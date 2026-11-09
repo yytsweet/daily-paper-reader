@@ -93,6 +93,20 @@ class LongRangeReviewTests(unittest.TestCase):
                     limit=500,
                 )
 
+    def test_transient_rpc_dns_errors_are_retried(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        states = [
+            ([], "rpc 查询异常：NameResolutionError: Failed to resolve host"),
+            ([{"id": "ok"}], "rpc 查询成功：1 条"),
+        ]
+        call = Mock(side_effect=states)
+        with patch("long_range_review.time.sleep"):
+            result = review.collect_window(
+                call, start, start + timedelta(days=1), exhaustive=True, limit=500
+            )
+        self.assertEqual(result, [{"id": "ok"}])
+        self.assertEqual(call.call_count, 2)
+
     def test_score_needs_scope_and_verbatim_evidence(self):
         self.assertIn('"papers"', review.SYSTEM_PROMPT)
         self.assertIn('"scope_match"', review.SYSTEM_PROMPT)
