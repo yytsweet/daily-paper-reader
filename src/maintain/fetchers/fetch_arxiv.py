@@ -28,10 +28,9 @@ CRAWL_STATE_FILE = os.path.join(ROOT_DIR, "archive", "crawl_state.json")
 SEEN_IDS_FILE = os.path.join(ROOT_DIR, "archive", "arxiv_seen.json")
 
 # ArXiv 的主要一级分类列表
-# 注意：物理学比较特殊，ArXiv 历史上有很多独立的物理存档，为了保险，我们列出主要的
+# 缩小到与研究方向相关的大类，减少请求量（原为 13 个大类）
 CATEGORIES_TO_FETCH = [
-    "cs", "math", "stat", "q-bio", "q-fin", "eess", "econ",
-    "physics", "cond-mat", "hep-ph", "hep-th", "gr-qc", "astro-ph",
+    "cs", "stat", "eess", "q-bio",
 ]
 RANGE_TOKEN_RE = re.compile(r"^\d{8}-\d{8}$")
 

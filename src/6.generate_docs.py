@@ -1498,6 +1498,78 @@ def ensure_text_content(pdf_url: str, txt_path: str) -> str:
     return text_content
 
 
+
+# ---------------- 期刊论文（OpenAlex）支持 ----------------
+_JOURNAL_META_CACHE: Dict[str, Dict[str, Any]] | None = None
+
+
+def is_journal_paper(paper: Dict[str, Any]) -> bool:
+    pid = str(paper.get("id") or paper.get("paper_id") or "").strip()
+    return str(paper.get("source") or "").strip() == "journal" or pid.startswith("journal-")
+
+
+def _load_journal_meta() -> Dict[str, Dict[str, Any]]:
+    """从当天论文池读取期刊论文的 DOI / 期刊名 / OA PDF（召回各步只保留了通用字段）。"""
+    global _JOURNAL_META_CACHE
+    if _JOURNAL_META_CACHE is not None:
+        return _JOURNAL_META_CACHE
+    meta: Dict[str, Dict[str, Any]] = {}
+    raw_path = os.path.join(ROOT_DIR, "archive", TODAY_STR, "raw", f"arxiv_papers_{TODAY_STR}.json")
+    try:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            for item in json.load(f) or []:
+                if isinstance(item, dict) and str(item.get("id") or "").startswith("journal-"):
+                    meta[str(item["id"])] = item
+    except Exception:
+        pass
+    _JOURNAL_META_CACHE = meta
+    return meta
+
+
+def enrich_journal_paper(paper: Dict[str, Any]) -> None:
+    if not is_journal_paper(paper):
+        return
+    paper["source"] = "journal"
+    pid = str(paper.get("id") or paper.get("paper_id") or "").strip()
+    raw = _load_journal_meta().get(pid) or {}
+    for key in ("doi", "venue", "is_oa"):
+        if raw.get(key) and not paper.get(key):
+            paper[key] = raw[key]
+    if not paper.get("venue") and paper.get("primary_category"):
+        paper["venue"] = paper["primary_category"]
+    # pdf_url 只保留开放获取 PDF；没有时为空，正文抓取会退回 DOI 落地页 / 摘要
+    if "pdf_url" not in paper or not str(paper.get("pdf_url") or "").lower().endswith(".pdf"):
+        paper["pdf_url"] = str(raw.get("pdf_url") or "").strip()
+    if not paper.get("link"):
+        doi = str(paper.get("doi") or "").strip()
+        paper["link"] = f"https://doi.org/{doi}" if doi else ""
+
+
+def ensure_text_for_paper(paper: Dict[str, Any], pdf_url: str, txt_path: str) -> str:
+    """期刊论文常在付费墙后：全文拿不到时，用标题+摘要作为解读依据。"""
+    if not is_journal_paper(paper):
+        return ensure_text_content(pdf_url, txt_path)
+    # 只尝试开放获取 PDF；付费墙落地页的网页文本质量不可靠，不作为全文
+    oa_pdf = str(paper.get("pdf_url") or "").strip()
+    if oa_pdf:
+        try:
+            return ensure_text_content(oa_pdf, txt_path)
+        except Exception:
+            pass
+    venue = str(paper.get("venue") or paper.get("primary_category") or "").strip()
+    text = (
+        f"Title: {paper.get('title') or ''}\n"
+        + (f"Journal: {venue}\n" if venue else "")
+        + (f"DOI: {paper.get('doi')}\n" if paper.get("doi") else "")
+        + "\nNote: Full text is not openly accessible; the following is the published abstract only.\n\n"
+        + f"Abstract: {paper.get('abstract') or ''}\n"
+    )
+    os.makedirs(os.path.dirname(txt_path) or ".", exist_ok=True)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
+
+
 def yaml_escape_value(s: str) -> str:
     if not s:
         return '""'
@@ -1600,7 +1672,11 @@ def build_markdown_content(
     ).strip()
     abstract_en = (paper.get("abstract") or "").strip()
     if not abstract_en:
-        abstract_en = "arXiv did not provide an abstract for this paper."
+        abstract_en = (
+            "The publisher did not provide an abstract for this paper."
+            if is_journal_paper(paper)
+            else "arXiv did not provide an abstract for this paper."
+        )
     paper_source = str(paper.get("source") or "").strip()
     selection_source = str(paper.get("selection_source") or "").strip()
     figure_assets = paper.get("_figure_assets") if isinstance(paper.get("_figure_assets"), list) else []
@@ -1639,6 +1715,12 @@ def build_markdown_content(
         lines.append(f"title_zh: {yaml_escape_value(zh_title)}")
     lines.append(f"authors: {yaml_escape_value(', '.join(authors) if authors else 'Unknown')}")
     lines.append(f"date: {yaml_escape_value(published or 'Unknown')}")
+    if is_journal_paper(paper):
+        pdf_url = str(paper.get("pdf_url") or "").strip()
+        if paper.get("venue"):
+            lines.append(f"venue: {yaml_escape_value(str(paper.get('venue')))}")
+        if paper.get("doi"):
+            lines.append(f"doi: {yaml_escape_value(str(paper.get('doi')))}")
     if pdf_url:
         lines.append(f"pdf: {yaml_escape_value(pdf_url)}")
     if tags_list:
@@ -1764,7 +1846,7 @@ def ensure_reading_content(paper, section, md_path, txt_path, client, *, require
         raise RuntimeError('论文内容未生成完整：' + ', '.join(missing))
 
     if section == 'deep' and not extract_section_tail(text, '论文详细总结（自动生成）'):
-        ensure_text_content(paper.get('pdf_url') or paper.get('link') or '', txt_path)
+        ensure_text_for_paper(paper, paper.get('pdf_url') or paper.get('link') or '', txt_path)
         summary = generate_deep_summary(md_path, txt_path, client=client)
         if not summary or '（完）' not in summary:
             if require_complete:
@@ -1789,6 +1871,7 @@ def process_paper(
     route: str | None = None,
     require_complete: bool = False,
 ) -> Tuple[str, str]:
+    enrich_journal_paper(paper)
     title = (paper.get("title") or "").strip()
     arxiv_id = str(paper.get("id") or paper.get("paper_id") or "").strip()
     md_path, txt_path, paper_id = prepare_paper_paths(docs_dir, date_str, title, arxiv_id)
@@ -1810,7 +1893,7 @@ def process_paper(
         # 即使是 glance-only，也要确保生成/补齐 .txt（用于前端聊天上下文等）
         if glance_only and pdf_url:
             try:
-                ensure_text_content(pdf_url, txt_path)
+                ensure_text_for_paper(paper, pdf_url, txt_path)
             except Exception:
                 # 不阻塞文档生成流程：txt 拉取失败时继续（避免因为网络/源站问题导致整批中断）
                 pass
@@ -1986,7 +2069,7 @@ def process_paper(
 
             # 生成详细总结
             pdf_url = str(paper.get("pdf_url") or paper.get("link") or "").strip()
-            ensure_text_content(pdf_url, txt_path)
+            ensure_text_for_paper(paper, pdf_url, txt_path)
             summary = generate_deep_summary(md_path, txt_path, client=paper_llm_client)
             if summary:
                 upsert_auto_block(md_path, "论文详细总结（自动生成）", summary)
@@ -2000,7 +2083,7 @@ def process_paper(
         # 速览模式也需要生成/补齐全文 txt（优先 jina，失败则 pymupdf 兜底）
         if pdf_url:
             try:
-                ensure_text_content(pdf_url, txt_path)
+                ensure_text_for_paper(paper, pdf_url, txt_path)
             except Exception:
                 pass
         figures, tables = maybe_generate_paper_media(
@@ -2025,7 +2108,7 @@ def process_paper(
 
     # 新文件：生成完整内容
     pdf_url = str(paper.get("pdf_url") or paper.get("link") or "").strip()
-    ensure_text_content(pdf_url, txt_path)
+    ensure_text_for_paper(paper, pdf_url, txt_path)
     figures, tables = maybe_generate_paper_media(
         paper,
         docs_dir=docs_dir,
@@ -2118,7 +2201,11 @@ def update_sidebar(
             clean_tags.append({"kind": safe_kind, "label": safe_label})
 
         arxiv_id = str(paper_id or "").strip().split("/")[-1]
-        paper_link = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else route_href
+        if arxiv_id.startswith("journal-"):
+            journal_raw = _load_journal_meta().get(arxiv_id) or {}
+            paper_link = str(journal_raw.get("link") or "").strip() or route_href
+        else:
+            paper_link = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else route_href
         payload = {
             "title": (title or "").strip() or paper_id,
             "link": paper_link,

@@ -661,6 +661,17 @@ def main() -> None:
                 *(["--ignore-seen"] if args.fetch_ignore_seen else []),
             ],
         )
+    journal_setting = (_load_full_config() or {}).get("journal_sources") or {}
+    if isinstance(journal_setting, dict) and journal_setting.get("enabled"):
+        # 期刊论文（OpenAlex）合并进同一个论文池；失败时脚本内部降级，不中断流水线
+        run_step(
+            "Step 1b - fetch journals",
+            [
+                python,
+                os.path.join(SRC_DIR, "maintain", "fetchers", "fetch_journals.py"),
+                *(["--ignore-seen"] if args.fetch_ignore_seen else []),
+            ],
+        )
     if trace_ids:
         print_trace_retrieval("RAW", raw_path, trace_ids)
     run_step(
