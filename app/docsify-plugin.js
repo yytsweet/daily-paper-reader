@@ -3133,7 +3133,16 @@ window.$docsify = {
         if (meta.source) {
           lines.push(`<p><strong>Source</strong>: ${renderSourceChips(meta.source)}</p>`);
         }
+        if (meta.venue) {
+          lines.push(`<p><strong>Journal</strong>: ${escapeHtml(meta.venue)}</p>`);
+        }
         lines.push(`<p><strong>Date</strong>: ${escapeHtml(meta.date || 'Unknown')}</p>`);
+        if (meta.doi) {
+          const safeDoi = escapeHtml(String(meta.doi).trim());
+          lines.push(
+            `<p><strong>DOI</strong>: <a href="https://doi.org/${safeDoi}" target="_blank" rel="noopener">${safeDoi}</a></p>`
+          );
+        }
         if (meta.pdf) {
           const safePdf = escapeHtml(meta.pdf);
           lines.push(
