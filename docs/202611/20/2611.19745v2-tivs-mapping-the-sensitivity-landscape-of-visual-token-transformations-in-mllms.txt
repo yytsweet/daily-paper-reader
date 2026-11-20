@@ -1,0 +1,1101 @@
+TIVS: Mapping the Sensitivity Landscape of Visual Token Transformations in
+MLLMs
+Yikang Qiao*1
+Jianye Zeng*2
+Duan Huang†1
+Ziying Song†3
+1Central South University
+2University of Science and Technology of China
+3Yanshan University
+*These authors contributed equally to this work.
+†Corresponding authors.
+Abstract
+Recent efforts to improve the efficiency of multimodal large
+language models (MLLMs) have explored visual token prun-
+ing, quantization, and feature compression. However, the
+properties that determine whether transformed visual tokens
+remain usable by a frozen decoder are not well character-
+ized. We introduce TIVS (Token Identity Versus Statistics),
+a training-free intervention framework that separately stud-
+ies sequence permutation, token retention, numerical preci-
+sion, and statistical replacement under controlled conditions.
+On 192 POPE questions, three token permutations change
+TinyLLaVA accuracy by only −0.17 percentage points on
+average, while changing 4.69% of individual predictions.
+Diagonal and rank-64 Gaussian replacements decrease ac-
+curacy by 25.0 and 28.1 points on the same subset. Further
+experiments with exact moment constraints, quantization
+error, token retention, and additional visual tasks reveal how
+strongly the effects depend on the original feature values and
+the evaluation setting. These findings provide an empirical
+basis for assessing visual token transformations in frozen
+MLLMs and designing more reliable multimodal interfaces.
+1. Introduction
+Multimodal large language models (MLLMs) represent im-
+ages as sequences of visual features consumed by language
+decoders. These sequences improve visual grounding but
+also increase inference cost. Recent methods have reduced
+visual token budgets through attention-based pruning, fea-
+ture selection, and compression. FastV removes tokens using
+decoder attention [4]. SparseVLM employs text-guided se-
+lection [21]. VisionZip compresses visual encoder features
+[16]. Their results show that many visual tokens can be re-
+moved or combined while preserving useful model behavior.
+These compression strategies modify different aspects of
+visual representations. Token pruning changes the available
+token set, while quantization and feature transformations
+Same token identity
+(identity-preserving)
+t 1
+t 2
+t n
+...
+New token identity
+(statistical replacement)
+t 1
+' ... t n
+'
+N(μ,σ²)
+A
+Statistical replacement
+Identity preserved
+Identity
+replaced
+Clean Perm. 50%
+8b
+6b
+Diag.G.
+Is there a bottle
+in the image?
+GT: Yes
+Tiny
+Yes
+Yes
+Yes
+Yes
+Yes
+No
+Smol
+Yes
+Yes
+Yes
+Yes
+Yes
+No
+Qwen
+Yes
+Yes
+Yes
+Yes
+Yes
+No
+B
+Precision & retention
+Identity preserved
+Identity
+replaced
+Clean Perm. 50%
+8b
+6b
+Diag.G.
+Is there a
+backpack in
+the image?
+GT: No
+Tiny
+No
+No
+Yes
+No
+Yes
+Yes
+Smol
+No
+No
+No
+No
+No
+No
+Qwen
+No
+No
+No
+No
+No
+No
+C
+Backbone dependence
+Identity preserved
+Identity
+replaced
+Clean Perm. 50%
+8b
+6b
+Diag.G.
+Is there a
+chair in the
+image?
+GT: Yes
+Tiny
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Smol
+Yes
+No
+Yes
+Yes
+No
+No
+Qwen
+Yes
+Yes
+No
+Yes
+Yes
+Yes
+Figure 1. Overview of TIVS. TIVS systematically investigates
+visual token transformations in frozen MLLMs. The results high-
+light the importance of preserving token-level numerical identity
+for visual understanding.
+alter the numerical content of visual features.
+However, the properties that determine whether trans-
+formed visual tokens remain usable by frozen MLLMs are
+not yet well understood. In particular, the relative impor-
+tance of token-level numerical identity, sequence order, and
+aggregate feature statistics remains unclear. These properties
+represent different aspects of visual information. Token per-
+mutation changes the sequence order while preserving the
+original feature vectors. Quantization modifies their numer-
+ical values, whereas statistical replacement generates new
+vectors from the original feature distribution. Understanding
+how these transformations affect model predictions can pro-
+vide insights into the information required by frozen visual
+interfaces.
+1
+arXiv:2611.19745v2  [cs.CV]  17 Nov 2026
+
+
+Vision
+Encoder
+...
+Z
+R
+N×d
+T(Z)
+Projector
+...
+...
+visual slots
+text tokens
+Question: ... ?
+Language
+Decoder
+Yes /
+No
+Permutation
+Retention
+Quantization
+Statistical replacement
+...
+...
+...
+...
+...
+...
+...
+(μ, Σ)
+...
+Figure 2. Controlled visual token interventions. TinyLLaVA features are transformed before the frozen projector and inserted into the
+visual positions of the language sequence. Retention reduces the number of slots. Decoder and binary readout remain fixed.
+A visual token sequence contains information at multiple
+levels. Individual token vectors encode specific numerical
+features, while their aggregate statistics describe the over-
+all feature distribution. These properties are not equivalent.
+Two sequences may exhibit similar means and covariances
+while containing different feature vectors. Conversely, token
+permutation preserves the original vectors while changing
+their positions. Understanding how these differences affect
+downstream predictions is essential for identifying which
+properties of visual representations support reliable multi-
+modal inference.
+We introduce TIVS (Token Identity Versus Statistics), a
+training-free framework for controlled visual token interven-
+tions. TIVS fixes the model and evaluation examples, varies
+one intervention at a time, and measures both accuracy and
+individual prediction changes. We study permutations, token
+retention, feature quantization, and Gaussian replacements.
+We also test exact finite-sample moment constraints and per-
+turbations matched by magnitude. These controls connect
+the properties of the transformed features to downstream
+predictions.
+Beyond aggregate accuracy, we examine how visual to-
+ken transformations affect individual model decisions. Two
+configurations can achieve identical accuracy while produc-
+ing different predictions on the same questions. We therefore
+evaluate prediction consistency and logit margins alongside
+conventional accuracy. This paired analysis provides a more
+detailed characterization of how visual token transformations
+influence the behavior of frozen decoders.
+Our experiments reveal a clear difference between trans-
+formations that preserve the original token vectors and those
+that replace their numerical content. On 192 POPE ques-
+tions [9], token permutation changes TinyLLaVA accuracy
+by only −0.17 percentage points on average, while diagonal
+and rank-64 Gaussian replacements reduce accuracy by 25.0
+and 28.1 points, respectively. Despite the small change in
+aggregate accuracy, permutation still alters 4.69% of individ-
+ual predictions. Further experiments with exact covariance
+matching, numerical precision, token retention, and different
+model backbones provide additional evidence of how visual
+feature properties influence frozen MLLM behavior. Our
+main contributions are summarized as follows:
+• We introduce TIVS, a training-free framework that system-
+atically investigates the effects of token order, retention,
+numerical precision, and statistical properties on frozen
+MLLMs.
+• We establish a paired evaluation protocol that jointly mea-
+sures prediction accuracy, decision consistency, and logit
+margins, revealing changes in individual predictions that
+aggregate accuracy can conceal.
+• We provide systematic experimental evidence across to-
+ken transformations, feature layers, and model backbones,
+highlighting the importance of token-level numerical iden-
+tity for reliable visual representations.
+2. Related Work
+Visual token selection.
+Efficient MLLMs commonly re-
+duce the number of visual tokens passed to the decoder.
+FastV prunes tokens using attention signals [4]. ATP-LLaVA
+adapts pruning decisions across inputs and layers [18]. Di-
+vPrune emphasizes token diversity [1]. TopV considers infer-
+ence compatibility [15]. VFlowOpt uses visual information
+flow to guide pruning [17]. TransPrune analyzes represen-
+tation transitions [8]. VisionZip compacts visual encoder
+outputs [16]. These methods motivate our study of retention
+budgets and selection strategies.
+Feature compression and transformation.
+Other meth-
+ods modify visual representations to create shorter inputs.
+LLaVA-PruMerge merges related visual features [11]. ApET
+uses approximation error in compression [10]. CORE con-
+solidates object-centric information [7]. Hybrid Token Com-
+pression combines discrete and continuous representations
+2
+
+
+[20]. EvoComp studies learned compression policies [12].
+While TIVS analyzes how numerical modification and statis-
+tical replacement affect a fixed visual interface.
+Visual token representations.
+Recent analyses exam-
+ine feature sparsity, redundancy, and token importance.
+Prior work studies sparsity and redundancy in MLLMs [6].
+Feather connects pruning with spatial coverage [5]. Skip-
+Vision identifies redundant computation across layers [19].
+Variation-aware dropping uses temporal feature changes [3].
+Random-selection comparisons probe token importance [13].
+Rethinking Token Reduction investigates multimodal inter-
+actions during token reduction [14]. Our controlled interven-
+tions focus on the distinction between original feature values,
+their sequence assignments, and their empirical moments.
+3. TIVS: Controlled Visual Token Interventions
+3.1. Frozen visual interfaces
+Given an image I and question q, let Z ∈RN×d be the visual
+token matrix. In our main TinyLLaVA protocol, Z contains
+the non-CLS features of the selected CLIP hidden state. Let
+P denote the frozen projector, D the frozen decoder, and
+H(q) the text embeddings. For a transformation T, we define
+ZT = T(Z) ∈RNT ×d,
+(1)
+UT = P(ZT ),
+LT = D
+ Inject(H(q), UT )
+
+.
+(2)
+The number of image slots changes to NT under token re-
+moval. The prompt and model weights remain fixed. A sec-
+ond protocol applies comparable interventions at the decoder
+input to support a matched cross-backbone comparison. The
+two injection sites are analyzed separately.
+For POPE, let Vy and Vn denote the recorded valid single-
+token forms of yes and no. The binary margin and prediction
+are
+mT = max
+v∈Vy LT [v] −max
+v∈Vn LT [v],
+(3)
+ˆyT = 1[mT > 0].
+(4)
+A zero margin is scored as no. Other benchmarks use their
+task-specific readout as detailed in Section 4.
+3.2. Numerical identity and statistical constraints
+We distinguish the original set of image-conditioned vectors
+from its sequence positions and aggregate statistics. The
+empirical mean and sample covariance are
+µ(Z) = 1
+N
+N
+X
+i=1
+zi,
+(5)
+Σ(Z) =
+1
+N −1
+N
+X
+i=1
+(zi −µ)(zi −µ)⊤.
+(6)
+These moments describe the feature population. They do not
+uniquely determine its individual vectors. To characterize
+token identity independently of sequence order, we define
+the multiset of visual feature vectors as
+M(Z) = {{z1, z2, . . . , zN}}.
+(7)
+A permutation preserves this multiset exactly, while
+changing the assignment of feature vectors to sequence po-
+sitions. In contrast, statistical constraints on the mean and
+covariance do not uniquely determine M(Z). This distinc-
+tion allows TIVS to examine the roles of individual feature
+values, sequence order, and population statistics through
+controlled interventions.
+Permutation and retention.
+For a permutation matrix
+Π ∈{0, 1}N×N,
+Tperm(Z) = ΠZ,
+µ(ΠZ) = µ(Z),
+Σ(ΠZ) = Σ(Z).
+(8)
+Permutation preserves the feature multiset exactly. Token
+retention selects K rows using SK ∈{0, 1}K×N:
+Tkeep(Z) = SKZ,
+K = ⌊ρN⌋,
+(9)
+where ρ ∈{0.25, 0.50, 0.75} in the new retention sweeps.
+The selected rows may come from the first positions, last
+positions, uniform spacing, or randomized subsets. The
+original relative order of retained rows is preserved.
+Affine min–max quantization.
+For each image-level ten-
+sor, let a = min(Z), b = max(Z) and B be the requested
+bit width. The implemented round-and-reconstruct operation
+is
+δB = max(b −a, 10−6)
+2B −1
+,
+(10)
+QB(Z) = a + δB clip
+
+round
+Z −a
+δB
+
+, 0, 2B −1
+
+.
+(11)
+It uses 2B affine grid points and ties-to-even rounding. For
+in-range scalar entries, the ideal FP32 rounding error is
+bounded by δB/2. The features are then cast to the model
+dtype. This experiment probes numerical precision at the
+frozen interface.
+Moment-based replacements.
+Let σ2
+j = Σ(Z)jj. A diag-
+onal Gaussian surrogate is
+[Tdiag(Z)]i = µ(Z) + diag(σ)εi,
+εi ∼N(0, Id). (12)
+A rank-r Gaussian surrogate uses the leading covariance
+factors:
+[Tpca(Z)]i = µ(Z) + UrΛ1/2
+r
+ηi,
+ηi ∼N(0, Ir), r = 64.
+(13)
+3
+
+
+1
+12
+24
+0
+192
+384
+576
+Token row index
+Clean
+1
+12
+24
+Permuted
+1
+12
+24
+Diagonal Gaussian
+-14.0
+0
+14.0
+Selected channel (display order)
+Figure 3. Measured token features. Actual non-CLS TinyLLaVA features from one fixed image under clean, permutation and diagonal
+Gaussian replacement. All panels use the same 24 clean selected channels and token-row selection.
+These Gaussian families target moments in expectation. We
+additionally test exact finite-sample constraints. For an or-
+thogonal row-mixing matrix R with R1 = 1, define
+Z′ = 1µ(Z)⊤+ R
+ Z −1µ(Z)⊤
+.
+(14)
+Let Zc = Z −1µ(Z)⊤denote the centered feature matrix.
+Since R is orthogonal and satisfies R1 = 1, the transformed
+features preserve the empirical mean and covariance:
+µ(Z′) = µ(Z),
+(15)
+Σ(Z′) =
+1
+N −1Z⊤
+c R⊤RZc
+(16)
+= Σ(Z).
+(17)
+Despite preserving these statistics, row mixing changes
+the individual feature vectors in general. This provides a con-
+trolled setting for examining whether second-order statistical
+information is sufficient to maintain the behavior of a frozen
+decoder. The strong controls also include exact per-channel
+moments, rank-64 matching, per-token norm preservation,
+and displacement-matched Gaussian noise.
+3.3. Paired decisions and conditional stability
+For M matched questions with labels yj, define accuracy
+and prediction flip rate:
+A(T) = 1
+M
+X
+j
+1[ˆyT,j = yj],
+(18)
+F(T) = 1
+M
+X
+j
+1[ˆyT,j̸ = ˆy0,j],
+(19)
+∆A(T) = 100[A(T) −A(0)].
+(20)
+Let ncw and nwc count clean-correct to wrong and clean-
+wrong to correct transitions. Then
+M[A(T) −A(0)] = nwc −ncw.
+(21)
+This identity shows why an unchanged aggregate accuracy
+can coexist with altered predictions. We also inspect feature
+reconstruction error ∥T(Z) −Z∥F /∥Z∥F and paired logit
+margins. For binary question answering, every prediction
+flip changes the correctness of the corresponding answer.
+The flip rate can therefore be expressed as
+MF(T) = ncw + nwc.
+(22)
+Together with Equation (21), this shows that unchanged
+accuracy occurs when the numbers of corrected and degraded
+predictions are equal. A transformation can therefore pre-
+serve aggregate accuracy while changing individual deci-
+sions.
+For aligned, equal-length features, assume the clean mar-
+gin function is locally Lm-Lipschitz in the Frobenius norm.
+Then
+|mT −m0| ≤Lm∥T(Z) −Z∥F .
+(23)
+The condition |m0| > Lm∥T(Z) −Z∥F suffices to retain
+its sign under this assumption. TIVS measures margins and
+perturbations directly. A universal Lm is not estimated, so
+we use Equation (23) as a conditional interpretation.
+4. Experimental Setup
+Models and intervention locations.
+The principal frozen
+model is from TinyLLaVA: A Framework of Small-scale
+Large Multimodal Models [22], using the recorded 1.1B lan-
+guage backbone. The current local experiments use snapshot
+and non-CLS features from CLIP before the trained projec-
+tor. An independent matched comparison applies transforma-
+tions at decoder input to this model and SmolVLM-256M-
+Instruct. Historical Qwen2.5-VL-3B results [2] are retained
+as a separate protocol. All models are frozen.
+Datasets.
+We evaluate POPE [9] with a 64-question pilot
+and a new set of 192 questions from 32 distinct images. The
+4
+
+
+−4
+−2
+0
+2
+4
+Clean yes−no margin
+−4
+−2
+0
+2
+4
+Permuted yes−no margin
+Same answer
+Changed answer
+Figure 4. Paired binary margins under permutation. The 64-
+question POPE run records four prediction flips at identical ag-
+gregate accuracy for clean and permuted tokens. Points represent
+actual recorded margins.
+larger set excludes the 11 pilot images. Shared 48-question
+subsets support matched interventions, cross-backbone com-
+parisons and layer ablations. We also test 48 ChartQA ques-
+tions and 48 MMBench English dev questions. ChartQA
+applies greedy short answer generation and 5% relaxed nu-
+meric accuracy. MMBench scores the unrotated choice let-
+ters using candidate logits.
+Evaluation and uncertainty.
+POPE uses the maximum-
+logit yes/no readout of Equation (3). We report correct
+counts, accuracy, differences from the clean arm and pre-
+diction flips. New paired 95% intervals are computed with
+10,000 image cluster bootstrap resamples. Multiple seeds
+are averaged per matched question before resampling. The
+intervals are exploratory and are not corrected for multiple
+comparisons. Image-cluster resampling keeps all questions
+associated with an image together. The paired comparisons
+retain within-image dependence across bootstrap draws. His-
+torical aggregates are reported separately when item identi-
+ties or logits are missing.
+5. Experimental Results and Analysis
+5.1. The main POPE intervention contrast
+The expanded POPE experiment contains 192 questions from
+32 images. The clean TinyLLaVA model answers 152 ques-
+tions correctly (79.17%). Across three random permutations,
+mean accuracy changes by −0.17 percentage points with a
+paired image-cluster 95% interval of [−3.47, 3.30] points.
+Prediction flips still occur on 4.69% of questions on aver-
+0
+25
+50
+75
+100
+POPE accuracy (%)
+Clean
+Permutation
+Keep first half
+8-bit
+Small scaling
+Small noise
+6-bit
+4-bit
+Diag. Gaussian
+PCA64 Gaussian
+78.1
+78.1
+76.6
+76.6
+78.1
+78.1
+57.8
+50.0
+56.2
+48.4
+Figure 5. Historical 64-question POPE pilot. Recorded accuracy
+across the original intervention arms. The dashed horizontal line
+marks 50/64 correct for clean.
+0
+0.04
+0.08
+A   Mean error
+Clean
+Permute
+Diag.
+PCA64
+0
+0.5
+1.0
+B   Covariance error
+0
+0.04
+0.08
+0
+0.5
+1.0
+Figure 6. Finite-sample moment diagnostics. Relative mean
+and covariance errors. Each point represents an individual image.
+Horizontal bars indicate median values.
+age. On the same set, diagonal Gaussian replacement yields
+54.17% accuracy and rank-64 Gaussian replacement yields
+51.04%. Both alter a much larger fraction of binary decisions
+(Table 1).
+The results show a pronounced contrast between rearrang-
+ing original image-conditioned features and replacing their
+joint values. The permutation effect is small in aggregate,
+although some individual answers differ. The real-valued fea-
+5
+
+
+Figure 7. Quantization error and decision changes. Each point is an observed question and bit width in the new 64-question run. Error is
+the relative Frobenius deviation before FP16 conversion.
+4
+5
+6
+7
+8
+Quantization (bits)
+50
+60
+70
+80
+POPE accuracy (%)
+50.0
+57.8
+57.8
+76.6
+76.6
+Clean 78.1%
+Figure 8. Bit-width sensitivity analysis. POPE accuracy under
+quantization on 64 questions.
+Figure 9. Token retention across budgets. Measured first, last,
+uniform and random-subset retention on 64 POPE questions. The
+clean score is the 100% reference.
+ture representation therefore remains important even when
+the decoder tolerates extensive changes in feature order on
+this task.
+5.2. Prediction Consistency under Token Transfor-
+mations
+To further investigate prediction consistency, we compare the
+model’s predictions before and after visual token transforma-
+Table 1. Expanded TinyLLaVA POPE evaluation. All conditions
+share 192 questions and 32 images. Permutation is the average of
+three seeds. The 95% intervals are paired image-cluster intervals
+for accuracy change.
+Intervention
+Acc. (%)
+∆(pt) Flip (%)
+Clean
+79.17
+0.00
+—
+Permutation
+78.99
+−0.17
+4.69
+8-bit affine quant.
+78.65
+−0.52
+3.65
+6-bit affine quant.
+65.62 −13.54
+33.33
+4-bit affine quant.
+48.96 −30.21
+50.00
+Diagonal Gaussian
+54.17 −25.00
+41.67
+Rank-64 Gaussian
+51.04 −28.12
+43.75
+tions. On 64 POPE questions, both the original and permuted
+tokens achieve 78.1% accuracy, but their predictions differ
+on four questions. Additional permutation trials show similar
+behavior, with only minor changes in overall accuracy but
+differences in individual predictions. These results indicate
+that stable accuracy does not necessarily imply consistent
+predictions. For the original 64-question comparison, the
+four prediction flips occur despite identical clean and per-
+muted accuracy. Under binary scoring, this means that two
+originally correct predictions become incorrect, while two
+incorrect predictions become correct. The resulting changes
+cancel in aggregate accuracy. This observation illustrates
+why paired prediction analysis provides information beyond
+conventional accuracy comparisons.
+5.3. Impact of Statistical Transformations
+We probe whether preserving observed moments can recover
+frozen decoder predictions. On a shared 48 question POPE
+subset, the clean model achieves 42/48 (87.5%). Exact per-
+channel moment matching achieves 52.08% mean accuracy
+over three seeds. Exact mean and full covariance preser-
+vation through row mixing yields 47.92%. A same-row
+norm control reaches 46.53%, while a perturbation matched
+to the diagonal surrogate’s Frobenius displacement reaches
+6
+
+
+−40
+−20
+0
+Accuracy
+change (pt)
+Permutation
+Keep first half
+8-bit
+6-bit
+Diag. Gaussian
+PCA64 Gaussian
+POPE (n=64)
+−40
+−20
+0
+Relaxed accuracy
+change (pt)
+ChartQA (n=48)
+−40
+−20
+0
+Fixed-order accuracy
+change (pt)
+MMBench (n=48)
+Figure 10. Sensitivity across tasks. Changes relative to the task specific clean score, with exploratory paired image-cluster intervals where
+estimable. ChartQA uses short answer numeric tolerance. MMBench uses fixed option order.
+Table 2. Strong controls on the shared 48-question POPE subset.
+Means across three random seeds. Exact constraints refer to the
+FP32 intervention tensors before model-dtype conversion.
+Intervention
+Acc. (%)
+∆(pt)
+Clean
+87.50
+—
+Permutation
+82.64
+−4.86
+Exact per-channel moments
+52.08
+−35.42
+Exact full covariance
+47.92
+−39.58
+Exact rank-64 covariance
+50.69
+−36.81
+Same row norms
+46.53
+−40.97
+Matched-displacement noise
+58.33
+−29.17
+58.33%. Table 2 reports the measurements. The compari-
+son between exact covariance matching and displacement-
+matched noise provides further insight into the role of feature
+statistics. Exact covariance matching achieves 47.92% ac-
+curacy, while displacement-matched noise achieves 58.33%.
+These interventions control different properties of the trans-
+formed features. Their distinct outcomes suggest that statis-
+tical agreement and perturbation magnitude capture different
+aspects of prediction sensitivity.
+The full covariance condition matches the clean empirical
+covariance to numerical precision before FP16 conversion.
+Its low accuracy strengthens the evidence that second-order
+population statistics are insufficient to reconstruct the orig-
+inal feature sequence for the frozen decoder. Matched dis-
+placement noise also changes decisions. The joint results
+identify feature-value alignment and intervention scale as
+important components of this behavior. The moment con-
+trols preserve aggregate channel statistics. They change the
+feature vectors occupying individual visual slots. The ac-
+curacy drop highlights the role of the image-specific token
+configuration.
+5.4. Task and backbone dependence
+The cross-backbone experiment transforms visual embed-
+dings at decoder input.
+TinyLLaVA, SmolVLM, and
+Qwen2.5-VL retain their native visual pipelines. The re-
+sulting accuracy changes measure the sensitivity of each
+complete frozen interface.
+5.5. Precision, margins, and token retention
+The local 64-question precision sweep adds 5 and 7 bits to
+the historical 4-, 6-, and 8-bit comparison. The resulting
+correct counts are 32, 37, 37, 49, and 49 for 4 through 8
+bits. The clean model scores 50/64. The expanded 192-
+question run shows a similar ordering, with 94/192 for 4 bits,
+126/192 for 6 bits, and 151/192 for 8 bits. The measured
+pattern depends on the affine min–max reconstruction of
+Equation (11).
+The accuracy decline is concentrated in the 6–8-bit range
+under the affine min–max quantizer of Equation (11). The
+error measurements in Figure 7 expose the question-level
+changes accompanying this transition.
+Retention sweeps evaluate 25%, 50%, and 75% budgets.
+At a 50% budget, keeping the first half yields 49/64, keeping
+the last half yields 46/64, and uniform spacing yields 52/64.
+Random subsets yield 54/64, 52/64, and 49/64 across three
+seeds. This variation shows the importance of the selected
+subset as well as the number of tokens retained.
+Uniform selection spreads retained tokens across the se-
+quence. First-half and last-half selection keep contiguous
+blocks. Their accuracy gap at the same 50% budget shows a
+clear selection-pattern effect.
+Table 3 extends the study beyond POPE using two 48-
+question task subsets. On MMBench English dev with fixed
+original option order, clean accuracy is 32/48 (66.7%) and
+permutation reaches 29/48 (60.4%). Eight-bit quantization
+7
+
+
+Perm.
+Half
+8-bit
+6-bit
+Diag. PCA64
+TinyLLaVA
+SmolVLM
+Qwen2.5
+-4.2
+-18.8
+0.0
+-8.3
+-33.3 -29.2
++4.2 -14.6
+-4.2
+-4.2
+-29.2 -25.0
+0.0
+-12.5
+0.0
+0.0
+-18.8
+-6.2
+−35
+0
+35
+Δ acc. (pt)
+Figure 11.
+Matched decoder input backbone comparison.
+Changes on the same 48 POPE questions. Every measured model
+uses its native visual encoder and prompt format.
+Table 3. Exploratory cross-task results on TinyLLaVA. Each
+task has 48 questions, with its own scoring protocol.
+Task
+Clean
+Perm.
+8-bit
+POPE†
+87.5
+83.3
+83.3
+ChartQA
+16.7
+16.7
+18.8
+MMBench
+66.7
+60.4
+62.5
+†Shared 48-question POPE subset.
+reaches 30/48 (62.5%). On ChartQA, clean and permutation
+both answer 8/48 correctly. Its low clean score makes the
+numerical comparison less informative for generalization.
+Different task readouts yield different sensitivity profiles.
+On the matched 48-question decoder-input subset,
+TinyLLaVA,
+SmolVLM-256M,
+and
+Qwen2.5-VL-3B
+achieve clean accuracies of 42/48, 39/48, and 45/48,
+respectively. Permutation changes accuracy by −4.2, +4.2,
+and 0.0 percentage points across the three models. For
+Qwen2.5-VL-3B, retaining the first half of visual tokens
+reduces accuracy by 12.5 points, while 8-bit and 6-bit
+quantization preserve its clean accuracy on this subset.
+Diagonal Gaussian replacement decreases accuracy by 33.3,
+29.2, and 18.8 points, respectively.
+These results reveal backbone-dependent sensitivity to
+visual token transformations. Permutation produces different
+accuracy changes across models, whereas diagonal Gaus-
+sian replacement causes substantial degradation in all three
+backbones. PCA64 Gaussian replacement also reduces ac-
+curacy, but its effect varies across models. Together, these
+observations suggest that the importance of visual feature
+properties depends on the frozen model interface and the
+transformation applied.
+5.6. Layer-wise Sensitivity Analysis
+We further investigate the influence of visual feature depth
+on model performance. Using a shared subset of 48 POPE
+questions, we evaluate visual features extracted from four
+encoder layers with the same frozen projector. The clean
+−8
+−4
+−2
+−1
+Vision hidden-state index
+−30
+−20
+−10
+0
+POPE accuracy change (pt)
+Permute
+8-bit
+Diag. Gauss.
+Figure 12. Layer sensitivity. Differences relative to clean at each
+hidden state index, with the native −2 choice marked. Every layer
+is passed through the original frozen projector.
+accuracies are 58.3%, 81.3%, 87.5%, and 68.8% for layers
+−8, −4, −2, and −1, respectively. These results show that
+model performance is sensitive to the selected feature layer.
+We further analyze the effects of token permutation and
+quantization relative to the clean accuracy of each layer.
+The native layer −2 gives the highest clean accuracy
+among the four tested depths. The frozen projector processes
+every layer with the same mapping. This exposes sensitivity
+at the encoder–projector interface. Figure 12 measures each
+intervention against the clean accuracy at its extraction depth.
+Across the four extraction depths, permutation changes
+accuracy by at most 6.3 points. Eight-bit quantization stays
+within 4.2 points of each clean baseline. Diagonal Gaussian
+replacement yields larger reductions at every depth, with the
+largest drop of 35.4 points at layer −2.
+At layer −4, 8-bit quantization increases accuracy by
+4.2 points. The other three layers show zero or negative
+changes.
+6. Conclusion
+We introduced TIVS, a controlled study of visual token trans-
+formations in frozen MLLMs. Expanded POPE experiments,
+paired margins, and exact statistical controls distinguish the
+effects of changing token order from changing numerical
+feature content. Precision and retention sweeps show how
+accuracy depends on the magnitude and structure of a trans-
+formation. Cross-task and backbone comparisons further
+define the conditions under which these observations hold.
+TIVS provides reproducible evidence and practical measure-
+ments for designing reliable visual token interfaces. We also
+plan to leverage these findings to develop adaptive visual
+token compression methods in future work.
+8
+
+
+LLM Usage Statement
+Large language models were used for language editing. Con-
+cretely, we used GPT-6-Astra and DeepSeek-V4.1-Flash on
+the abstract, the introduction and other writing revision tasks
+to improve grammar, clarity and concision. Every AI as-
+sisted passage was reviewed and edited by the authors, who
+take full responsibility for the content of the paper.
+References
+[1] Saeed Ranjbar Alvar, Gursimran Singh, Mohammad Akbari,
+and Yong Zhang. Divprune: Diversity-based visual token
+pruning for large multimodal models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 9392–9401, 2025. 2
+[2] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, Sibo Song, Kai Dang, Peng Wang, et al. Qwen2.5-vl
+technical report. arXiv preprint arXiv:2502.13923, 2025. 4
+[3] Junjie Chen, Xuyang Liu, Zichen Wen, Yiyu Wang, Siteng
+Huang, and Honggang Chen. Variation-aware vision token
+dropping for faster large vision-language models. In Proceed-
+ings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 3489–3499, 2026. 3
+[4] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang
+Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2
+tokens after layer 2: Plug-and-play inference acceleration for
+large vision-language models. In European Conference on
+Computer Vision, pages 19–35. Springer, 2024. 1, 2
+[5] Mark Endo, Xiaohan Wang, and Serena Yeung-Levy. Feather
+the throttle: Revisiting visual token pruning for vision-
+language model acceleration.
+In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 22826–22835, 2025. 3
+[6] Yingqi Fan, Junlong Tong, Anhao Zhao, and Xiaoyu Shen.
+What do visual tokens really encode? uncovering sparsity and
+redundancy in multimodal large language models. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 11987–11997, 2026. 3
+[7] Jingyu Lei, Gaoang Wang, and Der-Horng Lee. Core: Com-
+pact object-centric representations as a new paradigm for
+token merging in lvlms. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 39593–39605, 2026. 2
+[8] Ao Li, Yuxiang Duan, Jinghui Zhang, Congbo Ma, Yutong
+Xie, Gustavo Carneiro, Mohammad Yaqub, and Hu Wang.
+Transprune: Token transition pruning for efficient large vision-
+language model. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 39529–
+39538, 2026. 2
+[9] Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Wayne Xin
+Zhao, and Ji-Rong Wen. Evaluating object hallucination in
+large vision-language models. In Proceedings of the 2023
+Conference on Empirical Methods in Natural Language Pro-
+cessing, pages 292–305, 2023. 2, 4
+[10] Qiankun Ma, Ziyao Zhang, Haofei Wang, Zhen Song, Jie
+Chen, and Hairong Zheng. Apet: Approximation-error guided
+token compression for efficient vlms.
+In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 26306–26316, 2026. 2
+[11] Yuzhang Shang, Mu Cai, Bingxin Xu, Yong Jae Lee, and Yan
+Yan. Llava-prumerge: Adaptive token reduction for efficient
+large multimodal models. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 22857–
+22867, 2025. 2
+[12] Jiafei Song, Fengwei Zhou, Jin Qu, Wenjin Jason Li, Tong
+Wu, Gengjian Xue, Zhikang Zhao, Daomin Wei, Yichao Lu,
+and Bailin Na. Evocomp: Learning visual token compression
+for multimodal large language models via semantic-guided
+evolutionary labeling. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+3532–3542, 2026. 3
+[13] Yahong Wang, Juncheng Wu, Zhangkai Ni, Longzhen Yang,
+Yihang Liu, Chengmei Yang, Ying Wen, Lianghua He, Xian-
+feng Tang, Hui Liu, and Yuyin Zhou. When token pruning
+is worse than random: Understanding visual token informa-
+tion in vllms. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 31910–
+31919, 2026. 3
+[14] Yi Wang, Haofei Zhang, Qihan Huang, Anda Cao, Gong-
+fan Fang, Wei Wang, Xuan Jin, Jie Song, Mingli Song, and
+Xinchao Wang. Rethinking token reduction for large vision-
+language models. In Proceedings of the IEEE/CVF Confer-
+ence on Computer Vision and Pattern Recognition, pages
+24727–24737, 2026. 3
+[15] Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang, Yu Gong,
+Chendi Li, Jinghua Yan, Yu Bai, Ponnuswamy Sadayappan,
+Xia Hu, and Bo Yuan. Topv: Compatible token pruning
+with inference time optimization for fast and low-memory
+multimodal vision language model. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 19803–19813, 2025. 2
+[16] Senqiao Yang, Yukang Chen, Zhuotao Tian, Chengyao Wang,
+Jingyao Li, Bei Yu, and Jiaya Jia. Visionzip: Longer is better
+but not necessary in vision language models. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 19792–19802, 2025. 1, 2
+[17] Sihan Yang, Runsen Xu, Chenhang Cui, Tai Wang, Dahua Lin,
+and Jiangmiao Pang. Vflowopt: A token pruning framework
+for lmms with visual information flow-guided optimization.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 23924–23934, 2025. 2
+[18] Xubing Ye, Yukang Gan, Yixiao Ge, Xiao-Ping Zhang, and
+Yansong Tang. Atp-llava: Adaptive token pruning for large
+vision language models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 24972–24982, 2025. 2
+[19] Weili Zeng, Ziyuan Huang, Kaixiang Ji, and Yichao Yan.
+Skip-vision: Efficient and scalable acceleration of vision-
+language models via adaptive token skipping. In Proceedings
+of the IEEE/CVF International Conference on Computer Vi-
+sion, pages 21384–21397, 2025. 3
+[20] Jusheng Zhang, Xiaoyang Guo, Kaitong Cai, Qinhan Lv, Yijia
+Fan, Wenhao Chai, Jian Wang, and Keze Wang. Hybrid token
+compression for vision-language models. In Proceedings of
+9
+
+
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 31889–31899, 2026. 3
+[21] Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao Zheng,
+Tao Huang, Kuan Cheng, Denis A Gudovskiy, Tomoyuki
+Okuno, Yohei Nakata, Kurt Keutzer, and Shanghang Zhang.
+Sparsevlm: Visual token sparsification for efficient vision-
+language model inference. In Proceedings of the 42nd Interna-
+tional Conference on Machine Learning, pages 74840–74857,
+2025. 1
+[22] Baichuan Zhou, Ying Hu, Xi Weng, Junlong Jia, Jie Luo,
+Xien Liu, Ji Wu, and Lei Huang. Tinyllava: A framework
+of small-scale large multimodal models.
+arXiv preprint
+arXiv:2402.14289, 2024. 4
+10

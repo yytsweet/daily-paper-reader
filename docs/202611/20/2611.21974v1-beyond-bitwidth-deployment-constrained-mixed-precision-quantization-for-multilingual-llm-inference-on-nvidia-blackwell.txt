@@ -1,0 +1,1119 @@
+Beyond Bitwidth: Deployment-Constrained Mixed-Precision
+Quantization
+for Multilingual LLM Inference on NVIDIA Blackwell
+Hyojung Han
+ThakiCloud
+hyojung.han@thakicloud.com
+2026-11-16
+Abstract
+Low-bit LLM quantization is useful only if a model preserves service-relevant accuracy,
+executes through supported GPU kernels, and meets measured memory and latency limits. We
+study Qwen3-8B on NVIDIA B200 with vLLM, including INT2/INT3, GPTQ, NVFP4, and
+mixed-precision configurations. We verify native packed execution and precision on all 144 fused
+linear modules and evaluate Korean, English, numerical, and reasoning quality under preregistered
+gates. Packed INT2 and INT3 execute, but all seven tested INT2 grids degenerate on generation.
+Isolated module-restoration effects are strongly non-additive; Korean and reasoning sensitivity
+rankings disagree, and a promising INT4/INT8 development candidate fails independent final
+evaluation. A configuration with 16-bit activations, 98 NVFP4 weight-only modules, 46 INT8
+modules, and an INT8 output head passes all gates on the untouched FINAL-81 set (5,168
+items): 5.917 GiB of weight-loading memory (limit 5.98), Korean teacher-correct retention 0.904
+(gate 0.90), and TPOT ratio 0.939 relative to BF16. It improves paired accuracy over NVFP4
+W4A4 by +1.4 percentage points (Bonferroni-adjusted interval [+0.2, +2.6]), compared with
++3.4 points on the selection set. This comparison changes both activation precision and INT8
+protection; exploratory analyses suggest that the activation change contributes substantially, but
+the isolated allocation effect is not established. Final checkpoints were not retained, and bitwise
+rebuild reproducibility remains unverified.
+1
+Introduction
+Low-bit quantization is the standard way to cut the memory footprint and serving cost of large
+language models. GPTQ (Frantar et al., 2023) and AWQ (Lin et al., 2024b) showed that weight
+precision can be reduced substantially while preserving most of a model’s capability, and mixed-
+precision methods (Zheng et al., 2026; Zhao et al., 2025) assign different precisions to different
+components to improve the accuracy–compression trade-off. GPU hardware has meanwhile added
+native support for microscaling formats such as NVFP4, although accuracy and speed depend
+strongly on the format, its numerical details and the runtime implementation (Egiazarian et al.,
+2026).
+A gap therefore opens between quantization feasibility and deployment feasibility. A compact
+checkpoint can still need more GPU memory than expected once loaded. A configuration can run
+through an optimized packed kernel and still produce unusable text. A format can deliver high
+output-token throughput while the first token arrives late, or while one language degrades far more
+1
+arXiv:2611.21974v1  [cs.IR]  16 Nov 2026
+
+
+than another. Language-aware calibration has been studied (Chimoto et al., 2026; Waskito et al.,
+2026); here we evaluate its task-specific effects alongside measured runtime memory and kernel
+compatibility constraints.
+We study these interactions on Qwen3-8B (Qwen Team, 2025) served by vLLM (vLLM Project,
+2026) on an NVIDIA B200 GPU, through three preregistered experiment stages (D79, D80 and
+D81). Instead of optimizing a single compression ratio or benchmark score, each candidate must
+jointly satisfy four conditions: it runs through the intended packed kernel for every fused module;
+its measured weight-loading memory stays below a fixed limit; its Korean, English, numerical and
+reasoning quality stays within preregistered tolerances of the BF16 teacher; and its time per output
+token (TPOT) does not exceed that of BF16 by more than 10%.
+One instructive result is a failure. In D80, a mixed INT4/INT8 configuration ranked first on the
+development set and then failed the quality gates on the independent final set. D81 was designed
+around that lesson, with separate diagnostic, selection and final sets and a rule that no research-only
+candidate may be promoted to a deployment candidate on the strength of a final score. Under that
+protocol one configuration, which combines NVFP4 weight-only quantization with INT8 protection,
+passed every gate on both the selection set and the untouched final set.
+Contributions.
+• An end-to-end validation workflow that checks packed execution and weight type per
+fused module, measured weight-loading memory, per-axis quality against a teacher, and serving
+latency, instead of relying on nominal bitwidth (Section 3).
+• A characterization of low-bit failure modes on B200: INT2 and INT3 execute natively,
+yet INT2 degenerates on generation under every grid we tried and INT3 leaves large Korean
+and reasoning losses (Sections 5.1–5.3).
+• Evidence against isolated sensitivity heuristics: restoration effects are strongly non-
+additive, Korean and reasoning rankings largely disagree, and a development-set winner did
+not survive held-out evaluation (Sections 5.4–5.5).
+• A deployment-constrained configuration confirmed on a held-out set, together with
+exploratory evidence that activation precision is a major contributor to its advantage; the
+independent effect of the INT8 allocation remains unidentified (Sections 5.6–5.7).
+We did not invent GPTQ, NVFP4, mixed-precision quantization or any kernel. The contribution
+is an empirical study under deployment constraints and a configuration-selection protocol whose
+failures we report alongside its successes.
+2
+Background and related work
+Weight-only quantization and rounding.
+Early deployment-oriented quantization work es-
+tablished the importance of exceptional activations, per-channel scaling, and hardware-aware
+compression. Dettmers et al. (2022) isolate outliers in 8-bit transformer inference, while Yao et al.
+(2022) co-design a quantization pipeline and its inference backend. GPTQ (Frantar et al., 2023)
+uses second-order error compensation for weight-only quantization, and AWQ (Lin et al., 2024b)
+exploits activation statistics to protect salient weights. Nontrivial rounding and clipping choices are
+studied by AdaRound (Nagel et al., 2020) and OmniQuant (Shao et al., 2024). SpQR (Dettmers
+et al., 2024) and SqueezeLLM (Kim et al., 2024) protect difficult weights using sparse or mixed
+2
+
+
+representations. We use established GPTQ and RTN recipes; we neither modify their optimizers
+nor compare them directly with the full range of these alternatives. Our emphasis is on whether the
+resulting configuration is executable, satisfies a measured memory ceiling, and preserves preregistered
+task capabilities.
+Extreme low-bit representations.
+QuIP (Chee et al., 2023) and QuIP# (Tseng et al., 2024)
+combine incoherence processing with adaptive rounding and, in the latter, lattice codebooks. AQLM
+(Egiazarian et al., 2024) uses additive codebook quantization. ParetoQ (Liu et al., 2025b) studies
+training and scaling across extremely low bitwidths. Quantization-aware training also offers a
+different recovery path: LLM-QAT (Liu et al., 2024a) and EfficientQAT (Chen et al., 2025) use
+training or layer-wise optimization to reduce quantization damage. QLoRA (Dettmers et al., 2023)
+addresses efficient adaptation of models with quantized frozen weights, a distinct setting from
+our post-training inference experiments. These methods are relevant alternatives to our native
+INT2/INT3 diagnostics; their reported success prevents generalizing our INT2 failures into a claim
+that two-bit language models are inherently unusable. We did not implement or benchmark these
+alternatives on our fixed B200 runtime.
+Activation precision and FP4.
+SmoothQuant (Xiao et al., 2023) transfers quantization difficulty
+from activations to weights. QuaRot (Ashkboos et al., 2024), SpinQuant (Liu et al., 2025a), DuQuant
+(Lin et al., 2024a), and FlatQuant (Sun et al., 2025) employ different transformations or rotation
+strategies to control activation outliers. Recent microscaling FP4 work (Egiazarian et al., 2026)
+directly examines the gap between the accuracy and hardware promise of FP4 formats. These
+methods make an important distinction for our study: NVFP4 W4A4 and NVFP4 W4A16 are
+not equivalent comparisons, because they use different activation precision. Our FINAL-81 A81
+versus W4A4 result changes both activation precision and weight protection; it is therefore a
+configuration-level comparison, not an identified allocation effect.
+Mixed-precision allocation and interaction effects.
+Classical mixed-precision methods such
+as HAWQ (Dong et al., 2019) and HAWQ-V2 (Dong et al., 2020) use sensitivity information to help
+allocate precision, including second-order and Pareto-based approaches. Atom (Zhao et al., 2024)
+co-designs low-bit quantization and runtime throughput. More recent LLM approaches include
+MixLLM (Zheng et al., 2026), which mixes precision across output features, and IMPQ (Zhao et al.,
+2025), which considers interactions between layers. Our non-additive restoration results (Section 5.4)
+motivate such interaction-aware methods, but our frozen allocation procedure is a greedy heuristic,
+not an interaction-aware optimizer. Without matched-memory comparisons to these methods we
+make no methodological superiority claim.
+GPU serving and memory accounting.
+The PagedAttention/vLLM system (Kwon et al.,
+2023) addresses dynamic KV-cache memory; Marlin (Frantar et al., 2024) optimizes weight-only
+quantized linear inference, and FlashInfer (Ye et al., 2025) studies customizable GPU serving kernels.
+QServe (Lin et al., 2025) explicitly co-designs low-bit quantization and serving, whereas KIVI (Liu
+et al., 2024b) targets KV-cache precision rather than model-weight precision. We separately measure
+the vLLM weight-loading allocation increment and token latency. We do not treat the former
+as total peak serving memory, nor report KV-cache or concurrency improvements that were not
+measured. The Humming kernels (Ant Group and the vLLM Community, 2026) provide the native
+INT2/INT3 execution path in our pinned vLLM environment (vLLM Project, 2026); we implement
+no matrix-multiplication kernel of our own.
+3
+
+
+Table 1: Quantization families and the kernels vLLM 0.29.0 selected on B200.
+Family
+Weights
+Activations
+Kernel
+BF16
+BF16
+BF16
+reference
+NVFP4 W4A4 (n4)
+NVFP4
+FP4
+FlashInferCuteDslNvFp4
+NVFP4 W4A16
+NVFP4
+16-bit
+MarlinNvFp4
+GPTQ W8A16 / W4A16
+INT8 / INT4
+16-bit
+Marlin (uint8b128 / uint4b8)
+GPTQ W3A16
+INT3
+16-bit
+Humming (uint3b4)
+GPTQ W2A16
+INT2
+16-bit
+Humming (uint2b2)
+Multilingual calibration and evaluation.
+Chimoto et al. (2026) investigate multilingual
+calibration for GPTQ and AWQ, while Waskito et al. (2026) examine calibration language, bitwidth
+and cross-lingual effects. These studies motivate a per-language rather than solely aggregate quality
+analysis.
+Our Korean-enriched calibration experiment (Section 5.8) is a configuration-specific
+counterexample to assuming that adding more target-language calibration text necessarily improves
+target-language performance without harming reasoning. The observation does not contradict
+benefits reported in other models or calibration settings.
+3
+Deployment-constrained quantization
+3.1
+Model and quantization units
+Qwen3-8B (Qwen Team, 2025) has 36 transformer layers. vLLM executes each layer through four
+fused linear modules: the fused query–key–value projection (qkv), the output projection (o), the
+fused gate and up projection (gate_up) and the down projection (down), giving 144 fused modules
+in total. We assign precision at these boundaries because the runtime requires one scheme per fused
+module. In a negative control, assigning W4 to the query projection and W8 to the key and value
+projections inside one fused qkv module made the vLLM weight loader reject the checkpoint with a
+shape assertion. All configurations below therefore use one precision per fused module. The output
+head (lm_head) is treated separately.
+3.2
+Formats and runtime paths
+Table 1 lists the families we evaluate and the kernels vLLM 0.29.0 selected for them on B200. Its
+WNA16 path accepts symmetric integer weights from 2 to 8 bits and asymmetric weights only at 4
+and 8 bits. Kernel names describe the measured configuration, not a claim that a kernel family is
+generally optimal.
+3.3
+Memory constraint
+Checkpoint size, the sum of registered parameter bytes and the GPU memory allocated while loading
+can all differ. Our memory gate uses vLLM’s raw weight-loading counter, the change in allocated
+GPU memory while the model loads:
+M(c) = weight_load_bytes(c)/230 < 5.98 GiB,
+(1)
+with strict inequality. The limit is a fixed product requirement of this study. During allocation we
+predict M(c) from earlier measurements with a 32 MiB safety margin, but a prediction never counts
+4
+
+
+as passing: each candidate is first loaded in a smoke job that does not read the selection set, and
+only a measured counter below the limit admits it to selection. The counter excludes KV cache and
+runtime activations.
+3.4
+Quality and latency constraints
+Let T be the BF16 teacher and Q a quantized configuration. For an evaluation axis a we measure
+teacher-correct retention and the change in accuracy,
+ra(Q) = P(Q correct | T correct) ,
+∆a(Q) = acca(Q) −acca(T).
+(2)
+Retention measures how many of the teacher’s correct decisions survive; the accuracy change also
+credits items the teacher gets wrong and the quantized model gets right. The tier is retention pooled
+over all items of the four gate axes (Korean, English, numerical, reasoning). A configuration passes
+the quality gates if tier ≥0.90, rko ≥0.90, overall, numerical and reasoning accuracy changes are
+each at least −0.03 (three points), and the rate of malformed outputs on generation items rises
+by at most 2 points. It passes serving if M(c) < 5.98 GiB and its median TPOT is at most 1.1
+times that of BF16. Execution must match the expected packed kernel for every fused module, with
+no layer silently expanded to floating point, and the software environment must match the frozen
+manifest. Time to first token (TTFT) is reported but not gated. These thresholds were fixed before
+D78 and not changed in any later stage.
+3.5
+Execution verification
+Kernel names alone are not enough: INT4 and INT8 both run through Marlin, so the stored weight
+type is checked separately, and an NVFP4 scheme name does not reveal whether activations are
+quantized. For every candidate the checker records the kernel and weight type of each fused module,
+the activation policy, the output head, the absence of floating-point fallbacks, the model revision
+and the raw memory counter.
+3.6
+Sensitivity diagnostics and allocation
+Diagnostic runs, on a set reserved for them, measure how much each fused module contributes:
+starting from a fully quantized base, one module is restored to BF16 at a time and the change in
+teacher-correct retention is recorded per axis. We use these measurements to rank modules, not to
+predict the quality of a combination. A frozen script orders modules by their joint restoration effect
+(or a Korean-weighted variant) and a second frozen script fills the memory budget from the top of
+the list, stopping at the first module that does not fit. Both scripts and their output hashes were
+fixed before the selection set was read. Restoration is a proxy: the deployed protection format is
+INT8, not BF16. We do not claim that this greedy procedure is optimal.
+4
+Experimental protocol
+4.1
+Hardware and software
+All runs use one NVIDIA B200 with vLLM 0.29.0, PyTorch 2.11.0 and transformers 5.16.1. Check-
+points are produced with llm-compressor 0.15.0 and compressed-tensors 0.20.1 from a pinned
+Qwen3-8B revision. Each job verifies its environment against the stage’s frozen manifest before
+evaluating. Serving latency is measured at batch size 1 over 32 prompts with 256 forced output
+5
+
+
+tokens. Measured GPU time for the D81 stages was 4.98 (diagnostic), 2.39 (selection) and 1.35
+(final) B200 GPU-hours, excluding queueing.
+4.2
+Evaluation sets
+Items come from KMMLU (Son et al., 2025), KoBEST (Jang et al., 2022), MMLU (Hendrycks
+et al., 2021), ARC (Clark et al., 2018), HellaSwag (Zellers et al., 2019), BIG-Bench Hard (Suzgun
+et al., 2023), BIG-bench (Srivastava et al., 2023), MuSR (Sprague et al., 2024), HRM8K (Ko
+et al., 2025) and a seeded generator of numerical problems. Multiple-choice items are scored by
+log-likelihood; generation items use greedy decoding with output limits of 1,536 tokens (numerical),
+4,096 (reasoning) and 768 (Korean math). Each stage builds its sets with a script that removes
+every item used in earlier stages, so no item is reused across D78–D81.
+D80 used diagnostic, development and final sets of 1,662, 3,003 and 4,061 items. D81 used a
+diagnostic set of 1,998 items, a selection set (SEL-81) of 5,052 items and a final set (FINAL-81) of
+5,168 items. FINAL-81 contains 4,798 gate-axis items (Korean 1,565, English 1,043, numerical 1,320,
+reasoning 870), of which 2,190 are generation items, plus 370 report-only items, 300 of them HRM8K
+Korean math. No evaluation item is reproduced in this paper. Dataset access and redistribution
+rights are handled separately from the manuscript and must be checked against each source’s terms
+before any evaluation-set release.
+4.3
+Preregistration and statistics
+Candidate rules, gates, comparison families and the selection rule were frozen and committed before
+each set was read. Paired differences use identical items. With CQ(i) ∈{0, 1} the correctness of Q
+on item i, the primary metric is
+∆(Q, R) = 1
+n
+n
+X
+i=1
+[CQ(i) −CR(i)]
+(3)
+over all gate-axis items, with a normal-approximation interval. D79 and D80 report 95% intervals. In
+D81 each track is a Bonferroni family: track A (four-bit-class candidates) has k = 2 and z = 2.2414,
+and track B (three-bit-class candidates) has k = 5 and z = 2.5758. Superiority requires the adjusted
+lower bound to exceed zero. Two track-B budget variants produced exactly the same allocation as a
+third (Section 5.6); they were not run and are not counted as observations, and k = 5 was kept.
+Deployment eligibility and superiority are assessed separately: a candidate can pass every absolute
+gate without beating its reference, or beat its reference while failing the gates.
+4.4
+Selection and final evaluation
+The diagnostic set builds candidates, the selection set chooses them under the frozen rule, and the
+final set is read once for the chosen candidates and their references. A track with no candidate that
+passes all gates has no deployment candidate; a research-only candidate is never promoted because
+it scores well on the final set.
+5
+Results
+5.1
+Native low-bit execution does not guarantee quality
+D79 tested whether very-low-bit Qwen3-8B checkpoints run on B200. Packed INT3 and INT2
+checkpoints loaded and executed through the Humming kernels for all 144 fused modules. Measured
+6
+
+
+Table 2: D79 development set: memory, effective bits per weight (BPW, including the output head and
+embeddings), tier, Korean teacher-correct retention and TPOT ratio to BF16. Memory is the measured
+weight-loading counter in GiB.
+Arm
+Mem
+BPW
+Tier
+rko
+TPOT
+GPTQ W4
+5.68
+5.93
+0.898
+0.832
+0.846
+GPTQ W3
+4.86
+5.08
+0.748
+0.575
+0.857
+RTN W3
+4.86
+5.08
+0.361
+0.467
+0.857
+GPTQ Attn W2 + MLP W4 (h2)
+5.33
+5.56
+0.521
+0.459
+0.864
+GPTQ Attn W4 + MLP W2 (h1)
+4.42
+4.60
+0.120
+0.138
+0.829
+GPTQ W2
+4.07
+4.23
+0.115
+0.158
+0.837
+RTN W2
+4.07
+4.23
+0.143
+0.284
+0.839
+Table 3: D80 INT2 grid diagnostics (diagnostic set, 4.49 GPU-hours). Retention is teacher-correct retention
+over all gate items; MC and Gen. split it into multiple-choice and generation items. Loop and Trunc. are the
+fractions of generation outputs that repeat or hit the output limit.
+Grid
+Retention
+MC
+Gen.
+Loop
+Trunc.
+4-level balanced, MSE
+0.243
+0.454
+0.000
+1.00
+1.00
+GPTQ asym. INT2
+0.209
+0.392
+0.000
+1.00
+1.00
+asym. INT2, MSE
+0.203
+0.379
+0.000
+1.00
+1.00
+GPTQ sym. INT2
+0.163
+0.304
+0.000
+1.00
+1.00
+sym. INT2, min-max
+0.158
+0.296
+0.000
+1.00
+1.00
+sym. INT2, MSE
+0.151
+0.283
+0.000
+1.00
+1.00
+ternary, MSE
+0.120
+0.225
+0.000
+1.00
+1.00
+weight-loading memory fell to 4.86 GiB at W3 and 4.07 GiB at W2, against 15.27 GiB for BF16,
+reductions of 68.2% and 73.3% (Table 2).
+Quality is another matter. GPTQ improved on RTN at W3 by +29.9 points of paired accuracy
+[+27.9, +32.0], but GPTQ W3 remained far below the gates (tier 0.748). The INT2 failure is
+qualitative. On 1,302 generation items, GPTQ W2 hit the output limit on 99.9% of items, produced
+no extractable answer on 100.0% and repeated itself on 100.0%, against 4.4%, 4.5% and 2.3%
+for BF16. RTN W3 already showed the same pattern in part (54.4% truncated, 56.0% looping).
+Executing natively is necessary for deployment but tells us nothing about whether the output is
+usable.
+5.2
+Changing the INT2 grid does not stop degeneration
+We then asked whether the INT2 failure comes from the particular symmetric grid. Seven grids
+were evaluated on the D80 diagnostic set, including symmetric, ternary, balanced four-level and
+asymmetric variants (Table 3). Asymmetric and balanced grids recovered some multiple-choice
+decisions, the best reaching a retention of 0.243, but every grid looped and truncated on all generation
+items and retained none of the teacher’s correct generations. This rules out the simplest explanation,
+that changing the grid alone restores generation. It is not an impossibility result for INT2: we did
+not try quantization-aware training or other models.
+7
+
+
+Table 4: D80 arms on the development (dev) and final (fin) sets: memory (GiB), tier, Korean retention and
+reasoning accuracy change relative to BF16 (points).
+Arm
+Mem
+Tierdev
+Tierfin
+rko,dev
+rko,fin
+∆rea,dev
+∆rea,fin
+NVFP4 W4A4 (n4)
+5.977
+0.894
+0.879
+0.838
+0.805
+−3.9
+−3.9
+GPTQ W4 (w4)
+5.684
+0.909
+0.900
+0.864
+0.828
+−8.7
++2.6
+W4 + W8 units + W8 head
+5.980
+0.926
+0.891
+0.908
+0.877
+−5.1
+−9.0
+GPTQ W3 (w3)
+4.864
+0.753
+0.667
+0.634
+0.578
+−23.8
+−17.7
+INT4/INT3 mix (D80)
+5.191
+0.856
+0.804
+0.783
+0.730
+−0.9
+−5.4
+Table 5: D81 diagnostics. ρS: Spearman correlation between the Korean and the reasoning restoration
+rankings over the 144 fused modules. Last column: sum of single-module Korean retention gains divided by
+the gain from restoring all modules jointly. Track-B bases differ only in calibration (0%, 25% or 50% Korean
+rows).
+Base (track)
+ρS(ko, rea)
+Psingle / joint
+A: W4 body
+0.018
+7.57
+A: NVFP4A16 body
+0.256
+5.39
+B: W3, cal0
+−0.046
+−7.46
+B: W3, cal25
+0.152
+−2.42
+B: W3, cal50
+−0.045
+−4.50
+5.3
+Mixed INT3/INT4 precision helps but stays below the gates
+The D80 mixed configuration keeps 41 fused modules in INT4 (Marlin) and the remaining 103 in
+INT3 (Humming), at a measured 5.191 GiB (the allocator had predicted 5.159 GiB). On the D80
+final set it beat GPTQ W3 by +10.3 points [+8.6, +12.0], with gains of +19.4 points on numerical
+items, +12.4 on reasoning and +5.8 on Korean. Its Korean retention was still only 0.730 and its tier
+0.804 (Table 4). A relative improvement over a weak baseline is not deployment feasibility.
+5.4
+Isolated sensitivity predicts combined restoration poorly
+The D81 diagnostics, run on five quantized bases, show two related effects (Table 5). First, Korean
+and reasoning sensitivities rank modules very differently: Spearman correlations between the two
+rankings range from −0.046 to 0.256. A single ranking cannot protect both capabilities. Second,
+effects do not add up. On the two track-A bases, summing the Korean retention gains from restoring
+each module alone gives 5.4 to 7.6 times the gain from restoring all of them together; on the INT3
+bases the ratio is negative. A sensitivity ranking can nominate candidates, but the quality of the
+resulting mixture has to be measured directly.
+5.5
+A development-set gain disappeared on the final set
+The D80 INT4/INT8 configuration protects 24 fused modules and the output head in INT8 and
+stores the other 120 modules in INT4. On the development set it was the strongest four-bit-class
+arm, with tier 0.926 and Korean retention 0.908. On the final set its tier dropped to 0.891, its
+Korean retention to 0.877 and its reasoning change to −9.0 points (−5.1 on dev), so it failed the
+gates (Table 4). An exploratory comparison outside the preregistered family put it −2.4 points
+[−3.6, −1.2] below plain GPTQ W4. Plausible causes include selection optimism, a shift in the item
+8
+
+
+Table 6: FINAL-81 (5,168 items, read once). Mem: weight-loading memory (GiB); BPW: effective bits per
+weight; Tier and rko: teacher-correct retention; ∆acc, ∆num, ∆rea: accuracy change versus BF16 (points);
+∆fmt: change in the malformed-output rate on generation items (points, positive is worse); TPOT: ratio to
+BF16 (lower is faster); Fails: number of quality gates failed (of six).
+Arm
+Mem BPW
+Tier
+rko
+∆acc
+∆num
+∆rea
+∆fmt
+TPOT Fails
+Mixed NVFP4A16 + W8 (A81) 5.917
+6.17
+0.931
+0.904
+−0.3
+−0.9
+−0.1
++0.14
+0.939
+0
+NVFP4 W4A4 (n4)
+5.977
+6.25
+0.887
+0.821
+−1.7
+−1.3
+−3.9
+−0.18
+0.660
+3
+INT4/INT3 mix (B81)
+5.153
+5.35
+0.810
+0.700
+−6.7
+−12.2
+−3.8
++1.23
+0.863
+5
+GPTQ W3 (w3)
+4.864
+5.08
+0.748
+0.643
+−10.9
+−20.8
+−8.3
++2.92
+0.866
+6
+Table 7: FINAL-81 accuracy (%) per gate axis for the BF16 teacher and each arm.
+Axis
+n
+BF16
+A81
+n4
+B81
+w3
+Korean
+1,565
+51.7
+51.3
+50.2
+45.9
+44.3
+English
+1,043
+67.8
+68.2
+66.9
+64.1
+62.1
+Numerical
+1,320
+90.5
+89.5
+89.2
+78.3
+69.7
+Reasoning
+870
+73.9
+73.8
+70.0
+70.1
+65.6
+mix and interactions among the protected modules; the data do not single one out. This result is
+why D81 separates diagnostic, selection and final sets.
+5.6
+D81: selection and final evaluation
+D81 built five candidates from the diagnostics under frozen rules. In track A, A81 protects 46 fused
+modules (23 qkv, 18 o, 1 gate_up, 4 down) in INT8 on an NVFP4 W4A16 body with an INT8
+output head, using 0.499 of its 0.50 GiB budget; its reference is NVFP4 W4A4 (n4). A parallel
+candidate on a GPTQ W4 body (53 INT8 modules) has GPTQ W4 as its reference. In track B, B81
+upgrades 44 modules of a GPTQ W3 body to INT4; a second candidate uses a Korean-weighted
+ranking and a third repeats B81 with Korean-heavy calibration. The track-B allocator stopped at
+0.251 GiB under every budget it was given (0.30, 0.55 and 0.80 GiB), because the next modules
+in rank order were excluded as harmful; the two smaller budgets therefore yielded the identical
+artifact and were treated as aliases. Track B was preregistered as underpowered: the planned
+interval half-width needed about 6,100 items, more than SEL-81 provides, so non-significant track-B
+differences are not evidence of no effect.
+On SEL-81, A81 was the only candidate that passed every gate (tier 0.935, Korean retention 0.924,
+5.917 GiB, TPOT ratio 0.925) and it beat n4 by +3.4 points [+2.3, +4.6]. The GPTQ-W4-body
+candidate failed the Korean gate (0.869) and did not beat GPTQ W4 (−0.5 points [−1.7, +0.6]).
+B81 beat GPTQ W3 by +5.1 points [+3.3, +7.0] but failed the quality gates (tier 0.808, Korean
+retention 0.726), so track B had no deployment candidate and B81 went to the final set as a research
+comparison only.
+FINAL-81 was then read once (Tables 6 and 7). A81 passed all six quality gates and both
+serving gates: memory 5.917 GiB (6,353,372,672 bytes, 0.063 GiB below the limit), tier 0.931,
+Korean retention 0.904, overall accuracy change −0.31 points, numerical −0.91 and reasoning
+−0.11, malformed-output rate +0.14 points, and TPOT ratio 0.939. The execution check found the
+expected kernel on all 144 modules (98 MarlinNvFp4, 46 Marlin INT8) and an INT8 output head.
+Its Korean retention cleared the gate by only 0.0036, a narrow pass margin given only 1,565 Korean
+9
+
+
+−2
+0
+2
+4
+6
+paired gate-axis accuracy difference (pp)
+NVFP4A16 vs n4 (DEV-80)
++W8 units vs NVFP4A16 (DEV-80)
+W4+W8 head vs W4 (DEV-80)
++W8 units vs W4+W8 head (DEV-80)
+A81 vs n4 (SEL-81)
+A81-W4 vs w4 (SEL-81)
+A81 vs n4 (FINAL-81)
+B81 vs w3 (SEL-81)
+B81 vs w3 (FINAL-81)
+Figure 1: Paired differences in gate-axis accuracy (points) with confidence intervals. DEV-80 rows use 95%
+intervals; SEL-81 and FINAL-81 rows use the Bonferroni z of each track (z = 2.2414 for A81, z = 2.5758 for
+B81). FINAL-81 rows are highlighted. The A81 advantage over n4 shrank from SEL-81 to FINAL-81 but its
+lower bound stayed above zero.
+items. The reference n4 failed three gates: Korean retention 0.821, tier 0.887 and reasoning change
+−3.91 points (Table 6). A81 beat n4 by +1.4 points [+0.2, +2.6] at z = 2.2414, so superiority
+was reproduced, with a smaller effect than on SEL-81 (Figure 1). Per axis, the gain was largest
+on reasoning (+3.8 [+0.3, +7.2]); Korean (+1.1 [−1.1, +3.3]), English (+1.2 [−0.3, +2.7]) and
+numerical (+0.4 [−1.9, +2.6]) differences were not significant on their own; per-axis comparisons
+were report-only. B81 reproduced its advantage over GPTQ W3 (+4.1 points [+2.3, +5.9]) and
+failed five quality gates again.
+5.7
+What the gain over W4A4 consists of
+The comparison with n4 changes two things at once: activations go from FP4 to 16 bits, and
+46 modules gain INT8 protection.
+The D80 development set provides a partial, exploratory
+decomposition (Table 8); it does not identify the effect of the D81 allocation on an independent
+set. Moving from n4 to NVFP4 W4A16 alone raised paired accuracy by +2.8 points [+1.6, +4.0];
+adding INT8 modules on top of it changed accuracy by −0.3 points [−1.3, +0.8], which is not
+significant. These exploratory comparisons suggest that much of the gain relative to W4A4 is
+associated with keeping activations at 16-bit precision. The catch is memory. NVFP4 W4A16 with
+a BF16 output head measured 6.009 GiB, above the limit. Quantizing the output head to INT8
+saves about 0.57 GiB (a smoke load measured 5.44 GiB for this combination), and the 46 INT8
+modules then add 0.499 GiB, giving the final 5.917 GiB. The INT8 head is what makes 16-bit
+activations fit, and the INT8 modules occupy the remaining headroom. We never measured the
+quality of NVFP4 W4A16 with an INT8 head and no INT8 modules, nor a random choice of 46
+INT8 modules, so the contribution of the allocation itself is not identified. On the GPTQ W4 body
+the picture was similar: an INT8 head alone did not help (−0.6 [−1.7, +0.6]), INT8 modules on top
+of it did (+1.6 [+0.4, +2.8]), and that configuration later failed on the final set (Section 5.5).
+10
+
+
+5.0
+5.2
+5.4
+5.6
+5.8
+6.0
+(a) FINAL-81: weight memory (GiB)
+0.75
+0.80
+0.85
+0.90
+0.95
+tier (pooled retention)
+A81
+n4
+B81
+w3
+5.0
+5.2
+5.4
+5.6
+5.8
+6.0
+(b) DEV-80: weight memory (GiB)
+NVFP4A16+W8
+NVFP4A16
+W4+W8
+W4
+n4
+INT4/3 mix
+W3
+Figure 2: Measured weight-loading memory against tier. (a) FINAL-81 arms. (b) DEV-80 arms. Dashed
+line: memory limit (5.98 GiB, strict); dotted line: tier gate (0.90). Only A81 lies left of the memory line and
+above the tier line. Both NVFP4A16 arms in (b) exceed the memory limit.
+5.8
+Korean-heavy calibration damaged reasoning
+Calibration sets had 128 sequences of 2,048 tokens. The default set contained no Korean text; the
+Korean-enriched sets replaced 25% or 50% of the rows with Korean web text. On the diagnostic
+set, 50% Korean calibration raised Korean retention of the W3 base by +12.2 points [+2.3, +22.1]
+and reasoning by +7.4, so it was chosen for the calibration test.
+These diagnostic intervals
+were exploratory (independent-sample approximations). The preregistered paired test on SEL-81
+compared B81 with the same allocation recalibrated on that set. The Korean difference was +2.2
+points [−0.9, +5.4], not significant, while reasoning fell by −12.3 points [−16.8, −7.9]. The diagnostic
+gain did not transfer. Calibration-language changes have to be evaluated against every required
+capability; a calibration improvement for one language should not be declared from that language
+alone.
+5.9
+Serving behaviour
+Formats differ in where they are fast (Table 9). NVFP4 W4A4 produced 387 output tokens per
+second against 255.4 for BF16, but its median TTFT was 42.3 ms against 15.3 ms. A81 delivered
+272 tokens per second with a median TTFT of 15.4 ms, close to BF16 on both. These are batch-1
+measurements on short prompts and do not generalize to other batch sizes, prompt lengths or
+concurrency levels.
+6
+Discussion
+Deployment feasibility has several independent conditions.
+An INT2 checkpoint can
+execute in a compact footprint and fail generation entirely. An FP4 format can lead on output
+throughput and lag on first-token latency. A strong candidate can miss the memory limit by tens of
+11
+
+
+Table 8: Paired gate-axis accuracy differences used for attribution (B −A, points). DEV-80 rows use z = 1.96;
+SEL-81 and FINAL-81 rows use the Bonferroni z of each track.
+Comparison (B −A)
+Set
+z
+Diff (pp)
+CI (pp)
+NVFP4A16 −n4
+DEV-80
+1.96
++2.8
+[+1.6, +4.0]
++W8 units −NVFP4A16
+DEV-80
+1.96
+−0.3
+[−1.3, +0.8]
+W4+W8 head −W4
+DEV-80
+1.96
+−0.6
+[−1.7, +0.6]
++W8 units −W4+W8 head
+DEV-80
+1.96
++1.6
+[+0.4, +2.8]
+A81 −n4
+SEL-81
+2.24
++3.4
+[+2.3, +4.6]
+A81-W4 −w4
+SEL-81
+2.24
+−0.5
+[−1.7, +0.6]
+A81 −n4
+FINAL-81
+2.24
++1.4
+[+0.2, +2.6]
+B81 −w3
+SEL-81
+2.58
++5.1
+[+3.3, +7.0]
+B81 −w3
+FINAL-81
+2.58
++4.1
+[+2.3, +5.9]
+Table 9: FINAL-81 serving at batch size 1 (32 prompts, 256 output tokens). Mem in GiB; TTFT in ms (p50
+and p95); TPOT is the median in ms; tok/s is single-stream output throughput.
+Arm
+Mem
+TTFT50
+TTFT95
+TPOT
+tok/s
+TPOT ratio
+BF16 teacher
+15.27
+15.3
+20.3
+3.915
+255.4
+1.000
+Mixed NVFP4A16 + W8 (A81)
+5.92
+15.4
+16.2
+3.676
+272.0
+0.939
+NVFP4 W4A4 (n4)
+5.98
+42.3
+44.0
+2.584
+387.0
+0.660
+INT4/INT3 mix (B81)
+5.15
+16.8
+17.5
+3.379
+295.9
+0.863
+GPTQ W3 (w3)
+4.86
+16.3
+16.9
+3.389
+295.0
+0.866
+megabytes once loaded, as NVFP4 W4A16 with a BF16 head did. A configuration that leads on a
+development set can fail on held-out items. Each condition has to be checked on its own.
+Aggregate scores hide language-specific failures.
+Several configurations had acceptable
+aggregate or English results and failed the Korean gate. This does not show that Korean is generally
+more sensitive to quantization; it shows that per-language requirements can decide whether a
+compressed model is acceptable for a given service, and that they must be set before candidates are
+chosen.
+More precision on selected modules is not reliably better.
+The D80 INT4/INT8 result,
+the non-additivity of restoration and the weak INT8 contribution on the NVFP4 body all point the
+same way. Which modules to protect depends on interactions, the task mix, the activation path
+and the supported formats; a ranking from isolated measurements is a weak guide.
+Runtime support shapes the search space.
+Fused-module boundaries, kernel availability,
+loading overhead and activation precision determine which mixtures can actually run. Among the
+configurations we tested, a feasible path was to retain 16-bit activations and use an INT8 output
+head to create memory headroom; no global cost-optimality claim follows. Including such constraints
+in the search changes which configuration wins.
+12
+
+
+7
+Limitations
+One model, one GPU.
+All results are for Qwen3-8B on B200 with vLLM 0.29.0. Other models,
+scales, architectures and runtimes may behave differently.
+Attribution is incomplete.
+The gain of A81 over n4 combines activation precision and INT8
+protection. We have neither a quality measurement of NVFP4 W4A16 with an INT8 head and no
+INT8 modules nor a random-allocation control, and we compared against no published allocation
+method.
+Small margins.
+A81’s Korean retention passed its gate by 0.0036, and its superiority lower bound
+was +0.2 points. A modest shift in the item mix could change either verdict.
+Effect shrinkage.
+The advantage over n4 fell from +3.4 points on SEL-81 to +1.4 on FINAL-81,
+consistent with some selection optimism even under a frozen protocol.
+Checkpoints not preserved.
+Final-stage checkpoints were built, fingerprinted and served inside
+the evaluation job and not retained. The SEL-81 and FINAL-81 builds of A81, from the same recipe,
+calibration and code, have different SHA-256 digests, so rebuilds are not bitwise reproducible. We
+have not measured how much quality varies between rebuilds.
+Allocator prediction.
+The allocator predicted 5.947 GiB against an internal planning limit of
+5.949 GiB, leaving 2.01 MiB; the measured counter was 5.917 GiB. The prediction was conservative
+here, but it is a planning aid, not a guarantee.
+Underpowered track B.
+Track B was preregistered as underpowered; its null results are not
+evidence of no effect.
+Serving scope.
+Latency was measured at batch size 1 with short prompts. Throughput under
+concurrency, long contexts, KV-cache capacity, peak memory and energy were not measured.
+Study-specific gates.
+The thresholds are requirements of this study, not industry standards.
+No release.
+Passing the preregistered gates is not a product release. No checkpoint accompanies
+this paper.
+8
+Future work
+The most important next step is a causal ablation under one protocol on a fresh held-out set: NVFP4
+W4A4, NVFP4 W4A16 with an INT8 head and no INT8 modules, the same with 46 randomly chosen
+INT8 modules, and the ranked allocation, all at matched memory. Interaction-aware allocators
+(Zhao et al., 2025; Zheng et al., 2026) should be compared under the same runtime constraints.
+Repeating the study on other model families and sizes, measuring rebuild variance, and extending
+the serving study to concurrency, long contexts and memory headroom would show how far these
+findings extend.
+13
+
+
+9
+Conclusion
+We studied low-bit and mixed-precision quantization of Qwen3-8B on NVIDIA B200 under execution,
+memory, latency and multilingual quality constraints. Native INT2 and INT3 execution did not
+ensure usable output, isolated module sensitivity was a poor guide to mixtures, a development-set
+winner failed on held-out items, and Korean-heavy calibration damaged reasoning. A configuration
+with 16-bit activations, NVFP4 weights, 46 INT8 modules and an INT8 output head passed all
+preregistered gates on an untouched final set, with 5.917 GiB of weight-loading memory, Korean
+retention 0.904 and a TPOT ratio of 0.939, and outperformed NVFP4 W4A4 by +1.4 points
+[+0.2, +2.6]. Exploratory development-set comparisons suggest activation precision is the larger
+contributor, but the effect of the selected INT8 allocation remains unidentified. Quantization for
+deployment is a joint numerical and systems problem, and the measurement protocol, including
+what it rejects, matters as much as the format.
+References
+Ant Group and the vLLM Community. Announcing Humming: Fast, flexible kernels for quantized
+inference. vLLM Blog, https://vllm-project.github.io/2026/10/19/humming.html, 2026.
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin
+Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference
+in rotated LLMs. In Advances in Neural Information Processing Systems (NeurIPS), 2024.
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit quantization of
+large language models with guarantees. In Advances in Neural Information Processing Systems
+(NeurIPS), 2023.
+Mengzhao Chen, Wenqi Shao, Peng Xu, Jiahao Wang, Peng Gao, Kaipeng Zhang, and Ping Luo.
+EfficientQAT: Efficient quantization-aware training for large language models. In Proceedings of
+the 63rd Annual Meeting of the Association for Computational Linguistics (ACL), 2025.
+Everlyn Asiko Chimoto, Mostafa Elhoushi, and Bruce Bassett. Calibrating beyond English: Language
+diversity for better quantized multilingual LLMs. In Proceedings of the 19th Conference of the
+European Chapter of the Association for Computational Linguistics (EACL), 2026. 2026.eacl-
+long.223.
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and
+Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge.
+arXiv preprint arXiv:1803.05457, 2018.
+Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit matrix
+multiplication for transformers at scale. In Advances in Neural Information Processing Systems
+(NeurIPS), 2022. arXiv:2208.07339.
+Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. QLoRA: Efficient finetuning
+of quantized LLMs. In Advances in Neural Information Processing Systems (NeurIPS), 2023.
+Tim Dettmers, Ruslan Svirschevski, Vage Egiazarian, Denis Kuznedelev, Elias Frantar, Saleh
+Ashkboos, Alexander Borzunov, Torsten Hoefler, and Dan Alistarh. SpQR: A sparse-quantized
+representation for near-lossless LLM weight compression. In International Conference on Learning
+Representations (ICLR), 2024.
+14
+
+
+Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. HAWQ: Hessian
+AWare quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), 2019.
+Zhen Dong, Zhewei Yao, Daiyaan Arfeen, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer.
+HAWQ-V2: Hessian aware trace-weighted quantization of neural networks. In Advances in Neural
+Information Processing Systems (NeurIPS), 2020.
+Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan
+Alistarh. Extreme compression of large language models via additive quantization. In Proceedings
+of the 41st International Conference on Machine Learning (ICML), 2024.
+Vage Egiazarian et al. Bridging the gap between promise and performance for microscaling FP4
+quantization. In International Conference on Learning Representations (ICLR), 2026.
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training
+quantization for generative pre-trained transformers. In International Conference on Learning
+Representations (ICLR), 2023. arXiv:2210.17323.
+Elias Frantar, Roberto L. Castro, Jiale Chen, Torsten Hoefler, and Dan Alistarh.
+MARLIN:
+Mixed-precision auto-regressive parallel inference on large language models.
+arXiv preprint
+arXiv:2408.11743, 2024.
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob
+Steinhardt. Measuring massive multitask language understanding. In International Conference
+on Learning Representations (ICLR), 2021.
+Myeongjun Jang, Dohyung Kim, Deuk Sin Kwon, and Eric Davis. KoBEST: Korean balanced evalu-
+ation of significant tasks. In Proceedings of the 29th International Conference on Computational
+Linguistics (COLING), 2022.
+Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W.
+Mahoney, and Kurt Keutzer. SqueezeLLM: Dense-and-sparse quantization. In Proceedings of the
+41st International Conference on Machine Learning (ICML), 2024.
+Hyunwoo Ko, Guijin Son, and Dasol Choi. Understand, solve and translate: Bridging the multilingual
+mathematical reasoning gap. arXiv preprint arXiv:2501.02448, 2025.
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E.
+Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model
+serving with PagedAttention. In Proceedings of the 29th ACM Symposium on Operating Systems
+Principles (SOSP), 2023. doi: 10.1145/3600006.3613165.
+Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi Song, Zhenan
+Sun, and Ying Wei. DuQuant: Distributing outliers via dual transformation makes stronger
+quantized LLMs. In Advances in Neural Information Processing Systems (NeurIPS), 2024a.
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan
+Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for
+on-device LLM compression and acceleration. In Proceedings of Machine Learning and Systems
+(MLSys), 2024b.
+15
+
+
+Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao, Chuang Gan, and Song Han.
+QServe: W4A8KV4 quantization and system co-design for efficient LLM serving. In Proceedings
+of Machine Learning and Systems (MLSys), 2025.
+Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang, Pierre Stock, Yashar Mehdad, Yangyang
+Shi, Raghuraman Krishnamoorthi, and Vikas Chandra. LLM-QAT: Data-free quantization aware
+training for large language models. In Findings of the Association for Computational Linguistics:
+ACL 2024, 2024a.
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Kr-
+ishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM
+quantization with learned rotations. In International Conference on Learning Representations
+(ICLR), 2025a.
+Zechun Liu, Changsheng Zhao, Hanxian Huang, Sijia Chen, Jing Zhang, Jiawei Zhao, Scott Roy,
+Lisa Jin, Yunyang Xiong, Yangyang Shi, Lin Xiao, Yuandong Tian, Bilge Soran, Raghuraman
+Krishnamoorthi, Tijmen Blankevoort, and Vikas Chandra. ParetoQ: Scaling laws in extremely
+low-bit LLM quantization. arXiv preprint arXiv:2502.02631, 2025b.
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen,
+and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of
+the 41st International Conference on Machine Learning (ICML), 2024b.
+Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or
+down? Adaptive rounding for post-training quantization. In Proceedings of the 37th International
+Conference on Machine Learning (ICML), 2020.
+Qwen Team. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang,
+Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally calibrated quantization for
+large language models. In International Conference on Learning Representations (ICLR), 2024.
+Guijin Son, Hanwool Lee, Sungdong Kim, Seungone Kim, Niklas Muennighoff, Taekyoon Choi,
+Cheonbok Park, Kang Min Yoo, and Stella Biderman. KMMLU: Measuring massive multitask
+language understanding in Korean. In Proceedings of the 2025 Conference of the Nations of the
+Americas Chapter of the Association for Computational Linguistics (NAACL), 2025.
+Zayne Sprague, Xi Ye, Kaj Bostrom, Swarat Chaudhuri, and Greg Durrett. MuSR: Testing the
+limits of chain-of-thought with multistep soft reasoning. In International Conference on Learning
+Representations (ICLR), 2024.
+Aarohi Srivastava et al. Beyond the imitation game: Quantifying and extrapolating the capabilities
+of language models. Transactions on Machine Learning Research, 2023.
+Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu,
+Lu Hou, Chun Yuan, Xin Jiang, Wulong Liu, and Jun Yao. FlatQuant: Flatness matters for LLM
+quantization. In Proceedings of the 42nd International Conference on Machine Learning (ICML),
+2025.
+Mirac Suzgun, Nathan Scales, Nathanael Schärli, Sebastian Gehrmann, Yi Tay, Hyung Won Chung,
+Aakanksha Chowdhery, Quoc V. Le, Ed H. Chi, Denny Zhou, and Jason Wei. Challenging
+16
+
+
+BIG-Bench tasks and whether chain-of-thought can solve them. In Findings of the Association
+for Computational Linguistics: ACL 2023, 2023.
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#:
+Even better LLM quantization with Hadamard incoherence and lattice codebooks. In Proceedings
+of the 41st International Conference on Machine Learning (ICML), 2024.
+vLLM Project. vLLM v0.29.0 documentation. https://docs.vllm.ai/en/v0.29.0/, 2026.
+Muhammad Rafif Priyo Waskito et al. Multilinguality after quantization: Low-bits, calibration
+languages, mixed-precisions, and cross-linguality. In Findings of the Association for Computational
+Linguistics: IJCNLP-AACL, 2026. 2026.findings-aacl.9.
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant:
+Accurate and efficient post-training quantization for large language models. In Proceedings of the
+40th International Conference on Machine Learning (ICML), 2023.
+Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He.
+ZeroQuant: Efficient and affordable post-training quantization for large-scale transformers. In
+Advances in Neural Information Processing Systems (NeurIPS), 2022.
+Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen,
+Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. FlashInfer: Efficient and
+customizable attention engine for LLM inference serving. In Proceedings of Machine Learning
+and Systems (MLSys), 2025.
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a
+machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association
+for Computational Linguistics (ACL), 2019.
+Junchen Zhao et al. IMPQ: Interaction-aware layerwise mixed precision quantization for LLMs.
+arXiv preprint arXiv:2509.15455, 2025.
+Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis Ceze, Arvind
+Krishnamurthy, Tianqi Chen, and Baris Kasikci. Atom: Low-bit quantization for efficient and
+accurate LLM serving. In Proceedings of Machine Learning and Systems (MLSys), 2024.
+Zhen Zheng, Xiaonan Song, and Chuanjie Liu. MixLLM: LLM quantization with global mixed-
+precision between output-features and highly-efficient system design. In Proceedings of Machine
+Learning and Systems (MLSys), 2026.
+A
+FINAL-81 details
+FINAL-81 has SHA-256 prefix 26a1fadc91b6 and 5,168 items. It was read once for the BF16
+teacher, the two track references (n4 and GPTQ W3), A81 and B81, under the frozen protocol. The
+A81 build served in this job used 6,353,372,672 bytes of weight-loading memory; its checkpoint of
+6,320,384,652 bytes had SHA-256 prefix 7e6fcc531386, while the SEL-81 build had 9c4bce0c5e91.
+All four quantized arms passed the execution check with zero kernel mismatches; B81 ran 100
+modules through Humming (INT3) and 44 through Marlin (INT4). The deployment verdict for
+A81 was D81_DEPLOY_CANDIDATE; track B had no deployment candidate. Per-arm results are in
+Tables 6–9.
+17
+
+
+B
+Ablations needed for an allocation claim
+The present results do not isolate the allocation procedure. At minimum, the following arms are
+needed on a fresh held-out set: NVFP4 W4A4 (reference); NVFP4 W4A16 with an INT8 head and
+no INT8 modules (activation precision only); the same with 46 randomly chosen INT8 modules
+(protection budget only); the same with the 46 ranked modules (allocation); and a published
+allocation method at matched measured memory. Where memory differs, both accuracy at matched
+memory and the full measured quality–memory frontier should be reported. Items consumed by
+FINAL-81 must not be reused for tuning.
+C
+Reproducibility
+For each stage we keep the set manifests and hashes, the pinned model revision, the quantization
+recipes and calibration hashes, the frozen ranking and allocation code with its output hashes,
+the per-module precision assignments, environment manifests, raw memory counters, kernel and
+weight-type verification records, decoding settings and the preregistration records. Every number in
+this paper is generated from those ledgers by one script. Final-stage checkpoints were not preserved
+(see Limitations). Infrastructure identifiers and credentials are not part of the record.
+18

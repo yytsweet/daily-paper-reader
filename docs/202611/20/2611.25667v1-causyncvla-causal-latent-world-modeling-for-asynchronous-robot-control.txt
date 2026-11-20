@@ -1,0 +1,3237 @@
+Preprint
+November 20, 2026
+CauSyncVLA: Causal Latent World Modeling
+for Asynchronous Robot Control
+Xu Pan1, Chubin Zhang2, Xingrui Yu3, Runmin Lan1, Zihao Wang1, Wenkai Guo1,
+Bofang Jia1, Bo An2, and Ziwei Wang†1,4
+1PINE Lab, School of Electrical and Electronic Engineering, Nanyang Technological University, Singapore
+2College of Computing and Data Science, Nanyang Technological University, Singapore
+3CFAR and IHPC, Agency for Science, Technology and Research (A*STAR), Singapore
+4Embodied AI Center, Singapore
+†Corresponding author.
+Abstract
+Vision–Language–Action (VLA) policies must react while visual inference is still running. Overlapping
+computation and execution reduces waiting, yet leaves perceptual memory stale and successive action
+chunks disconnected. We present CauSyncVLA, an asynchronous dual-system controller that aligns
+perceptual-memory prediction and trajectory correction with actual robot execution. Rather than forecasting
+pixels or physical states, a Causal Latent World Model predicts current perceptual memory from delayed
+visual anchors and executed state–action history, supervised through action-sensitive distillation to retain the
+frozen expert’s control response. Conditioned on this updated memory, Predictive Flow Warm-Starting
+(PFWS) aligns the unexecuted action horizon for single-step flow correction without extra training. On
+LIBERO-10, CauSyncVLA reaches 93.8% success at 5.04× inference throughput, improving closed-loop
+robustness and robot motion smoothness.
+Project page: https://xupan.top/projects/causyncvla
+Correspondence: ziwei.wang@ntu.edu.sg
+Keywords: Vision-Language-Action Models, Asynchronous Robot Control, Latent World Models, Flow
+Matching, Robotic Manipulation
+1 Introduction
+Vision–Language–Action (VLA) policies transfer pretrained multimodal knowledge to robotic manipula-
+tion [9, 17, 44]. They pair foundation backbones with generative action heads to synthesize continuous
+motion [2, 3, 6]. During physical deployment, however, the environment does not pause for model
+inference. Approaching, grasping, and placing continuously alter the robot–scene configuration and
+demand timely closed-loop decisions grounded in the evolving physical state.
+Meeting this requirement is difficult because heavy visual encoding cannot match the rate of fast physical
+execution, stalling synchronous closed-loop feedback.
+Action chunking [6, 42] and asynchronous
+execution [4, 33] amortize this latency by overlapping inference with ongoing motion, yet leave perception
+and action temporally misaligned because replaying open-loop tails or stitching boundaries keeps
+intermediate queries conditioned on delayed perceptual memory when contacts shift mid-chunk. Existing
+1
+arXiv:2611.25667v1  [cs.RO]  19 Nov 2026
+
+
+The Trade-off in 
+Closed-Loop VLA
+Reactivity
+Motion
+Continuity 
+Perceptual
+Freshness 
+CauSyncVLA (Ours) 
+Asynchronous VLA 
+Synchronous VLA 
+Naive Asynchronous VLA
+𝑡
+System 2
+Slow visual
+perception
+System 1
+Asynchronous control as coupled prediction and correction
+CauSyncVLA
+𝑡
+Synchronous VLA
+…
+𝑡
+WAIT
+WAIT
+stop (WAIT)
+stale view (𝑡)
+current view (𝑡+ 𝑘)
+conflicting plan (JITTER)
+VLM
+KV anchor
+Fast feedback
+control
+Causal Latent
+World Model
+PFWS (training-free)
+Action Expert (1-step flow)
+Prior
+(unexecuted)
+Corrected
+(1 step)
+LIBERO-10 Success
+Replanning Capacity
+93.8%
+5.04⨉
+(vs. 91.2% baseline)
+(shared GPU)
+Vision
+Async vision
+Execution
+KV memory
+…
+…
+Executed action-state history
+…
+…
+…
+Unexecuted remaining plan
+Predicted KV
+Trainable
+Frozen
+𝑡
+𝑡+ Δ
+Figure 1. Coupled prediction and correction in asynchronous control. Left: Synchronous control stalls for
+vision, whereas naive asynchronous control acts on stale views with boundary jitter. Center: System 2 publishes
+KV anchors while System 1 propagates KV memory from executed history and refines plans in one frozen-expert
+PFWS step. Right: Control trade-offs and LIBERO-10 gains.
+methods address stitching or latent extrapolation [4, 25, 40], motivating a common execution reference
+for perceptual conditioning and action refinement. As illustrated in Figure 1, asynchronous control must
+reconcile reactivity, perceptual freshness, and trajectory continuity across mismatched sensing and control
+timescales.
+To resolve this misalignment, we observe that actual robot execution supplies a shared temporal reference
+to align perception and action. Observed state transitions and applied commands record physical evolution
+since the latest visual frame, while the unexecuted tail of the preceding plan provides a structured motion
+prior. Rather than predicting pixels or physical states independently of control, we formulate asynchronous
+control as coupled perceptual-memory prediction and trajectory correction under one physical clock,
+updating prefix key–value (KV) memory from execution history before refining remaining actions.
+We instantiate this principle in CauSyncVLA, an asynchronous dual-system controller [15]. A slow visual
+stream periodically publishes KV memory anchors from observed images, while a fast control stream
+predicts current perceptual memory and refines subsequent actions. Specifically, a Causal Latent World
+Model predicts current KV memory from the latest delayed anchor and executed state–action history
+under action-sensitive distillation. Conditioned on this predicted memory, Predictive Flow Warm-Starting
+(PFWS) aligns the unexecuted action horizon to the current step and refines it in one flow step. Training only
+the lightweight predictor keeps the backbone and action expert frozen, retaining pretrained competence
+while supporting rapid closed-loop replanning between visual updates.
+On LIBERO-10, CauSyncVLA raises task success from 91.2% to 93.8% over the ten-step synchronous
+policy while delivering 5.04× higher model replanning capacity on a shared GPU. Ablations, perturbation
+tests, and physical trials isolate the complementary roles of causal perceptual-memory prediction and
+trajectory correction. Our principal technical contributions are organized around three axes.
+• Execution-grounded asynchronous control.
+We formulate asynchronous control as coupled
+perceptual-memory prediction and trajectory correction, evaluating execution-aligned replanning
+across simulation and physical trials, reducing feedback latency with frozen VLAs.
+• Causal, action-relevant latent world modeling. We propagate delayed KV anchors along realized
+state–action history in latent prefix space, supervising residual updates via action-sensitive distillation,
+which recovers control-relevant perceptual conditioning.
+• Training-free predictive trajectory correction. We propose PFWS to reuse unexecuted action
+horizons as intermediate flow priors, refining trajectories in one frozen-expert Euler step, which
+suppresses boundary mode switching across perturbed trials.
+2
+
+
+KV anchor
+𝑧!
+History
+ℋ!:#
+KV
+proj.
+Self-Attn
+AdaLN
+MLP
+Predicted
+KV
+𝑧̂#
+Encoder
+𝐴#$%
+𝑄#
+…
+…
+𝐶executed
+𝐻−𝐶unexecuted
+shift and padding
+𝐴#
+𝑄#
+𝑥&
+pred.
+𝑧̂#
+𝐷'
+𝐴∗
+teacher
+𝐴(
+student
+stop-grad
+ℒ)*
+ℒ!+#
+Control Sensitivity (schematic)
+𝑒!
+𝑧
+𝑒"
+‖𝑒"‖ = ‖𝑒!‖
+Δ𝐴
+Δ𝐴"
+Δ𝐴!
+‖Δ𝐴"‖ ≫‖Δ𝐴!‖
+𝐷#
+(a) Overall Framework: Coupled Prediction and Correction
+Real
+Visual Anchor
+𝑧!
+captured at 𝑎
+Executed History ℋ$:&
+Prior plan 𝐴#$%
+𝑊!
+Latent World Model
+b
+PFWS 𝑅"
+1 step, frozen
+c
+𝑧̂#
+𝐴#
+Execute
+𝑢#:#%&'(
+fresh
+𝑧#
+Executed history
+Unexecuted
+tail
+𝜖
+Action-plan space
+𝑧̂#
+𝐷'
+shared
+(b) Causal Latent World Model 𝑊!
+(c) Predictive Flow Warm-Starting 𝑅"
+(d) Action-Sensitive Distillation
+Figure 2. Architecture and training of CauSyncVLA. (a) Executed history H𝑎:𝑡propagates delayed KV anchor
+𝑧𝑎into predicted memory ˆ𝑧𝑡via 𝑊𝜃, while prior plan 𝐴𝑡−𝐶initializes one-step frozen-expert refinement R𝜓. (b)
+History H𝑎:𝑡modulates KV tokens through AdaLN blocks, and adding residual 𝛿𝑧𝑡to 𝑧𝑎gives ˆ𝑧𝑡. (c) Shifted prior
+Q𝑡interpolates with noise 𝜖into 𝑥𝜌for one Euler step under ˆ𝑧𝑡. (d) Fresh 𝑧𝑡and predicted ˆ𝑧𝑡query frozen endpoint
+map 𝐷𝜓under shared noise, flow time, and state to train 𝑊𝜃via LKV and Lact.
+2 Related Works
+Asynchronous Vision–Language–Action Execution.
+Generalist policies pair multimodal pretraining
+in RT-1 [5], RT-2 [44], OpenVLA [17], and Octo [9] with generative control in 𝜋0 [3], 𝜋0.5 [2], and
+CogACT [18]. Later works extend this paradigm through spatial grounding [29], mobile manipulation [36],
+and reinforcement learning [26]. For higher closed-loop speed, OpenVLA-OFT [16] accelerates decoding,
+while EfficientVLA and HBVLA reduce model cost through compression and low-bit quantization [38, 39].
+Action chunking [6, 42] further amortizes computation across fixed horizons or adaptive horizons in
+AAC [20]. SmolVLA [33] overlaps prediction with execution, whereas RTC [4] and Acting While
+Understanding [37] reconcile chunk boundaries via action inpainting or time-misalignment training. Still,
+overlapping or stitching chunks leaves intermediate queries conditioned on stale anchors between visual
+passes, requiring execution-grounded updates over frozen backbones.
+Latent World Models for Visuomotor Control.
+Compensating for delayed perception links asyn-
+chronous VLAs to latent dynamics models in DreamerV3 [11] and TD-MPC [12], later extended to
+manipulation and whole-body control in ManiGaussian [27] and SuperMimic [21]. Within VLAs,
+MAP-VLA [19] injects execution memory, Latent Bridge [25] predicts inter-pass feature or KV deltas,
+and EagleVLA [40] forecasts future representations for asynchronous inference. Action-informed belief
+learning also links latent memory to control through an inverse-dynamics objective [35]. Our Causal
+Latent World Model advances delayed KV memory anchors along realized state–action transitions inside
+prefix cache space, supervised through the frozen flow expert via action-sensitive distillation to maintain
+control fidelity.
+Trajectory Priors and Fast Flow Sampling.
+Even with refreshed perceptual memory, resampling
+trajectories from Gaussian noise at each cycle risks cross-chunk mode switching and multi-step overhead in
+diffusion [6] and flow [1, 22] policies. Prior speedups rely on Consistency Policy [31] distillation, real-time
+iteration [7] warm-starts, history-informed initialization in A2A [14], history transport in Δ-flow [45],
+or adaptive tail reuse in VLA-Rolling [13]. Building on trajectory reuse, PFWS keeps expert weights
+fixed, shifts the unexecuted horizon past consumed commands, rebases state-relative coordinates to the
+3
+
+
+latest proprioceptive state, and applies one Euler refinement under causally predicted memory to improve
+alignment and continuity across successive chunks.
+3 Method
+Overlapping visual encoding with physical actuation mitigates inference stalls, yet still leaves perceptual
+conditioning stale and consecutive action chunks spatially misaligned.
+To address this challenge,
+CauSyncVLA couples perceptual-memory prediction and trajectory correction around the frozen visual–
+language backbone 𝐵𝜙and action expert 𝑣𝜓[2, 3] (Figure 2a). At each replanning boundary, our Causal
+Latent World Model 𝑊𝜃integrates the latest visual anchor with realized state–action history to predict
+current KV memory. Predictive Flow Warm-Starting then refines the prior plan’s unexecuted tail under
+this memory in one frozen-expert Euler step, while action-sensitive distillation guides 𝑊𝜃.
+3.1 Execution-Grounded Asynchronous Control
+At environment tick 𝑡, the robot observes visual frames 𝑜𝑡and proprioceptive state 𝑠𝑡∈R𝑑𝑠while
+executing command 𝑢𝑡∈R𝑑𝑢. Perceptual memory is represented by the frozen VLM’s prefix key–value
+tensors, termed KV memory. System 2 encodes image 𝑜𝑎and instruction ℓinto 𝑧𝑎= 𝐵𝜙(𝑜𝑎, ℓ), the latest
+published KV memory anchor. Its capture tick is 𝑎= 𝑎(𝑡) and its delay is 𝑘= 𝑡−𝑎, turning 𝑧𝑎into delayed
+perceptual memory as physical motion proceeds. In parallel, System 1 synthesizes 𝐻-step action plans
+and replans every 𝐶executed commands 𝑢𝑡:𝑡+𝐶−1. Each fast decision reads two execution-aligned records.
+First, execution history H𝑎:𝑡pairs (𝑠𝑎, 𝑠𝑡) with realized transitions (𝑠𝑖−𝑠𝑎, 𝑢𝑖−1) for 𝑖= 𝑎+ 1, . . . , 𝑡,
+recording both realized motion and applied commands since anchor capture. Second, trajectory prior Q𝑡
+aligns the unexecuted tail of 𝐴𝑡−𝐶with the 𝐶consumed commands. Thus, realized transitions in H𝑎:𝑡
+advance perceptual memory while the unexecuted action prior Q𝑡initializes trajectory refinement.
+Combining both execution records gives the closed-loop control law at replanning boundary 𝑡as
+𝐴𝑡= R𝜓(Q𝑡, 𝑊𝜃(𝑧𝑎, H𝑎:𝑡)) ,
+(1)
+where 𝑊𝜃predicts current KV memory ˆ𝑧𝑡and R𝜓refines the aligned prior through frozen expert 𝑣𝜓
+without auxiliary weights, omitting noise and state inputs. Equation 1 formalizes dual-stream coupling by
+letting execution feedback update perceptual conditioning before trajectory revision. History H𝑎:𝑡contains
+observed states and applied commands, while capture tick 𝑎and the preceding replanning boundary 𝑡−𝐶
+can differ. Completed visual passes publish new KV anchors asynchronously, whereas intermediate fast
+cycles advance anchor 𝑧𝑎across varying slow-to-fast ratios.
+3.2 Causal Latent World Model
+Between visual updates, physical motion renders cached prefix keys and values out of date before System 2
+finishes encoding a new frame. Rather than synthesizing intermediate RGB images, the Causal Latent
+World Model 𝑊𝜃operates directly inside the frozen VLM’s prefix space as shown in Figure 2b, preserving
+fused vision–language semantics via an anchor-conditioned residual
+ˆ𝑧𝑡= 𝑊𝜃(𝑧𝑎, H𝑎:𝑡) = 𝑧𝑎+ I[𝑘> 0] 𝛿𝑧𝑡,
+(2)
+where 𝛿𝑧𝑡is a validity-masked, scale-restored KV residual conditioned on H𝑎:𝑡, and the age gate I[𝑘> 0]
+preserves unmodified anchors when 𝑘= 0. Rather than forecasting future physical states or claiming
+causal identification of external scene dynamics, 𝑊𝜃operates causally in decision-time information,
+conditioning strictly on the latest real KV memory anchor 𝑧𝑎and realized state–action history H𝑎:𝑡up to
+tick 𝑡until the next completed visual pass refreshes 𝑧𝑎.
+To compute 𝛿𝑧𝑡, 𝑊𝜃standardizes keys and values using per-layer RMS scales [41] 𝜎KV to equalize
+depth-wise magnitudes, concatenates layer features per prefix slot, and projects them into tokens with
+learned positional embeddings. In parallel, a trajectory MLP encodes normalized anchor age, endpoints,
+net displacement, and padded transitions of normalized state deltas and native-coordinate commands.
+4
+
+
+This encoding aggregates observed displacement and commanded motion relative to the same anchor
+while keeping valid task prompt slots intact. Bidirectional self-attention and MLP blocks then inject this
+history embedding via adaptive LayerNorm [30]. Finally, an output projection restores the post-RoPE [34]
+KV layout under residual scales 𝜎Δ and prefix mask 𝑚, zeroing padded slots before adding 𝛿𝑧𝑡to 𝑧𝑎.
+Zero-initialized projections configure 𝑊𝜃as an identity map at initialization, while exceeding history
+capacity triggers a synchronous refresh matching the horizon settings in Table 7.
+3.3 Predictive Flow Warm-Starting
+Predicted KV memory ˆ𝑧𝑡updates action conditioning, but cold-start sampling discards the preceding
+trajectory and can switch between modes at chunk boundaries. Figure 2c instantiates Q𝑡and R𝜓in
+Eq. 1 through Predictive Flow Warm-Starting (PFWS), drawing on warm-started optimization [7] and
+horizon reuse [13]. After 𝐶executed steps, shifting the remaining 𝐻−𝐶entries of 𝐴𝑡−𝐶∈R𝐻×𝐷forward
+and repeating the terminal action 𝐶times forms the prior Q𝑡= ShiftRepeat(𝐴𝑡−𝐶, 𝐶). State-relative
+coordinates are rebased to 𝑠𝑡to align Q𝑡with predicted KV memory ˆ𝑧𝑡.
+Rather than denoising from pure noise, PFWS interpolates Q𝑡with Gaussian noise 𝜖∼N (0, 𝐼) at
+intermediate flow time 𝜌∈(0, 1] as
+𝑥𝜌= (1 −𝜌)Q𝑡+ 𝜌𝜖,
+R𝜓(Q𝑡, 𝑧) = 𝑥𝜌−𝜌𝑣𝜓(𝑥𝜌, 𝜌| 𝑧),
+(3)
+where flow time 𝜌proceeds from noise at 1 to actions at 0 [3]. Evaluating the same frozen expert 𝑣𝜓at
+𝑧= ˆ𝑧𝑡refines the rebased prior in one Euler step, so that trajectory continuation and memory updates
+share one execution-aligned reference (𝑠𝑡, ˆ𝑧𝑡). Together with a fixed-length history representation, this
+single pass maintains constant fast-loop complexity independent of anchor age. The factor 𝜌∈(0, 1)
+trades continuity against reactivity, where smaller 𝜌keeps commands close to Q𝑡to suppress chatter,
+moderate 𝜌preserves headroom for ˆ𝑧𝑡-guided target correction, and 𝜌= 1 recovers cold-start sampling at
+episode onset. Caching endpoint 𝐴𝑡before unnormalization and dispatching its leading 𝐶commands
+𝑢𝑡:𝑡+𝐶−1 sustains cross-chunk smoothness without modifying expert weights.
+3.4 Action-Sensitive Distillation
+Pretrained VLM KV memory encodes broad scene semantics, but equal-sized memory errors can have
+different effects on action prediction. KV regression alone does not capture this sensitivity, whereas
+downstream control depends on how ˆ𝑧𝑡steers the frozen expert in Eq. 3. We supervise 𝑊𝜃through
+the one-step output of this same expert alongside KV regression, as shown in Figure 2d. Given a
+training pair (𝑎, 𝑡) with history H𝑎:𝑡and fresh KV memory 𝑧𝑡= 𝐵𝜙(𝑜𝑡, ℓ), we define 𝐷𝜓(𝑧; 𝑥𝜌, 𝜌) to
+extract the 𝑑𝑢normalized control dimensions of 𝑥𝜌−𝜌𝑣𝜓(𝑥𝜌, 𝜌| 𝑧) using the same frozen expert as
+PFWS. Shared (𝑥𝜌, 𝜌) and robot states yield detached teacher target 𝐴★= sg[𝐷𝜓(𝑧𝑡; 𝑥𝜌, 𝜌)] and student
+ˆ𝐴= 𝐷𝜓(ˆ𝑧𝑡; 𝑥𝜌, 𝜌) under this composite loss
+L(𝜃) =
+
+ˆ𝑧𝑡−𝑧𝑡
+𝜎Δ
+
+2
+𝑚
+|       {z       }
+LKV
++𝜆
+ ˆ𝐴−𝐴★2
+𝑤
+|       {z       }
+Lact
+,
+(4)
+where LKV averages normalized error across valid KV entries and Lact averages coordinate-weighted
+error under weight vector 𝑤across 𝐻𝑑𝑢control dimensions. Sharing (𝑥𝜌, 𝜌) aligns memory-induced
+control errors and distills the fresh-memory control response [32] into 𝑊𝜃via frozen-expert KV gradients
+without modifying 𝑣𝜓.
+A first-order expansion of the expert response in KV error 𝑒= ˆ𝑧𝑡−𝑧𝑡, with Jacobian 𝐽𝐷= ∇𝑧𝐷𝜓(𝑧𝑡; 𝑥𝜌, 𝜌),
+yields a quadratic approximation to the action loss
+Lact ≈
+1
+𝐻𝑑𝑢
+Ω1/2𝐽𝐷𝑒
+
+2
+2 ,
+(5)
+5
+
+
+Table 1. Task competence and inference capacity on LIBERO-10. Metrics span 500 official starts under a
+520-action budget alongside batch-one model inference throughput, while Table 2 evaluates 20 Hz timed closed-loop
+execution. Bold and underline mark the best and second-best verified values.
+Latency (ms) ↓
+Model capacity ↑
+Controller
+Decoder
+𝐻/𝐶Success (%) ↑
+Mean
+P95
+Plans/s
+Actions/s
+𝜋0.5
+10-step flow
+10/5
+91.20
+60.01
+60.20
+16.66
+83.32
+𝜋0.5
+1-step flow
+10/5
+90.80
+36.00
+36.32
+27.78
+138.88
+𝜋0.5 + PFWS
+1-step flow
+10/5
+93.00
+35.54
+35.94
+28.14
+140.70
+GR00T N1.7 [28]
+4-step flow
+16/5
+85.80
+59.37
+59.90
+16.84
+84.21
+OpenVLA-OFT [16]
+Parallel L1
+8/5
+89.20
+62.71
+62.91
+15.95
+79.73
+RTC [4]
+10-step + guidance
+10/5
+91.80
+179.82
+182.66
+5.56
+27.81
+Latent Bridge R0 [25] 2-step + bridge
+10/5
+91.80
+63.06
+78.29
+15.86
+79.29
+VLA-Rolling [13]
+Adaptive 1–10
+50/10
+93.40
+166.47
+202.06
+6.01
+60.07
+CauSyncVLA
+1-step flow
+10/5
+93.80
+11.91
+13.38
+83.96
+419.82
+where Ω = 𝐼𝐻⊗diag(𝑤). Thus, equal-norm KV errors induce unequal action shifts across expert input
+directions. Minimizing Lact induces a pullback metric 𝐽⊤
+𝐷Ω𝐽𝐷weighting KV directions by control impact
+without forming 𝐽𝐷, while LKV regularizes ker(𝐽𝐷) toward fresh VLM statistics to support repeated
+execution-conditioned updates across delayed visual intervals. Mixing cold 𝜌= 1 and warm 0 < 𝜌< 1
+queries aligns 𝑊𝜃across onset generation and mid-trajectory refinement per the training schedule in
+Section 4.1 and Table 7.
+4 Experiments
+Our evaluation separates individual module contributions from whole-system asynchronous execution
+while testing whether decoupled visual encoding accelerates closed-loop reaction without sacrificing
+competence, whether causal latent prediction preserves conditioning between visual refreshes, and whether
+PFWS sustains smoothness and robustness. We further ablate each component and training objective
+within matched cohorts before validating closed-loop physical deployment on a Franka FR3 arm.
+4.1 Experimental Setup
+Built on a frozen 𝜋0.5 backbone and flow action expert, the Causal Latent World Model is a 24.27M-
+parameter AdaLN transformer trained for 12k updates with simulation horizon 𝐻= 10, stride 𝐶= 5,
+one Euler step, and PFWS factor 𝜌= 0.5, while baselines retain public weights and official inference
+heads. Specifically, RTC and Latent Bridge R0 share the OpenPI 𝜋0.5 base at 𝐻/𝐶= 10/5, whereas
+VLA-Rolling retains its LeRobot backbone at 𝐻/𝐶= 50/10. Full hyperparameters and training datasets
+appear in Appendix A and Table 7.
+Competence and robustness span 500 native starts on LIBERO-10 [23] and 2,519 paired perturbations
+on LIBERO-Plus [8], while timed closed-loop execution evaluates 100 shared starts at 20 Hz under a
+26 s budget on an exclusive RTX 5090 GPU alongside scheduling analyses in Appendix C.10. Physical
+manipulation is evaluated on a 7-DoF Franka FR3 arm with dual D405 cameras at 𝐻/𝐶= 10/2 under a
+100 Hz dispatch ceiling and live 30 Hz perception, deploying an offline timestamp-adapted updater trained
+on 10 Hz demonstrations across altered cup stacking and held-out fruit placement and vegetable sorting
+per the protocol and trial counts in Appendix C.9.
+4.2 Task Competence and Closed-Loop Latency
+Decoupling fast action generation from slow visual encoding must overcome single-step Euler truncation
+without relying on stale visual features. Across LIBERO-10 in Table 1 and Table 9, compressing
+synchronous 𝜋0.5 from ten steps to one accelerates inference yet erodes competence because coarse
+integration from Gaussian noise amplifies discretization drift across contact-rich subgoals. Warm-starting
+one-step flow with PFWS from Section 3.3 and Eq. 3 recovers accuracy by initializing near the shifted
+6
+
+
+Table 2. Single-GPU closed-loop execution within 26 seconds. Policy inference and simulation rendering share
+one RTX 5090. Timed success, observation-to-first-action response P50/P95, and realized dispatch span 100 shared
+20 Hz starts.
+Controller
+Success (%) ↑
+Response (ms) ↓
+Replans/s ↑
+Actions/s ↑
+𝜋0.5
+86.00
+176.73/189.97
+2.57
+13.02
+Latent Bridge R0
+82.00
+183.88/189.79
+2.48
+12.58
+VLA-Rolling [13]
+87.00
+295.21/345.94
+1.28
+13.20
+CauSyncVLA
+91.00
+83.04/90.53
+3.28
+16.60
+Table 3. Execution-history ablations in memory prediction. Fresh-target errors across 320 held-out windows
+under masked or permuted records preserving state–action pairings.
+History conditioning
+KV error ↓
+Action MSE ↓
+Stale anchor (w/o update)
+0.42430
+0.10355
+Age only
+0.37217
+0.07221
+Age + endpoint states
+0.35669
+0.04602
+Shuffled history
+0.32037
+0.01107
+Full causal history
+0.31958
+0.00983
+prior chunk, whereas RTC [4] and Latent Bridge R0 [25] retain ten-step guided inpainting or bridge
+overhead, and VLA-Rolling sustains high accuracy only at 166.47 ms mean plan latency. Propagating
+delayed visual anchors along realized execution feedback per Eq. 1 removes System 2 stalls from the
+control path while keeping conditioning aligned with motion, yielding the native point estimates in Table 1
+across comparison cohorts separated in Appendix B.13.
+Beyond raw forward speed, practical deployment requires that model capacity translates into lower
+closed-loop response latency and timely task completion under fixed wall-clock budgets. As shown
+in Figure 3 and Table 16, reducing flow steps cuts shared-GPU latency from 60.01 to 36.00 ms, while
+offloading visual encoding lowers fast-loop latency further to 11.91 ms, yielding fivefold shared-GPU and
+over twelvefold isolated capacity gains while 𝑊𝜃preserves conditioning quality rather than accelerating
+compute. Under co-located single-GPU 20 Hz execution in Table 2, this decoupled loop from Section 3.1
+halves response latency relative to synchronous 𝜋0.5 from 176.73 to 83.04 ms and increases realized
+replanning, lifting timed completion to 91.00% ahead of deadline-bound schedules, with separate-GPU
+RTC timing and scheduling diagnostics reported in Appendix C.10 and Tables 17, 18, and 24.
+4.3 Action-Relevant Latent Prediction
+Higher replanning speed alone cannot guide contact-rich manipulation unless predicted perceptual memory
+tracks evolving scene geometry between visual refreshes. Inside frozen cross-attention layers, outdated
+KV caches force the action expert to synthesize velocities relative to outdated end-effector and object
+poses, creating systematic spatial lag. Across 320 held-out windows in Table 3, stale KV anchors degrade
+predictions, whereas propagating delayed anchors via 𝑊𝜃in Section 3.2 and Eq. 2 cuts downstream action
+MSE over tenfold.
+Simply knowing elapsed time or start–end gripper positions cannot distinguish curved trajectories or
+intermediate contact events between camera frames. Progressively ablating conditioning signals in Table 3
+isolates how ordered execution history resolves this ambiguity, reflecting empirical alignment within the
+expert interface rather than causal identification of external dynamics. Elapsed age encodes drift duration
+without directional geometry, while endpoints (𝑠𝑎, 𝑠𝑡) collapse intermediate trajectories into net offsets.
+Unordered increments ground traversed geometry to 𝑧𝑎via (𝑠𝑖−𝑠𝑎, 𝑢𝑖−1) and cut error nearly fourfold,
+whereas causal ordering preserves sequential command–state coupling and lowers action MSE over tenfold.
+Across staleness horizons up to 45 steps in Figure 4 and Table 13, 𝑊𝜃keeps action error an order of
+magnitude below stale anchors until integration drift warrants a System 2 refresh. Dual-camera PCA
+7
+
+
+CauSyncVLA
+shared
+CauSyncVLA
+isolated
+0
+4
+8
+12
+Replanning capacity (×)
+Synchronous baseline
+CauSyncVLA (Ours)
+1.00×
+60.01 ms
+1.67×
+36.00 ms
+5.04×
+11.91 ms
+12.52×
+4.79 ms
+π0.5
+10-step
+π0.5
+1-step
+Figure 3. Normalized model replanning capacity. In-
+verse batch-one forward latency at 𝐶= 5 relative to ten-
+step synchronous 𝜋0.5, comparing shared single-GPU
+visual encoding against isolated System 1 execution.
+1–4
+5–9
+10–19
+20–29
+30–39
+40–45
+Visual anchor age (steps)
+0.003
+0.01
+0.03
+0.1
+0.3
+1
+Downstream action MSE
+39.4×
+Overall: 10.5× lower MSE
+Stale anchor
+CauSyncVLA
+Figure 4. Downstream action error across anchor
+staleness. Logarithmic action MSE of stale and 𝑊𝜃-
+predicted conditioning relative to fresh-anchor outputs
+across 320 windows.
+Table 4. PFWS competence and trajectory continuity. Episode-averaged flip rates over 500 native starts and
+2,519 LIBERO-Plus variants, where zero boundary excess denotes interior-step parity.
+Metric / policy
+w/o PFWS
+w/ PFWS
+Δ (pp)
+Synchronous 𝜋0.5, 1-step; 500 paired starts
+Native success (%) ↑
+90.80
+93.00
++2.20
+Boundary flips (%) ↓
+2.57
+1.36
+−1.22
+Interior flips (%) ↓
+1.69
+1.39
+−0.30
+Boundary excess (pp; →0)
++0.88
+−0.03
+−0.91
+LIBERO-Plus success (%); 2,519 paired variants
+𝜋0.5, 1-step
+78.36
+80.15
++1.79
+CauSyncVLA, 1-step
+76.38
+78.09
++1.71
+projections in Figures 16–18 and Table 28 confirm lower full-dimensional KV error alongside localized
+representation shifts across dynamic scene views.
+4.4 Trajectory Correction with PFWS
+Restoring scene semantics via 𝑊𝜃resolves spatial lag, yet Gaussian resampling at chunk boundaries can
+still trigger mode switching even under synchronous fresh visual conditioning. Anchoring generation to
+prior plans via PFWS from Section 3.3 and Eq. 3, illustrated in Figure 2c and detailed in Appendix A.4,
+suppresses reversals in Table 4 and Table 14, nearly halving boundary flips and eliminating boundary-
+versus-interior flip excess across full and matched episodes. While native success gains are modest with
+inconclusive paired evidence in Appendix B.13, trajectory continuity provides its primary gain.
+Supporting single-step refinement around rebased action tails without fine-tuning 𝑣𝜓depends on the
+pretrained flow field preserving consistent velocity directions over the remaining interval. Projecting
+frozen-expert trajectories onto a shared PCA basis in Figure 5 and Appendix C.4.1 reveals low-curvature
+streamlines whose cold and warm ODE paths exceed unit path-to-chord length by about 0.3%, while a
+matched [0.5, 0] cold suffix mirrors warm accuracy. Seeding integration from shifted prior tails halves the
+remaining flow distance along aligned vector fields, reducing one-step endpoint error by 19.7% without
+modifying expert weights.
+This trajectory reliance defines an operating boundary across the 2,519 LIBERO-Plus rollouts in Figure 6
+and Table 15. Within both synchronous 𝜋0.5 and CauSyncVLA, PFWS improves robustness under sensor
+noise and robot-state shifts where rebased tails Q𝑡filter jitter, whereas viewpoint and layout jumps displace
+grasp attractors and favor cold starts. Because CauSyncVLA still trails synchronous PFWS overall in
+Table 4, trajectory reuse acts as a within-controller regularizer rather than unconditional perturbation
+robustness.
+8
+
+
+−6
+−3
+0
+3
+6
+Shared action PC1
+−5.0
+−2.5
+0.0
+2.5
+5.0
+Shared action PC2
+Cold (½ : 1 ! 0)
+PFWS (½ : 0:5 ! 0)
+Figure 5. Cold and PFWS frozen-expert flow paths.
+Shared PCA projections across eight matched seeds
+tracing 𝑣𝜓from initial latents (circles) to dense endpoints
+(squares).
+CauSync
+VLA
+Viewpoint
+Object layout
+Language
+Overall
+Background
+Lighting
+Robot state
+Sensor noise
+-2
+0
++2
++4
++6
+CauSyncVLA · 1-step
++6.46
+-1.19
+-1.92
++1.04
++1.71
++2.08
++4.01
++4.58
++3.34
+1
+2
+3
+4
+5
+6
+7
+8
+Success Δ (pp)
+π0.5
+10-step
+π0.5
+1-step
+π0.5 · 10-step
+π0.5 · 1-step
+Figure 6. PFWS differentials across LIBERO-Plus.
+Percentage-point gains over cold starts across 2,519 vari-
+ants with fixed 𝑊𝜃in CauSyncVLA and synchronous
+vision in 𝜋0.5.
+Table 5. Component and objective ablations on LIBERO-10. Module removals over 500 starts (top) and uniform
+KV loss versus action distillation across matched 12k-update predictors (bottom).
+Controller
+Success (%) ↑
+Pooled flips (%) ↓
+w/o latent world model
+80.20
+2.30
+w/o PFWS
+92.00
+3.69
+Sync. PFWS (fresh KV)
+92.00
+1.26
+Full (w/ latent WM + PFWS)
+93.40
+1.86
+Objective
+Success (%) ↑
+KV error ↓
+Action MSE ↓
+w/o action distillation
+85.60
+0.28461
+0.02018
+w/ action distillation
+92.80
+0.31958
+0.00983
+4.5 Component and Objective Ablations
+We next test why coupling memory propagation with trajectory reuse outperforms each mechanism
+in isolation, evaluating every ablation within its matched cohort in Table 10. Disabling 𝑊𝜃while
+keeping PFWS in Table 5 and Table 12 drops competence to 80.20% because warm-started refinement
+then steers continuous motion toward stale anchors, whereas dropping PFWS retains success yet nearly
+doubles boundary flips and coupling both preserves smoothness at 93.40%. Paired discordant tests in
+Appendix B.13 confirm significant competence gains from memory prediction, while PFWS acts primarily
+through continuity rather than a standalone accuracy leap.
+We next test whether unconstrained KV reconstruction suffices to preserve the frozen expert’s control
+response. In the lower panel of Table 5, adding action distillation via Eq. 4 in Section 3.4 cuts action MSE
+from 0.02018 to 0.00983 and raises success from 85.60% to 92.80% despite increasing raw KV error from
+0.28461 to 0.31958, establishing a statistically significant paired objective gain in Appendix B.13. This
+metric reversal reflects the sensitivity geometry of Eq. 5, where uniform KV distance weights all cache
+coordinates equally regardless of Jacobian sensitivity 𝐽𝐷, whereas matching frozen-expert outputs focuses
+supervision on perturbations that alter generated actions. Tracking optimization across update budgets
+in Figure 8 and Table 11 likewise favors checkpoint selection by downstream control accuracy over KV
+regression alone.
+4.6 Real-Robot Evaluation
+Physical manipulation exposes contact compliance, camera transport jitter, and surface friction that
+turn minor perceptual phase lag into rim collisions or object slip when visual encoding stalls. Across
+Franka FR3 evaluations in Table 6 and Tables 19–20, synchronous control waits over 72 ms at replanning
+9
+
+
+Table 6. Closed-loop competence, feedback latency, and motion smoothness on a physical Franka FR3 robot.
+Evaluated at 𝐻= 10 and 𝐶= 2 with cohort counts detailed in Appendix C.9, reporting all-trial medians for dispatch,
+latency, and 100 ms EEF motion alongside mean Time over solved runs.
+Success
+Active dispatch (Hz) ↑
+Response (ms) ↓
+EEF motion ↓
+Time
+Task
+Controller
+(%) ↑
+Actions
+Plans
+P50
+P95
+Speed CV
+Accel.
+(m/s2)
+(s) ↓
+Cup stacking
+𝜋0.5
+73.91
+20.00
+9.98
+72.34
+75.03
+0.530
+0.390 28.97
+CauSyncVLA
+82.61
+43.22
+21.67
+13.30
+25.50
+0.453
+0.289 19.63
+Fruit placement
+𝜋0.5
+69.57
+20.08
+10.07
+72.30
+73.42
+0.487
+0.348 22.87
+CauSyncVLA
+95.65
+42.41
+21.27
+14.28
+31.75
+0.433
+0.289 16.62
+Vegetable sorting 𝜋0.5
+73.91
+20.04
+10.03
+72.26
+73.28
+0.659
+0.405 23.50
+CauSyncVLA
+82.61
+43.26
+21.66
+12.82
+23.54
+0.525
+0.332 17.75
+All tasks
+𝜋0.5
+72.46
+20.06
+10.03
+72.30
+73.47
+0.531
+0.387 25.16
+CauSyncVLA
+86.96
+43.13
+21.60
+13.17
+25.53
+0.462
+0.296 17.93
+𝜋0.5
+4.1 s
+(a) Grasp 1.
+11.0 s
+(b) Place 1.
+17.2 s
+(c) Grasp 2.
+25.2 s
+(d) Place 2.
+CauSyncVLA
+3.0 s
+(e) Grasp 1.
+7.7 s
+(f) Place 1.
+12.4 s
+(g) Grasp 2.
+17.7 s
+(h) Place 2.
+Figure 7. Stage-aligned cup stacking on Franka FR3. Aligned three-cup grasp–place milestones for 𝜋0.5 (top)
+and CauSyncVLA (bottom) under shared crops and masking, tracing gripper motion from circles to endpoints.
+boundaries and leaves terminal errors uncorrected during grasp closure and release, whereas cutting
+median response fivefold to 13.17 ms via Eq. 1 more than doubles active dispatch to 43.13 actions/s
+and lifts pooled success from 72.5% to 87.0%. Normalized execution indexing in Sections 3.2 and 4.3
+transfers offline 10 Hz adaptation directly to live 30 Hz cup stacking under altered layouts, while zero-shot
+improvements carry over to held-out fruit placement and deformable vegetable sorting where timely
+feedback prevents slip and crushing.
+Faster hardware replanning typically risks actuator chatter when independent chunks switch modes or
+amplify sensor noise. Consistent with Sections 4.4–4.5, coupling propagated KV anchors with PFWS
+from Eq. 3 lets higher dispatch coincide with lower P95 tail latency, speed variation, and acceleration RMS
+across all three suites in Table 6, cutting mean solved duration from 25.16 to 17.93 s. Inside uninterrupted
+10
+
+
+System 2 intervals, Table 20 confirms multi-plan intra-window updates in 35.00% of slow passes, while
+unsmoothed traces and frames in Figure 7, Table 21, and Figures 9–10 show synchronous 𝜋0.5 stalling near
+cup rims with velocity spikes upon frame arrival whereas CauSyncVLA sustains continuous approach
+arcs.
+Because physical trials reset scenes independently and active dispatch co-varies with fast-loop latency
+while both controllers pause and clear priors at shared gripper barriers, Table 6 measures deployed
+whole-system performance rather than fixed-frequency module effects, with active rates excluding shared
+waits retained in total solve time and Table 19. Per-suite trial counts, Wilson confidence intervals, and
+single-backbone 𝜋0.5 scope limits appear in Appendices C.9 and B.13.
+5 Conclusion
+We presented CauSyncVLA, an execution-grounded asynchronous controller that reconciles perceptual
+freshness with cross-chunk continuity around frozen VLA policies without retraining. Coupling history-
+conditioned prefix KV prediction with single-step flow warm-starting keeps rapid trajectory revisions
+aligned with actual robot motion and clarifies a continuity–adaptation boundary between local stabilization
+and large exogenous shifts. Operating strictly through cached prefix KV memory and chunked flow priors
+makes the design directly compatible with single-system flow VLAs, while multi-backbone hardware
+validation, event-triggered visual refreshes, and exogenous prior resets in Appendix B.15 mark natural
+next steps toward broad physical autonomy.
+References
+[1] Michael S. Albergo and Eric Vanden-Eijnden. Building normalizing flows with stochastic interpolants.
+In Proc. Int. Conf. Learn. Represent., 2023.
+[2] Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya Ghosh, Lachy Groom,
+Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey
+Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang
+Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan Vuong, Homer
+Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky. 𝜋0.5: A vision-language-action
+model with open-world generalization. In Proc. Conf. Robot. Learn., volume 305 of Proc. Mach.
+Learn. Res., pages 17–40, 2025.
+[3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo
+Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke,
+Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang Shi,
+Laura Smith, James Tanner, Quan Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. 𝜋0: A
+vision-language-action flow model for general robot control. In Proc. Robot. Sci. Syst., 2025.
+[4] Kevin Black, Manuel Y. Galliker, and Sergey Levine. Real-time execution of action chunking flow
+policies. In Adv. Neural Inf. Process. Syst., volume 38, pages 37596–37620, 2025.
+[5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Joseph Dabis, Chelsea Finn,
+Keerthana Gopalakrishnan, Karol Hausman, Alexander Herzog, Jasmine Hsu, Julian Ibarz, Brian
+Ichter, Alex Irpan, Tomas Jackson, Sally Jesmonth, Nikhil Joshi, Ryan Julian, Dmitry Kalashnikov,
+Yuheng Kuang, Isabel Leal, Kuang-Huei Lee, Sergey Levine, Yao Lu, Utsav Malla, Deeksha
+Manjunath, Igor Mordatch, Ofir Nachum, Carolina Parada, Jodilyn Peralta, Emily Perez, Karl Pertsch,
+Jornell Quiambao, Kanishka Rao, Michael S Ryoo, Grecia Salazar, Pannag R Sanketi, Kevin Sayed,
+Jaspiar Singh, Sumedh Sontakke, Austin Stone, Clayton Tan, Huong Tran, Vincent Vanhoucke, Steve
+Vega, Quan H Vuong, Fei Xia, Ted Xiao, Peng Xu, Sichun Xu, Tianhe Yu, and Brianna Zitkovich.
+RT-1: Robotics transformer for real-world control at scale. In Proc. Robot. Sci. Syst., 2023.
+11
+
+
+[6] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin Burchfiel, and Shuran
+Song. Diffusion policy: Visuomotor policy learning via action diffusion. In Proc. Robot. Sci. Syst.,
+2023.
+[7] Yufei Duan, Hang Yin, and Danica Kragic. Real-time iteration scheme for diffusion policy. In Proc.
+IEEE/RSJ Int. Conf. Intell. Robots Syst., pages 11758–11764, 2025.
+[8] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Pengfang Qian, Li Ji, Xinzhe He, Shiduo
+Zhang, Zhaoye Fei, Jinlan Fu, Jingjing Gong, and Xipeng Qiu. LIBERO-Plus: A progressive
+robustness benchmark for visual-language-action models. In Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit., pages 38574–38583, 2026.
+[9] Dibya Ghosh, Homer Rich Walke, Karl Pertsch, Kevin Black, Oier Mees, Sudeep Dasari, Joey Hejna,
+Tobias Kreiman, Charles Xu, Jianlan Luo, You Liang Tan, Lawrence Yunliang Chen, Quan Vuong,
+Ted Xiao, Pannag R Sanketi, Dorsa Sadigh, Chelsea Finn, and Sergey Levine. Octo: An open-source
+generalist robot policy. In Proc. Robot. Sci. Syst., 2024.
+[10] Google DeepMind. MuJoCo Documentation: Overview. https://mujoco.readthedocs.io/en
+/stable/overview.html, 2026. Accessed November 16, 2026.
+[11] Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap. Mastering diverse control tasks
+through world models. Nature, 640(8059):647–653, 2025.
+[12] Nicklas A Hansen, Hao Su, and Xiaolong Wang. Temporal difference learning for model predictive
+control. In Proc. Int. Conf. Mach. Learn., volume 162, pages 8387–8406, 2022.
+[13] Sicheng He, Yi Pan, Qiuting Yu, Jiaming Huang, Qi Lu, Shuyan Wu, Hongyan Feng, Xuanyu
+Liu, Jun Zhang, Jie Zhang, Wenqi Zhang, Xuhong Zhang, and Jianwei Yin. VLA-Rolling: Fewer
+denoising steps, better control via adaptive action reuse. arXiv preprint arXiv:2610.25043, 2026.
+[14] Jindou Jia, Gen Li, Xiangyu Chen, Tuo An, Yuxuan Hu, Jingliang Li, Xinying Guo, and Jianfei Yang.
+Action-to-action flow matching. In Proc. Robot. Sci. Syst., 2026.
+[15] Daniel Kahneman. Thinking, Fast and Slow. Farrar, Straus and Giroux, 2011.
+[16] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning vision-language-action models: Optimizing
+speed and success. In Proc. Robot. Sci. Syst., 2025.
+[17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael
+Rafailov, Ethan P Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar, Benjamin Burchfiel, Russ
+Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-source
+vision-language-action model. In Proc. Conf. Robot. Learn., volume 270 of Proc. Mach. Learn. Res.,
+pages 2679–2713, 2025.
+[18] Qixiu Li, Yaobo Liang, Zeyu Wang, Lin Luo, Xi Chen, Mozheng Liao, Fangyun Wei, Yu Deng,
+Sicheng Xu, Yizhong Zhang, Xiaofan Wang, Bei Liu, Jianlong Fu, Jianmin Bao, Dong Chen,
+Yuanchun Shi, Jiaolong Yang, and Baining Guo. CogACT: A foundational vision-language-action
+model for synergizing cognition and action in robotic manipulation. arXiv preprint arXiv:2411.19650,
+2024.
+[19] Runhao Li, Wenkai Guo, Zhenyu Wu, Changyuan Wang, Haoyuan Deng, Zhenyu Weng, Yap-Peng
+Tan, and Ziwei Wang. MAP-VLA: Memory-augmented prompting for vision-language-action model
+in robotic manipulation. In Proc. IEEE Int. Conf. Robot. Automat., 2026.
+[20] Yuanchang Liang, Xiaobo Wang, Kai Wang, Shuo Wang, Xiaojiang Peng, Haoyu Chen, David
+Kim Huat Chua, and Prahlad Vadakkepat. Adaptive action chunking at inference-time for vision-
+language-action models. In Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit., pages 20802–
+20811, 2026.
+12
+
+
+[21] Qiayuan Liao, Yiyang Shao, Junfeng Long, Kevin Zakka, Roberto Horowitz, Pieter Abbeel, and
+Koushil Sreenath. SuperMimic: Scaling humanoid whole-body control with one differentiable world
+model. In Proc. Conf. Robot. Learn., 2026.
+[22] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matt Le. Flow matching
+for generative modeling. In Proc. Int. Conf. Learn. Represent., 2023.
+[23] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO:
+Benchmarking knowledge transfer for lifelong robot learning. In Adv. Neural Inf. Process. Syst.,
+volume 36, 2023.
+[24] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow straight and fast: Learning to generate and
+transfer data with rectified flow. In Proc. Int. Conf. Learn. Represent., 2023.
+[25] Yudong Liu, Yuan Li, Zijia Tang, Yuxi Zheng, Yueqian Lin, Qinsi Wang, Yi Li, Shuangjun Liu,
+Shuai Zhang, Taotao Jing, Dashan Gao, Ning Bi, Jingwei Sun, Yiran Chen, and Hai Li. Latent
+bridge: Feature delta prediction for efficient dual-system vision-language-action model inference.
+arXiv preprint arXiv:2605.02739, 2026.
+[26] Guanxing Lu, Wenkai Guo, Chubin Zhang, Yuheng Zhou, Haonan Jiang, Zifeng Gao, Yansong
+Tang, and Ziwei Wang. VLA-RL: Towards masterful and general robotic manipulation with scalable
+reinforcement learning. arXiv preprint arXiv:2505.18719, 2025.
+[27] Guanxing Lu, Shiyi Zhang, Ziwei Wang, Changliu Liu, Jiwen Lu, and Yansong Tang. ManiGaussian:
+Dynamic gaussian splatting for multi-task robotic manipulation. In Proc. Eur. Conf. Comput. Vis.,
+2024.
+[28] NVIDIA. GR00T N1.7 LIBERO: Official policy checkpoints. https://huggingface.co/nvidi
+a/GR00T-N1.7-LIBERO, 2026.
+[29] Xu Pan, Zhenglin Wan, Xingrui Yu, Xianwei Zheng, Youkai Ke, Ming Sun, Rui Wang, Ziwei Wang,
+and Ivor Tsang. SA-VLA: Spatially-aware flow-matching for vision-language-action reinforcement
+learning. In Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. Workshops (3D-LLM/VLA), June
+2026.
+[30] William Peebles and Saining Xie. Scalable diffusion models with transformers. In Proc. IEEE/CVF
+Int. Conf. Comput. Vis., pages 4195–4205, 2023.
+[31] Aaditya Prasad, Kevin Lin, Jimmy Wu, Linqi Zhou, and Jeannette Bohg. Consistency policy:
+Accelerated visuomotor policies via consistency distillation. In Proc. Robot. Sci. Syst., 2024.
+[32] Andrei A. Rusu, Sergio Gomez Colmenarejo, Caglar Gulcehre, Guillaume Desjardins, James
+Kirkpatrick, Razvan Pascanu, Volodymyr Mnih, Koray Kavukcuoglu, and Raia Hadsell. Policy
+distillation. In Proc. Int. Conf. Learn. Represent., 2016.
+[33] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn Kooijmans, Steven Palma, Adil
+Zouitine, Michel Aractingi, Caroline Pascal, Martino Russi, Andres Marafioti, Simon Alibert,
+Matthieu Cord, Thomas Wolf, and Remi Cadene. SmolVLA: A vision-language-action model for
+affordable and efficient robotics. arXiv preprint arXiv:2506.01844, 2025.
+[34] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. Roformer: Enhanced
+transformer with rotary position embedding. Neurocomputing, 568:127063, 2024.
+[35] Dawei Wang, Xingrui Yu, Zhenglin Wan, and Ivor Tsang. Action-informed belief via latent flow
+matching for memory-intensive robotic tasks. In Int. Conf. Learn. Represent., ReALM-GEN Workshop,
+2026.
+13
+
+
+[36] Zhenyu Wu, Yuheng Zhou, Xiuwei Xu, Ziwei Wang, and Haibin Yan. MoManipVLA: Transferring
+vision-language-action models for general mobile manipulation. In Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recognit., pages 1714–1723, 2025.
+[37] Shenhao Yan, Ge Wang, Qi Liu, Weilin Meng, Jiahao Yang, Chengsi Yao, Fan Feng, Xiaoguang
+Ma, Yiming Zhao, and Yatong Han. Acting while understanding: Asynchronous semantic-action
+decoupling for real-time vision-language-action models. arXiv preprint arXiv:2606.15285, 2026.
+[38] Xin Yan, Zhenglin Wan, Feiyang Ye, Xingrui Yu, Hangyu Du, Yang You, and Ivor Tsang. HB-
+VLA: Pushing 1-bit post-training quantization for vision-language-action models. arXiv preprint
+arXiv:2602.13710, 2026.
+[39] Yantai Yang, Yuhao Wang, Zichen Wen, Zhongwei Luo, Chang Zou, Zhipeng Zhang, Chuan Wen, and
+Linfeng Zhang. EfficientVLA: Training-free acceleration and compression for vision-language-action
+models. In Adv. Neural Inf. Process. Syst., volume 38, 2025.
+[40] Zebin Yang, Qi Wang, Yunhe Wang, Xiurui Guo, Bo Yu, Shaoshan Liu, Jiafeng Xu, Hao Dong, and
+Meng Li. EagleVLA: Towards onboard real-time robot control via foresight-aligned asynchronous
+inference. In Proc. Conf. Robot. Learn., 2026.
+[41] Biao Zhang and Rico Sennrich. Root mean square layer normalization. In Adv. Neural Inf. Process.
+Syst., volume 32, 2019.
+[42] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn. Learning fine-grained bimanual
+manipulation with low-cost hardware. In Proc. Robot. Sci. Syst., 2023.
+[43] Yuke Zhu, Josiah Wong, Ajay Mandlekar, Roberto Martín-Martín, Abhishek Joshi, Soroush Nasiriany,
+and Yifeng Zhu. robosuite: A modular simulation framework and benchmark for robot learning.
+arXiv preprint arXiv:2009.12293v2, 2022.
+[44] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted Xiao, Fei Xia, Jialin Wu, Paul Wohlhart,
+Stefan Welker, Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong Tran, Radu Soricut, Anikait
+Singh, Jaspiar Singh, Pierre Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S. Ryoo, Krista
+Reymann, Kanishka Rao, Karl Pertsch, Igor Mordatch, Henryk Michalewski, Yao Lu, Sergey
+Levine, Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng Kuang, Dmitry Kalashnikov, Ryan
+Julian, Nikhil J. Joshi, Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog, Karol Hausman,
+Keerthana Gopalakrishnan, Chuyuan Fu, Pete Florence, Chelsea Finn, Kumar Avinava Dubey,
+Danny Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi Chen, Yevgen Chebotar, Justice
+Carbajal, Noah Brown, Anthony Brohan, Montserrat Gonzalez Arenas, and Kehang Han. RT-2:
+Vision-language-action models transfer web knowledge to robotic control. In Proc. Conf. Robot.
+Learn., volume 229 of Proc. Mach. Learn. Res., pages 2165–2183, 2023.
+[45] Kuangji Zuo, Tuo An, Xinying Guo, Gen Li, Mengfei Zhao, Jiaqi Bai, Bofan Lyu, Zhuoyuan Yu,
+Jinghan Yang, Jiayi Li, Jindou Jia, and Jianfei Yang. Δ Flow Matching for Robot Foundation Models.
+arXiv preprint arXiv:2610.15794, 2026.
+14
+
+
+Appendix
+A Method Details and Theoretical Analysis
+A.1 Experimental Setup and Architecture
+This appendix expands the main text’s three evaluations of feedback response, action-relevant memory,
+and trajectory continuity. Table 7 and Algorithm 1 summarize the controller architecture and training
+hyperparameters; simulation environments run in robosuite [43] on the MuJoCo physics engine [10].
+Subsequent sections document protocols, analytical scope, and physical trials.
+Table 7. Controller architecture and training setup. A global update combines two devices and two gradient-
+accumulation steps per device. KV and action dimensions match the frozen expert.
+Hyperparameter
+Value
+Updater parameters
+24,273,024
+Native KV Dimension per Token
+18 layers × 256 × 2 = 9,216
+Compact Prefix Slots
+544 (512 visual + 32 language)
+Trajectory Conditioner Input Dim
+745 (1 + 3 × 8 + 48 × (8 + 7))
+Transformer Depth / Width / Heads
+6 blocks / 384 dim / 4 heads
+Transformer MLP Intermediate Dim
+1,536
+Trajectory Conditioner MLP
+745 →768 →384 (GELU)
+State / Flow Latent / Control Dim
+8 / 32 / 7
+Action Chunk Horizon / Consumed (𝐻/𝐶)
+10 / 5
+Warm Restart / Maximum Anchor Age (𝜌warm/𝐾)
+0.5 / 48
+Inference Solver NFE
+1 NFE (Euler step)
+Training devices
+2 GPUs
+Pairs per GPU microbatch / global update
+8 / 32
+Anchors / targets per anchor per microbatch
+2 / 4
+Selected checkpoint / completed run
+12,000 / 18,000 updates
+Peak Learning Rate / Warmup
+5 × 10−5 / 200 steps (cosine decay)
+Weight Decay / Gradient Clipping
+0.01 / 1.0
+Loss Weights (LKV/Lact/𝑤grip)
+1.0 / 2.0 / 0.1
+Latency Age Support
+1–10 (80%); 11–45 (20%)
+Training runtime
+PyTorch 2.8.0 / CUDA 12.8
+Simulation Environment
+robosuite 1.4.1 / MuJoCo 2.3.7
+Simulation uses robosuite 1.4.1 with MuJoCo 2.3.7 as summarized in Table 7.
+The transformer block follows adaptive layer-normalization conditioning used in diffusion transformers [30].
+Let 𝑥denote the projected KV tokens and 𝑐the encoded execution history. Each transformer block
+computes
+(𝛾1, 𝛽1, 𝛼1, 𝛾2, 𝛽2, 𝛼2) = 𝑀(𝑐),
+(6)
+ℎ= LN(𝑥) ⊙(1 + 𝛾1) + 𝛽1,
+(7)
+𝑥′ = 𝑥+ 𝛼1 ⊙Attention(ℎ),
+(8)
+ℎ′ = LN(𝑥′) ⊙(1 + 𝛾2) + 𝛽2,
+(9)
+𝑥′′ = 𝑥′ + 𝛼2 ⊙MLP(ℎ′).
+(10)
+Attention masks exclude inactive tokens. The compact updater operates on 512 visual and 32 language slots,
+retaining post-RoPE key coordinates [34], and restores the 968-slot expert layout after prediction. Masked
+slots receive zero residual. Both modulation heads and the final residual projection are zero-initialized.
+Independently of initialization, an explicit I[𝑘> 0] gate zeroes the residual at age zero so fresh anchors
+remain unchanged throughout training and deployment. Input K/V tokens use per-layer RMS scales 𝜎KV
+𝑋,𝑙;
+15
+
+
+output residuals and KV regression use separate delta RMS scales 𝜎Δ
+𝑋,𝑙. All normalization statistics are
+fitted on training data and inherited by subsequent checkpoints.
+Physical tick 𝑡, wall-clock decision time 𝑞𝑡, and flow time 𝜌are distinct. The latest available anchor has
+capture tick 𝑎(𝑡) and staleness age 𝑘= 𝑡−𝑎(𝑡). The history H𝑎:𝑡pairs states 𝑠𝑎+1, . . . , 𝑠𝑡with executed
+commands 𝑢𝑎, . . . , 𝑢𝑡−1. The receding endpoint prior is Q𝑡with restart time 𝜌= 0.5.
+A.1.1 Exact History and Projection Interfaces
+The simulation history conditioner uses a fixed-length chronologically ordered vector so runtime latency
+remains invariant to elapsed steps. Let 𝑑𝑠= 8, 𝑑𝑢= 7, history capacity 𝐾= 48, 𝑘= 𝑡−𝑎, and
+¯𝑠= (𝑠−𝜇𝑠) ⊘𝜎𝑠. With chronological zero-padded rows,
+ℎ𝑎:𝑡=
+
+𝑘/𝐾, ¯𝑠𝑎, ¯𝑠𝑡, (𝑠𝑡−𝑠𝑎) ⊘𝜎𝑠,
+vec(Δ𝑆), vec(𝑈)
+
+,
+(11)
+where Δ𝑆𝑖= (𝑠𝑎+𝑖+1 −𝑠𝑎) ⊘𝜎𝑠and 𝑈𝑖= 𝑢𝑎+𝑖for 0 ≤𝑖< 𝑘, and entries for 𝑖≥𝑘are zero-padded.
+State increments are flattened before executed commands, with actions retaining native control units for a
+combined dimensionality of 1 + 3𝑑𝑠+ 𝐾(𝑑𝑠+ 𝑑𝑢) = 745. Each post-step state pairs with its preceding
+issued command, excluding speculative future plans; anchor ages exceeding capacity trigger a synchronous
+visual refresh.
+The history MLP maps 745→768→384 with GELU activations. For prefix token 𝑗, keys and values
+across all 18 layers are standardized and concatenated:
+𝑞𝑗= concat
+
+{𝐾ℓ𝑗/𝜎KV
+𝐾,ℓ}18
+ℓ=1, {𝑉ℓ𝑗/𝜎KV
+𝑉,ℓ}18
+ℓ=1
+
+.
+(12)
+An affine 9216→384 projection, learned positional embeddings, and a history projection initialize the
+token stream across six AdaLN blocks, followed by LayerNorm and a 384 →9216 output projection.
+Reshaping the predicted residual back into layer-wise K/V tensors, rescaling by 𝜎Δ, and gating by active
+tokens and I[𝑘> 0] prepares the additive update to 𝑧𝑎. Token attention is bidirectional across prefix slots,
+whereas causal conditioning refers to indexing strictly realized states and executed commands up to tick 𝑡.
+The frozen 𝜋0.5 backbone [2] exposes a 968-slot prefix comprising two active 256-token camera views,
+one masked third camera view, and up to 200 text tokens. In simulation, 𝑊𝜃operates on the 512 active
+visual slots and first 32 language slots and scatters predicted residuals back into the native 968-slot layout,
+injecting proprioceptive history without enabling VLM state tokenization.
+16
+
+
+Algorithm 1 CauSyncVLA at a replanning boundary
+Require: Frozen 𝐵𝜙, 𝑣𝜓; updater W𝜃; consumed length 𝐶; restart 𝜌warm; age limit 𝐾.
+1: Initialize real anchor (𝑎, 𝑧𝑎); cache 𝑌←∅.
+2: loop
+3:
+Append observed states and executed commands.
+4:
+Adopt the latest completed real anchor (𝑎, 𝑧𝑎).
+5:
+Refresh synchronously if 𝑡−𝑎> 𝐾.
+6:
+ˆ𝑧𝑡←W𝜃(𝑧𝑎, H𝑎:𝑡).
+7:
+Sample fresh 𝜖∼N (0, 𝐼).
+8:
+if 𝑌≠∅then
+9:
+𝑄←ShiftRepeat(𝑌, 𝐶); 𝜌←𝜌warm.
+10:
+Rebase 𝑄when state-relative coordinates apply.
+11:
+𝑥𝜌←(1 −𝜌)𝑄+ 𝜌𝜖.
+12:
+else
+13:
+𝜌←1; 𝑥𝜌←𝜖.
+14:
+end if
+15:
+𝑌←𝑥𝜌−𝜌𝑣𝜓(𝑥𝜌, 𝜌| ˆ𝑧𝑡).
+16:
+Execute the first 𝐶commands; record each step.
+17: end loop
+A.2 Action Distillation
+Output matching follows the policy-distillation principle [32], applied here to the input memory of an
+unchanged expert. The teacher and student queries share frozen action expert 𝑣𝜓, current-state input,
+initial flow latent 𝑥𝜌, and flow time 𝜌. The map 𝐷𝜓denotes its one-step control endpoint, as in Section 3.4.
+The teacher reads fresh KV memory 𝑧𝑡; the student reads predicted KV memory ˆ𝑧𝑡. Both outputs are
+normalized one-step endpoints restricted to the seven control dimensions. Their difference supervises the
+updater, while the expert parameters remain fixed.
+Let 𝑏, 𝑙, 𝑗, 𝑑index training pairs, layers, prefix slots, and KV channels. For 𝑋∈{𝐾,𝑉}, define the
+normalized error
+𝐸𝑋
+𝑏𝑙𝑗𝑑=
+ˆ𝑋𝑏𝑙𝑗𝑑−𝑋★
+𝑏𝑙𝑗𝑑
+𝜎Δ
+𝑋,𝑙
+.
+(13)
+With prefix mask 𝑚𝑏𝑗, 𝐿layers and 𝑑𝑧channels, the masked norm in Eq. 4 is
+LKV =
+Í
+𝑋,𝑏,𝑙, 𝑗,𝑑𝑚𝑏𝑗(𝐸𝑋
+𝑏𝑙𝑗𝑑)2
+2𝐿𝑑𝑧
+Í
+𝑏, 𝑗𝑚𝑏𝑗
+.
+(14)
+Thus each active KV entry has equal weight after per-layer delta normalization. Input normalization 𝜎KV
+is used by the predictor; the regression loss uses the separate residual scale 𝜎Δ.
+For batch size 𝐵, horizon 𝐻, and control index 𝑑, the action norm is
+Lact =
+1
+7𝐵𝐻
+𝐵
+∑︁
+𝑏=1
+𝐻
+∑︁
+ℎ=1
+7
+∑︁
+𝑑=1
+𝑤𝑑( ˆ𝐴𝑏ℎ𝑑−𝐴★
+𝑏ℎ𝑑)2,
+(15)
+where 𝑤1:6 = 1 and 𝑤7 = 0.1. The denominator is 7𝐵𝐻, so downweighting the gripper does not rescale the
+arm terms. The final objective is LKV + 2Lact. Targets are detached, but the student expert query remains
+in the differentiation graph. Gradients with respect to its KV input train only the updater parameters 𝜃.
+Fix the shared action query and let 𝑒= ˆ𝑧𝑡−𝑧𝑡. A first-order expansion of the expert gives
+𝐷𝜓(𝑧𝑡+ 𝑒) −𝐷𝜓(𝑧𝑡) = 𝐽𝐷𝑒+ 𝑜(∥𝑒∥).
+(16)
+17
+
+
+For one pair, let Ω = 𝐼𝐻⊗diag(𝑤) and vectorize the chunk. Then
+Lact = 𝑒⊤𝐽⊤
+𝐷Ω𝐽𝐷𝑒
+7𝐻
++ 𝑜(∥𝑒∥2).
+(17)
+The positive-semidefinite form 𝐽⊤
+𝐷Ω𝐽𝐷assigns larger penalty to memory errors that change the expert’s
+action response. Its nullspace may contain errors that KV regression still penalizes. This is a local
+interpretation of output matching: training backpropagates the action loss and never constructs the Jacobian
+explicitly.
+Distillation gradient path and warm-query proxy.
+For one training sample, write ˆ𝐴= 𝐷𝜓(𝑊𝜃(𝑧𝑎, ℎ))
+and detach teacher target 𝐴★= 𝐷𝜓(𝑧𝑡). Holding robot state and flow initializer (𝑥𝜌, 𝜌) fixed gives
+∇𝜃Lact = 2
+7𝐻𝐽⊤
+𝑊𝜃𝐽⊤
+𝐷Ω( ˆ𝐴−𝐴★).
+(18)
+Although expert weights remain frozen, gradients flow with respect to the predicted KV inputs into
+the action expert. Sharing (𝑥𝜌, 𝜌) between teacher and student isolates conditioning-induced action
+differences from sampling noise. Warm training queries are drawn with probability 0.5 whenever a
+preceding boundary exists by shifting and renoising the fresh-memory endpoint at 𝑡−𝐶; this provides a
+tractable offline proxy for recursive warm-started deployment while KV regression and action distillation
+retain their separate microbatch normalizations.
+A.3 Causality and Local Error Guarantees
+Information available at decision tick 𝑡.
+Let F𝑡denote the filtration generated by observations acquired
+up to tick 𝑡, commands issued strictly before 𝑡, completed visual encodings, and sampler randomness
+drawn by 𝑡. An asynchronous anchor becomes eligible for fast updates only upon encoding completion
+and only for capture ticks 𝑎≤𝑡.
+Causal measurability.
+Because the history buffer appends only realized state–action transitions (𝑠𝑖+1, 𝑢𝑖),
+visual anchor publication is atomic, and 𝑊𝜃reads only published real anchors without ever feeding
+predicted KV back as an anchor, both ˆ𝑧𝑡and 𝐴𝑡are F𝑡-measurable by induction over execution steps. This
+guarantees causal information flow in asynchronous execution, whereas contact behavior still rests on
+model accuracy.
+Exact fresh-anchor identity.
+Because the residual branch is gated as ˆ𝑧= 𝑧𝑎+ I[𝑘> 0] 𝛿𝑧𝑡, the identity
+ˆ𝑧= 𝑧𝑎holds identically whenever 𝑘= 0, and zero-initialized residual projections further guarantee
+identity across all ages at initialization.
+Conditional action-error bound.
+For a fixed state, flow noise, and initializer, assume 𝐷𝜓is differ-
+entiable along the line segment connecting 𝑧𝑡to ˆ𝑧𝑡= 𝑧𝑡+ 𝑒with bounded weighted Jacobian norm
+sup𝑢∈[0,1] ∥Ω1/2𝐽𝐷(𝑧𝑡+ 𝑢𝑒)∥2 ≤𝐿. By the fundamental theorem of calculus,
+Ω1/2[𝐷𝜓(𝑧𝑡+ 𝑒) −𝐷𝜓(𝑧𝑡)] =
+∫1
+0
+Ω1/2𝐽𝐷(𝑧𝑡+ 𝑢𝑒)𝑒𝑑𝑢,
+(19)
+which yields the local bound Lact ≤𝐿2∥𝑒∥2
+2/(7𝐻). Consistent with the quadratic sensitivity model in
+Appendix A.2 and Eq. 5, minimizing Lact aligns prediction error with control sensitivity beyond isotropic
+KV distance.
+18
+
+
+A.4 PFWS Alignment and One-Step Integration
+Consumed-tail alignment shifts the remaining 𝐻−𝐶steps forward and repeats the terminal action 𝐶
+times:
+𝑄𝑡,ℎ= 𝐴𝑡−𝐶,min(ℎ+𝐶,𝐻−1),
+ℎ= 0, . . . , 𝐻−1.
+(20)
+Partial renoising interpolates 𝑄𝑡with fresh Gaussian innovation 𝜖∼N (0, 𝐼) at 𝑥𝜌= (1 −𝜌)𝑄𝑡+ 𝜌𝜖,
+followed by the frozen-expert Euler update 𝑥E
+0 = 𝑥𝜌−𝜌𝑣𝜓(𝑥𝜌, 𝜌| ˆ𝑧𝑡) integrating from flow time 𝜌toward
+the action manifold [22] (𝜌= 1 at cold episode onset). Hardware execution applies shift–repeat updates
+on rebased state axes.
+Local Euler discretization error.
+Fix the conditioning memory and initializer, and assume the exact
+ODE velocity 𝑔(𝑟) = 𝑣𝜓(𝑥(𝑟), 𝑟| 𝑧) is differentiable on [0, 𝜌] with ∥𝑔′(𝑟)∥≤𝑀. Comparing the single
+Euler step 𝑥E
+0 against the exact integral 𝑥0 = 𝑥𝜌−
+∫𝜌
+0 𝑔(𝑟) 𝑑𝑟gives
+∥𝑥E
+0 −𝑥0∥≤
+∫𝜌
+0
+∥𝑔(𝜌) −𝑔(𝑟)∥𝑑𝑟
+≤
+∫𝜌
+0
+𝑀(𝜌−𝑟) 𝑑𝑟= 1
+2 𝑀𝜌2.
+(21)
+Because cold and warm initializers traverse distinct regions of the flow field with different local curvature
+bounds 𝑀, Appendix C.4.1 directly measures dense streamline geometry and one-step truncation error on
+evaluation contexts.
+Exogenous scene identifiability.
+If two environments yield identical anchor and proprioceptive-
+history inputs while an external object moves independently between camera frames, any deterministic
+execution-conditioned predictor produces the same ˆ𝑧𝑡for distinct true memories 𝑧(1)
+𝑡
+and 𝑧(2)
+𝑡
+, giving the
+triangle-inequality lower bound
+max
+𝑖∈{1,2} ∥ˆ𝑧𝑡−𝑧(𝑖)
+𝑡∥≥1
+2 ∥𝑧(1)
+𝑡
+−𝑧(2)
+𝑡
+∥.
+(22)
+Consequently, execution history captures robot-induced and contact-mediated state evolution, whereas
+purely exogenous visual changes between frames are resolved upon the next synchronous visual anchor
+refresh.
+A.5 Clean Expert-Only Training
+The updater’s residual output and optimizer moments are initialized to zero. Normalization is fitted
+on the 341 training demonstrations and is preserved for every checkpoint.
+A fixed holdout of 38
+demonstrations and 100 original-policy trajectories supplies 320 validation pairs, balanced across the ten
+tasks with demonstration/expert probabilities 20/80. Validation examples remain excluded from training
+and normalization.
+The four expert training pools contain 600/300/300/300 trajectories and are all available at update zero.
+Demonstrations receive sampling probability 0.20 and these pools receive 0.32/0.16/0.16/0.16. We
+sample an eligible episode within the selected task and source, then an anchor and causal targets. Every
+retained row is available at stride one. Expert recordings retain every executed simulator action; ages in
+preprocessed demonstrations index retained rows. An epoch count would not describe this sampler: the
+selected 12k updates produce 384,000 target-pair draws, with temporal pairs sampled repeatedly from
+trajectories.
+Table 7 specifies the microbatch construction and optimizer. The cosine learning-rate schedule repeats
+every 6k updates, while optimizer moments, RNG, and pools remain continuous up to the selected 12k
+weights.
+Temporal sampling follows the age distribution in Table 7. Each target uses executed state–action pairs
+19
+
+
+and freshly encoded target memory. Half of eligible action queries use a shifted fresh-teacher endpoint
+from the preceding boundary, whereas cold queries share random initializers across teacher and student to
+isolate memory effects.
+A.6 Checkpoint Selection and Hardware Protocols
+The deployed controller uses the 12k-update checkpoint trained with seed 42 from zero-residual initialization
+around the official frozen 𝜋0.5 LIBERO weights, evaluated across 500 official LIBERO starts [23] at seed
+7 after selecting the training-budget peak in Table 10.
+Table 8. Hardware and evaluation protocols. Model timing measures inference with resident inputs; fixed-clock
+and unpaced evaluations include environment feedback. Literature references retain their original configurations.
+Study
+Hardware
+Software / inference
+Protocol
+Updater training
+2 RTX 5090
+Torch 2.8 / CUDA 12.8
+Batch 32, selected 12k
+Checkpoint sweep
+4 A100 workers
+Torch 2.6 / CUDA 12.4
+𝐻= 10, 𝐶= 5, 500
+starts/arm
+Objective control
+2 RTX 5090
+Torch 2.8 / CUDA 12.8
+Paired objectives on each
+task/GPU
+Module controls
+1–4 A100 per task shard
+Torch 2.6 / CUDA 12.4
+Four arms on each
+task/GPU
+Model-only capacity
+1 RTX 5090
+BF16, compiled
+15 warmups, 100 timed
+calls
+Deadline grid
+2 A100
+Separate policy / renderer
+20/50 Hz, 𝐶= 1/5
+Backbone deadline references
+2 PRO6000
+Separate policy / renderer
+20 Hz, 𝐶= 5, 10 starts/arm
+LIBERO-Plus robustness
+A100 / RTX 5090 / PRO6000
+Compiled; paired GPU/variant
+2,519 variants/arm
+FR3 updater pretraining
+2 RTX 5090
+Torch 2.8 / CUDA 12.8
+Batch 32, 6k updates
+FR3 time adaptation
+2 L40S
+Frozen original expert
+Batch 32, 4k updates; select
+2.5k
+Physical FR3 evaluation
+1 RTX 5090
+Compiled; front/wrist D405
+𝐻= 10, 𝐶= 2, 100 Hz
+ceiling
+RTC reference
+RTX 4090
+5-step inference
+Unguided / guided
+Latent Bridge reference
+A100
+Control cycle
+Mean cycle latency
+EagleVLA reference
+Thor / Orin
+Reaction latency
+Device-specific values
+GR00T [28] native success uses one A100 with its official Torch 2.9 / CUDA 12.8 runtime; its model
+timing uses RTX 5090. The original-policy native references use standard A100 evaluation, and their
+timing is separately measured on RTX 5090. A100 success measurements are not used to derive 5090
+speed. The native experiment has a 520-action horizon and no imposed wall-clock command deadline.
+The deadline grid has a 26-second clock budget, with 520 ticks at 20 Hz or 1,300 ticks at 50 Hz; it is a
+capability test rather than the native LIBERO benchmark.
+Model timing uses resident inputs and max-autotune-no-cudagraphs, with 100 synchronized calls
+after 15 warmups. Original one-step and synchronous PFWS native references use eager inference; the
+matched module controls use the same compiled backend within each task. Published RTC, Latent
+Bridge and EagleVLA timings retain RTX 4090, A100 and Thor/Orin hardware, respectively, while
+OpenVLA-OFT [16] executes deterministically.
+B Discussion, Analytical Scope, and Limitations
+B.1 What Is Added Beyond Asynchronous Scheduling?
+Asynchronous execution by itself can overlap perception and command supply, as demonstrated by RTC [4].
+While feature or KV prediction has precedent in Latent Bridge [25] and tail reuse in VLA-Rolling [13],
+our learned contribution conditions a published real visual anchor on ordered execution transitions
+and supervises that update through the frozen expert’s action sensitivity, paired with training-free tail
+continuation under PFWS. Writing the frozen one-step endpoint as 𝐹𝜓(Q, 𝑧) while suppressing fixed state,
+20
+
+
+noise, and restart time, adding and subtracting 𝐹𝜓(Q, 𝑧★) around reference inputs (Q★, 𝑧★) yields
+𝐹𝜓(Q, ˆ𝑧) −𝐹𝜓(Q★, 𝑧★) = [𝐹𝜓(Q, ˆ𝑧) −𝐹𝜓(Q, 𝑧★)]
++ [𝐹𝜓(Q, 𝑧★) −𝐹𝜓(Q★, 𝑧★)].
+(23)
+The first term isolates the conditioning discrepancy targeted by action distillation at a shared initializer, and
+the second captures the effect of the prior initializer under fixed conditioning, explaining why a smooth
+prior cannot replace current memory and why KV reconstruction alone does not constrain boundary
+sampling. Matched controls in Table 12 test module necessity within this implementation without claiming
+additive task-success gains or superadditive interaction over a complete multi-factor runtime grid.
+B.2 What Do the Theoretical Arguments Establish?
+Appendix A.3 proves causal information flow, exact age-zero identity, and a conditional local action-error
+bound. It does not prove task success, global stability, or universal transfer across control frequencies.
+The history interventions are tests of a trained model, not separately trained reduced-input baselines. The
+KV-only objective comparison, in contrast, changes supervision at a matched training budget.
+B.3 Does PFWS Always Improve Performance?
+No. Its synchronous paired success difference is not statistically decisive (𝑝= 0.1173), despite reduced
+boundary reversals. Across the LIBERO-Plus perturbation catalog, PFWS raises synchronous success
+from 78.36% to 80.15% and asynchronous success from 76.38% to 78.09%, leaving an asynchronous
+deficit of 1.98 percentage points without reuse and 2.06 percentage points with reuse. Because that gap
+already appears without PFWS, aggregate scores establish a within-controller benefit from trajectory reuse
+alongside perturbation families where reuse hurts rather than greater absolute perturbation robustness
+or disentangled memory-and-scheduling errors. Dense flow paths are already low-curvature in both
+conditions, so PFWS shortens the correction interval rather than learning a new field or proving smaller
+training-distribution shift. Full perturbation-family results and the matched flow-interval comparison are
+retained below.
+B.4 How Should Pretrained Comparisons Be Interpreted?
+Public checkpoints retain their released action heads and inference budgets. Latent Bridge [25] is the
+available R0 model, not an unreleased or retrained R1, while VLA-Rolling [13] retains its LeRobot
+backbone and longer horizon alongside its paired backbone control. Native success has an action budget,
+whereas paced success limits wall time under distinct hardware scopes. Model-only timing measures
+resident-input forward latency (60.01, 36.00, 35.54, and 11.91 ms across ten-step, one-step, synchronous
+PFWS, and shared-GPU CauSyncVLA), so fewer flow evaluations explain part of the 5.04× capacity ratio
+and removing visual encoding from the fast path accounts for the remaining reduction while the world
+model preserves conditioning rather than accelerating compute. By contrast, single-GPU timed execution
+includes observation transport, co-located rendering, and executor guards, producing smaller realized gains
+of 3.28/2.57 = 1.28 in replans/s and 16.60/13.02 = 1.27 in supplied actions/s. RTC’s separate-GPU
+93/100 asynchronous evaluation appears in Table 24 outside the co-located single-GPU ranking, while
+the teaser radar plot depicts qualitative trade-offs rather than normalized axis scores, isolating a 12.52×
+speedup in Table 16.
+B.5 Selection, Physical Transfer, and Failure Cases
+The evaluation seed and updater recipe were chosen after earlier endpoint comparisons, and the selected
+12k checkpoint follows a training-budget sweep, making reported uncertainty conditional on that selection.
+Separately reset physical scenes are not exact outcome pairs, and offline timestamp-conditioned adaptation
+from processed existing trajectories adjusts the updater rather than deploying an unchanged 10 Hz model.
+Held-out task labels denote tasks unseen by the updater without certifying absence from backbone
+pretraining. Successful duration ends at the operator verdict, HTTP dispatch does not verify actuator
+21
+
+
+consumption, and whole-system hardware comparisons co-vary realized dispatch frequency with controller
+inference speed rather than isolating frequency-matched module effects.
+B.6 Is This a General Dynamics or Future-Video Model?
+No. The predictor estimates current frozen-expert conditioning rather than synthesizing future pixels,
+predicting counterfactual rewards, or identifying physical contact dynamics. Temporal causality follows
+the information filtration in Appendix A.3, and the indistinguishability bound in Appendix A.4 shows why
+execution history alone cannot resolve exogenous scene changes without new visual anchors. Empirical
+prediction quality between anchors is therefore evaluated rather than implied by causal measurability,
+age-stratified curves reflect sampled history probes rather than live deployment age distributions, and
+RGB-colored KV panels depict shared-basis PCA projections rather than reconstructed camera views.
+B.7 Is Direct KV Prediction the Novelty?
+Direct prediction alone is not the distinction: Latent Bridge already includes a 𝜋0.5 KV bridge [25].
+Our proposed combination is an ordered record of executed transitions, prediction anchored at the latest
+published real memory, and supervision through the unchanged action expert. The prior action chunk
+Q𝑡initializes PFWS; it is not supplied as an unexecuted trajectory to the history encoder. The history
+interventions and matched objective control isolate these design choices more directly than a comparison
+of aggregate success across independently trained public checkpoints.
+B.8 Could Extra Training or the Sampling Rule Explain the Gain?
+The updater adds learned parameters and training data; freezing the backbone does not make the entire
+controller training-free. Public-method comparisons do not equalize training budgets and do not imply
+sample-efficiency advantages. Within our ablations, the same data, initialization, budget, and validation
+pairs isolate the action-loss contribution, while inference-time module toggles keep the learned checkpoint
+fixed. Every retained training row is eligible with stride one; 𝐶controls deployed chunk consumption and
+cache shifting, not dataset subsampling. Validation splits and normalization stay separate from evaluation.
+B.9 Does the Teacher Leak Future Evaluation Information?
+Offline supervised pairs contain a real target encoding at the later recorded state. This target supplies a
+detached label, like standard teacher supervision [32]; it is never available to the deployed updater. At
+inference, only a completed real prefix and transitions already issued and observed are admissible. The
+warm training prior comes from a previous fresh-teacher endpoint and therefore differs from recursive
+deployment, an acknowledged training-distribution approximation rather than hidden online oracle access.
+B.10 Why Not Simply Increase the Command Rate?
+Higher-rate resending can repeat an unchanged target without computing a new plan, so distinct action-node
+first dispatches are reported separately from plan adoption, model capacity, and response latency. Under
+uninterrupted steady execution consuming 𝐶nodes per plan, realized replanning is bounded by both fast
+computation capacity and node-consumption rate divided by 𝐶, alongside startup, gripper barriers, and
+horizon exhaustion. Multi-plan overlap within one System 2 window is measured directly from monotonic
+timestamps rather than inferred from latency ratios; in the archived 20-episode 𝐶= 1 simulation probe,
+250 of 4,874 completed slow windows contain multiple fast plans first used in that window (5.13%),
+demonstrating workload-dependent overlap without claiming multiple replans in every pass or identical
+ratios at 𝐶= 5.
+B.11 Does Timestamp Conditioning Make 10 Hz Data Native High-Rate Data?
+No. The physical controller uses a separately adapted updater while preserving the original expert and
+action units. Its 𝐾= 24, seven-state/seven-action base vector has 358 entries. The shared training/inference
+encoder appends the 24 measured transition durations divided by 0.1 s and their sum on that same scale,
+giving 383 inputs. These duration features expose irregular sampling; they neither create previously
+22
+
+
+unobserved contact events nor prove rate invariance. Offline processing of existing trajectories is not
+equivalent to collecting independent 100 Hz measurements. The physical results establish performance for
+the evaluated 100 Hz ceiling and actual measured rates, not for arbitrary 200 Hz or faster execution.
+B.12 Could Synchronization, Smoothing, or Pair Selection Produce the Motion Result?
+Both controllers share the pose-arrival and gripper-completion executor. During a gripper barrier, arm
+progression and policy history/cache updates pause; resumption requires fresh observation and real
+memory. Active-rate statistics remove those waits, whereas successful-trial duration retains them. These
+are complementary quantities rather than interchangeable notions of speed. The speed-CV and acceleration-
+RMS statistics use the same unsmoothed 100 ms EEF samples for all outcomes; display-only filtering does
+not enter the numbers. The new illustration pairs are selected first by complete phase-path similarity and
+then initial layout, without ranking the size of our advantage. Requiring complete grasp–place phases
+restricts visual panels to that subset, while the 138-trial table covers all outcomes.
+B.13 Cohort Isolation, Statistical Evidence, and Uncertainty
+Table 10 separates three independent evaluations whose counts are interpreted solely within each cohort
+rather than pooled into a single estimate: the selected native checkpoint (469/500 vs. 456/500), matched
+module ablations (467/500 full, 460/500 synchronous PFWS, 465/500 independent synchronous PFWS),
+and matched objective training (464/500 vs. 428/500). For discordant paired starts in Table 10, where 𝑤
+counts starts solved only by the tested arm and 𝑙starts solved only by its reference, the exact two-sided
+McNemar test conditions on 𝑛𝑑= 𝑤+ 𝑙:
+𝑝= min ©­
+«
+1, 2
+min(𝑤,𝑙)
+∑︁
+𝑗=0
+𝑛𝑑
+𝑗
+
+2−𝑛𝑑ª®
+¬
+.
+(24)
+Applying this test to the archived discordant counts summarizes pairwise strength within each cohort:
+Comparison
+𝑤/𝑙
+Gain (pp)
+Exact 𝑝
+Memory prediction
+80/14
+13.20
+2.12 × 10−12
+PFWS, full controller
+24/17
+1.40
+0.3489
+Action distillation
+54/18
+7.20
+2.57 × 10−5
+PFWS, synchronous
+26/15
+2.20
+0.1173
+Memory prediction and action distillation remain below 0.05 under a four-test Bonferroni threshold,
+whereas the PFWS success comparisons remain statistically inconclusive and rest primarily on boundary
+flip reduction. For aggregate totals, descriptive 95% Wilson intervals span 91.33–95.60% (469/500) vs.
+88.39–93.38% (456/500) in native simulation, and 77.03–92.98% (60/69) vs. 60.95–81.61% (50/69) in
+physical trials; marginal totals do not yield paired test statistics, and physical intervals treat separately
+reset trials without modeling task or block correlation. Full LIBERO-Plus perturbation families retain
+localized losses alongside gains, leaving statistical inference conditioned on the evaluated starts and
+selected checkpoints rather than universal dominance across seeds or operators.
+B.14 Implementation Checks and Unresolved Warnings
+RTC uses a precision-preserving compiled input-gradient backend. Its numerical audit retained a rare
+decoded-action discrepancy in one of 120 independent contexts; the compiled implementation is therefore
+evaluated empirically rather than claimed to be numerically identical to the reference. The 500-start
+native result remains 459/500 (91.80%). The corrected 100-start asynchronous evaluation reaches 93/100
+(93.00%); its scheduling and hardware allocation are specified in Appendix C.10. Rolling’s native simulator
+warnings are audited independently of policy success. Replaying all 1,000 paired-arm initializations and
+the first three recorded commands localizes both warnings to task 5, initial state 18, on the first command.
+Simulator time resets from 0.500 to 0.002 s in both arms. Both original episodes were failures and remain
+failures in the 500-start denominators; the audit changes no outcome labels.
+23
+
+
+B.15 Limitations, Applicability to Single-System VLAs, and Future Directions
+Adapting the memory predictor to another VLA requires a compatible cached prefix conditioning interface
+and training against that policy’s frozen action expert, while PFWS as formulated requires a flow velocity
+head. Other benchmarked backbones remain reference baselines without controller integration, leaving
+cross-architecture transfer and alternative action heads untested.
+In execution, the controller cold-starts at episode onset and clears prior tails with fresh anchors across
+physical gripper barriers or upon exceeding history capacity, yet does not run a learned confidence test
+against sudden viewpoint or scene shifts. Future extensions therefore include innovation- or entropy-
+triggered visual refreshes for exogenous motion in Appendix A.4, adaptive flow interpolation 𝜌𝑡between
+warm reuse and cold resets, and high-frequency visuo-tactile sensing during dexterous contact.
+C Supplementary Experimental Results
+C.1 Per-Task Native LIBERO-10 Evaluation
+Table 9. Native successes by task. Each task uses 50 official starts at seed 7 and 𝐻= 10, 𝐶= 5. Bold marks the
+higher success count, including ties.
+Task
+10-step 𝜋0.5
+CauSyncVLA
+Soup / tomato
+46
+49
+Cheese / butter
+50
+50
+Stove + moka pot
+47
+49
+Bowl / drawer
+50
+47
+Two mugs
+48
+48
+Book / caddy
+43
+44
+Mug / pudding
+45
+46
+Soup / cheese
+49
+50
+Two moka pots
+29
+38
+Mug / microwave
+49
+48
+Total (/500)
+456
+469
+Table 9 localizes the native gain: both-moka-pot and book placement improve, while several tasks approach
+ceiling. This heterogeneity complements the aggregate competence test in the main text.
+Synchronous one-step PFWS uses the same 500 official task–initial-state identities, seed 7, 𝐻= 10, 𝐶= 5,
+restart time 0.5 and 520-action horizon. This reference uses eager Torch 2.8/CUDA 12.8; the selected
+controller uses compiled Torch 2.6/CUDA 12.4 on A100. Table 12 fixes the backend and allocated GPU
+within each task to isolate memory prediction from synchronous PFWS.
+Table 10. Matched evaluation cohorts. Each comparison uses 500 starts per arm. Wins/losses count starts solved
+only by the full arm or only by its reference. Native, module, and objective comparisons are separate runs.
+Comparison
+CauSyncVLA successes ↑
+Wins ↑
+Losses ↓
+Native checkpoint run
+469
+—
+—
+w/ vs. w/o latent WM
+467
+80
+14
+w/ vs. w/o PFWS
+467
+24
+17
+w/ vs. w/o action loss
+464
+54
+18
+Frozen policy: PFWS vs. cold
+465
+26
+15
+C.2 Training Budget and Module Results
+Figure 8 and Table 11 show why optimization progress and control quality require separate checks.
+Weighted loss continues to decrease after the selected checkpoint, whereas gripper error increases and
+24
+
+
+Table 11. Validation error across training budgets. All checkpoints share 320 held-out pairs. Weighted action
+MSE weights the gripper by 0.1, unweighted MSE treats all seven axes equally, and bold or underline marks the top
+two errors.
+Metric
+6k
+12k
+18k
+Weighted action MSE
+0.00807
+0.00686
+0.00648
+Unweighted action MSE
+0.01158
+0.00983
+0.01033
+Gripper MSE
+0.02736
+0.02308
+0.02993
+0
+6
+12
+18
+Optimizer updates (thousands)
+0.005
+0.01
+0.02
+0.05
+0.1
+Weighted action MSE
+(a) Weighted action error on fixed validation pairs.
+0
+6
+12
+18
+Optimizer updates (thousands)
+80
+85
+90
+95
+Native success (%)
+80.0
+93.4
+93.8
+93.0
+(b) Native success on 500 fixed initial states.
+Figure 8. Training loss and control performance. (a) Weighted action error across three cycles. (b) Native
+success at matched update budgets, with open markers highlighting 12k.
+native success declines. The lower gripper weight permits this disagreement. Table 10 separates this
+native checkpoint run from matched controls.
+Table 12. Module ablations by task. Cells count successes out of 50 paired starts. All arms share the assigned
+device, compiled runtime, seed 7, and 𝐻= 10, 𝐶= 5 within each task.
+Task
+w/o latent WM
+w/o PFWS
+Sync. PFWS
+CauSyncVLA
+0
+42
+47
+48
+49
+1
+46
+50
+50
+49
+2
+29
+50
+49
+48
+3
+48
+50
+48
+48
+4
+44
+50
+49
+50
+5
+45
+43
+44
+46
+6
+40
+44
+46
+45
+7
+48
+48
+50
+50
+8
+22
+31
+31
+34
+9
+37
+47
+45
+48
+Total
+401
+460
+460
+467
+Table 12 resolves the module comparison by task; Table 10 gives its discordant pairs. Removing
+memory prediction causes a broader competence loss than removing PFWS, complementing the distinct
+boundary-continuity effect in Table 5. Module flip rates pool boundary transitions across episodes; the
+independent synchronous assay below weights episodes equally.
+C.3 Action-Relevant Prediction Assay
+Table 13 reports the final checkpoint’s validation errors by anchor age, measuring stale and updated KV
+against fresh target KV on the same windows and flow latents. Action MSE gives equal weight to all seven
+output dimensions, whereas training error weights the gripper by 0.1, making both metrics complementary.
+25
+
+
+Table 13. Memory and action error by anchor age. Normalized KV error and unweighted action MSE use
+fresh-memory targets. Bold marks the lower error in each stale/updated pair; the final bin contains ages 40–45.
+KV error ↓
+Action MSE ↓
+Age
+Pairs
+Stale
+Updated
+Stale
+Updated
+1–4
+105
+0.1553
+0.1356
+0.0171
+0.0025
+5–9
+126
+0.3953
+0.3116
+0.0702
+0.0072
+10–19
+40
+0.5856
+0.4400
+0.1125
+0.0121
+20–29
+21
+0.9364
+0.6357
+0.3208
+0.0284
+30–39
+21
+0.9037
+0.6083
+0.3253
+0.0373
+40–45
+7
+1.0858
+0.7205
+0.6330
+0.0161
+The input interventions use fixed weights, pair seed 100042, and noise seed 200042 on held-out
+demonstrations and expert trajectories. Replacing history with age or endpoint states tests the value of
+execution evidence; row shuffling tests its ordering. These are inference interventions, not retrained
+reduced-input models.
+The objective control starts from the same zero-update state and uses the same training pool and update
+budget, changing only the action-loss coefficient. The main ablation reports representation error, action
+error, and native success together. Their reversed ranking under KV-only training supports supervising
+latent prediction via expert actions.
+C.4 Trajectory Correction and Boundary Smoothness
+Appendix A.4 specifies the alignment and one-step correction. The independent synchronous test uses
+fresh visual memory, removing the learned updater from the comparison. We measure command changes
+at chunk boundaries and within chunks, using an equal weight for each episode. Table 14 further isolates
+starts solved by both policies to test success-set confounding.
+Table 14. PFWS continuity under synchronous fresh vision. Command-change metrics are averaged equally
+across episodes. Boundary excess is the boundary-minus-interior flip rate. Paired bootstrap intervals report changes
+in excess for all 500 starts and the 439 starts solved by both arms.
+Metric
+Cold
+PFWS
+All 500 paired starts
+Translation boundary 𝐿2
+0.08566
+0.08221
+Rotation boundary 𝐿2
+0.01775
+0.01742
+Boundary flips (%)
+2.57
+1.36
+Interior flips (%)
+1.69
+1.39
+Boundary excess (pp; →0)
++0.88
+−0.03
+Excess change: −0.91 pp; 95% CI [−1.23, −0.62]
+439 jointly solved starts
+Translation boundary 𝐿2
+0.08392
+0.08186
+Boundary flips (%)
+2.20
+1.34
+Interior flips (%)
+1.67
+1.40
+Excess change: −0.58 pp; 95% CI [−0.86, −0.32]
+The concentration of reversals at handoff decreases in both cohorts. The all-start result therefore persists
+when conditioning on shared task completion. This localizes the continuity benefit without treating
+every motion statistic as a proxy for task success. The paired success outcomes appear in Table 10; their
+McNemar test gives 𝑝= 0.1173.
+26
+
+
+C.4.1 Frozen-Expert Flow Geometry
+To examine the initializer used by PFWS, we visualize actual model ODE trajectories and velocity
+directions, following the trajectory-straightness perspective of rectified flow [24]. The frozen 𝜋0.5 expert
+and current real visual prefix are identical for both conditions. Native LIBERO-10 tasks 0, 4, and 8 supply
+contexts at executed steps 20 and 40 under a ten-step reference policy. At each of these six contexts, eight
+matched Gaussian seeds give 48 trajectories per condition. Each prior chunk has executed five commands
+before shift-and-repeat builds Q𝑡.
+We densely integrate cold starts from 1 to 0 and PFWS starts from 𝜌= 0.5 to 0, using Euler step size
+0.025. The cold suffix from 0.5 to 0 provides a matched-interval reference. These dense paths diagnose
+the field rather than change the deployed one-step method. All metrics use the 70 active normalized action
+coordinates, excluding padding. We measure path length divided by endpoint chord, initial-to-endpoint
+RMS distance, and the RMS discrepancy between a single Euler step and the corresponding dense endpoint.
+Figure 5 shows the preselected task-0, step-20 context; the numerical summaries below average all six
+contexts and eight seeds per context.
+PFWS reduces mean initial-to-endpoint RMS distance from 1.115 to 0.550 and one-step endpoint error
+from 0.03655 to 0.02937 (19.7%). The cold matched suffix has distance 0.550 and error 0.02970.
+Path/chord ratios are 1.00182 for full cold, 1.00302 for its suffix, and 1.00301 for PFWS, showing that
+PFWS shortens the integration interval along nearly straight frozen streamlines without reshaping the
+underlying flow field. This diagnostic uses a shared GPU for trajectory visualization.
+C.5 LIBERO-Plus Robustness Benchmark
+Table 15 complements the main LIBERO-Plus [8] plot with absolute counts. The frozen-policy comparison
+tests PFWS without learned memory, while the CauSyncVLA toggle holds the updater fixed. Both
+support a positive aggregate contribution, with different family-level effects. Viewpoint and layout changes
+can reduce CauSyncVLA’s benefit, so the evidence supports useful trajectory reuse rather than uniform
+robustness to every visual shift.
+All variants remain in each arm’s denominator, including 17 instructions beyond the updater’s active-slot
+capacity. Every paired variant shares its initial state and physical device; Table 8 records the runtimes.
+These measurements evaluate success, not model speed.
+C.6 Model Timing and Deadline Protocols
+Table 16 reports model-only timings. For model intervals 𝑡𝑖in milliseconds, replanning capacity is 1000/¯𝑡
+and action-generation throughput is 𝐶1000/¯𝑡, where ¯𝑡is the mean synchronized latency. We measure the
+final checkpoint at both 𝐶= 1 and 𝐶= 5, retaining its actual PFWS shift, renoising, updater and expert
+computation. The isolated condition has no background visual worker; the concurrent condition runs the
+visual backbone continuously on another CUDA stream on the same card. Simulator stepping, rendering,
+action execution, CPU history construction, host transforms and random-noise generation are excluded
+from both model-only conditions.
+Table 17 gives the complete deadline grid, which remeasures five controllers on the same ten starts at each
+of four settings (20/50 Hz crossed with 𝐶= 1/5): 𝜋0.5 10-step hold, 1-step hold, 10-step tail, 1-step tail,
+and CauSyncVLA hold. Hold issues zero arm displacement and preserves the last gripper command.
+Old-tail dispatch takes the unused command for the current tick from the preceding chunk, holding only
+after that tail is exhausted. All issued commands, including holds and tail commands, are recorded as
+actual feedback.
+The scheduling audit reports pooled P50/P95 feedback-to-plan latency, 𝑡ready −𝑡observation. This excludes
+the first cold plan and does not include simulator work preceding feedback availability. Table 17 retains
+scheduler-target adherence: a request is ready if it finishes by its own scheduled target. A dispatched
+action can meet a command deadline while originating in an older chunk. We therefore report ready
+requests, hold ticks, committed-prefix ticks and old-tail ticks separately. The all-start capped goal time is
+min(𝑇𝑖, 26) for a solved start and 26 seconds otherwise. Joint-success completion times, when available,
+use identical initial states. Policy/renderer GPU binding is checked in each run; clock overruns remain in
+27
+
+
+Table 15. PFWS effects across all LIBERO-Plus perturbations. Cells report success percentage and count at
+𝐻= 10, 𝐶= 5, seed 7. Top: synchronous 𝜋0.5. Bottom: CauSyncVLA with a fixed world model. Bold marks the
+better cold/PFWS result at equal NFE within each category.
+Frozen policy: synchronous inference
+Perturbation
+Episodes
+Cold (1 NFE)
+Cold (10 NFE) PFWS (1 NFE) PFWS (10 NFE)
+Background Textures
+289
+87.89% (254)
+88.93% (257)
+90.66% (262)
+88.58% (256)
+Camera Viewpoints
+419
+55.85% (234)
+54.89% (230)
+54.18% (227)
+54.42% (228)
+Language Instructions
+383
+90.08% (345)
+90.86% (348)
+89.03% (341)
+89.56% (343)
+Light Conditions
+274
+93.43% (256)
+90.51% (248)
+93.80% (257)
+93.43% (256)
+Objects Layout
+312
+86.54% (270)
+86.54% (270)
+89.10% (278)
+83.65% (261)
+Robot Initial States
+393
+73.03% (287)
+75.32% (296)
+75.57% (297)
+78.63% (309)
+Sensor Noise
+449
+73.05% (328)
+77.51% (348)
+79.51% (357)
+78.40% (352)
+Overall
+2,519 78.36% (1,974) 79.28% (1,997) 80.15% (2,019)
+79.60% (2,005)
+CauSyncVLA: fixed world model, 1 NFE
+Perturbation
+Episodes Without PFWS
+With PFWS Change (pp)
+Background Textures
+289
+91.70% (265)
+93.77% (271)
++2.08
+Camera Viewpoints
+419
+51.07% (214)
+49.88% (209)
+-1.19
+Language Instructions
+383
+86.95% (333)
+87.99% (337)
++1.04
+Light Conditions
+274
+84.31% (231)
+88.32% (242)
++4.01
+Objects Layout
+312
+81.09% (253)
+79.17% (247)
+-1.92
+Robot Initial States
+393
+73.54% (289)
+78.12% (307)
++4.58
+Sensor Noise
+449
+75.50% (339)
+78.84% (354)
++3.34
+Overall
+2,519 76.38% (1,924) 78.09% (1,967)
++1.71
+Table 16. Model-only latency and action throughput. Mean/P95 use 100 synchronized calls after 15 warmups,
+batch one, BF16. Warm inference includes the updater and PFWS at anchor age 3; the first cold plan includes visual
+encoding. Throughput is 1000𝐶/¯𝑡. Bold/underline rank entries within each 𝐶.
+𝐶
+Operation
+Mean ↓
+P95 ↓
+Actions/s ↑
+5
+𝜋0.5, 10-step
+60.01
+60.20
+83.32
+5
+𝜋0.5, 1-step
+36.00
+36.32
+138.88
+5
+First cold plan
+35.39
+35.66
+141.27
+5
+CauSyncVLA, isolated
+4.79
+4.83
+1043.02
+5
+CauSyncVLA, shared
+11.91
+13.38
+419.82
+1
+𝜋0.5, 10-step
+59.96
+60.25
+16.68
+1
+𝜋0.5, 1-step
+36.15
+36.47
+27.67
+1
+First cold plan
+35.55
+35.81
+28.13
+1
+CauSyncVLA, isolated
+4.78
+4.81
+209.32
+1
+CauSyncVLA, shared
+11.97
+13.53
+83.51
+28
+
+
+the results.
+Table 18 reports the original-timestamp audit at the main operating point. Finishing within one command
+period and meeting the next absolute deadline differ because feedback arrives partway through that period.
+Catch-up dispatch can still hold even when a candidate plan is already ready. This audit separates plan
+readiness from command dispatch and hold. All traces, including long-tail requests and clock overruns,
+remain in the audit.
+Continuing a chunk supplies previously predicted commands while a replacement is pending. The
+incoming plan is aligned to its actual decision-to-adoption lag. This control tests command supply, without
+implementing RTC’s guided generation [4].
+Table 17. Fixed-clock response and dispatch. The five-controller grid contains 200 episodes; backbone controls
+add 40 episodes on the same ten starts. Each episode has a 26-second budget. Overrun ticks remain in the
+denominators, and capped completion time assigns 26 seconds to unsolved starts.
+Hz 𝐶
+Controller / miss rule
+Solved ↑Ready (%) ↑Hold (%) ↓Capped time (s) ↓Overrun ticks ↓
+20
+1
+𝜋0.5, 10-step / hold
+2/10
+0.00
+52.05
+25.70
+3/5132
+20
+1
+𝜋0.5, 1-step / hold
+0/10
+0.00
+50.10
+26.00
+0/5190
+20
+1
+𝜋0.5, 10-step / tail
+10/10
+0.00
+0.00
+13.66
+0/2726
+20
+1
+𝜋0.5, 1-step / tail
+10/10
+0.00
+0.00
+13.30
+0/2657
+20
+1 CauSyncVLA/ hold
+9/10
+83.92
+15.40
+15.35
+56/3064
+50
+1
+𝜋0.5, 10-step / hold
+0/10
+0.00
+83.34
+26.00
+1/12990
+50
+1
+𝜋0.5, 1-step / hold
+0/10
+0.00
+70.02
+26.00
+11/12990
+50
+1
+𝜋0.5, 10-step / tail
+4/10
+0.00
+15.41
+21.07
+2/10528
+50
+1
+𝜋0.5, 1-step / tail
+10/10
+0.00
+0.00
+10.19
+0/5091
+50
+1 CauSyncVLA/ hold
+3/10
+0.22
+60.00
+25.29
+20/12634
+20
+5
+𝜋0.5, 10-step / hold
+9/10
+0.00
+25.31
+16.73
+4/3342
+20
+5
+𝜋0.5, 1-step / hold
+10/10
+0.00
+16.53
+14.75
+0/2946
+20
+5
+𝜋0.5, 10-step / tail
+9/10
+0.00
+0.00
+14.00
+0/2796
+20
+5
+𝜋0.5, 1-step / tail
+10/10
+0.00
+0.00
+11.99
+0/2394
+20
+5 CauSyncVLA/ hold
+9/10
+54.63
+9.17
+14.75
+54/2944
+50
+5
+𝜋0.5, 10-step / hold
+6/10
+0.00
+51.82
+22.45
+2/11215
+50
+5
+𝜋0.5, 1-step / hold
+8/10
+0.00
+37.24
+17.23
+0/8611
+50
+5
+𝜋0.5, 10-step / tail
+0/10
+0.00
+49.58
+26.00
+0/12990
+50
+5
+𝜋0.5, 1-step / tail
+6/10
+0.00
+11.59
+18.93
+0/9456
+50
+5 CauSyncVLA/ hold
+6/10
+2.34
+25.41
+19.54
+234/9764
+Additional-backbone references: separate PRO6000 policy/rendering GPUs
+20
+5 GR00T N1.7 / hold
+10/10
+0.00
+16.57
+14.76
+0/2951
+20
+5 GR00T N1.7 / tail
+10/10
+0.00
+0.00
+12.38
+0/2474
+20
+5 OpenVLA-OFT / hold
+9/10
+0.00
+16.57
+15.01
+0/2999
+20
+5 OpenVLA-OFT / tail
+10/10
+0.00
+0.00
+12.51
+0/2501
+C.7 Additional Backbone Protocols
+GR00T N1.7 retains its official LIBERO-10 weights, 16-action horizon, and four-step head. OFT retains its
+released front/wrist cameras, state input, center crop, eight-action horizon, and parallel L1 head. Table 17
+includes their continued-chunk dispatch controls; Table 8 records the hardware difference.
+These references test how released policies interact with hold and continued-chunk dispatch. Continuous
+command supply can improve without a new inference result, reinforcing the response/supply distinction
+in the main text.
+29
+
+
+C.8 Fixed-Clock Timestamp Audit
+Table 18. Feedback response versus scheduled dispatch. Counts are recomputed from all 50 original traces at
+20 Hz and 𝐶= 5. Request-level readiness and tick-level holds have distinct denominators, shown explicitly.
+Diagnostic
+Value
+CauSyncVLA
+Responses within 50 ms
+528/529
+Responses meeting absolute target
+289/529
+Within 50 ms but after target
+239
+Median remaining target budget (ms)
+28.72
+Held ticks / eligible ticks
+270/2,944
+Held: no completed candidate at dispatch
+245
+Held: candidate complete at dispatch
+25
+Held ticks at least one period late
+31
+Longest response (ms) / resulting holds
+294.36 / 6
+One-step baseline with hold
+Responses / range (ms)
+487 / 52.41–59.16
+Mean pre-worker delay (ms)
+2.84
+Mean visual-prefix selection (ms)
+47.70
+Mean remaining computation (ms)
+5.59
+Held ticks / eligible ticks
+487/2,946
+The response decomposition locates the one-step baseline’s primary cost in visual processing, whereas the
+dispatch decomposition separately exposes deadline-budget loss and catch-up holds. Together, latency and
+hold columns isolate distinct regimes of asynchronous control.
+C.9 Real-Robot Training and Evaluation
+Frozen expert and timestamp-conditioned updater.
+The FR3 policy uses front/wrist images and seven-
+dimensional end-effector/gripper state. Its original action expert, action magnitude, and normalization
+remain fixed. Updater pretraining uses 205 demonstrations and 36 validation trajectories across screw
+sorting, water pouring, marker sorting, cup stacking, and test-tube tidying. The existing filtered 10 Hz
+dataset contains 35,198 training and 6,201 validation rows across 6k pretraining updates.
+For variable-rate feedback, we augment the existing filtered trajectories with timestamped histories while
+retaining every original action target. Actual collection timestamps determine interval duration. Continuous
+states are interpolated only within gaps of at most 150 ms without gripper transitions; commands and
+RGB observations use causal holds. The extra history states are synthetic augmentation, rather than newly
+acquired high-rate measurements. Training samples use approximately 10/20/30 ms history intervals,
+preserve command changes, and cap history at 24 nodes and 250 ms. The conditioner appends the 24
+measured intervals and elapsed anchor time, scaled by 100 ms. Runtime supplies the same features from
+actual state samples and dispatched commands.
+We adapt only the updater for 4k additional updates on two L40S GPUs with global batch 32, AdamW,
+learning rate 3×10−5, 200 warmup updates, and cosine decay. The new time-input weights start at zero.
+The objective combines KV regression and action distillation with weights 1 and 2, respectively, and
+gripper weight 0.1. Fixed validation on 600 pairs selects adaptation step 2,500, giving 8,500 cumulative
+updater updates; the total optimization budget is 10,000. No new robot rollouts enter training. Cup
+stacking is updater-trained; fruit placement and vegetable sorting are held out from updater training,
+without assuming they are unseen by the supplied backbone.
+Shared physical protocol.
+Both controllers use the same FR3/Robotiq hardware, two D405 cameras,
+RTX 5090, compiled inference, ten-action horizon, and two consumed actions per plan. Feedback is
+read after the preceding action has been dispatched, with a 100 Hz sending ceiling. The baseline uses ten
+30
+
+
+denoising evaluations with dual prediction and PFWS disabled; CauSyncVLA uses one evaluation, the
+timestamp-conditioned updater, and PFWS restart 𝜌= 0.5. A slow pass uses the newest image pair after
+both camera sequences advance, up to the wrist camera’s 30 Hz limit, without an added slow-stream delay.
+Before a gripper transition, the shared executor waits for the associated arm pose, then confirms fresh native
+gripper completion. Both model streams pause during this interval. After completion, CauSyncVLA
+builds a real anchor from new observations, clears the old action tail, and resumes from a cold plan. Both
+controllers share workspace, force, freshness, and first-post-grasp action guards. Trials are collected in
+controller blocks with manually reset objects and recorded initial images; they are not paired by identical
+physical object poses or random noise.
+Trial accounting.
+The final evaluation contains 23 operator-adjudicated trials per controller for each of
+three tasks. Success requires all task goals: stacking the brown, green, and blue cups; placing the tennis ball
+on the green cup and the orange on the brown cup; or placing the carrot on the large plate and the eggplant
+on the small plate. All 138 trials contribute to success rates and available timing/motion summaries,
+including failed and interrupted runs. Baseline and CauSyncVLA record 50 and 60 successes out of 69.
+Fifteen baseline runs and five CauSyncVLA runs contain an execution error; operator verdicts determine
+the outcome, including one successful CauSyncVLA trial with a terminal controller warning. The main
+table’s time column averages trial start to the operator’s success verdict over successful trials only, including
+synchronization waits. Its denominators are 17/19, 16/22, and 17/19 for baseline/CauSyncVLA on
+stacking, placement, and sorting, respectively; pooled means use 50/60 successful trials. This operational
+completion measure includes operator response time and is distinct from autonomously detected goal
+attainment.
+Table 19. Measured physical update rates and response latency on the Franka FR3. Entries report medians
+of 23 per-episode statistics across each controller and task. Active rates exclude pose/gripper synchronization
+waits, whereas wall-clock rates retain them; P50 and P95 are first computed within each episode, then summarized
+separately by their cross-episode medians.
+New actions (Hz) ↑
+New plans (Hz) ↑
+First-dispatch latency (ms) ↓
+Task
+Controller
+Active
+Wall clock
+Active
+Wall clock
+P50
+P95
+Cup stacking
+𝜋0.5
+20.00
+17.46
+9.98
+8.77
+72.34
+75.03
+CauSyncVLA
+43.22
+35.54
+21.67
+17.80
+13.30
+25.50
+Fruit placement
+𝜋0.5
+20.08
+18.33
+10.07
+9.16
+72.30
+73.42
+CauSyncVLA
+42.41
+37.41
+21.27
+18.71
+14.28
+31.75
+Vegetable sorting 𝜋0.5
+20.04
+17.52
+10.03
+8.77
+72.26
+73.28
+CauSyncVLA
+43.26
+35.19
+21.66
+17.63
+12.82
+23.54
+Rate and response definitions.
+A new action is the first dispatch of a distinct policy action node.
+Repeated pose holds maintain the interface heartbeat but add no new action or plan. A new plan is
+counted at its first dispatched action. Active time removes the shared pose/gripper wait while retaining
+post-gripper real-anchor computation; Table 19 also reports complete wall-clock rates. The endpoint
+is command dispatch, not independent confirmation of physical pose attainment or low-level controller
+consumption. Response starts at the measured state sample and ends at the first dispatch from its resulting
+plan. All measurements use same-host monotonic timestamps. Across the 69 trials per controller, median
+feedback-to-plan-ready latency is 64.08 ms for the baseline and 11.39 ms for CauSyncVLA; both send
+repeated targets at approximately 99 Hz.
+Slow-window analysis.
+For each pair of consecutive System 2 start timestamps, we count distinct
+completed fast plans and their first dispatches. Table 20 requires both events inside the same window.
+Repeated transmissions, unfinished final windows, and windows overlapping pose/gripper pauses are
+31
+
+
+Table 20. Multi-plan dispatches per System 2 window. A qualifying plan completes and issues its first action
+between consecutive System 2 starts across 69 CauSyncVLA trials.
+Task
+Windows
+≥2 fast plans
+Fraction
+Cup stacking
+5,574
+2,009
+36.04%
+Fruit placement
+4,723
+1,569
+33.22%
+Vegetable sorting
+4,502
+1,602
+35.58%
+All tasks
+14,799
+5,180
+35.00%
+excluded. The resulting 35.00% fraction measures actual asynchronous plan use rather than a ratio of
+isolated model timings.
+Motion descriptors.
+We use measured EEF positions and segment trajectories at pose/gripper waits
+or state gaps above 150 ms. Within each active segment, linear resampling onto a common 100 ms grid
+precedes forward differences. Speed CV is the population standard deviation of speed divided by its mean;
+acceleration RMS is the square root of mean squared acceleration magnitude. No smoothing is applied,
+and derivatives never cross synchronization gaps. Each episode contributes one descriptor, with medians
+reported across all 23 trials in its task/controller group, capturing physical motion at 100 ms resolution.
+Selected physical illustration.
+The two selected stacking trials are both successful, with exactly two
+closing and two opening transitions. They have separately reset object layouts, rather than identical initial
+states. Figure 7’s cup-stacking illustration uses original frames from an independent recording camera at
+corresponding milestones. Markers track the visible rigid gripper housing in image coordinates, not a
+calibrated TCP projection; trailing lines connect tracked positions from each event-defined phase start to
+the displayed frame, without filling tracking gaps. The four phases are the initial approach, first transfer,
+second approach, and second transfer; after the initial approach, each phase starts at the preceding gripper
+completion. The display retains complete available phase tracks, including high lifts that extended above
+the previous crop. This image annotation is illustrative. All motion descriptors below are instead computed
+from the measured EEF log using the common protocol above.
+Table 21. Metrics for the selected cup-stacking pair. Prompt: “stack green cup on brown cup then blue cup on
+green cup.” Motion descriptors evaluate the complete active trajectory at 100 ms resolution, while successful-trial
+duration includes synchronization waits through the operator verdict.
+Metric
+𝜋0.5
+CauSyncVLA
+Successful-trial time (s) ↓
+28.43
+20.37
+Speed CV ↓
+0.531
+0.502
+Acceleration RMS (m/s2) ↓
+0.370
+0.291
+New plans (Hz) ↑
+10.20
+21.59
+New action nodes (Hz) ↑
+20.38
+43.14
+Response P50 (ms) ↓
+72.16
+13.50
+Response P95 (ms) ↓
+73.84
+23.26
+For this illustration, speed CV decreases by 5.6% and acceleration RMS by 21.3%. Feedback-to-first-
+dispatch P50/P95 decrease from 72.16/73.84 ms to 13.50/23.26 ms, while active replanning increases from
+10.20 to 21.59 Hz. These descriptors agree with the full-cohort motion/response trends; the two selected
+trials do not supply a separate population estimate.
+32
+
+
+𝜋0.5
+CauSyncVLA
+0
+5
+10
+15
+20
+25
+Trial time (s)
+0.00
+0.05
+0.10
+0.15
+0.20
+EEF speed (m/s)
+(a) Measured EEF speed.
+0
+5
+10
+15
+20
+25
+Trial time (s)
+0.0
+0.5
+1.0
+Acceleration (m/s²)
+(b) Measured EEF acceleration.
+Figure 9. Measured end-effector speed and acceleration for the selected cup-stacking pair. Translucent markers
+show unsmoothed 100 ms samples and solid curves apply identical three-point triangular display smoothing within
+active segments, preserving synchronization gaps. Unsmoothed acceleration RMS and speed CV drop by 21.3% and
+5.6%, respectively.
+𝜋0.5
+CauSyncVLA
+0
+5
+10
+15
+20
+25
+Trial time (s)
+0.45
+0.50
+0.55
+0.60
+EEF X (m)
+(a) Measured X coordinate.
+0
+5
+10
+15
+20
+25
+Trial time (s)
+−0.10
+−0.05
+0.00
+0.05
+0.10
+EEF Y (m)
+(b) Measured Y coordinate.
+0
+5
+10
+15
+20
+25
+Trial time (s)
+0.2
+0.3
+0.4
+EEF Z (m)
+(c) Measured Z coordinate.
+Figure 10. Measured end-effector Cartesian coordinates for the selected cup-stacking pair. Translucent markers
+preserve unsmoothed 100 ms samples while curves apply identical three-point display weights (0.25, 0.5, 0.25)
+within active segments, leaving synchronization and missing-state gaps unbroken.
+33
+
+
+C.9.1 Motion- and Layout-Matched Physical Sequences
+To inspect complete trajectories under matched kinematics and initial scene layouts, we first align motion
+phase paths across the 98 physical trials containing four complete close–open–close–open transitions
+and sufficient end-effector samples. Within each task and layout reference, each 3D phase trajectory is
+resampled at 40 equidistant arc-length points to rank pairwise RMS geometric distance, retaining the
+closest 10% of candidate pairs for visual layout screening without conditioning selection on success,
+latency, or smoothness. Five disjoint pairs spanning cup stacking, fruit placement, and vegetable sorting
+meet this geometry-and-layout criterion, excluding one vegetable candidate with mismatched carrot pose.
+𝜋0.5
+0.00 s
+(a) Initial.
+5.64 s
+(b) Grasp 1.
+11.96 s
+(c) Release 1.
+17.20 s
+(d) Grasp 2.
+22.32 s
+(e) Release 2.
+23.92 s
+(f) Final.
+CauSyncVLA
+0.00 s
+(g) Initial.
+3.80 s
+(h) Grasp 1.
+8.40 s
+(i) Release 1.
+11.76 s
+(j) Grasp 2.
+16.00 s
+(k) Release 2.
+17.60 s
+(l) Final.
+Figure 11. Cup stacking: matched sequence 1. Prompt: “stack green cup on brown cup then blue cup on green
+cup.” Rows compare 𝜋0.5 above and CauSyncVLA below across six event-defined stages under shared framing,
+with top-left badges indicating elapsed trial time.
+Figures 11–15 align frames by six discrete event stages (initial frame, first grasp completion, first
+release completion, second grasp completion, second release completion, and final observation) under
+uniform framing within a 28 ms frame-alignment tolerance, while Table 22 summarizes the corresponding
+unsmoothed active trajectory metrics over the complete motion segments.
+𝜋0.5
+0.00 s
+(a) Initial.
+5.28 s
+(b) Grasp 1.
+13.64 s
+(c) Release 1.
+20.48 s
+(d) Grasp 2.
+28.60 s
+(e) Release 2.
+30.72 s
+(f) Final.
+CauSyncVLA
+0.00 s
+(g) Initial.
+4.12 s
+(h) Grasp 1.
+9.20 s
+(i) Release 1.
+13.40 s
+(j) Grasp 2.
+18.64 s
+(k) Release 2.
+20.32 s
+(l) Final.
+Figure 12. Cup stacking: matched sequence 2. Prompt: “stack green cup on brown cup then blue cup on green
+cup.” Rows compare 𝜋0.5 above and CauSyncVLA below across six event-defined stages under shared framing,
+with top-left badges indicating elapsed trial time.
+34
+
+
+𝜋0.5
+0.00 s
+(a) Initial.
+5.00 s
+(b) Grasp 1.
+9.56 s
+(c) Release 1.
+14.48 s
+(d) Grasp 2.
+18.72 s
+(e) Release 2.
+20.12 s
+(f) Final.
+CauSyncVLA
+0.00 s
+(g) Initial.
+3.56 s
+(h) Grasp 1.
+6.96 s
+(i) Release 1.
+10.28 s
+(j) Grasp 2.
+13.44 s
+(k) Release 2.
+14.92 s
+(l) Final.
+Figure 13. Sequential fruit placement: matched sequence 3. Prompt: “pick tennis ball on green cup then orange
+on brown cup.” Rows compare 𝜋0.5 above and CauSyncVLA below across six event-defined stages under shared
+framing, with top-left badges indicating elapsed trial time.
+𝜋0.5
+0.00 s
+(a) Initial.
+5.16 s
+(b) Grasp 1.
+11.00 s
+(c) Release 1.
+16.08 s
+(d) Grasp 2.
+22.24 s
+(e) Release 2.
+24.12 s
+(f) Final.
+CauSyncVLA
+0.00 s
+(g) Initial.
+3.48 s
+(h) Grasp 1.
+7.32 s
+(i) Release 1.
+10.96 s
+(j) Grasp 2.
+14.84 s
+(k) Release 2.
+16.32 s
+(l) Final.
+Figure 14. Sequential fruit placement: matched sequence 4. Prompt: “pick tennis ball on green cup then orange
+on brown cup.” Rows compare 𝜋0.5 above and CauSyncVLA below across six event-defined stages under shared
+framing, with top-left badges indicating elapsed trial time.
+𝜋0.5
+0.00 s
+(a) Initial.
+5.24 s
+(b) Grasp 1.
+9.84 s
+(c) Release 1.
+14.88 s
+(d) Grasp 2.
+20.44 s
+(e) Release 2.
+22.28 s
+(f) Final.
+CauSyncVLA
+0.00 s
+(g) Initial.
+3.68 s
+(h) Grasp 1.
+6.56 s
+(i) Release 1.
+10.60 s
+(j) Grasp 2.
+14.48 s
+(k) Release 2.
+16.16 s
+(l) Final.
+Figure 15. Vegetable sorting: matched sequence 5. Prompt: “pick carrot on big plate and eggplant on small
+plate.” Rows compare 𝜋0.5 above and CauSyncVLA below across six event-defined stages under shared framing,
+with top-left badges indicating elapsed trial time.
+35
+
+
+Table 22. Motion and response in the five matched physical pairs. Entries compare 𝜋0.5 / CauSyncVLA over
+complete unsmoothed active trajectories from the 138-trial cohort; Geometry reports the phase-matching RMS
+distance.
+Pair Task
+Geometry (mm)
+Speed CV ↓Accel. (m/s2) ↓
+Replans/s ↑Response P50 (ms) ↓
+1
+Cup stacking
+18.0 0.513 / 0.446
+0.403 / 0.336
+9.99 / 21.72
+72.31 / 12.96
+2
+Cup stacking
+30.8 0.527 / 0.462
+0.408 / 0.317
+9.55 / 21.57
+72.73 / 13.37
+3
+Fruit placement
+18.3 0.508 / 0.469
+0.410 / 0.317 10.18 / 20.65
+72.18 / 21.66
+4
+Fruit placement
+21.8 0.508 / 0.426
+0.364 / 0.299 10.07 / 21.67
+72.30 / 13.23
+5
+Vegetable sorting
+44.2 0.661 / 0.523
+0.393 / 0.329 10.07 / 21.45
+72.23 / 20.88
+C.10 Direct Pretrained-Controller Comparison
+All ten LIBERO-10 tasks are evaluated under official initial-state indices and seed 7 across 500 native trials
+(520-action budget) and 100 timed trials (20 Hz dispatch pacing without catch-up under a 26 s wall-clock
+ceiling), executing on dedicated RTX 5090 workers under Torch 2.8/CUDA 12.8. Timed response excludes
+the initial cold plan prepared before the timed loop and measures observation-to-first-action latency for
+adopted plans, reporting unweighted arithmetic means of per-episode response quantiles alongside distinct
+node dispatch and hold rates across all 100 timed episodes.
+The comparison uses public pretrained weights with the inference configurations specified below. RTC [4]
+uses ten denoising evaluations with exponential prefix weights, input-vector–Jacobian guidance capped at
+5, and open-loop tail continuation while the next plan computes; under the precision-preserving compiled
+input-gradient backend, it reaches 459/500 native successes (91.80%) and 93/100 timed successes (93.00%,
+0.00% hold rate). Latent Bridge [25] uses the released LIBERO-10 R0 checkpoint with two denoising
+steps and a visual refresh every three plans, reaching 459/500 native successes or 91.80% in Table 23.
+CauSyncVLA uses the 12k-update checkpoint with one evaluation and 𝜌= 0.5, while VLA-Rolling [13]
+uses its released LeRobot backbone at 𝐻/𝐶= 50/10 with an adaptive budget of one to ten denoising steps.
+RTC scheduling and latency coverage.
+RTC’s published physical setting uses 𝐻= 50, minimum
+execution horizon 𝑠min = 25, five denoising steps, and a 50 Hz controller [4]. We retain the OpenPI
+LIBERO checkpoint’s 𝐻= 10, 𝑠min = 5, and ten denoising steps used in the native comparison. Following
+Algorithm 1, the last ten observed delays are measured in actual controller steps, the next estimate is their
+maximum, and a completed chunk is published immediately with its elapsed prefix skipped. The estimate
+is never clipped to the remaining tail, and execution checks 𝑑≤𝑠≤𝐻−𝑑. The policy and renderer run
+in separate processes on two exclusively allocated RTX 5090 GPUs, one for each role; the other timed
+controllers retain their previously reported co-located execution. The additional renderer GPU is part
+of the configuration in Table 24; this result is therefore separate from the main single-GPU execution
+comparison. The change from the earlier run combines GPU isolation, process isolation, and scheduling
+repairs, so the latency reduction is not an isolated estimate of GPU contention alone.
+Only the 100 timed starts were rerun after this scheduling repair; the native weights, outcomes, and
+independent inference-capacity measurements are unchanged. Mean per-plan closed-loop generation time
+is 208.03 ms, compared with 283.33 ms in the superseded co-located implementation. Mean per-episode
+response P50/P95 is 235.25/256.49 ms, with 3.89 newly adopted plans/s, 20.01 distinct action nodes/s,
+and no holds. Rates use the recorded rollout interval, so endpoint counting can yield a value slightly
+above the nominal 20 Hz. All 100 official initial states match the native subset; zero runtime errors
+occurred. The earlier 55/100 result arose under tail exhaustion and a clipped delay estimate and is retained
+as implementation-diagnostic evidence rather than the final RTC comparison.
+Scheduling controls and VLA-Rolling comparison.
+While Table 17 isolates observation-to-plan-ready
+scheduling on separate rendering GPUs, Table 2 measures end-to-end observation-to-first-dispatch latency
+with co-located rendering and policy inference on one GPU. RTC’s separate-renderer result is retained
+in Table 24. Across the completed native and timed comparisons in Table 26, CauSyncVLA reduces
+36
+
+
+Table 23. Per-task pretrained benchmark successes. Native columns span 500 starts (50/task); paced columns
+span the shared 100-start timed assay (10/task). RTC uses separate policy/rendering GPUs; the other paced columns
+use one GPU. Paced highlighting compares only the single-GPU controllers.
+Native (50/task)
+Paced (10/task)
+Task
+RTC
+LB R0
+𝜋0.5
+RTC
+LB R0
+CauSyncVLA
+0
+48
+46
+10
+10
+10
+9
+1
+49
+50
+10
+10
+10
+10
+2
+50
+46
+10
+10
+10
+10
+3
+49
+49
+10
+8
+7
+9
+4
+48
+45
+10
+9
+8
+10
+5
+43
+46
+10
+10
+10
+10
+6
+43
+45
+10
+10
+8
+9
+7
+50
+49
+9
+10
+10
+10
+8
+32
+41
+0
+8
+0
+5
+9
+47
+42
+7
+8
+9
+9
+Total
+459
+459
+86
+93
+82
+91
+Table 24. RTC with isolated rendering. The policy and renderer each occupy a separate, exclusively allocated
+RTX 5090. Results span the same 100 official starts at 20 Hz with a 26 s budget. This two-GPU configuration is
+reported separately from the main single-GPU execution table.
+Metric
+RTC
+Timed success (%)
+93.00
+Response P50 / P95 (ms)
+235.25 / 256.49
+New plans/s
+3.89
+Distinct action nodes/s
+20.01
+Hold (%)
+0.00
+Mean plan generation (ms)
+208.03
+Table 25. Published timing context. Source-reported values retain their original hardware and timing definitions.
+Controller
+Scope
+Latency (ms) ↓
+RTC [4]
+Inference
+76.00/97.00
+Latent Bridge [25]
+Control cycle
+46.00
+EagleVLA [40]
+Reaction
+61.10/97.10
+Table 26. Additional dispatch and continuity metrics. Nodes/s and Hold use the 100 timed runs in Table 2; native
+jump measures unclipped boundary translation increments.
+Controller
+Nodes/s ↑
+Hold (%) ↓
+Native jump ↓
+𝜋0.5
+13.02
+34.86
+0.10
+Latent Bridge R0
+12.58
+37.08
+0.13
+CauSyncVLA
+16.60
+16.80
+0.08
+37
+
+
+unclipped native boundary translation jumps from 0.1013 for 𝜋0.5 to 0.0771 and cuts timed holds from
+34.86% to 16.80%. On the LeRobot 𝐻/𝐶= 50/10 base in Table 27, VLA-Rolling averages 6.19 native
+and 6.17 paced steps to lower paced response latency from 376.6 to 295.2 ms, yielding 93.4% native and
+87.0% paced success versus 93.8% and 88.0% for its matched baseline. Under the exclusive RTX 5090
+resident-input capacity probe across 120 synchronized calls after 15 warmups, Latent Bridge R0 averages
+63.06 ms with 78.29 ms P95, 15.86 plans/s, and 79.29 actions/s across full refresh cycles, whereas
+VLA-Rolling averages 166.47 ms with 202.06 ms P95, 6.01 plans/s, and 60.07 actions/s.
+Table 27. Matched backbone control for VLA-Rolling. Evaluated at 𝐻/𝐶= 50/10 on the released LeRobot base
+over 500 native and 100 timed starts.
+Controller
+Native (%) ↑
+Paced (%) ↑
+P50 (ms) ↓
+Actions/s ↑
+𝜋0.5 (LeRobot)
+93.8
+88.0
+376.6
+12.06
+VLA-Rolling
+93.4
+87.0
+295.2
+13.20
+C.11 Visualizing Real and Predicted KV Memory
+Figures 16–18 compare the KV anchor, predicted KV memory, and fresh KV memory for three held-out
+LIBERO examples. We use the selected 12k updater and fix the examples before inference: the first
+held-out demonstration of tasks 0, 4 and 8, with an anchor approximately one third into each trajectory
+and a target five retained rows later. The history contains the intervening recorded states and executed
+actions. Retained demonstration rows need not correspond to every simulator tick.
+For each visual token, we concatenate keys and values from all 18 layers into a 9,216-dimensional vector,
+normalized by the checkpoint’s input KV scales. One PCA basis is fitted to the real anchors and real targets
+from all three examples and both cameras; predictions do not enter the fit. The first three components
+explain 25.56% of the variance. Common component signs and 1st–99th percentile channel limits map
+them to RGB. Each camera’s 256 tokens form a 16 × 16 grid, enlarged by nearest-neighbor replication.
+Colors thus depict latent features rather than camera RGB.
+Table 28 measures error to the target in the full visual KV space, using the training loss’s delta
+normalization. Prediction reduces this error in each of the three examples. The images show where
+the predicted representation changes; the full-dimensional errors quantify its proximity to the target
+independently of the RGB projection.
+Table 28. KV prediction error on diagnostic examples. Mean squared error over 512 visual tokens, both K/V
+tensors, all 18 layers, and all 256 channels using training delta normalization.
+KV error ↓
+Example
+Stale
+Predicted
+Reduction (%) ↑
+Two mugs
+0.14273
+0.13538
+5.15
+Soup and cream cheese
+0.32771
+0.23517
+28.24
+Bowl into drawer
+0.37498
+0.31968
+14.75
+38
+
+
+External camera
+(a) Anchor image.
+(b) KV anchor.
+(c) Predicted KV memory.
+(d) Fresh KV memory.
+(e) Target image.
+Wrist camera
+(f) Anchor image.
+(g) KV anchor.
+(h) Predicted KV memory.
+(i) Fresh KV memory.
+(j) Target image.
+Figure 16. KV memory visualization: two-mug placement. Episode 85, retained rows 95–100 (external camera
+above, wrist camera below). RGB frames retain unmodified camera pixels, whereas latent KV panels use the shared
+PCA projection defined in Appendix C.11.
+External camera
+(a) Anchor image.
+(b) KV anchor.
+(c) Predicted KV memory.
+(d) Fresh KV memory.
+(e) Target image.
+Wrist camera
+(f) Anchor image.
+(g) KV anchor.
+(h) Predicted KV memory.
+(i) Fresh KV memory.
+(j) Target image.
+Figure 17. KV memory visualization: soup and cream cheese into basket. Episode 148, retained rows 94–99
+(external camera above, wrist camera below). Predicted KV memory updates local manipulator and object regions
+toward fresh KV memory.
+39
+
+
+External camera
+(a) Anchor image.
+(b) KV anchor.
+(c) Predicted KV memory.
+(d) Fresh KV memory.
+(e) Target image.
+Wrist camera
+(f) Anchor image.
+(g) KV anchor.
+(h) Predicted KV memory.
+(i) Fresh KV memory.
+(j) Target image.
+Figure 18. KV memory visualization: bowl into drawer. Episode 15, retained rows 78–83 (external camera
+above, wrist camera below). Both cameras share the common PCA basis and percentile bounds fitted solely on real
+anchors and targets.
+40

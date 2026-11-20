@@ -1,0 +1,2757 @@
+MIAO: MICROSCALING INTERMEDIATE ACCUMULATION OPTIMIZATION
+Chloe Wong * 1 Nicolas Rakela * 1 Man Shi 1 Hansung Kim 1 Ruohan Richard Yan 1
+Coleman Richard Charles Hooper 1 Yakun Sophia Shao 1
+ABSTRACT
+Microscaling (MX) quantization enables lower-precision large language model (LLM) inference with limited
+accuracy degradation, reducing memory requirement and multiplication cost. However, despite reduced operand
+precision, accumulation is often retained at high floating-point precisions, leaving a substantial hardware cost that
+operand quantization alone does not address. In particular, systolic arrays, as used in tensor accelerators such as
+Google TPU and AWS Trainium, distribute accumulation across distinct processing elements but conventionally
+use uniform accumulator precision throughout the array. This spatial organization offers an opportunity to reduce
+hardware cost by tailoring precision to individual accumulation stages.
+In this work, we present MIAO, a hardware-software co-design framework that jointly selects product preci-
+sion and stage-dependent accumulator widths to minimize hardware area and energy cost under an end-to-end
+perplexity constraint. MIAO first calibrates MX block-scale shifts to reduce intermediate magnitudes while pre-
+serving operand quantization accuracy, then assigns narrower accumulators to earlier stages and progressively
+wider accumulators to later stages. To efficiently explore the resulting design space, MIAO combines hardware
+cost estimates derived from logic synthesis with a calibrated accuracy predictor to identify promising precision
+configurations, then validates the accuracy of promising candidates through bit-exact end-to-end LLM evalua-
+tion. Across MXFP8, MXFP6, and MXFP4, MIAO reduces processing element (PE) array area by up to 38.7%
+and energy by up to 36.1% relative to the all-BF16 accumulation baseline, with at most 1.60% additional per-
+plexity degradation over operand-only MX quantization across six LLMs.
+1
+INTRODUCTION
+Large language models (LLMs) impose substantial com-
+putational and memory demands, motivating the devel-
+opment of specialized accelerators for efficient inference
+(Jouppi et al., 2017). A key technique for improving hard-
+ware efficiency is quantization, which reduces the precision
+of weights and activations to lower memory requirements
+and allows less costly arithmetic operations (Horowitz,
+2014). Aggressive low-bit quantization can introduce sub-
+stantial numerical error due to the wide dynamic ranges
+of weights and activations, particularly in the presence of
+outliers (Dettmers et al., 2022; Xiao et al., 2023).
+Mi-
+croscaling (MX) formats mitigate this error by sharing a
+scale across small blocks of low-precision floating-point el-
+ements, adapting their representation to local value ranges
+and enabling aggressive operand quantization with limited
+*Equal
+contribution
+1University
+of
+California,
+Berke-
+ley, Berkeley, CA, USA. Correspondence to:
+Chloe Wong
+<chloe.wong@berkeley.edu>,
+Nicolas
+Rakela
+<nico-
+rakela@berkeley.edu>.
+Distribution Statement A: Approved for public release. Dis-
+tribution is unlimited.
+accuracy degradation (Open Compute Project, 2023).
+However, simply reducing operand precision does not elim-
+inate the cost of intermediate arithmetic.
+Products and
+partial sums often retain wider floating-point precision to
+accommodate their dynamic range and limit rounding er-
+ror. In particular, floating-point accumulation requires ex-
+ponent alignment, significand arithmetic, and normaliza-
+tion, making it a substantial component of the datapath
+even when the operands use only a few bits. In our evalu-
+ated baseline designs, accumulation accounts for more than
+50% of PE area and up to 54% of PE energy. These costs
+limit the hardware savings achievable through operand
+quantization alone (Abdel-Aziz et al., 2021).
+Prior work has addressed low-precision inference through
+operand scaling, accumulation-aware quantization, and in-
+termediate arithmetic hardware optimizations. VS-Quant
+improves quantization accuracy through vector-wise scal-
+ing (Dai et al., 2021), and Chhugani et al. (2026) sim-
+ilarly improve MXFP4 operand scaling without optimiz-
+ing intermediate arithmetic precision. Accumulator-aware
+quantization methods such as A2Q, A2Q+, and AXE adapt
+operand quantization to satisfy predefined accumulator
+constraints (Colbert et al., 2023; 2024; 2025). Other work
+arXiv:2611.19722v1  [cs.AR]  15 Nov 2026
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+e8m7
+product
+e8m7
+row 1
+e8m7
+row 2
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+e8m7
+row 15
+MX operands  a × b   (OCP scale, d = emax)
+partial sum flows down the column
+16 bits
+(a) Existing: BF16 datapath
+e4m3
+product
+e5m3
+row 1
+e5m3
+row 2
+e5m3
+e5m3
+e5m3
+e5m3
+e5m4
+e5m4
+e5m4
+e5m4
+e5m4
+e5m4
+e5m5
+e5m5
+e5m6
+row 15
+MX operands  a × b   (our scale offset d)
+partial sum flows down the column
+16 bits
+(b) MIAO: rows widen with depth
+BF16
+datapath
+ours
+MXFP8
+ours
+MXFP6
+ours
+MXFP4
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+mesh area, 16×16 (BF16 = 1)
+10%
+65%
+25%
+area
+energy
+ppl
+12%
+55%
+32%
+−32%
+−31%
+−0.43%
+13%
+53%
+34%
+−36%
+−35%
++0.57%
+13%
+53%
+34%
+−37%
+−34%
+≈0%
+(c) Result: area reduced, ppl kept
+multiplier
+accumulator
+other
+Figure 1. MIAO reduces intermediate arithmetic precision by narrowing accumulator widths row by row, cutting PE-array area
+by 32-37% and energy by 31-35% while preserving end-to-end accuracy. (a) Conventional BF16 intermediate arithmetic. (b) MIAO:
+calibrated MX scaling, reduced product precision, row-dependent accumulation (MXFP4 example). (c) Area breakdown from our area
+model. Perplexity: TinyLlama-1.1B on WikiText-2, vs. OCP-scaled MX; energy: whole accelerator, per operation.
+directly reduces floating-point arithmetic overhead by op-
+timizing product and alignment widths (Abdel-Aziz et al.,
+2021) or exploring precision bounds and hierarchical ac-
+cumulation (He et al., 2026). However, these approaches
+do not explicitly optimize floating-point accumulator width
+across individual stages of an MX systolic array.
+Our key insight is that accumulation precision can be tai-
+lored to individual hardware stages rather than chosen uni-
+formly for the entire array. Conventional designs neverthe-
+less use the same accumulator format throughout the array.
+For example, in weight-stationary systolic arrays, as used
+in tensor accelerators such as Google’s TPU and AWS’s
+Trainium, each processing element multiplies an incoming
+activation by a stationary weight and adds the product to a
+partial sum received from the preceding row (Kwon et al.,
+2019; Sze et al., 2017). Successive accumulation stages
+therefore map to distinct hardware units whose widths can
+be selected independently. Earlier stages accumulate fewer
+products, creating an opportunity to use narrower formats,
+while later stages can retain wider formats to accommodate
+growing partial sums and limit rounding error (Higham,
+2002). We exploit this spatial organization to reduce hard-
+ware cost while preserving end-to-end model accuracy.
+Realizing this opportunity, however, requires more than
+just independently narrowing each accumulator; naively re-
+ducing intermediate arithmetic precision in MX accelera-
+tors can lead to substantial accuracy degradation.
+First,
+intermediate precision depends on MX operand scaling.
+Conventional MX block scaling places quantized operands
+near the upper range of their operand format to limit un-
+derflow, producing large products and partial sums that re-
+quire wide floating-point accumulation to avoid overflow.
+Reducing the block-scale factor can lower these magni-
+tudes but may increase operand quantization error. Sec-
+ond, rounding errors introduced at different accumulation
+stages propagate through subsequent computations and af-
+fect end-to-end model accuracy. As a result, product and
+accumulation precisions must be selected jointly, creating
+a combinatorial design space that is expensive to explore
+through exhaustive LLM evaluation (Dong et al., 2019).
+To address these limitations,
+we present MIAO, a
+hardware-software co-design framework that jointly se-
+lects product precision and stage-dependent accumulator
+widths to minimize hardware area and energy cost under
+end-to-end perplexity constraints.
+MIAO first calibrates
+MX block-scale shifts to reduce intermediate product and
+partial-sum magnitudes while preserving operand quanti-
+zation accuracy. MIAO then combines hardware cost esti-
+mates derived from logic synthesis with a calibrated accu-
+racy predictor to search over configurations with narrower
+accumulation in earlier stages and progressively wider ac-
+cumulators in later stages. The predictor guides the search
+toward promising configurations, while bit-exact end-to-
+end LLM evaluation verifies whether each candidate meets
+the perplexity constraint.
+Our contributions are:
+1. We propose stage-dependent floating-point accumula-
+tion for MX systolic arrays, replacing uniform accumu-
+lator precision with widths tailored to individual stages
+of the reduction. Together with block-scale calibration
+and product precision selection, this enables narrower
+arithmetic hardware while preserving end-to-end model
+accuracy.
+2. We develop an automated search methodology that
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+combines synthesis-derived hardware costs, an accu-
+racy predictor, and bit-exact LLM evaluation to select
+precision configurations under a perplexity constraint.
+For MXFP8, it reduces the search space by 177× and
+3,009× relative to exhaustive enumeration on 16×16
+and 32×32 systolic arrays, respectively.
+3. We demonstrate hardware implementations that reduce
+PE-array area by up to 38.7% and measured energy
+per operation reduction by up to 36.1% relative to
+an all-BF16 datapath baseline, with at most 1.6% addi-
+tional perplexity degradation across six LLMs.
+2
+BACKGROUND
+2.1
+Microscaling Formats and Arithmetic
+Microscaling (MX) formats represent tensors using low-
+precision floating-point elements with a shared scale for
+each small block.
+Compared to coarser-grained quanti-
+zation, smaller blocks allow scales to better match lo-
+cal value ranges, reducing quantization error and enabling
+lower-precision representations of LLM weights and acti-
+vations. We consider MXFP8 (E4M3), MXFP6 (E3M2),
+and MXFP4 (E2M1), following the Open Compute Project
+(OCP) MX specification (Open Compute Project, 2023).
+Each MX block contains 32 elements and a shared 8-bit
+exponent-only (E8M0) scale, representing powers of two
+as x = 2E−127, where E is the encoded exponent. This
+enables efficient hardware scaling through exponent adjust-
+ment rather than general floating-point multiplication.
+For a block of values v, MX quantization computes a
+shared scale x, quantized elements P, and reconstructed
+values ¯v as
+x = 2⌊log2 maxi |vi|⌋−d,
+P = Q
+v
+x
+
+,
+¯v = xP,
+(1)
+where Q(·) rounds to the target element format and d is an
+integer shift controlling the shared scale. The OCP speci-
+fication fixes d = emax, the exponent of the largest normal
+value of the element format, with emax = 8, 4, and 2 for
+MXFP8, MXFP6, and MXFP4, respectively.
+For two MX blocks A and B, their dot product is:
+dot(A, B) = xAxB
+k
+X
+i=1
+P (A)
+i
+P (B)
+i
+,
+(2)
+where xA and xB are the corresponding block scales and
+k = 32. Longer dot products combine contributions from
+multiple blocks, each with its own scale factors. While the
+MX specification defines numerical representation and dot-
+product semantics, it leaves intermediate product and accu-
+mulation precision to the implementation (Open Compute
+Project, 2023). Existing implementations commonly retain
+BF16 or FP32 accumulation despite using low-precision
+MX operands (Wang et al., 2026; Wipfli et al., 2026).
+In this work, we apply MX quantization to both weights
+and activations during LLM inference. Each linear layer
+computes Y = W × A using MX-quantized operands, and
+its output is requantized into MX blocks before use by sub-
+sequent MX-quantized operations.
+2.2
+Floating-Point Accumulation in Systolic Arrays
+Systolic arrays accelerate matrix multiplication using grids
+of processing elements (PEs) performing parallel multiply-
+accumulate (MAC) operations. Common dataflows include
+output-stationary (OS), where each PE accumulates a local
+output, and weight-stationary (WS), where weights remain
+fixed in PEs while activations propagate horizontally and
+partial sums propagate vertically (Chen et al., 2016). We
+focus on WS arrays (Figure 2), where successive accumu-
+lation stages map to different PE rows. This allows each
+row to use a fixed accumulator precision, enabling stage-
+dependent precision allocation through differently sized
+arithmetic hardware.
+Figure 2. Weight-stationary systolic array dataflow, PE datapath.
+In the WS dataflow, each PE multiplies an incoming ac-
+tivation by its stationary weight and adds the product to
+the partial sum received from the preceding row. While
+low-precision operands reduce multiplier costs, accumula-
+tors typically retain wider floating-point formats to accom-
+modate the growing range of partial sums and limit round-
+ing error. Floating-point accumulation requires exponent
+alignment and significand arithmetic, contributing substan-
+tially to hardware cost (Mach et al., 2021). As shown in
+Fig. 1(c), BF16 accumulation accounts for approximately
+65% of PE-array area in our baseline with MX operands
+and BF16 intermediate arithmetic.
+Because each successive row adds another product, partial-
+sum magnitudes generally increase with accumulation
+depth. This suggests that different stages may have differ-
+ent precision requirements, motivating the characterization
+of stage-dependent accumulation precision in Sec. 3.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9 10 11 12 13 14 15
+accumulation stage (row)
+2−16
+2−12
+2−8
+2−4
+20
+24
+28
+212
+216
+220
+|partial sum| (element units)
+d=8
+d=4
+d=2
+e5 limit
+(a) OCP scale (d = emax)
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9 10 11 12 13 14 15
+accumulation stage (row)
+2−16
+2−12
+2−8
+2−4
+20
+24
+28
+212
+216
+220
+|partial sum| (element units)
+d=0
+d=2
+d=2
+e5 limit
+(c) picked d
+0 1 2 3 4 5 6 7 8
+0.4
+0.6
+0.8
+1.0
+1.2
+1.4
+perplexity vs BF16 (%)
+(b) MXFP8
+0 1 2 3 4
+d (block maximum in [2d, 2d + 1))
+1.8
+1.9
+2.0
+2.1
+2.2
+2.3
+2.4
+2.5
+MXFP6
+0 1 2
+101
+102
+MXFP4
+MXFP8
+MXFP6
+MXFP4
+max
+median
+0.1th pct. to max
+OCP d
+picked d
+Figure 3. Choosing the block-scale shift d (TinyLlama, one 16-row column). (a) and (c) show partial sums at each accumulation stage,
+before and after choosing d. (b) The picked d is the smallest d whose perplexity is within noise of the best.
+3
+DATAPATH PRODUCT AND
+ACCUMULATION PRECISION
+OPTIMIZATION
+We first examine why conventional OCP block-scaling
+limits opportunities for intermediate precision reduction
+(Sec. 3.1), then show how calibrating the prescribed block-
+scale shifts can reduce precision requirements (Sec. 3.2).
+We then use a weight-stationary systolic array as a case
+study to investigate how reduced product precision and
+row-dependent floating-point accumulation can translate
+into hardware area and energy savings (Sec. 3.3). These
+observations motivate the automated precision optimiza-
+tion method in Sec. 4.
+3.1
+Limitations of Existing Microscaling
+The intermediate precision requirements of MX arithmetic
+depend not only on the operand format, but also on the
+block-scale shift d (Eq.
+1). The OCP specification sets
+d = emax, with emax = 8, 4, and 2 for MXFP8, MXFP6,
+and MXFP4, respectively (Open Compute Project, 2023).
+This places the largest scaled element near the upper range
+of its format to limit underflow. However, because OCP’s
+scaling rule is defined independently of intermediate arith-
+metic precision, it can impose substantial precision require-
+ments on the hardware datapath.
+Large intermediate dynamic range.
+Increasing d by
+one doubles the magnitude of each scaled operand and
+increases product magnitudes by a factor of four, before
+rounding and saturation. For MXFP8, the OCP shift d = 8
+therefore increases nominal product magnitudes by a fac-
+tor of 216 relative to d = 0. This amplification carries into
+intermediate partial sums, which must be represented be-
+fore the block scales are applied to rescale the dot-product
+result.
+Figure 3(a) shows partial-sum magnitudes under OCP scal-
+ing across a 16-row weight-stationary systolic array. For
+TinyLlama, partial sums reach approximately 220, 212,
+and 28 for MXFP8, MXFP6, and MXFP4, respectively.
+These magnitudes impose substantial exponent-range re-
+quirements on intermediate accumulation, limiting oppor-
+tunities to narrow accumulator formats without risking
+overflow.
+Operand quantization error. The OCP scaling rule can
+also introduce saturation error. Setting d = emax places
+the block maximum in the highest power-of-two range of
+the element format, which is not fully representable. Con-
+sequently, scaled elements exceeding the maximum repre-
+sentable value are clipped. For TinyLlama under MXFP8,
+the maximum element is clipped in 14-16% of activation
+blocks and 9-13% of weight blocks, with an average clip-
+ping magnitude of 8%. This error persists even when inter-
+mediate arithmetic uses high precision.
+Together, these limitations make conventional OCP scaling
+poorly suited to reducing intermediate arithmetic precision:
+large partial-sum magnitudes restrict accumulator narrow-
+ing, while operand saturation introduces accuracy loss even
+with high-precision arithmetic. Exploiting narrower prod-
+uct and accumulator formats therefore requires reconsider-
+ing the OCP-defined block-scale shift d.
+3.2
+MX Block-Scale Shift Calibration
+To address the limitations of conventional OCP scaling, we
+calibrate the block-scale shift d separately for each MX for-
+mat. From Eq. 1, the scaled block maximum satisfies
+2d ≤maxi |vi|
+x
+< 2d+1.
+(3)
+before element rounding and saturation. Reducing d de-
+creases product and partial-sum magnitudes, enabling nar-
+rower intermediate arithmetic, but can increase operand un-
+derflow. We therefore balance operand quantization accu-
+racy against intermediate precision requirements.
+Calibration Procedure. For each MX format, we sweep
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Figure 4. Proposed Hardware Architecture. (a) Precision-configurable systolic array datapath with three design parameters: (1) MX
+block-scale shift d, calibrated per operand format; (2) product floating-point precision, shared across PEs; and (3) row-wise accumulator
+floating-point precision, independently configurable at each accumulation stage. Inter-tile accumulation retains BF16 precision. (b)
+Processing element microarchitecture implementing a fused multiply-add (FMA) operation. L(·) denotes configurable wire bit-widths.
+integer shifts d ∈{0, . . . , dOCP}, where dOCP is the
+OCP-defined shift.
+We measure end-to-end perplexity
+using MX-quantized operands with full-precision matrix
+multiplication, isolating operand quantization error from
+reduced intermediate precision.
+We select the small-
+est d whose perplexity is statistically indistinguishable
+from the minimum measured perplexity, reducing product
+and downstream partial-sum magnitudes while preserving
+quantization accuracy.
+Fig. 3(b) shows the perplexity across block-scale shifts
+for TinyLlama, from which we select d = 0, 2, and 2
+for MXFP8, MXFP6, and MXFP4, respectively. Compar-
+ing Fig. 3(a,c), these calibrated shifts substantially reduce
+partial-sum magnitudes relative to OCP scaling for MXFP8
+and MXFP6, while MXFP4 retains its OCP-defined shift.
+The selected shifts remain fixed during subsequent preci-
+sion optimization. Nevertheless, partial-sum magnitudes
+still generally grow with accumulation depth, indicating
+that precision requirements vary across rows. This moti-
+vates configuring accumulator precision independently for
+each row rather than using a uniform format throughout the
+array.
+3.3
+Precision-Configurable Systolic Datapath and
+Hardware Characterization
+To investigate the hardware benefits of the precision re-
+duction opportunities identified in Sec. 3.2, we parame-
+terize a weight-stationary systolic array with configurable
+floating-point formats for products and row-wise accumu-
+lation. This serves as a hardware case study for characteriz-
+ing how intermediate arithmetic precision affects area and
+energy.
+Precision-Configurable Datapath.
+We extend the open-source Gemmini accelerator (Genc
+et al., 2021) to support MX operands and configurable in-
+termediate floating-point precision in its weight-stationary
+systolic array (Fig. 4). Specifically, we support two config-
+urable precision parameters:
+1.
+Configurable product precision.
+Each PE multi-
+plies an MX-quantized weight and activation, rounding its
+product to configurable floating-point format fp, which is
+shared across all PEs.
+2. Row-wise accumulation precision. For an n-row array,
+the n−1 successive accumulation stages use independently
+configurable formats f1, . . . , fn−1. At stage i, the incom-
+ing partial sum is added to the product, and the result is
+rounded to format fi. This allows accumulator precision to
+vary across rows.
+3. MX requantization and scale handling. At each tile’s
+output, the accumulated result is rescaled using the corre-
+sponding MX block scales (Eq 2). Rescaled outputs from
+multiple tiles are accumulated in BF16. Once the full ma-
+trix multiplication is complete, the result is requantized to
+the target MX format before being used by subsequent MX-
+quantized operations.
+Hardware Precision Characterization.
+Now, we characterize the numerical requirements of inter-
+mediate products and partial sums and quantify the hard-
+ware costs of reduced floating-point precision.
+Product profiling.
+For each MX format, we derive the minimum floating-point
+format required to represent all quantized element products
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+without rounding. With the calibrated block-scale shifts,
+these formats are E5M7, E4M5, and E4M3 for MXFP8,
+MXFP6, and MXFP4, respectively. These establish ref-
+erence points for exploring narrower product formats that
+will introduce rounding error.
+Accumulator profiling.
+We capture quantized operands from 67 linear layers across
+16 evaluation samples and simulate systolic accumulation
+using exact products and high-precision partial sums. We
+record partial-sum magnitudes and exponent distributions
+at each stage. For MXFP8 at d = 0, the maximum observed
+magnitude grows from 8 after the first addition to 23.93
+after the fifteenth, suggesting there are different exponent-
+range requirements across accumulation stages.
+Hardware sensitivity. To quantify the cost of accumula-
+tion precision, we independently vary exponent and man-
+tissa widths, applying each format uniformly across the 15
+accumulation stages of a 16 × 16 systolic array. Table 1
+reports the resulting changes in PE-array area, energy, and
+perplexity for MXFP8.
+Lane width
+PE-array area
+(kµm2)
+PE-array
+area
+Energy
+Perplexity
+(% points)
+mantissa, lanes e5, relative to m7
+m7
+0
+0.0%
+0.0%
++0.00
+m6
+−46.8
+−6.7%
+−8.2%
++0.03
+m5
+−88.4
+−12.7%
+−13.9%
++0.05
+m4
+−114.1
+−16.4%
+−19.2%
++0.70
+m3
+−155.8
+−22.4%
+−24.5%
++2.20
+m2
+–
+–
+–
++8.42
+exponent, lanes m7, relative to e8
+e8
+0
+0.0%
+0.0%
++0.00
+e7
+−7.8
+−1.1%
+−0.9%
++0.00
+e6
+−17.7
+−2.5%
+−1.6%
++0.00
+e5
+−18.4
+−2.6%
+−0.9%
++0.00
+e4
+−20.2
+−2.9%
+−3.1%
++0.07
+Table 1. Accumulator exponent and mantissa sensitivity for
+MXFP8. Hardware and perplexity changes are relative to the
+widest format in each sweep (e5m7 for the mantissa sweep; e8m7,
+i.e. BF16, for the exponent sweep). Hardware costs are evaluated
+using the synthesis-calibrated model described in Sec. 4.2.
+Reducing accumulator mantissa width from M7 to M5 de-
+creases PE-array area by 12.7% and energy by 13.9%, com-
+pared with 2.6% and 0.9% reductions from narrowing the
+exponent width from E8 to E5. Thus, reducing mantissa
+width offers substantially greater hardware savings.
+These characterizations establish the numerical require-
+ments and hardware costs used to select product and row-
+wise accumulator formats under end-to-end accuracy con-
+straints in Sec. 4.
+4
+FRAMEWORK AND SEARCH
+Building on the precision-configurable datapath and hard-
+ware characterization in Sec. 3, we develop an automated
+method for selecting product and accumulation precisions
+under end-to-end accuracy constraints. Sec. 4.1 formulates
+the optimization problem, Sec. 4.2 describes the hardware-
+software evaluation method, and Sec. 4.3 presents the auto-
+mated search, loss-model prediction, and certification pro-
+cedure.
+4.1
+Problem Formulation
+We formulate product and accumulation precision selection
+as a constrained hardware cost minimization problem. For
+an n × n weight-stationary systolic array, we define the
+precision configuration
+θ = (fp, fa,1, . . . , fa,n−1),
+(4)
+where fp is the product format shared across PEs and fa,r
+is the accumulator format at row r. The accumulator for-
+mats form a non-decreasing precision ladder along each re-
+duction path. We consider MXFP8, MXFP6, and MXFP4
+operands with their respective calibrated block-scale shifts
+from Sec. 3.2.
+For each configuration θ, we evaluate end-to-end perplexity
+PPL(θ), PE area A(θ), and energy per operation E(θ). We
+minimize the normalized area-energy product:
+H(θ) = A(θ)
+ABF16
+· E(θ)
+EBF16
+.
+(5)
+where ABF16 and EBF16 are the area and energy costs
+of a baseline datapath that uses the same MX-quantized
+operands and array dimensions, but performs all product
+and accumulation operations in BF16.
+We seek the minimum-cost configuration satisfying a spec-
+ified accuracy constraint:
+minimize
+θ∈Θ
+H(θ)
+subject to
+PPL(θ) ≤(1 + ϵ)PPLBF16.
+(6)
+Here, Θ denotes the supported precision configurations,
+PPLBF16 is the perplexity of the unquantized BF16 ref-
+erence model, and ϵ specifies the maximum allowable rela-
+tive perplexity increase. This constraint accounts for degra-
+dation from both MX operand quantization and reduced in-
+termediate precision. Varying ϵ allows us to explore the
+trade-off between hardware cost and end-to-end accuracy.
+Although the formulation generalizes to other accumula-
+tion topologies, including adder trees, we focus on weight-
+stationary systolic arrays in this work (Sec. 3.3).
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+4.2
+Hardware-Software Evaluation Framework
+Evaluating each precision configuration requires end-to-
+end LLM inference and hardware cost characterization,
+making exhaustive exploration expensive. To reduce eval-
+uation overhead, we combine bit-exact arithmetic simu-
+lation, accelerated LLM inference, and synthesis-derived
+hardware area and energy modeling.
+Bit-Exact Arithmetic Simulation. We implement a con-
+figurable arithmetic simulator that reproduces the numeri-
+cal behavior of the systolic datapath in Sec. 3.3. The sim-
+ulator models MX operand quantization, product rounding
+to the selected format fp, row-wise accumulation using the
+specified formats fa,r, and BF16 inter-tile accumulation.
+Operations follow the datapath’s order of execution, in-
+cluding intermediate rounding, saturation, and underflow
+behavior. We validate the simulator against hardware arith-
+metic outputs, obtaining bit-identical results across 65,536
+evaluated elements for MXFP8.
+End-to-end LLM integration. We integrate the simulator
+into LLM inference by replacing selected linear-layer ma-
+trix multiplications with configurable MX arithmetic while
+retaining BF16 for other operations. This enables direct
+measurement of perplexity for each precision configura-
+tion. An optimized Triton implementation preserves the
+simulator’s bit-exact outputs and accelerates repeated end-
+to-end perplexity evaluations by 2.2–7.4× on TinyLlama.
+Hardware area and energy estimation. We construct a
+hardware area and energy model from logic synthesis and
+gate-level power analysis of parameterized processing el-
+ements (PEs) in a 16 nm technology. We sweep product
+formats with exponent widths of 3–8 bits and significand
+widths of 3–8 bits, and accumulator formats with expo-
+nent widths of 4–8 bits and significand widths of 4–12
+bits. Using these synthesis results, the model combines PE
+costs according to each configuration’s product precision
+and row-wise accumulator formats, enabling efficient area
+and energy estimation across precision configurations and
+array sizes without synthesizing each candidate.
+4.3
+Automated Precision Search and Certification
+We develop an automated framework (Algorithm 1) that
+takes a target perplexity constraint and selects a low-cost
+product and accumulator precision configuration without
+manual tuning.
+1. Search Space. We first constrain the search space to
+keep exploration tractable. For an n × n weight-stationary
+array, we impose two restrictions:
+(i) We use a shared product format and a non-decreasing
+ladder of n −1 accumulator formats, reflecting increas-
+ing partial-sum magnitudes and rounding sensitivity across
+rows.
+(ii) We fix accumulator exponent widths to five bits, suffi-
+cient for the observed dynamic range, and vary mantissa
+widths from three to seven bits to capture the accuracy-
+hardware cost trade-off (Sec. 3.3).
+These restrictions yield
+ n+3
+4
+
+ladders: 330, 3,876, and
+52,360 for 8 × 8, 16 × 16, and 32 × 32 arrays, respectively.
+For 32 × 32 certification, we additionally restrict precision
+transitions to four-row boundaries to reduce search com-
+plexity, yielding 495 ladders per product format. Two-step
+ladders from candidate selection (step 3) keep any transi-
+tion row.
+2. Feasibility Screening. To avoid unnecessary precision
+search, we first check whether the selected MX operand
+format can meet the perplexity target. We evaluate the cal-
+ibrated operands with lossless products and BF16 accumu-
+lation, terminating the search if measured perplexity ex-
+ceeds the target beyond evaluation noise.
+3. Candidate Selection. To establish an initial low-cost
+feasible configuration and collect data for loss-model fit-
+ting, we fix product format and sweep uniform accumu-
+lator mantissa widths to identify two adjacent widths that
+bracket the perplexity target:
+the narrowest width that
+meets the target and the next narrower width that exceeds
+it. Using these two widths, we construct two-step ladders
+by assigning the narrower precision to rows 1, . . . , k and
+the wider precision to rows k +1, . . . , n−1. We sweep the
+transition row k to identify the lowest-cost feasible ladder.
+4. Loss-Model-Guided Refinement. To efficiently ex-
+plore multi-step ladders, we fit a model that predicts per-
+plexity for untested ladders using measurements from the
+initial sweeps. The model assumes that rounding the par-
+tial sum Sr to mr bits introduces zero-mean noise with
+variance proportional to E[S2
+r]4−mr (Widrow et al., 1996).
+Assuming uncorrelated rounding errors, their variances
+add across rows; a second-order loss approximation re-
+lates these variances to expected loss increase (Dong et al.,
+2020). We model the resulting log-perplexity increase as
+log
+d
+PPL(θ)
+PPLbase
+=
+n−1
+X
+r=1
+wr
+ 4−mr −4−7
+,
+(7)
+where wr is the fitted coefficient for rounding at row r, and
+PPLbase is the measured perplexity for the same product
+format with BF16 accumulation.
+To fit the model, we approximate wr ∝E[S2
+r] ∝r + 1,
+assuming approximately constant loss sensitivity across
+rows. Partial-sum profiling follows this trend within 9%
+across 67 layers.
+We compare a single-scale fit to the
+measured row profile against non-negative, smoothness-
+regularized per-row coefficients, selecting by five-fold
+cross-validation.
+On 8 × 8 MXFP8, fitting 11 ladders
+predicts 319 unseen ladders with an RMS perplexity error
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Algorithm 1 Automated Precision Search
+Require: Calibrated MX format fMX, array size n,
+perplexity tolerance ϵ, noise margin δ
+Ensure: Best feasible configuration θ∗, certification status
+1: T ←(1 + ϵ)PPLBF16
+2: [1] Search Space: Construct non-decreasing precision
+ladders
+3: [2] Feasibility Screening:
+4: if operand-only PPL with exact products and BF16 ac-
+cumulation > T + δ then
+5:
+return infeasible
+6: end if
+7: [3] Candidate Selection:
+8: for each product format fp do
+9:
+Find adjacent uniform accumulator widths bracket-
+ing T
+10:
+Sweep two-step transitions; update θ∗
+11: end for
+12: [4] Loss-Model-Guided Refinement:
+13: Fit loss model to measured configurations
+14: while promising lower-cost candidates remain do
+15:
+Predict perplexity and cost; select candidates
+16:
+Evaluate end-to-end; update model and θ∗
+17: end while
+18: [5] Search-Space Certification:
+19: Prune cheaper candidates no more precise than mea-
+sured failures
+20: Evaluate remaining cheaper candidates end-to-end
+21: Certify if all cheaper candidates are excluded
+22: return θ∗, certification status
+of 0.0066, below the paired-run standard error of 0.0085.
+We first use the fitted loss model to predict perplexity and
+the hardware cost model (Sec. 4.2) to estimate area and en-
+ergy for untested ladders. Based on these predictions, we
+select promising low-cost candidates for bit-exact end-to-
+end LLM evaluation. We then use the measured perplexity
+to update the loss model and determine whether each can-
+didate satisfies the accuracy constraint.
+5. Search-Space Certification. Finally, we assess whether
+the best configuration is optimal within the restricted search
+space. We identify cheaper candidates and prune those no
+more precise than previously failed configurations, assum-
+ing accuracy does not worsen with increased precision. We
+evaluate the remaining candidates end-to-end and update
+the best configuration if a cheaper feasible candidate is
+found. We certify optimality only when all cheaper can-
+didates are excluded.
+Together, these stages provide an automated procedure for
+selecting product and accumulator precisions under a user-
+specified perplexity constraint, with explicit verification of
+the resulting configuration.
+5
+EVALUATION
+We evaluate our framework’s ability to reduce hardware
+cost while preserving end-to-end LLM accuracy. Our se-
+lected configurations reduce PE-array compute area by
+32.0-38.7% and estimated whole-accelerator energy per
+operation by 23.7-36.1% relative to all-BF16, with at most
+1.06% additional perplexity degradation over operand-only
+MX quantization.
+We first describe the experimental setup, then examine
+hardware-accuracy trade-offs and selected precision con-
+figurations. Finally, we evaluate cross-model generaliza-
+tion and downstream task accuracy.
+5.1
+Experimental Setup
+Software.
+We evaluate TinyLlama-1.1B and five addi-
+tional LLMs on WikiText-2, using 16 windows of 2,048
+tokens per model. We optimize precision configurations on
+TinyLlama and apply the selected configurations to the re-
+maining models without retuning. Perplexity is measured
+through end-to-end inference with bit-exact emulation of
+MX operands, products, and accumulation.
+Hardware.
+We evaluate 8 × 8, 16 × 16, and 32 × 32
+weight-stationary systolic arrays. Hardware costs are es-
+timated using the synthesis-derived model in Sec. 4.2,
+targeting a 16 nm technology and a 2 ns clock period.
+We additionally use FireSim FPGA-accelerated simula-
+tion (Karandikar et al., 2018) to compare hardware arith-
+metic outputs against the bit-exact software reference.
+Baselines and Metrics. We use two accuracy baselines:
+(1) an unquantized BF16 model with BF16 products, ac-
+cumulation, and inter-tile additions, and (2) operand-only
+MX quantization with BF16 products, accumulation, and
+inter-tile additions. We report perplexity relative to both
+baselines, along with PE-array area, estimated whole-
+accelerator energy per operation, and power.
+Hardware
+costs are compared against BF16 intermediate arithmetic
+with the same MX operands and array dimensions.
+5.2
+Hardware-Accuracy Trade-offs
+Search Outcomes.
+Figure 5 compares the automated
+search with exhaustive evaluation of the restricted 8×8 pre-
+cision space. The search evaluates only a subset of configu-
+rations, while the exhaustive results verify that the selected
+configurations minimize hardware cost under the perplex-
+ity constraint.
+Selected Precisions.
+Table 2 reports the selected prod-
+uct and accumulator formats across MX formats and array
+sizes. All configurations use progressively wider accumu-
+lator mantissas, while product precision and accumulator
+transitions vary with MX format and array size.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+0.65
+0.70
+0.75
+0.80
+0.5
+1.0
+1.5
+(a) MXFP8: e5m3x3+e5m4x4
+0.60
+0.65
+0.70
+0.75
+0.80
+2.5
+3.0
+3.5
+(b) MXFP6: e5m3x5+e5m5x2
+0.60
+0.65
+0.70
+0.75
+0.80
+16.0
+16.5
+17.0
+17.5
+18.0
+(c) MXFP4: e5m3x4+e5m4x3
+0.75
+0.80
+0.85
+0.90
+0.5
+1.0
+1.5
+0.70
+0.75
+0.80
+0.85
+energy per op (BF16 = 1), lower is better
+2.5
+3.0
+3.5
+0.75
+0.80
+0.85
+0.90
+16.0
+16.5
+17.0
+17.5
+18.0
+perplexity increase over all-BF16 (%)
+searched, under target
+searched, over target
+not searched, under target
+not searched, over target
+target
+final choice
+PE-array area (BF16 = 1), lower is better
+Figure 5. Hardware-accuracy trade-offs at 8 × 8. Orange points are configurations evaluated during search; grey points are additional
+exhaustive evaluations for verification. Each point represents an accumulator ladder at the selected d and product format. Top: PE-array
+area; bottom: whole-accelerator energy per operation, both normalized to all-BF16.
+Format
+Size
+d Prod
+Accum (rows 1..n−1)
+MXFP8
+8×8
+0 e4m6 e5m3×3 + e5m4×4
+16×16 0 e4m5 e5m4×11 + e5m5×4
+32×32 0 e4m6 e5m4×19 + e5m5×12
+MXFP6
+8×8
+2 e4m3 e5m3×5 + e5m5×2
+16×16 2 e4m4 e5m3×6 + e5m4×8 + e5m5×1
+32×32 2 e4m4 e5m3×2 + e5m4×29
+MXFP4
+8×8
+2 e4m3 e5m3×4 + e5m4×3
+16×16 2 e4m3 e5m3×6 + e5m4×6 + e5m5×2 + e5m6×1
+32×32 2 e4m3 e5m3×4 + e5m4×24 + e5m6×3
+Table 2. Selected precision configurations. d: block-scale shift;
+Prod: product format; Accum: row-wise accumulator formats.
+Hardware Cost and Accuracy. Table 3 reports hardware
+savings and perplexity changes relative to both BF16 and
+operand-only MX quantization.
+(i) MXFP8 reduces PE-array area by 32.0–34.5% and en-
+ergy per operation by 23.7–32.5%, with at most 0.50% ad-
+ditional perplexity degradation over operand-only MX.
+(ii) MXFP6 reduces area by 34.6–38.5% and energy by
+28.6–36.1%, with at most 1.06% additional perplexity
+degradation over operand-only MX.
+(iii) MXFP4 reduces PE-array area by 35.2–38.7% and en-
+ergy by 26.0–36.1%, with at most 0.89% additional per-
+plexity degradation over operand-only MX, despite greater
+total degradation from operand quantization.
+5.3
+Cross-Model Generalization
+We apply the 16×16 configurations selected on TinyLlama
+to five additional LLMs without retuning. Table 4 shows
+that intermediate precision reduction introduces at most
+a 1.6% relative perplexity increase over operand-only
+MX quantization. MXFP4 incurs substantially greater to-
+tal perplexity degradation relative to BF16, primarily from
+operand quantization. These results demonstrate transfer-
+ability across models, although the TinyLlama accuracy
+constraints are not guaranteed to hold.
+Model
+Format
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Mistral-7B
+BF16
+5.73
+–
+–
+MXFP8
+5.76
++0.5%
++0.2%
+MXFP6
+5.85
++2.1%
++0.7%
+MXFP4
+6.31
++10.1%
++0.5%
+Llama-3.1-8B
+BF16
+6.52
+–
+–
+MXFP8
+6.63
++1.7%
++0.6%
+MXFP6
+6.86
++5.2%
++1.5%
+MXFP4
+8.36
++28.3%
++1.1%
+Llama-2-7B
+BF16
+5.15
+–
+–
+MXFP8
+5.18
++0.6%
++0.3%
+MXFP6
+5.32
++3.3%
++1.6%
+MXFP4
+5.93
++15.3%
++0.5%
+Llama-2-13B
+BF16
+4.66
+–
+–
+MXFP8
+4.68
++0.5%
++0.2%
+MXFP6
+4.74
++1.7%
++0.6%
+MXFP4
+5.02
++7.7%
++0.8%
+Qwen2.5-14B
+BF16
+5.34
+–
+–
+MXFP8
+5.44
++1.8%
++0.6%
+MXFP6
+5.64
++5.5%
++1.1%
+MXFP4
+6.88
++28.8%
++0.5%
+Table 4. Cross-model transfer of TinyLlama-selected 16 × 16
+configurations. WikiText-2 perplexity (16 windows of 2,048 to-
+kens). Changes are relative to all-BF16 and operand-only MX.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Format
+Size
+Perplexity
+∆vs
+op.-only
+∆vs
+BF16
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+MXFP8
+8×8
+7.3581
++0.44%
++0.97%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+16×16
+7.3036
++0.38%
++0.98%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+32×32
+7.2929
++0.50%
++0.97%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+MXFP6
+8×8
+7.5035
++1.06%
++2.97%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+16×16
+7.4468
++1.02%
++2.96%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+32×32
+7.4387
++0.96%
++2.99%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+MXFP4
+8×8
+8.5495
++0.89%
++17.32%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+16×16
+8.4695
+0.00%
++17.10%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+32×32
+8.4861
++0.78%
++17.50%
+0.78
+-36.1%
+1.803
+-35.2%
+1541.5∗
+-36.1%
+Table 3. Hardware–accuracy results on TinyLlama-1.1B. Perplexity changes are relative to operand-only MX and all-BF16; hardware
+changes are relative to all-BF16 at the same PE-array size. Area: post-synthesis PE-array area. Energy and power: whole-accelerator
+estimates. ∗: power derived from energy per operation.
+Downstream Tasks. We further evaluate selected configu-
+rations on seven zero-shot tasks using TinyLlama and Hu-
+manEval code generation using Llama-3.1-8B (Appendix,
+Tables 11 and 5).
+Across all array sizes, MXFP8 and
+MXFP6 maintain mean zero-shot accuracy within 0.91
+percentage points of all-BF16. On HumanEval, selected
+configurations change pass@1 by +3.7, -3.0, and +0.6 per-
+centage points relative to operand-only MXFP8, MXFP6,
+and MXFP4, respectively, with no statistically significant
+differences. These results provide further evidence that re-
+duced product and accumulator precision preserves down-
+stream performance beyond perplexity.
+6
+RELATED WORK
+Mixed-precision allocation.
+Mixed-precision quantiza-
+tion assigns more bits where the model is most sensitive.
+HAQ (Wang et al., 2019) uses reinforcement learning with
+hardware feedback to choose layer-wise weight and activa-
+tion bitwidths, and HAWQ-V2 (Dong et al., 2020) ranks
+layers by Hessian trace.
+For LLMs, AWQ (Lin et al.,
+2024) protects salient weight channels through activation-
+aware scaling, Atom (Zhao et al., 2024) keeps outlier chan-
+nels at higher precision within 4-bit serving kernels, SliM-
+LLM (Huang et al., 2025) allocates bitwidths to weight
+groups by salience, MixLLM (Zheng et al., 2026) assigns
+4- or 8-bit precision to individual output features, and
+FGMP (Hooper et al., 2025) selects FP8 or NVFP4 per
+weight and activation block using Fisher-weighted sensi-
+tivity, with matching datapath support. All of these allocate
+precision to operands. MIAO instead allocates precision to
+intermediate arithmetic: the product and each accumulator
+row of a systolic array, at fixed operand formats.
+Precision search. Because the space of per-layer preci-
+sion assignments grows exponentially, recent work reduces
+search cost. FLIQS (Dotzel et al., 2024) runs a one-shot
+reinforcement-learning search over integer and floating-
+point formats, AMQ (Lee et al., 2025) prunes the search
+space and guides an iterative search with a learned quality
+predictor, and KVTuner (Li et al., 2025) prunes per-layer
+key and value precision pairs offline using attention-output
+error. MIAO shares the goal of avoiding exhaustive evalu-
+ation, but its search space is ordered by construction: a fit-
+ted rounding-loss model proposes accumulator ladders, and
+every selected configuration is certified by bit-exact end-to-
+end evaluation.
+Hardware cost models.
+Analytical models such as
+Timeloop (Parashar et al., 2019) and Accelergy (Wu et al.,
+2019) estimate accelerator energy and area from archi-
+tectural actions and per-component costs, enabling fast
+design-space exploration. MIAO prices each configuration
+with a compositional area and energy model calibrated on
+post-synthesis processing elements, so that the cost of one
+additional mantissa or exponent bit in a single accumulator
+row is resolved.
+7
+CONCLUSION
+We present MIAO, a hardware-software co-design frame-
+work for jointly optimizing product and accumulator pre-
+cision in MX-based systolic arrays.
+By modeling row-
+dependent rounding sensitivity and hardware cost, MIAO
+selects and certifies non-uniform accumulation ladders un-
+der a target perplexity constraint. Across MXFP8, MXFP6,
+and MXFP4, the selected configurations reduce PE-array
+area by 32.0-38.7% and estimated whole-accelerator en-
+ergy per operation by 23.7-36.1% relative to all-BF16,
+with at most 1.06% additional perplexity degradation be-
+yond operand-only quantization. Configurations selected
+on TinyLlama transfer to five additional LLMs without re-
+tuning, adding at most 1.6% perplexity beyond operand-
+only quantization. Future work includes cross-model cali-
+bration and extending the optimization to other accelerator
+architectures and workloads.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+8
+ACKNOWLEDGEMENTS
+This research was supported in part by the NSF CAREER
+Award CCF-2238346 and in part by the Specialized Com-
+puting Ecosystems (SLICE) Lab industrial sponsors and af-
+filiates. This project is also funded by the Microelectronics
+Commons Program, a DoW initiative. Distribution State-
+ment A: Approved for public release. Distribution is un-
+limited. The views and conclusions contained in this docu-
+ment are those of the authors and should not be interpreted
+as representing the official policies, either expressed or im-
+plied, of the U.S. Government.
+REFERENCES
+Abdel-Aziz, H., Shafiee, A., Shin, J. H., Pedram, A., and
+Hassoun, J. H. Rethinking floating point overheads for
+mixed precision DNN accelerators. In Proceedings of
+Machine Learning and Systems, volume 3, 2021. URL
+https://proceedings.mlsys.org/paper_
+files/paper/2021/file/e96c462898b476
+00c6f0b1c40979e8ca-Paper.pdf.
+Chen, Y.-H., Krishna, T., Emer, J. S., and Sze, V. Eyeriss:
+An energy-efficient reconfigurable accelerator for deep
+convolutional neural networks. In 2016 ACM/IEEE 43rd
+Annual International Symposium on Computer Architec-
+ture (ISCA), pp. 367–379, 2016. doi: 10.1109/ISCA.201
+6.40.
+Chhugani, J., Jeong, G., Su, B.-Y., Pan, Y., Yang, H.,
+Ankit, A., Yu, J., Deng, S., Chen, Y., Satish, N., and
+Kim, C.
+Unveiling the potential of quantization with
+MXFP4:
+Strategies for quantization error reduction.
+In Proceedings of the 43rd International Conference
+on Machine Learning, volume 306 of Proceedings of
+Machine Learning Research, pp. 19376–19394. PMLR,
+2026. URL https://proceedings.mlr.pres
+s/v306/chhugani26a.html.
+Colbert, I., Pappalardo, A., and Petri-Koenig, J.
+A2Q:
+Accumulator-aware quantization with guaranteed over-
+flow avoidance.
+In Proceedings of the IEEE/CVF In-
+ternational Conference on Computer Vision, pp. 16989–
+16998, 2023. URL https://openaccess.thecv
+f.com/content/ICCV2023/html/Colbert_
+A2Q_Accumulator-Aware_Quantization_wi
+th_Guaranteed_Overflow_Avoidance_ICC
+V_2023_paper.html.
+Colbert,
+I.,
+Pappalardo,
+A.,
+Petri-Koenig,
+J.,
+and
+Umuroglu, Y.
+A2Q+: Improving accumulator-aware
+weight quantization. In Proceedings of the 41st Interna-
+tional Conference on Machine Learning, volume 235 of
+Proceedings of Machine Learning Research, pp. 9275–
+9291. PMLR, 2024. URL https://proceedings.
+mlr.press/v235/colbert24a.html.
+Colbert, I., Franco, G., Grob, F., Zhang, J., and Saab, R.
+Accumulator-aware post-training quantization for large
+language models.
+Transactions on Machine Learning
+Research, 2025. URL https://openreview.net
+/forum?id=p6l0579yj7.
+Dai, S., Venkatesan, R., Ren, M., Zimmer, B., Dally, W.,
+and Khailany, B. VS-Quant: Per-vector scaled quantiza-
+tion for accurate low-precision neural network inference.
+In Proceedings of Machine Learning and Systems, vol-
+ume 3, 2021. URL https://proceedings.mlsy
+s.org/paper_files/paper/2021/hash/48
+a6431f04545e11919887748ec5cb52-Abstr
+act.html.
+Dettmers, T., Lewis, M., Belkada, Y., and Zettlemoyer, L.
+LLM.int8(): 8-bit matrix multiplication for transformers
+at scale. In Advances in Neural Information Processing
+Systems, volume 35, pp. 30318–30332, 2022.
+Dong, Z., Yao, Z., Gholami, A., Mahoney, M. W., and
+Keutzer, K.
+HAWQ: Hessian AWare quantization of
+neural networks with mixed-precision. In Proceedings
+of the IEEE/CVF International Conference on Computer
+Vision, pp. 293–302, 2019.
+Dong, Z., Yao, Z., Arfeen, D., Gholami, A., Mahoney,
+M. W., and Keutzer, K.
+HAWQ-V2: Hessian aware
+trace-weighted quantization of neural networks.
+In
+Advances in Neural Information Processing Systems
+(NeurIPS), volume 33, pp. 18518–18529, 2020.
+Dotzel, J., Wu, G., Li, A., Umar, M., Ni, Y., Abdelfat-
+tah, M. S., Zhang, Z., Cheng, L., Dixon, M. G., Jouppi,
+N. P., Le, Q. V., and Li, S. FLIQS: One-shot mixed-
+precision floating-point and integer quantization search.
+In Proceedings of the Third International Conference on
+Automated Machine Learning (AutoML), volume 256 of
+Proceedings of Machine Learning Research, pp. 6/1–26,
+2024.
+Genc, H., Kim, S., Amid, A., Haj-Ali, A., Iyer, V., Prakash,
+P., Zhao, J., Grubb, D., Liew, H., Mao, H., Ou, A.,
+Schmidt, C., Steffl, S., Wright, J., Stoica, I., Ragan-
+Kelley, J., Asanovi´c, K., Nikoli´c, B., and Shao, Y. S.
+Gemmini: Enabling systematic deep-learning architec-
+ture evaluation via full-stack integration. In Proceedings
+of the 58th ACM/IEEE Design Automation Conference
+(DAC), pp. 769–774, 2021. doi: 10.1109/DAC18074.2
+021.9586216.
+He, J., Feng, J., Ju, X., Cao, Y., Luo, Z., Yang, J., Yang,
+J., Li, G., Cheng, J., Chen, D., and Wen, M.
+Preci-
+sion boundary modeling for area-efficient block float-
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+ing point accumulation. Journal of Systems Architecture,
+173:103704, 2026. doi: 10.1016/j.sysarc.2026.103704.
+Higham, N. J. Accuracy and Stability of Numerical Algo-
+rithms. Society for Industrial and Applied Mathematics,
+second edition, 2002. doi: 10.1137/1.9780898718027.
+Hooper, C., Sakr, C., Keller, B., Venkatesan, R., Keutzer,
+K., Shao, S., and Khailany, B.
+FGMP: Fine-grained
+mixed-precision weight and activation quantization for
+hardware-accelerated LLM inference.
+arXiv preprint
+arXiv:2504.14152, 2025.
+Horowitz, M. Computing’s energy problem (and what we
+can do about it). In 2014 IEEE International Solid-State
+Circuits Conference Digest of Technical Papers (ISSCC),
+pp. 10–14, 2014. doi: 10.1109/ISSCC.2014.6757323.
+Huang, W., Qin, H., Liu, Y., Li, Y., Liu, Q., Liu, X.,
+Benini, L., Magno, M., Zhang, S., and Qi, X. SliM-
+LLM: Salience-driven mixed-precision quantization for
+large language models. In Proceedings of the 42nd Inter-
+national Conference on Machine Learning (ICML), vol-
+ume 267 of Proceedings of Machine Learning Research,
+pp. 25672–25692, 2025.
+Jouppi, N. P., Young, C., Patil, N., Patterson, D., Agrawal,
+G., Bajwa, R., Bates, S., Bhatia, S., Boden, N., Borchers,
+A., Boyle, R., Cantin, P.-l., Chao, C., Clark, C., Coriell,
+J., Daley, M., Dau, M., Dean, J., Gelb, B., Ghaem-
+maghami, T. V., Gottipati, R., Gulland, W., Hagmann,
+R., Ho, C. R., Hogberg, D., Hu, J., Hundt, R., Hurt,
+D., Ibarz, J., Jaffey, A., Jaworski, A., Kaplan, A., Khai-
+tan, H., Killebrew, D., Koch, A., Kumar, N., Lacy, S.,
+Laudon, J., Law, J., Le, D., Leary, C., Liu, Z., Lucke,
+K., Lundin, A., MacKean, G., Maggiore, A., Mahony,
+M., Miller, K., Nagarajan, R., Narayanaswami, R., Ni,
+R., Nix, K., Norrie, T., Omernick, M., Penukonda, N.,
+Phelps, A., Ross, J., Ross, M., Salek, A., Samadiani, E.,
+Severn, C., Sizikov, G., Snelham, M., Souter, J., Stein-
+berg, D., Swing, A., Tan, M., Thorson, G., Tian, B.,
+Toma, H., Tuttle, E., Vasudevan, V., Walter, R., Wang,
+W., Wilcox, E., and Yoon, D. H.
+In-datacenter per-
+formance analysis of a tensor processing unit. In Pro-
+ceedings of the 44th Annual International Symposium
+on Computer Architecture (ISCA), pp. 1–12, 2017. doi:
+10.1145/3079856.3080246.
+Karandikar, S., Mao, H., Kim, D., Biancolin, D., Amid,
+A., Lee, D., Pemberton, N., Amaro, E., Schmidt, C.,
+Chopra, A., Huang, Q., Kovacs, K., Nikoli´c, B., Katz,
+R., Bachrach, J., and Asanovi´c, K.
+FireSim: FPGA-
+accelerated cycle-exact scale-out system simulation in
+the public cloud.
+In Proceedings of the 45th An-
+nual International Symposium on Computer Architecture
+(ISCA), pp. 29–42, 2018. doi: 10.1109/ISCA.2018.0001
+4.
+Kwon, H., Chatarasi, P., Sarkar, V., Krishna, T., Pel-
+lauer, M., and Parashar, A. Understanding reuse, per-
+formance, and hardware cost of DNN dataflow: A data-
+centric approach.
+In Proceedings of the 52nd Annual
+IEEE/ACM International Symposium on Microarchitec-
+ture, pp. 754–768, 2019. doi: 10.1145/3352460.335825
+2.
+Lee, S., Woo, S.-t., Jin, J.-g., Lee, C., and Park, E.
+AMQ: Enabling AutoML for mixed-precision weight-
+only quantization of large language models.
+In Pro-
+ceedings of the 2025 Conference on Empirical Meth-
+ods in Natural Language Processing (EMNLP), pp.
+35532–35550. Association for Computational Linguis-
+tics, 2025. doi: 10.18653/v1/2025.emnlp-main.1799.
+Li, X., Xing, Z., Li, Y., Qu, L., Zhen, H.-L., Yao, Y., Liu,
+W., Pan, S. J., and Yuan, M. KVTuner: Sensitivity-aware
+layer-wise mixed-precision KV cache quantization for
+efficient and nearly lossless LLM inference. In Proceed-
+ings of the 42nd International Conference on Machine
+Learning (ICML), volume 267 of Proceedings of Ma-
+chine Learning Research, pp. 36451–36485, 2025.
+Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M.,
+Wang, W.-C., Xiao, G., Dang, X., Gan, C., and Han,
+S. AWQ: Activation-aware weight quantization for on-
+device LLM compression and acceleration. In Proceed-
+ings of Machine Learning and Systems (MLSys), vol-
+ume 6, 2024.
+Mach, S., Schuiki, F., Zaruba, F., and Benini, L.
+FP-
+new: An open-source multiformat floating-point unit ar-
+chitecture for energy-proportional transprecision com-
+puting.
+IEEE Transactions on Very Large Scale In-
+tegration (VLSI) Systems, 29(4):774–787, 2021.
+doi:
+10.1109/TVLSI.2020.3047088.
+Open Compute Project. OCP Microscaling Formats (MX)
+Specification. Technical Report Version 1.0, Open Com-
+pute Project, September 2023. URL https://www.
+opencompute.org/documents/ocp-microsc
+aling-formats-mx-v1-0-spec-final-pdf.
+Parashar, A., Raina, P., Shao, Y. S., Chen, Y.-H., Ying,
+V. A., Mukkara, A., Venkatesan, R., Khailany, B., Keck-
+ler, S. W., and Emer, J.
+Timeloop: A systematic ap-
+proach to DNN accelerator evaluation. In IEEE Interna-
+tional Symposium on Performance Analysis of Systems
+and Software (ISPASS), pp. 304–315, 2019.
+Sze, V., Chen, Y.-H., Yang, T.-J., and Emer, J. S.
+Effi-
+cient processing of deep neural networks: A tutorial and
+survey. Proceedings of the IEEE, 105(12):2295–2329,
+2017. doi: 10.1109/JPROC.2017.2761740.
+Wang, J., Bishop, K., and Li, A. MFSA: A multi-format
+systolic array with native micro scaling support, 2026.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Wang, K., Liu, Z., Lin, Y., Lin, J., and Han, S.
+HAQ:
+Hardware-aware automated quantization with mixed
+precision. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR),
+pp. 8612–8620, 2019.
+Widrow, B., Koll´ar, I., and Liu, M.-C. Statistical theory of
+quantization. IEEE Transactions on Instrumentation and
+Measurement, 45(2):353–361, 1996. doi: 10.1109/19.4
+92748.
+Wipfli, M., ˙Islamo˘glu, G., Kunhi Purayil, N., Garofalo, A.,
+and Benini, L. VMXDOTP: A RISC-V vector ISA ex-
+tension for efficient microscaling (MX) format acceler-
+ation.
+In 2026 Design, Automation & Test in Europe
+Conference (DATE), 2026. doi: 10.23919/DATE69613
+.2026.11539385.
+Wu, Y. N., Emer, J. S., and Sze, V.
+Accelergy: An
+architecture-level energy estimation methodology for ac-
+celerator designs. In IEEE/ACM International Confer-
+ence on Computer-Aided Design (ICCAD), 2019.
+Xiao, G., Lin, J., Seznec, M., Wu, H., Demouth, J., and
+Han, S.
+SmoothQuant: Accurate and efficient post-
+training quantization for large language models. In Pro-
+ceedings of the 40th International Conference on Ma-
+chine Learning, volume 202 of Proceedings of Machine
+Learning Research, pp. 38087–38099. PMLR, 2023.
+URL https://proceedings.mlr.press/v2
+02/xiao23c.html.
+Zhao, Y., Lin, C.-Y., Zhu, K., Ye, Z., Chen, L., Zheng,
+S., Ceze, L., Krishnamurthy, A., Chen, T., and Kasikci,
+B. Atom: Low-bit quantization for efficient and accurate
+LLM serving. In Proceedings of Machine Learning and
+Systems (MLSys), volume 6, pp. 196–209, 2024.
+Zheng, Z., Song, X., and Liu, C. MixLLM: LLM quan-
+tization with global mixed-precision between output-
+features and highly-efficient system design. In Proceed-
+ings of Machine Learning and Systems (MLSys), 2026.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+A
+ADDITIONAL EVALUATION RESULTS
+A.1
+Area–Accuracy Trade-offs
+Figure 6 extends the main-text 8×8 analysis to all MX for-
+mats and array sizes, showing the measured area–accuracy
+trade-offs and configurations selected by the search.
+A.2
+Energy–Accuracy Trade-offs
+Figure 7 presents the corresponding energy–accuracy
+trade-offs across all nine configurations.
+A.3
+Cross-Model Perplexity and Performance
+Tables 6–10 apply TinyLlama-selected configurations (Ta-
+ble 2) to five LLMs without retuning or re-imposing per-
+plexity targets. Perplexity uses WikiText-2 (16 windows
+of 2,048 tokens, seed 0), with MLP linears and lm head
+mapped to the array. ∆vs op.-only compares against MX
+operands with lossless products and BF16 accumulation;
+all other ∆values compare against all-BF16 at the same
+size. Hardware area, energy, and power match Table 3; ∗
+marks power derived from energy per operation.
+FireSim cycle-accurate simulation (Karandikar et al., 2018)
+measures a 32-token prefill after a 2,048-token KV cache,
+with BF16 attention. Cycle ∆compares against a BF16
+systolic array (negative is faster); reported cycles equal
+BF16 cycles times (1 + ∆).
+A.4
+Zero-Shot Task Accuracy
+Table 11 evaluates seven tasks on TinyLlama-1.1B. Se-
+lected MXFP8 and MXFP6 configurations change mean
+accuracy by at most 0.91 points relative to all-BF16;
+MXFP4 loses 2.31, 2.03 and 2.46 points at 8 × 8, 16 × 16
+and 32 × 32. Across all nine configurations, selected prod-
+uct and accumulator precisions change mean accuracy by
+at most 0.7 points relative to operand-only MX.
+A.5
+Code Generation
+Table 5 tests whether the selected configurations hold up
+on generation, where errors can compound over many de-
+coding steps.
+We run Llama-3.1-8B (base) on all 164
+HumanEval problems (lm-eval, 0-shot, greedy decoding,
+pass@1) at 16×16, with the MLP linears and lm head
+through the array and attention in BF16, as in the cross-
+model runs. No selected configuration differs significantly
+from operand-only MX: the product and accumulator pre-
+cisions change pass@1 by +3.7, −3.0 and +0.6 points for
+MXFP8, MXFP6 and MXFP4, against a paired 95% inter-
+val of about ±5.6–6.7 points. MXFP8 and MXFP6 are no
+worse than all-BF16. MXFP4 loses 5.5 points, and that loss
+comes from operand quantization (operand-only MXFP4
+loses 6.1), not from the selected product and accumulators.
+The +6.1 for operand-only MXFP6 is within the spread ex-
+pected over these comparisons and is not an improvement
+we claim.
+Configuration
+pass@1 (%)
+∆vs BF16
+∆vs op.-only
+All-BF16
+33.5
+Op.-only MXFP8
+34.1
++0.6
+Op.-only MXFP6
+39.6
++6.1
+Op.-only MXFP4
+27.4
+−6.1
+Selected MXFP8
+37.8
++4.3
++3.7
+Selected MXFP6
+36.6
++3.0
+−3.0
+Selected MXFP4
+28.0
+−5.5
++0.6
+Table 5. Llama-3.1-8B HumanEval pass@1 at 16×16.
+164
+problems, 0-shot, greedy. ∆in percentage points, paired over
+the same problems (95% interval about ±5–7 points).
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+0.65
+0.70
+0.75
+0.80
+0.5
+1.0
+1.5
+(a) MXFP8, 8×8
+e5m3x3+e5m4x4
+0.67
+0.68
+0.69
+1.0
+1.5
+(b) MXFP8, 16×16
+e5m4x11+e5m5x4
+0.67
+0.68
+0.69
+0.70
+0.5
+1.0
+1.5
+2.0
+(c) MXFP8, 32×32
+e5m4x19+e5m5x12
+0.60
+0.65
+0.70
+0.75
+0.80
+2.5
+3.0
+3.5
+(d) MXFP6, 8×8
+e5m3x5+e5m5x2
+0.60
+0.62
+0.64
+0.66
+0.68
+0.70
+2
+3
+4
+(e) MXFP6, 16×16
+e5m3x6+e5m4x8+e5m5x1
+0.65
+0.70
+0.75
+2
+4
+6
+(f) MXFP6, 32×32
+e5m3x2+e5m4x29
+0.60
+0.65
+0.70
+0.75
+0.80
+16.0
+16.5
+17.0
+17.5
+18.0
+(g) MXFP4, 8×8
+e5m3x4+e5m4x3
+0.60
+0.62
+0.64
+0.66
+0.68
+mesh area (BF16 = 1), lower is better
+17
+18
+19
+(h) MXFP4, 16×16
+e5m3x6+e5m4x6+e5m5x2+e5m6x1
+0.60
+0.62
+0.64
+0.66
+0.68
+18
+20
+22
+(i) MXFP4, 32×32
+e5m3x4+e5m4x24+e5m6x3
+perplexity increase over all-BF16 (%)
+searched, under target
+searched, over target
+not searched, under target
+not searched, over target
+target
+final choice
+Figure 6. PE-array area versus perplexity, all formats and array sizes. Each point is one measured accumulator ladder at the selected
+d and product format; area is normalized to the all-BF16 PE-array of the same size. Grey ladders were measured outside the search,
+mainly an exhaustive 8×8 sweep that validates the search’s choice. The 16×16 and 32×32 axes are zoomed; triangles mark points
+beyond the edge.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+0.75
+0.80
+0.85
+0.90
+0.5
+1.0
+1.5
+(a) MXFP8, 8×8
+e5m3x3+e5m4x4
+0.69
+0.70
+0.71
+0.72
+1.0
+1.5
+(b) MXFP8, 16×16
+e5m4x11+e5m5x4
+0.67 0.68 0.69 0.70 0.71
+0.5
+1.0
+1.5
+2.0
+(c) MXFP8, 32×32
+e5m4x19+e5m5x12
+0.70
+0.75
+0.80
+0.85
+2.5
+3.0
+3.5
+(d) MXFP6, 8×8
+e5m3x5+e5m5x2
+0.62 0.64 0.66 0.68 0.70 0.72
+2
+3
+4
+(e) MXFP6, 16×16
+e5m3x6+e5m4x8+e5m5x1
+0.60
+0.65
+0.70
+0.75
+0.80
+2
+4
+6
+(f) MXFP6, 32×32
+e5m3x2+e5m4x29
+0.75
+0.80
+0.85
+0.90
+16.0
+16.5
+17.0
+17.5
+18.0
+(g) MXFP4, 8×8
+e5m3x4+e5m4x3
+0.62 0.64 0.66 0.68 0.70 0.72
+energy per op (BF16 = 1), lower is better
+17
+18
+19
+(h) MXFP4, 16×16
+e5m3x6+e5m4x6+e5m5x2+e5m6x1
+0.58 0.60 0.62 0.64 0.66 0.68
+18
+20
+22
+(i) MXFP4, 32×32
+e5m3x4+e5m4x24+e5m6x3
+perplexity increase over all-BF16 (%)
+searched, under target
+searched, over target
+not searched, under target
+not searched, over target
+target
+final choice
+Figure 7. Energy versus perplexity, all formats and array sizes. Each point is one measured accumulator ladder at the selected d and
+product format; energy is whole-accelerator energy per operation, normalized to the all-BF16 datapath. Grey ladders were measured
+outside the search, mainly an exhaustive 8×8 sweep that validates the search’s choice. The 16×16 and 32×32 axes are zoomed; triangles
+mark points beyond the edge.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Format
+Size
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+Cycles
+(109)
+∆
+MXFP8
+8×8
+5.8425
++0.68%
++0.38%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+4.19
+-6.4%
+16×16
+5.7580
++0.54%
++0.22%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+1.15
+-48.3%
+32×32
+5.7262
++0.68%
++0.28%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+1.00
+-45.9%
+MXFP6
+8×8
+5.9260
++2.12%
++0.72%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+4.19
+-6.4%
+16×16
+5.8490
++2.13%
++0.66%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+1.14
+-48.5%
+32×32
+5.7973
++1.93%
++0.63%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+0.61
+-66.9%
+MXFP4
+8×8
+6.3701
++9.78%
++0.30%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+4.19
+-6.4%
+16×16
+6.3058
++10.11% +0.54%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+1.14
+-48.5%
+32×32
+6.2901
++10.60% +0.86%
+0.78
+-36.1%
+1.803
+-35.2% 1541.5∗-36.1%
+0.61
+-66.9%
+Table 6. Mistral-7B (v0.3). BF16 baseline (8/16/32): PPL 5.8027 / 5.7270 / 5.6875; cycles 4.48 / 2.22 / 1.85×109.
+Format
+Size
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+Cycles
+(109)
+∆
+MXFP8
+8×8
+6.7969
++2.02%
++1.07%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+4.19
+-6.4%
+16×16
+6.6256
++1.69%
++0.64%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+1.15
+-48.3%
+32×32
+6.5830
++2.27%
++1.17%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+1.00
+-45.9%
+MXFP6
+8×8
+7.0196
++5.36%
++1.42%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+4.19
+-6.4%
+16×16
+6.8558
++5.23%
++1.46%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+1.14
+-48.5%
+32×32
+6.8147
++5.87%
++1.90%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+0.61
+-66.9%
+MXFP4
+8×8
+8.5231
++27.93% +0.71%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+4.19
+-6.4%
+16×16
+8.3569
++28.26% +1.09%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+1.14
+-48.5%
+32×32
+8.2729
++28.52% +1.74%
+0.78
+-36.1%
+1.803
+-35.2% 1541.5∗-36.1%
+0.61
+-66.9%
+Table 7. Llama-3.1-8B. BF16 baseline (8/16/32): PPL 6.6623 / 6.5154 / 6.4370; cycles 4.48 / 2.22 / 1.85×109.
+Format
+Size
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+Cycles
+(109)
+∆
+MXFP8
+8×8
+5.2899
++0.47%
++0.28%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+3.94
+-6.4%
+16×16
+5.1773
++0.58%
++0.28%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+1.10
+-48.9%
+32×32
+5.1261
++0.60%
++0.15%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+0.99
+-47.2%
+MXFP6
+8×8
+5.3917
++2.40%
++0.97%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+3.94
+-6.4%
+16×16
+5.3163
++3.28%
++1.65%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+1.10
+-49.1%
+32×32
+5.2106
++2.26%
++0.68%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+0.60
+-67.7%
+MXFP4
+8×8
+6.0384
++14.68% +0.00%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+3.94
+-6.4%
+16×16
+5.9343
++15.29% +0.45%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+1.10
+-49.1%
+32×32
+5.8293
++14.41% +0.34%
+0.78
+-36.1%
+1.803
+-35.2% 1541.5∗-36.1%
+0.60
+-67.8%
+Table 8. Llama-2-7B. BF16 baseline (8/16/32): PPL 5.2652 / 5.1473 / 5.0953; cycles 4.21 / 2.16 / 1.87×109.
+
+
+MIAO: Microscaling Intermediate Accumulation Optimization
+Format
+Size
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+Cycles
+(109)
+∆
+MXFP8
+8×8
+4.7631
++0.58% +0.47%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+7.42
+-6.5%
+16×16
+4.6824
++0.46% +0.24%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+2.05
+-50.9%
+32×32
+4.6431
++0.56% +0.25%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+1.87
+-48.5%
+MXFP6
+8×8
+4.8032
++1.43% +0.35%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+7.42
+-6.5%
+16×16
+4.7388
++1.67% +0.60%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+2.04
+-51.1%
+32×32
+4.7041
++1.89% +0.69%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+1.12
+-69.3%
+MXFP4
+8×8
+5.1263
++8.25% +0.23%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+7.42
+-6.5%
+16×16
+5.0219
++7.74% +0.80%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+2.04
+-51.1%
+32×32
+4.9611
++7.45% +0.14%
+0.78
+-36.1%
+1.803
+-35.2% 1541.5∗-36.1%
+1.11
+-69.4%
+Table 9. Llama-2-13B. BF16 baseline (8/16/32): PPL 4.7357 / 4.6611 / 4.6170; cycles 7.94 / 4.17 / 3.64×109.
+Format
+Size
+Perplexity
+∆vs
+BF16
+∆vs
+op.-only
+Energy
+(pJ/op)
+∆
+Area
+(mm2)
+∆
+Power
+(mW)
+∆
+Cycles
+(109)
+∆
+MXFP8
+8×8
+5.7727
++0.95%
+-2.40%
+6.39
+-23.7%
+0.115
+-34.5%
+197.4
+-23.7%
+7.88
+-6.3%
+16×16
+5.4376
++1.75%
++0.56%
+4.19
+-30.7%
+0.471
+-32.4%
+517.2
+-30.7%
+2.15
+-50.8%
+32×32
+5.3753
++2.87%
++1.55%
+3.65
+-32.5%
+1.892
+-32.0%
+1804.5
+-32.5%
+1.95
+-48.9%
+MXFP6
+8×8
+5.9160
++3.45%
++0.39%
+1.65
+-28.6%
+0.108
+-38.5%
+203.8∗
+-28.6%
+7.87
+-6.4%
+16×16
+5.6387
++5.52%
++1.14%
+1.12
+-34.5%
+0.445
+-36.2%
+553.4∗
+-34.5%
+2.15
+-51.0%
+32×32
+5.5432
++6.09%
++1.88%
+0.99
+-36.1%
+1.820
+-34.6%
+1960.0
+-36.1%
+1.15
+-69.7%
+MXFP4
+8×8
+7.1379
++24.82% +1.24%
+1.45
+-26.0%
+0.108
+-38.7%
+178.6
+-26.0%
+7.87
+-6.4%
+16×16
+6.8849
++28.84% +0.46%
+0.91
+-34.1%
+0.441
+-36.8%
+449.6∗
+-34.1%
+2.15
+-51.0%
+32×32
+6.7903
++29.95% +0.76%
+0.78
+-36.1%
+1.803
+-35.2% 1541.5∗-36.1%
+1.15
+-69.7%
+Table 10. Qwen2.5-14B. BF16 baseline (8/16/32): PPL 5.7186 / 5.3438 / 5.2251; cycles 8.41 / 4.38 /3.81×109.
+Size
+Configuration
+ARC-e
+ARC-c
+HellaSwag
+PIQA
+WinoGrande
+BoolQ
+LAMBADA Mean ∆mean
+8×8
+All-BF16
+54.0
+31.8
+56.8
+76.0
+58.0
+62.2
+59.6
+56.91
+Op.-only MXFP8 55.0 (+1.0)
+31.8 (+0.0)
+56.2 (−0.6)
+75.4(−0.6)
+57.8 (−0.2)
+61.8 (−0.4)
+59.4 (−0.2)
+56.77
+−0.14
+Op.-only MXFP6 55.8 (+1.8) 30.0 (−1.8) 56.4 (−0.4) 74.8 (−1.2)
+58.2 (+0.2)
+63.0 (+0.8)
+59.0 (−0.6)
+56.74
+−0.17
+Op.-only MXFP4 50.8 (−3.2) 31.8 (+0.0)
+54.0 (−2.8)
+72.0(−4.0)
+55.6 (−2.4)
+61.2 (−1.0)
+53.2 (−6.4)
+54.09
+−2.83
+Selected MXFP8
+54.4 (+0.4) 31.4 (−0.4) 56.0 (−0.8) 75.4 (−0.6)
+58.2 (+0.2)
+62.0 (−0.2)
+59.6 (+0.0)
+56.71
+−0.20
+Selected MXFP6
+55.2 (+1.2)
+32.2 (+0.4)
+56.0 (−0.8)
+72.8(−3.2)
+58.0 (+0.0)
+61.8 (−0.4)
+57.4 (−2.2)
+56.20
+−0.71
+Selected MXFP4
+51.2 (−2.8) 31.8 (+0.0)
+54.6 (−2.2) 72.4 (−3.6)
+57.4 (−0.6)
+61.6 (−0.6)
+53.2 (−6.4)
+54.60
+−2.31
+16×16
+All-BF16
+55.0
+32.2
+56.4
+76.6
+57.4
+61.0
+58.6
+56.74
+Op.-only MXFP8 54.6 (−0.4) 32.8 (+0.6)
+57.2 (+0.8)
+75.2(−1.4)
+59.2 (+1.8)
+62.2 (+1.2)
+59.4 (+0.8)
+57.23
++0.49
+Op.-only MXFP6 53.0 (−2.0) 31.2 (−1.0)
+57.0 (+0.6)
+74.2 (−2.4)
+57.2 (−0.2)
+62.6 (+1.6)
+58.0 (−0.6)
+56.17
+−0.57
+Op.-only MXFP4 51.8 (−3.2) 32.2 (+0.0)
+53.4 (−3.0)
+73.2(−3.4)
+58.0 (+0.6)
+63.8 (+2.8)
+54.4 (−4.2)
+55.26
+−1.49
+Selected MXFP8
+54.4 (−0.6) 32.0 (−0.2)
+57.6 (+1.2)
+75.6 (−1.0)
+60.0 (+2.6)
+62.8 (+1.8)
+60.0 (+1.4)
+57.49
++0.74
+Selected MXFP6
+54.8 (−0.2) 31.2 (−1.0) 55.8 (−0.6)
+74.0(−2.6)
+59.4 (+2.0)
+63.2 (+2.2)
+58.8 (+0.2)
+56.74
++0.00
+Selected MXFP4
+54.2 (−0.8) 32.2 (+0.0)
+54.6 (−1.8) 73.2 (−3.4)
+54.8 (−2.6)
+61.0 (+0.0)
+53.0 (−5.6)
+54.71
+−2.03
+32×32
+All-BF16
+54.8
+33.0
+56.4
+76.2
+58.4
+61.8
+59.4
+57.14
+Op.-only MXFP8 54.8 (+0.0) 31.4 (−1.6)
+56.8 (+0.4)
+76.0(−0.2)
+60.0 (+1.6)
+62.4 (+0.6)
+59.2 (−0.2)
+57.23
++0.09
+Op.-only MXFP6 54.0 (−0.8) 31.6 (−1.4) 54.8 (−1.6) 74.2 (−2.0)
+60.4 (+2.0)
+61.4 (−0.4)
+58.6 (−0.8)
+56.43
+−0.71
+Op.-only MXFP4 52.4 (−2.4) 30.6 (−2.4) 53.8 (−2.6)
+72.8(−3.4)
+55.6 (−2.8)
+61.2 (−0.6)
+51.8 (−7.6)
+54.03
+−3.11
+Selected MXFP8
+53.8 (−1.0) 31.2 (−1.8)
+56.4 (+0.0)
+76.0 (−0.2)
+61.0 (+2.6)
+62.4 (+0.6)
+59.0 (−0.4)
+57.11
+−0.03
+Selected MXFP6
+53.4 (−1.4) 33.0 (+0.0)
+55.2 (−1.2)
+75.0(−1.2)
+56.0 (−2.4)
+62.8 (+1.0)
+58.2 (−1.2)
+56.23
+−0.91
+Selected MXFP4
+51.4 (−3.4) 32.6 (−0.4) 53.2 (−3.2) 74.0 (−2.2)
+57.4 (−1.0)
+61.6 (−0.2)
+52.6 (−6.8)
+54.69
+−2.46
+Table 11. TinyLlama zero-shot accuracy (%). First 500 examples per task (lm-eval); acc norm for ARC-e/c, HellaSwag, PIQA; acc
+for WinoGrande, BoolQ, LAMBADA (OpenAI). Parentheses: percentage-point change from same-size all-BF16; op.-only uses lossless
+products and BF16 accumulation. Approximate 95% task uncertainty: ±4 points.

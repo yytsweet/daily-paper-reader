@@ -1,0 +1,1852 @@
+Bring Back Language to Actions: Restoring VLM capabilities in VLA
+Models via Parameter Merging
+Mohamed Salim Aissi1, Olivier Sigaud1, Laure Soulier 1, Nicolas Thome 1,2,3
+1Sorbonne Université, CNRS, ISIR, F-75005 Paris, France
+2Institut universitaire de France (IUF)
+3International Laboratory on Learning Systems (ILLS)
+{salim.aissi, laure.soulier, olivier.sigaud, nicolas.thome}@isir.upmc.fr
+Abstract
+Vision-Language-Action models (VLAs) are
+obtained by fine-tuning pre-trained Vision-
+Language Models (VLMs) on robot demon-
+stration data, enabling action prediction from
+visual observations and language instructions.
+However, this fine-tuning induces catastrophic
+forgetting, substantially degrading the semantic
+and visual grounding capabilities of the original
+VLM. We address this by merging the parame-
+ters of a VLM and its VLA derivative without
+retraining either model. Concretely, we extract
+the task vector — the difference between VLA
+and VLM weights — and decompose it via
+Singular Value Decomposition. For each com-
+ponent, we learn a scalar mixing coefficient
+controlling how much of the VLA adaptation
+is retained, optimised to jointly preserve ac-
+tion prediction and vision-language capabilities.
+Experiments show that our merged model per-
+forms well on both axes simultaneously, consis-
+tently outperforming established merging base-
+lines.
+1
+Introduction
+The ability to reason about complex environments
+and to plan sequences of actions has long been a
+central challenge in artificial intelligence. Large
+Language Models (LLMs) and Vision-Language
+Models (VLMs) have made significant strides in
+this direction, combining reasoning, visual percep-
+tion, and scene understanding into unified models
+capable of high-level instruction following, task
+decomposition, and environment description (Wei
+et al., 2023; Yao et al., 2023; Radford et al., 2021;
+Liu et al., 2023b; Dai et al., 2026; Aissi et al., 2026)
+— capabilities that make them compelling building
+blocks for autonomous robotic agents. However,
+these models remain confined to perception and rea-
+soning, and cannot directly produce the low-level
+motor commands required for physical interaction.
+Vision-Language-Action models (VLAs) bridge
+this gap by fine-tuning pre-trained VLMs on robot
+demonstration data (O’Neill et al., 2025; Walke
+et al., 2023), enabling them to predict actions
+directly from visual observations and language
+instructions (Brohan et al., 2023; Kim et al.,
+2024). However, this fine-tuning comes at a signifi-
+cant cost: the action objective progressively over-
+writes the weight-space directions encoding visual-
+language understanding (Hancock et al., 2025),
+yielding a specialised model that excels at low-
+level control but can no longer reliably perform the
+high-level semantic reasoning needed for robust,
+generalist robotic agents.
+This tension between action specialisation and
+semantic preservation is a fundamental obstacle to
+building robotic systems that are both capable of
+language modelling and fine-grained motor control
+(see Figure 1). Existing approaches to mitigating
+this degradation typically require architectural mod-
+ifications or costly co-training on mixed datasets
+(Zawalski et al., 2024; Hancock et al., 2025), mak-
+ing them difficult to apply post-hoc to already fine-
+tuned VLAs. Model merging offers a compelling
+alternative (Li et al., 2025; Yadav et al., 2025): by
+combining the parameters of a VLM and a VLA,
+one can in principle recover a model that retains
+both action prediction and vision-language capabil-
+ities. However, naive uniform blending treats all pa-
+rameters equally and fails to account for the hetero-
+geneous roles played by different weight matrices
+across the two models, yielding suboptimal trade-
+offs between semantic and action performance.
+In this work, we investigate how to merge a VLM
+and a VLA such that the resulting model retains
+the action capabilities acquired during fine-tuning
+while recovering the vision-language understand-
+ing of the original VLM. To this end, we extract the
+task vector by subtracting the VLM weights from
+those of the VLA and decompose it using Singu-
+lar Value Decomposition to expose the individual
+components of this adaptation. For each such di-
+rection, we learn a scalar coefficient that controls
+arXiv:2611.18891v1  [cs.AI]  13 Nov 2026
+
+
+Describe the scene
+A: A robot arm is
+on a table with a
+mug nearby.
+no action output
+Language
+Actions
+G: pick up the mug
+VLM
+VLA
+Describe the scene
+A: —
+G: pick up the mug
+[a₁, a₂, … a₁₀]
+Language
+Actions
+no text output
+Ours
+Describe the scene
+A: —
+G: pick up the mug
+[a₁, a₂, … a₁₀]
+Language
+Actions
+A: A robot arm is
+on a table with a
+mug nearby.
+Model merging
+0
+10
+20
+30
+Language capability (ROUGE-L 
+)
+0
+20
+40
+60
+80
+100
+Robot performance (mean LIBERO SR 
+)
+Good actions
+poor language
+Good language
+poor actions
+Poor
+on both
+  Good in both worlds
+PaliGemma
+(VLM)
+AdaMerging
+(
+. )
+Fast (VLA)
+. (VLA)
+Model
+Soup
+= 0.5
+Model
+Soup
+= 0.3
+Model
+Soup
+= 0.9
+DARE
+SLERP
+Ours (
+Fast)
+Ours (
+. )
+Language vs Robot performance trade-off
+Figure 1: (Left) Given the same visual scene, a VLM responds accurately to descriptive language prompts but
+produces no action output. Fine-tuning into a VLA enables action prediction from a task goal, but at the cost of
+language grounding — the VLA generates incoherent text when prompted with the same descriptive query. Our
+merged model recovers both capabilities, producing coherent language responses while retaining the ability to
+predict actions. (Right) The VLM achieves strong language performance but cannot act, while VLAs excel at
+manipulation but lose language capability. Our merged models are the only ones that achieve the best of both worlds,
+reaching the upper-right region of the trade-off space.
+how much of the VLA adaptation is retained in the
+merged model, jointly preserving action prediction
+performance and the original vision-language ca-
+pabilities of the VLM. We demonstrate that this
+approach consistently outperforms uniform blend-
+ing and established merging baselines across both
+vision-language benchmarks and robotic manipula-
+tion tasks, on two distinct VLA architectures.
+Our contributions are as follows:
+• A post-hoc, lightweight merging method that
+decomposes the VLM–VLA task vector via SVD
+and learns per-component coefficients to jointly
+recover language understanding and preserve ac-
+tion capabilities, requiring only the optimisation
+of a small set of scalar merging parameters while
+keeping both source models fully frozen.
+• An ablation study justifying fine-grained merg-
+ing, showing per-component coefficients are neces-
+sary where global or per-layer scalars fail.
+• A structural analysis of the fine-tuning direc-
+tions at multiple scales of the SVD decomposition,
+identifying which components of the adaptation
+must be preserved to reconcile vision-language un-
+derstanding and action prediction in the merged
+model.
+Together, these contributions offer a practi-
+cal and substantially cheaper path toward robotic
+agents that combine reliable low-level control with
+the high-level semantic reasoning of their underly-
+ing VLM.
+2
+Related Work
+2.1
+Vision Language Action Models
+Vision-Language-Action (VLA) models extend
+Vision-Language Models (VLMs) by fine-tuning
+them on large-scale robot demonstration data
+(O’Neill et al., 2025), enabling them to act as
+generalist policies that directly generate low-level
+actions (Brohan et al., 2023; Ghosh et al., 2024;
+Kim et al., 2024). Actions are produced either
+autoregressively (Kim et al., 2024; Pertsch et al.,
+2025) or via continuous decoding such as flow
+matching (Black et al., 2024). However, this fine-
+tuning causes them to largely lose their original
+vision–language capabilities through catastrophic
+forgetting.
+Some works sidestep this issue by keeping the
+VLM frozen and training only a lightweight ac-
+tion module (Shukor et al., 2025; Wen et al., 2025),
+but this limits the model’s ability to fully adapt its
+representations for embodied control. Others rein-
+troduce text tasks during training either by training
+VLAs to generate both actions and text simultane-
+ously (Zawalski et al., 2024; Black et al., 2025)
+or by aligning action representations with the lan-
+guage objective (Hancock et al., 2025). Both ap-
+proaches require large-scale co-training to recover
+knowledge already present in the initial VLM. In
+contrast, our approach operates post-hoc on an al-
+ready fine-tuned VLA, requiring no additional train-
+ing of either source model.
+
+
+Figure 2: Overview of our VLM–VLA merging method. (a) The task vector ∆(l) is extracted by subtracting the
+VLM weights from the VLA weights for each layer l. (b) ∆(l) is decomposed via Singular Value Decomposition,
+revealing the orthogonal directions of adaptation introduced during VLA fine-tuning. (c) A scalar mixing coefficient
+α(l)
+k
+is assigned to each singular component, controlling how much of each direction is retained in the merged
+model. The coefficients α are optimised by minimising a composite objective that jointly penalises degradation of
+language generation quality and action prediction accuracy with respect to both source models.
+2.2
+Model Merging
+Model merging has emerged as a cost-effective
+alternative to full retraining, enabling the combi-
+nation of specialised models into a single capable
+model without additional data or compute. Model
+Soup (Wortsman et al., 2022) averages the weights
+of models fine-tuned from the same checkpoint.
+SLERP (Jang et al., 2024) interpolates along the
+spherical geodesic rather than linearly, better pre-
+serving parameter norms.
+TIES (Yadav et al.,
+2023) resolves sign conflicts across multiple task
+vectors before averaging, requiring at least two
+independently fine-tuned models and thus not di-
+rectly applicable to our setting. DARE (Yu et al.,
+2024) randomly drops a fraction of task vector pa-
+rameters before rescaling the remainder. Fisher
+Merging (Matena and Raffel, 2022) weights each
+parameter by its diagonal Fisher information, but
+requires computing and storing a matrix as large as
+the full model, making it costly at billion-parameter
+scale. AdaMerging (Yang et al., 2024) learns task-
+wise or layer-wise merging weights but does not
+decompose the task vector into finer-grained com-
+ponents. All these methods operate with fixed or
+coarse-grained coefficients and none have been ap-
+plied to reconciling a VLM with its VLA derivative.
+Closer to our work, decomposing task vectors via
+SVD has already been proposed to reduce inter-
+ference between models trained on different tasks
+Gargiulo et al. (2025). We build on this insight and
+extend it to the VLM–VLA setting, where the ob-
+jective is to reconcile two fundamentally different
+capabilities — language understanding and action
+prediction — rather than reduce task interference.
+3
+Method
+3.1
+Problem Formulation
+Let θVLM and θVLA denote the parameters of a pre-
+trained Vision-Language Model and a fine-tuned
+Vision-Language-Action model, respectively. Both
+models share a common backbone architecture.
+The VLM initially possesses strong language and
+visual grounding capabilities, while the VLA has
+been further trained to predict robotic actions, al-
+beit at the cost of partial degradation of its original
+vision-language abilities. Our merging procedure
+is applied to all layers that are common to both
+architectures; VLA-specific components such as
+the action head are left unchanged and carried over
+directly into the merged model.
+Our goal is to construct a merged model θmerged
+that jointly retains the action prediction capabilities
+of the VLA and the vision-language understanding
+of the VLM (Figure 2a). We define it as a weighted
+combination of both source models, controlled by
+a set of mixing coefficients α:
+θ(l)
+merged = (1−α(l)) θ(l)
+VLM+α(l) θ(l)
+VLA, l ∈{1, . . . , L}
+(1)
+
+
+where L is the total number of layers and α(l) ∈
+[0, 1] controls the contribution of each source
+model at layer l. The central question is how to
+determine α — and at what granularity — such
+that the merged model best preserves both capa-
+bilities. In the following, we show that operating
+at the level of individual singular components of
+the per-layer task vector provides the necessary
+fine-grained control.
+3.2
+Task Vector and SVD Decomposition
+For each layer l, we define the task vector as the
+difference between the VLA and VLM weight ma-
+trices (Figure 2a):
+∆(l) = θ(l)
+VLA −θ(l)
+VLM
+(2)
+Substituting into Eq. (1), the merged model can
+be equivalently written as:
+θ(l)
+merged = θ(l)
+VLM + α(l) ∆(l)
+(3)
+This formulation shows that merging amounts
+to scaling the task vector by α(l) at each layer. To
+obtain finer-grained control, we decompose ∆(l)
+into its individual directions via Singular Value De-
+composition, as (Gargiulo et al., 2025) (Figure 2b),
+allowing a separate coefficient to be assigned to
+each direction independently:
+∆(l) =
+r(l)
+X
+k=1
+σ(l)
+k u(l)
+k v(l)⊤
+k
+(4)
+where σ(l)
+1
+≥· · · ≥σ(l)
+r(l) are the singular val-
+ues ranked by importance and r(l) is the rank of
+∆(l). Each term σ(l)
+k u(l)
+k v(l)⊤
+k
+captures a distinct di-
+rection of adaptation introduced during VLA fine-
+tuning.
+Substituting the SVD decomposition of Eq. (4)
+into Eq. (3), the merged model becomes:
+θ(l)
+merged = θ(l)
+VLM + α(l)
+r(l)
+X
+k=1
+σ(l)
+k u(l)
+k v(l)⊤
+k
+(5)
+We now replace the single scalar α(l) by a per-
+component coefficient α(l)
+k
+∈[0, 1] (Figure 2c),
+one for each singular direction, yielding our final
+merging equation:
+θ(l)
+merged = θ(l)
+VLM Prism +
+r(l)
+X
+k=1
+α(l)
+k σ(l)
+k u(l)
+k v(l)⊤
+k
+(6)
+When all α(l)
+k
+= 0, the layer reduces to the
+VLM. When all α(l)
+k
+= 1, it recovers the full VLA
+adaptation. The global scalar merging of Eq. (3) is
+recovered as the special case where all coefficients
+are equal to α. Importantly, both θVLM and the
+SVD decomposition of the task vector are frozen
+throughout — the only free parameters are the mix-
+ing coefficients α, which are optimised to simulta-
+neously satisfy the language understanding objec-
+tive of the VLM and the action prediction objective
+of the VLA, as described in Section 3.3.
+3.3
+Training Objective
+To optimise the mixing coefficients α, we define
+a composite objective that captures both language
+fidelity and action prediction accuracy, while penal-
+ising excessive deviation from either source model:
+L(α) = λ1Ltext(α) + λ2 · DKL(πα ∥πVLM)
++ λ3Lact(α) + λ4 · DKL(πα ∥πVLA)
+(7)
+where λ1, λ2, λ3, λ4 ≥0 are tunable weight-
+ing hyperparameters (details can be found in Ap-
+pendix A.1). Ltext measures language generation
+quality via negative log-likelihood over a language
+dataset Dtext. Lact measures action prediction qual-
+ity over a robot trajectory dataset Dact; its form de-
+pends on the VLA action head — for an autoregres-
+sive architecture it is the negative log-likelihood
+over action tokens, while for flow matching it is
+the conditional flow matching loss (Lipman et al.,
+2023). The KL divergence terms act as regularis-
+ers, penalising deviation from the pure VLM and
+VLA distributions respectively. Since θ(l)
+merged is a
+differentiable function of α via Eq. (6), L is min-
+imised directly with gradient descent using Adam
+(Kingma and Ba, 2017) (details can be found in
+Appendix A.2).
+4
+Experiments
+4.1
+Experimental Setup
+Models and datasets.
+We apply our merging
+method to PaliGemma-3B (Beyer et al., 2024) as
+the VLM, paired with two VLA variants sharing the
+same architecture: π0-FAST (Pertsch et al., 2025),
+an autoregressive VLA that tokenises actions, and
+π0.5 (Black et al., 2025), a flow matching VLA
+that predicts continuous action chunks via iterative
+denoising. Both VLA variants are obtained by fine-
+tuning PaliGemma on robot demonstration data.
+
+
+All models are kept frozen — only the mixing coef-
+ficients α are optimised via Adam (Kingma and Ba,
+2017) on two complementary datasets built from
+the LIBERO dataset available on LeRobot (Liu
+et al., 2023a; Cadene et al., 2026). For the action
+signal, we relabel existing expert demonstrations
+from the LIBERO dataset with the pure VLA’s own
+predicted action chunks, producing Dact. For the
+language signal, we prompt PaliGemma to caption
+each observed frame, producing a paired dataset
+Dtext = {(xi, ci)} of observations and scene de-
+scriptions.
+Evaluation protocol.
+We evaluate the merged
+model along three axes: vision-language capabili-
+ties, embodied reasoning, and action capabilities.
+For
+vision-language
+capabilities,
+we
+as-
+sess captioning performance on the COCO
+dataset (Lin et al., 2015) using Rouge-L (Lin,
+2004), METEOR (Banerjee and Lavie, 2005) and
+BERTScore (Zhang et al., 2020) metrics, and visual
+question answering performance on VQAv2 (Goyal
+et al., 2017).
+For embodied reasoning, we evaluate accu-
+racy on the EQA benchmark across three ques-
+tion categories — Object State, Spatial, and At-
+tribute Recognition — which probe whether the
+model can answer language questions grounded
+in a robotic setting, bridging the gap between the
+general-domain vision-language evaluations above
+and the action benchmarks below.
+For action capabilities, we evaluate task suc-
+cess rate on the LIBERO task suites — LIBERO-
+Spatial, LIBERO-Goal and LIBERO-Object (Liu
+et al., 2023a) — and report the average success rate
+across tasks for each suite (details can be found in
+Appendix B; additional results on the RoboCasa
+kitchen tasks are also reported in Appendix B.1).
+Baselines.
+We compare our merged model
+against
+a
+set
+of
+baselines.
+The
+VLM
+(PaliGemma (Beyer et al., 2024)) and VLAs (π0-
+FAST and π0.5) serve as upper bounds on language
+and action performance respectively. π0.5 (Black
+et al., 2025) is also a co-trained model that
+jointly optimises language and action objectives
+during training. We further include three estab-
+lished merging strategies that all use a fixed, non-
+learned merging coefficient: Model Soup (Worts-
+man et al., 2022), which linearly interpolates be-
+tween VLM and VLA weights, and which we
+evaluate at four interpolation coefficients α ∈
+{0.3, 0.5, 0.7, 0.9} to characterise the full trade-
+off curve it induces between language and ac-
+tion performance; DARE (Yu et al., 2024), which
+randomly drops a fraction of the task vector pa-
+rameters before rescaling and adding the remain-
+der to the VLM; and SLERP (Jang et al., 2024),
+which interpolates between the two weight vec-
+tors along the spherical geodesic rather than lin-
+early. For the merged baselines, π0FAST is used
+as the VLA backbone.
+We additionally com-
+pare against AdaMerging (Yang et al., 2024),
+which learns a single per-layer coefficient rather
+than per-component ones; we optimise it with the
+same objective (Eq. 7) as our method; we use
+π0.5 as its VLA backbone for direct comparison
+with Oursπ0.5. All stochastic methods — DARE,
+AdaMerging, and our merged models — are av-
+eraged over 10 seeds, with standard deviations re-
+ported in Table 1.
+4.2
+Main Results
+Vision-language capabilities.
+Table 1 reports
+captioning and VQA performance. The pure VLM
+sets the upper bound (33.68 ROUGE-L, 88.98
+BERTScore, 53.87 VQAv2), while both pure VLAs
+degrade severely (π0-FAST: 1.25 ROUGE-L, 9.93
+VQAv2; π0.5: 9.40 ROUGE-L, 8.22 VQAv2 de-
+spite co-training). Model Soup, DARE and SLERP
+offer only modest, comparable recovery (8.32–
+10.11 ROUGE-L), confirming that a single coeffi-
+cient applied uniformly across the task vector can-
+not restore language grounding. AdaMergingπ0.5,
+which shares our training objective but learns only
+a per-layer coefficient, recovers substantially more
+(28.1 ROUGE-L, 87.5 BERTScore, 38.2 VQAv2)
+— but still trails Oursπ0.5 (29.5/87.8/48.7), and,
+as shown below, this comes at the cost of near-
+total collapse on action prediction. Our merged
+models close most of the remaining gap to the
+VLM: Oursπ0F ast reaches 18.6 ROUGE-L / 28.9
+VQAv2, and Oursπ0.5 reaches 29.5 ROUGE-L /
+87.8 BERTScore / 48.7 VQAv2 — nearly match-
+ing the VLM. Recovery is stronger for π0.5 than
+π0-FAST, likely because the latter entangles lan-
+guage and action within a shared autoregressive
+head. Figure 3 illustrates this: π0.5 retains scene-
+relevant keywords (e.g. “Kitchen pan”, “Robot”)
+but loses the language modelling coherence of the
+VLM needed to form descriptions, whereas our
+merged model generates grammatically coherent
+captions that correctly identify objects and their
+spatial relationships. Additional examples can be
+found in Appendix C.3
+
+
+Table 1: Vision-language, embodied reasoning, and robot manipulation performance of all methods. The pure VLM
+cannot act, and both VLAs lose language and reasoning ability despite strong action performance. Existing merging
+baselines largely collapse on manipulation, while our merged models recover strong performance on all three axes
+simultaneously, without retraining either source model.
+VLM
+Capabilities
+Embodied
+Reasoning
+Robot
+Manipulation
+Model
+Type
+Captioning
+VQAv2
+EQA
+Libero
+RougeL
+Meteor
+BERTScore
+Acc
+Obj
+State
+Spatial
+Attri
+Recog
+Spatial
+Goal
+Object
+PaliGemma
+VLM
+33.6
+23.6
+88.9
+53.8
+44.4
+21.7
+32.4
+0.0
+0.0
+0.0
+π0Fast
+VLA
+1.2
+0.5
+68.2
+9.9
+15.5
+5.7
+3.8
+70.0
+82.0
+88.0
+π0.5
+9.4
+1.5
+76.5
+8.2
+8.8
+0
+0
+88.0
+90.0
+96.0
+Model Soupα=0.3
+Merged
+14.6
+11.4
+82.7
+32.4
+22.2
+15.1
+22.7
+0.0
+0.0
+0.0
+Model Soupα=0.5
+8.3
+5.3
+76.4
+21.7
+19.9
+8.1
+11.6
+0.0
+0.0
+0.0
+Model Soupα=0.7
+5.0
+5.1
+73.9
+15.3
+19.9
+4.4
+4.7
+0.0
+0.0
+0.0
+Model Soupα=0.9
+2.1
+1.1
+70.1
+9.0
+15.5
+5.8
+2.6
+5.0
+13.0
+17.0
+DARE
+10.4 ± 0.9
+7.6 ± 0.4
+78.3 ± 0.3
+22.5 ± 1.7
+9.2 ± 1.8
+3.6 ± 0.9
+4.1 ± 0.8
+0.0 ± 0.0
+0.0 ± 0.0
+0.0 ± 0.0
+SLERP
+9.9
+7.4
+77.7
+18.5
+17.7
+10.3
+10.5
+0.0
+0.0
+0.0
+AdaMergingπ0.5
+28.1 ± 5.3
+23.1 ± 5.8
+87.5 ± 1.1
+38.2 ± 4.9
+43.4 ± 13.7
+14.0 ± 3.8
+20.3 ± 4.5
+6.2 ± 3.2
+2.9 ± 1.1
+3.7 ± 2.9
+Oursπ0F ast
+Ours
+18.6 ± 2.1
+14.1 ± 1.1
+82.1 ± 0.3
+28.9 ± 1.9
+29.7 ± 4.8
+14.1 ± 5.1
+17.2 ± 6.9
+61.2 ± 2.8
+73.1 ± 3.5
+79.8 ± 3.1
+Oursπ0.5
+29.5 ± 1.8
+22.7 ± 1.7
+87.8 ± 0.5
+48.7 ± 2.1
+32.3 ± 5.6
+17.3 ± 6.4
+19.5 ± 6.7
+89.3 ± 3.1
+88.1 ± 4.2
+93.3 ± 2.6
+Score:
+Low
+Medium
+High
+The image is a 3D model of a robot arm
+holding a cup and a plate.
+VLM Paligemma
+3D Robot
+A robot and cups of coffee are on the
+table
+A toy kitchen with a robotic arm
+VLM Paligemma
+Kitchen pan
+VLA      
+A kitchenware set containing
+various items such as pots, pans
+and utensils.
+Ours      
+VLA      
+Ours      
+Figure 3: Qualitative captioning examples. Given the same visual observation, the VLM produces coherent scene
+descriptions, the VLA (π0.5) generates fragmented or incomplete text due to catastrophic forgetting, and Oursπ0.5
+merged model recovers meaningful captions while retaining action capabilities.
+Embodied reasoning.
+The same pattern holds
+on EQA (Object State / Spatial / Attribute
+Recognition). The VLM leads (44.44/21.73/32.46),
+both VLAs degrade sharply, and fixed-coefficient
+baselines recover only partially and inconsistently
+(best: Model Soupα=0.3 at 22.22/15.19/22.75).
+AdaMergingπ0.5
+recovers
+markedly
+more
+(43.4/14.0/20.3), even edging out Oursπ0.5 on
+Object State, indicating that a learned, task-aware
+objective is the primary driver of embodied-
+reasoning recovery, with SVD granularity offering
+more modest further gains on this axis.
+Our
+merged models nonetheless outperform all base-
+lines overall: Oursπ0F ast reaches 29.7/14.1/17.2,
+and Oursπ0.5 reaches 32.3/17.3/19.5, recovering
+a substantial share of the VLM’s embodied
+reasoning capabilities despite having no direct
+EQA supervision.
+Robot manipulation performance.
+Table 1 also
+reports success rate on the LIBERO suites. The
+VLM achieves zero success everywhere, while
+both VLAs establish strong upper bounds (π0.5:
+88/90/96; π0-FAST: 70/82/88). DARE, SLERP
+and Model Soup (at α ≤0.7) collapse entirely
+to zero success, and Model Soupα=0.9 only re-
+covers marginally (5/13/17) by sacrificing nearly
+all language gains — confirming that a fixed, uni-
+form coefficient cannot preserve the action-relevant
+structure of the VLA. AdaMergingπ0.5 collapses
+almost as severely (6.2/2.9/3.7) despite sharing
+our training objective, showing that a single per-
+layer coefficient lacks the resolution to preserve
+action-relevant directions — consistent with the
+granularity ablation of Section 4.3, where per-
+layer α cannot disentangle language- from action-
+relevant directions within ∆(l). Our merged mod-
+els retain strong performance on both variants:
+Oursπ0F ast reaches 61.2/73.1/79.8, and Oursπ0.5
+reaches 89.3/88.1/93.3, closely tracking its pure
+VLA counterpart while still achieving the language
+and reasoning gains above — a trade-off no base-
+line, including AdaMerging, offers.
+4.3
+Ablation study
+We conduct three ablations to validate the design
+choices of our method: the granularity of the mix-
+ing coefficients, the contribution of each compo-
+
+
+0
+5000
+10000
+15000
+20000
+Iteration
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+4.0
+Per-Layer 
+Per-component 
+0
+5000
+10000
+15000
+20000
+Iteration
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+5000
+10000
+15000
+20000
+Iteration
+600
+800
+1000
+1200
+1400
+DKL(
+|
+VLM) 
+0
+5000
+10000
+15000
+20000
+Iteration
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+DKL(
+|
+VLA)
+Figure 4: Granularity of mixing coefficients. We compare two levels of granularity for α — per-layer and
+per-component (ours) — and report the evolution of Ltext, Lact, DKL(πα∥πVLM) and DKL(πα∥πVLA) over training.
+Per-component α converges to substantially lower values on every metric, confirming that fine-grained SVD-based
+control is essential to simultaneously preserve language and action capabilities.
+nent of the training objective, and the sensitivity of
+the method to the rank of the SVD decomposition.
+Granularity of mixing coefficients.
+To analyse
+the impact of per-component SVD coefficients, we
+compare two levels of granularity for α. Under
+per-layer α, a single coefficient α(l) ∈[0, 1] is
+learned for each layer l and applied uniformly
+to every singular component of that layer’s task
+vector ∆(l) — this is equivalent to the layer-wise
+AdaMerging protocol (Yang et al., 2024), adapted
+to our setting. Under per-component α (ours),
+a separate coefficient α(l)
+k
+∈[0, 1] is learned for
+each individual singular component k within each
+layer l. Figure 4 shows the evolution of Ltext, Lact,
+DKL(πα∥πVLM) and DKL(πα∥πVLA) over optimi-
+sation steps for each condition. The results are un-
+ambiguous: per-component α consistently and sub-
+stantially outperforms the per-layer scalar across all
+four metrics. On Ltext, per-layer α plateaus around
+2.0, while per-component α converges below 1.0.
+The gap is even more pronounced on action pre-
+diction: per-layer α converges to Lact ≈0.7
+and DKL(πα∥πVLA) remains noisy around 0.06–
+0.08, whereas per-component α drives both metrics
+down to roughly a tenth of these values. A single
+coefficient per layer cannot disentangle the direc-
+tions within ∆(l) that encode language degradation
+from those that encode action prediction, since both
+are entangled within the same weight matrix and
+a layer-wide α(l) must trade them off uniformly.
+These results confirm that the fine-grained con-
+trol afforded by SVD decomposition is essential —
+coarser parameterisations lack the expressivity to
+reconcile both objectives.
+Contribution of each loss component.
+To under-
+stand the role of each term in the training objective
+L(α), we train four variants of Oursπ0.5 by remov-
+ing one component at a time: without Ltext, Lact,
+Table 2: Contribution of each loss component. We
+ablate each term of the training objective and evaluate
+using ROUGE-L for language quality and Success Rate
+SR for action predictions. Best results in bold.
+Objective
+ROUGE-L ↑
+SR ↑
+w/o Ltext
+21.9
+95.6
+w/o Lact
+34.6
+0
+w/o DKL(πα∥πVLM)
+7.9
+94.1
+w/o DKL(πα∥πVLA)
+31.2
+71.5
+Full objective (ours)
+29.5
+93.3
+DKL(πα∥πVLM), and DKL(πα∥πVLA). Results are
+reported in Table 2. Removing Lact causes the
+merged model to collapse on action prediction en-
+tirely (0% success rate) while language is the high-
+est of all variants (34.6 ROUGE-L), confirming that
+without an explicit action signal α drifts toward
+the VLM. Conversely, removing DKL(πα∥πVLM)
+severely degrades language quality (7.9 ROUGE-
+L) while leaving action performance almost intact
+(94.1%), showing that this KL term is the primary
+anchor preserving language fluency and that Ltext
+alone is insufficient to fully constrain α toward
+the VLM. Removing Ltext has a comparatively
+mild effect (21.97 ROUGE-L, 95% success rate),
+suggesting that DKL(πα∥πVLM) already provides
+most of the language-preserving signal on its own.
+Removing DKL(πα∥πVLA) yields the second-best
+language score (31.2 ROUGE-L) but a substantial
+drop in success rate (71.5%), indicating that this
+term plays an important role in stabilising action
+prediction beyond what Lact alone provides. Over-
+all, the full objective achieves the best joint trade-
+off (29.5 ROUGE-L, 93.3% success rate), confirm-
+ing that all four terms are complementary: the L
+terms provide the primary task signal while the KL
+terms regularise and stabilise the optimisation, with
+the VLM-side KL term proving especially critical
+for language retention.
+
+
+0
+2000
+4000
+6000
+8000
+10000
+Iteration
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+r=4
+r=16
+r=64
+r=256
+r=1024
+r=full rank
+0
+2000
+4000
+6000
+8000
+10000
+Iteration
+0.2
+0.4
+0.6
+0.8
+1.0
+0
+2000
+4000
+6000
+8000
+10000
+Iteration
+600
+800
+1000
+1200
+1400
+DKL(
+|
+VLM) 
+0
+2000
+4000
+6000
+8000
+10000
+Iteration
+0.02
+0.04
+0.06
+0.08
+0.10
+DKL(
+|
+VLA)
+5
+0
+5
+10
+15
+20
+25
+30
+Language capability (ROUGE-L 
+)
+0
+20
+40
+60
+80
+100
+Robot performance (mean LIBERO SR 
+)
+Effect of SVD rank on language vs robot performance
+r=4
+r=16
+r=64
+r=256
+r=1024
+r=full rank
+Figure 5: Effect of SVD rank. (Left) Training losses for varying rank r ∈{4, 16, 64, 256, 1024, full}: Ltext is
+largely insensitive to rank, while Lact improves markedly with higher rank, indicating that the VLA adaptation is
+diffuse across many singular components. (Right) Downstream evaluation confirms this asymmetry: ROUGE-L
+saturates from r = 16, while LIBERO success rate requires r ≥1024 to exceed 90% — language recovery needs
+far fewer singular directions than action preservation.
+Effect of SVD rank.
+We study the sensitivity of
+the method to the rank r used in the SVD decompo-
+sition by varying r ∈{4, 16, 64, 256, 1024, full}.
+For a given r, each layer’s task vector ∆(l) is trun-
+cated to its top-r singular components — those
+associated with the r largest singular values — and
+only the corresponding α(l)
+k are optimised, with the
+remaining components implicitly set to the VLM.
+Figure 5 reveals a striking asymmetry between the
+two objectives: Ltext is largely insensitive to rank,
+while Lact shows a clear separation, with higher
+rank leading to significantly better action preser-
+vation. The KL divergence terms follow the same
+pattern. This is confirmed by the downstream scat-
+ter plot: ROUGE-L is low at the extreme r = 4
+but already saturates around 30 from r = 16 on-
+ward, while mean LIBERO success rate stays at
+0% for r ≤16, jumps to 64% at r = 256, and ex-
+ceeds 90% only from r = 1024 onward. Notably,
+r = 1024 requires only 269,443 learnable param-
+eters compared to 381,605 at full rank — both
+roughly four orders of magnitude smaller than the
+finetuning of the ∼3B backbone, confirming that
+near-optimal performance is achieved with an even
+smaller fraction of the already lightweight param-
+eter budget. This indicates that language recovery
+only requires a small set of dominant directions
+of the task vector, whereas action preservation re-
+quires a much larger, near complete, set of singular
+directions — confirming that the VLA adaptation is
+diffuse in weight space while language-relevant di-
+rections are concentrated in a handful of dominant
+components. More broadly, this asymmetry ex-
+plains why uniform merging fails to recover action
+performance while partially recovering language.
+More analysis on the α distribution can be found
+in Appendix C.2
+5
+Conclusion
+In this paper, we present a post-hoc method for
+merging a VLM and a VLA by decomposing the
+task vector via SVD and learning per-component
+mixing coefficients through gradient descent. We
+apply this method to two distinct VLA architec-
+tures, an autoregressive and a flow matching model,
+demonstrating that it generalises across different
+action decoding strategies. Both source models
+remain frozen throughout, and only the mixing
+coefficients are optimised, making the approach
+substantially cheaper than retraining or co-training
+a VLA from scratch and broadly applicable to al-
+ready fine-tuned VLAs. Our approach recovers a
+model that retains the action prediction capabilities
+of the VLA while restoring the vision-language
+understanding of the original VLM, a balance that
+uniform interpolation fails to achieve. Through ex-
+tensive ablations, we show that this fine-grained
+control over the merging process is essential, and
+our analysis further reveals that language and ac-
+tion capabilities are encoded at different scales in
+weight space, offering new insight into the nature
+of catastrophic forgetting in VLA fine-tuning. Fu-
+ture work could leverage the language and reason-
+ing capabilities restored by our method to equip
+VLAs with high-level planning, enabling them to
+decompose and reason about long-horizon tasks
+rather than merely reacting to immediate instruc-
+tions. Code and merged model checkpoints will be
+released upon acceptance.
+
+
+Limitations
+Our method assumes the VLM and VLA share
+a common backbone, so it does not directly ap-
+ply to mismatched architectures or tokenizers. It
+also still requires a training loop to optimise α,
+albeit a much cheaper one than full fine-tuning.
+Our action and language datasets are both derived
+from a single benchmark (LIBERO) and from the
+source models themselves, so performance on out-
+of-distribution tasks, embodiments, or real-world
+deployments remains untested. Finally, our experi-
+ments are limited to VLMs and VLAs at the 3–4B
+parameter scale, and whether our findings hold at
+larger scales remains untested.
+Ethical Considerations
+This work aims to mitigate catastrophic forgetting
+in robot learning models, helping robotic agents
+retain language-based communication alongside
+low-level control rather than sacrificing one for the
+other. All experiments are conducted in simula-
+tion using publicly available models and datasets;
+no human subjects or physical robot deployments
+are involved. As with any method that enhances
+action capabilities, thorough safety validation is
+recommended before real-world deployment.
+Acknowledgments
+Experiments presented in this paper were car-
+ried out using the HPC resources of IDRIS un-
+der the allocations 2026-[A0201016980] and 2026-
+[AD011015093R2] made by GENCI. This work
+was supported by the European Commission’s Hori-
+zon Europe Framework Programme under grant No
+101070381 (PILLAR-robots), by RODEO Project
+(ANR-24-CE23-5886), by PEPR Sharp (ANR-
+23-PEIA-0008, ANR, FRANCE 2030) and by
+Cluster PostGenAI@Paris (ANR-23-IACL-0007,
+FRANCE 2030).
+References
+Mohamed Salim Aissi, Clémence Grislain, Clément Ro-
+mac, Laure Soulier, Mohamed Chetouani, Olivier
+Sigaud, and Nicolas Thome. 2026.
+PRISM: Per-
+ception reasoning interleaved for sequential decision
+making. In Forty-third International Conference on
+Machine Learning.
+Satanjeev Banerjee and Alon Lavie. 2005. METEOR:
+An automatic metric for MT evaluation with im-
+proved correlation with human judgments. In Pro-
+ceedings of the ACL Workshop on Intrinsic and Ex-
+trinsic Evaluation Measures for Machine Transla-
+tion and/or Summarization, pages 65–72, Ann Arbor,
+Michigan. Association for Computational Linguis-
+tics.
+Lucas Beyer, Andreas Steiner, André Susano Pinto,
+Alexander Kolesnikov, Xiao Wang, Daniel Salz,
+Maxim Neumann, Ibrahim Alabdulmohsin, Michael
+Tschannen, Emanuele Bugliarello, Thomas Un-
+terthiner, Daniel Keysers, Skanda Koppula, Fangyu
+Liu, Adam Grycner, Alexey Gritsenko, Neil Houlsby,
+Manoj Kumar, Keran Rong, and 16 others. 2024.
+Paligemma: A versatile 3b vlm for transfer. Preprint,
+arXiv:2407.07726.
+Kevin Black, Noah Brown, James Darpinian, Karan
+Dhabalia, Danny Driess, Adnan Esmail, Michael
+Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Gal-
+liker, Dibya Ghosh, Lachy Groom, Karol Haus-
+man, Brian Ichter, Szymon Jakubczak, Tim Jones,
+Liyiming Ke, Devin LeBlanc, Sergey Levine, and
+16 others. 2025.
+π0.5: a vision-language-action
+model with open-world generalization.
+Preprint,
+arXiv:2504.16054.
+Kevin Black, Noah Brown, Danny Driess, Adnan Es-
+mail, Michael Equi, Chelsea Finn, Niccolo Fusai,
+Lachy Groom, Karol Hausman, Brian Ichter, Szy-
+mon Jakubczak, Tim Jones, Liyiming Ke, Sergey
+Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj
+Nair, Karl Pertsch, Lucy Xiaoyang Shi, and 5 others.
+2024. π0: A vision-language-action flow model for
+general robot control. Preprint, arXiv:2410.24164.
+Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli
+Ding, Danny Driess, Avinava Dubey, Chelsea Finn,
+Pete Florence, Chuyuan Fu, Montse Gonzalez Are-
+nas, Keerthana Gopalakrishnan, Kehang Han, Karol
+Hausman, Alexander Herzog, Jasmine Hsu, Brian
+Ichter, and 35 others. 2023. Rt-2: Vision-language-
+action models transfer web knowledge to robotic con-
+trol. Preprint, arXiv:2307.15818.
+Remi Cadene, Simon Aliberts, Francesco Capuano,
+Michel Aractingi, Adil Zouitine, Pepijn Kooijmans,
+Jade Choghari, Martino Russi, Caroline Pascal,
+Steven Palma, Mustafa Shukor, Jess Moss, Alexander
+Soare, Dana Aubakirova, Quentin Lhoest, Quentin
+Gallouédec, and Thomas Wolf. 2026. Lerobot: An
+open-source library for end-to-end robot learning.
+Preprint, arXiv:2602.22818.
+Yinlong Dai, Benjamin A. Christie, Daniel J. Evans, Dy-
+lan P. Losey, and Simon Stepputtis. 2026. Language
+movement primitives: Grounding language models
+in robot motion. Preprint, arXiv:2602.02839.
+Antonio
+Andrea
+Gargiulo,
+Donato
+Crisostomi,
+Maria Sofia Bucarelli, Simone Scardapane, Fabrizio
+Silvestri, and Emanuele Rodolà. 2025. Task singular
+vectors: Reducing task interference in model merg-
+ing. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR),
+pages 18695–18705.
+
+
+Dibya Ghosh, Homer Walke, Karl Pertsch, Kevin
+Black, Oier Mees, Sudeep Dasari, Joey Hejna, To-
+bias Kreiman, Charles Xu, Jianlan Luo, You Liang
+Tan, Lawrence Yunliang Chen, Pannag Sanketi, Quan
+Vuong, Ted Xiao, Dorsa Sadigh, Chelsea Finn, and
+Sergey Levine. 2024. Octo: An open-source general-
+ist robot policy. Preprint, arXiv:2405.12213.
+Yash Goyal, Tejas Khot, Douglas Summers-Stay, Dhruv
+Batra, and Devi Parikh. 2017. Making the V in VQA
+matter: Elevating the role of image understanding
+in Visual Question Answering. In Conference on
+Computer Vision and Pattern Recognition (CVPR).
+Asher J. Hancock, Xindi Wu, Lihan Zha, Olga Rus-
+sakovsky, and Anirudha Majumdar. 2025. Actions as
+language: Fine-tuning vlms into vlas without catas-
+trophic forgetting. Preprint, arXiv:2509.22195.
+Young Kyun Jang, Dat Huynh, Ashish Shah, Wen-Kai
+Chen, and Ser-Nam Lim. 2024. Spherical linear inter-
+polation and text-anchoring for zero-shot composed
+image retrieval. Preprint, arXiv:2405.00571.
+Bofang Jia, Pengxiang Ding, Can Cui, Mingyang
+Sun, Pengfang Qian, Siteng Huang, Zhaoxin Fan,
+and Donglin Wang. 2024. Score and distribution
+matching policy: Advanced accelerated visuomo-
+tor policies via matched distillation. arXiv preprint
+arXiv:2412.09265.
+Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti,
+Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael
+Rafailov, Ethan Foster, Grace Lam, Pannag San-
+keti, Quan Vuong, Thomas Kollar, Benjamin Burch-
+fiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine,
+Percy Liang, and Chelsea Finn. 2024. Openvla: An
+open-source vision-language-action model. Preprint,
+arXiv:2406.09246.
+Diederik P. Kingma and Jimmy Ba. 2017.
+Adam:
+A method for stochastic optimization.
+Preprint,
+arXiv:1412.6980.
+Mei Li, Yuxiang Lu, Qinyan Dai, Suizhi Huang, Yue
+Ding, and Hongtao Lu. 2025. BECAME: Bayesian
+continual learning with adaptive model merging. In
+Proceedings of the 42nd International Conference
+on Machine Learning, volume 267 of Proceedings
+of Machine Learning Research, pages 35481–35501.
+PMLR.
+Chin-Yew Lin. 2004. ROUGE: A package for auto-
+matic evaluation of summaries. In Text Summariza-
+tion Branches Out, pages 74–81, Barcelona, Spain.
+Association for Computational Linguistics.
+Tsung-Yi Lin, Michael Maire, Serge Belongie, Lubomir
+Bourdev, Ross Girshick, James Hays, Pietro Perona,
+Deva Ramanan, C. Lawrence Zitnick, and Piotr Dol-
+lár. 2015. Microsoft coco: Common objects in con-
+text. Preprint, arXiv:1405.0312.
+Yaron Lipman, Ricky TQ Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matthew Le. 2023. Flow match-
+ing for generative modeling. In The Eleventh Inter-
+national Conference on Learning Representations.
+Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang
+Liu, Yuke Zhu, and Peter Stone. 2023a.
+Libero:
+Benchmarking knowledge transfer for lifelong robot
+learning. arXiv preprint arXiv:2306.03310.
+Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae
+Lee. 2023b.
+Visual instruction tuning.
+Preprint,
+arXiv:2304.08485.
+Michael Matena and Colin Raffel. 2022.
+Merging
+models with fisher-weighted averaging. Preprint,
+arXiv:2111.09832.
+Soroush Nasiriany, Sepehr Nasiriany, Abhiram Mad-
+dukuri, and Yuke Zhu. 2026. Robocasa365: A large-
+scale simulation framework for training and bench-
+marking generalist robots. In International Confer-
+ence on Learning Representations (ICLR).
+Abby O’Neill, Abdul Rehman, Abhinav Gupta, Abhi-
+ram Maddukuri, Abhishek Gupta, Abhishek Padalkar,
+Abraham Lee, Acorn Pooley, Agrim Gupta, Ajay
+Mandlekar, Ajinkya Jain, Albert Tung, Alex Be-
+wley, Alex Herzog, Alex Irpan, Alexander Khaz-
+atsky, Anant Rai, Anchit Gupta, Andrew Wang,
+and 274 others. 2025.
+Open x-embodiment:
+Robotic learning datasets and rt-x models. Preprint,
+arXiv:2310.08864.
+Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny
+Driess, Suraj Nair, Quan Vuong, Oier Mees, Chelsea
+Finn, and Sergey Levine. 2025. Fast: Efficient ac-
+tion tokenization for vision-language-action models.
+Preprint, arXiv:2501.09747.
+Bowen Ping, Xiangxin Zhou, Penghui Qi, Minnan Luo,
+Liefeng Bo, and Tianyu Pang. 2026. Flow-dppo:
+Divergence proximal policy optimization for flow
+matching models. Preprint, arXiv:2606.11025.
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sas-
+try, Amanda Askell, Pamela Mishkin, Jack Clark,
+Gretchen Krueger, and Ilya Sutskever. 2021. Learn-
+ing transferable visual models from natural language
+supervision. Preprint, arXiv:2103.00020.
+Mustafa Shukor, Dana Aubakirova, Francesco Capuano,
+Pepijn Kooijmans, Steven Palma, Adil Zouitine,
+Michel Aractingi, Caroline Pascal, Martino Russi,
+Andres Marafioti, Simon Alibert, Matthieu Cord,
+Thomas Wolf, and Remi Cadene. 2025. Smolvla:
+A vision-language-action model for affordable and
+efficient robotics. Preprint, arXiv:2506.01844.
+Homer Walke, Kevin Black, Abraham Lee, Moo Jin
+Kim, Max Du, Chongyi Zheng, Tony Zhao, Philippe
+Hansen-Estruch, Quan Vuong, Andre He, Vivek My-
+ers, Kuan Fang, Chelsea Finn, and Sergey Levine.
+2023. Bridgedata v2: A dataset for robot learning at
+scale. In Conference on Robot Learning (CoRL).
+Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+Bosma, Brian Ichter, Fei Xia, Ed Chi, Quoc Le, and
+Denny Zhou. 2023. Chain-of-thought prompting elic-
+its reasoning in large language models. Preprint,
+arXiv:2201.11903.
+
+
+Junjie Wen, Yichen Zhu, Jinming Li, Minjie Zhu, Kun
+Wu, Zhiyuan Xu, Ning Liu, Ran Cheng, Chaomin
+Shen, Yaxin Peng, Feifei Feng, and Jian Tang. 2025.
+Tinyvla: Towards fast, data-efficient vision-language-
+action models for robotic manipulation. Preprint,
+arXiv:2409.12514.
+Mitchell Wortsman, Gabriel Ilharco, Samir Yitzhak
+Gadre, Rebecca Roelofs, Raphael Gontijo-Lopes,
+Ari S. Morcos, Hongseok Namkoong, Ali Farhadi,
+Yair Carmon, Simon Kornblith, and Ludwig Schmidt.
+2022. Model soups: averaging weights of multiple
+fine-tuned models improves accuracy without increas-
+ing inference time. Preprint, arXiv:2203.05482.
+Prateek Yadav, Derek Tam, Leshem Choshen, Colin
+Raffel, and Mohit Bansal. 2023. Ties-merging: Re-
+solving interference when merging models. Preprint,
+arXiv:2306.01708.
+Yajat Yadav, Zhiyuan Zhou, Andrew Wagenmaker, Karl
+Pertsch, and Sergey Levine. 2025. Robust finetuning
+of vision-language-action robot policies via parame-
+ter merging. arXiv preprint arXiv:2512.08333.
+Enneng Yang, Zhenyi Wang, Li Shen, Shiwei Liu, Guib-
+ing Guo, Xingwei Wang, and Dacheng Tao. 2024.
+Adamerging: Adaptive model merging for multi-task
+learning. Preprint, arXiv:2310.02575.
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak
+Shafran, Karthik Narasimhan, and Yuan Cao. 2023.
+React: Synergizing reasoning and acting in language
+models. Preprint, arXiv:2210.03629.
+Le Yu, Bowen Yu, Haiyang Yu, Fei Huang, and Yongbin
+Li. 2024. Language models are super mario: Absorb-
+ing abilities from homologous models as a free lunch.
+Preprint, arXiv:2311.03099.
+Michał Zawalski, William Chen, Karl Pertsch, Oier
+Mees, Chelsea Finn, and Sergey Levine. 2024.
+Robotic control via embodied chain-of-thought rea-
+soning. arXiv preprint arXiv:2407.08693.
+Tianyi Zhang, Varsha Kishore, Felix Wu, Kilian Q.
+Weinberger, and Yoav Artzi. 2020.
+Bertscore:
+Evaluating text generation with bert.
+Preprint,
+arXiv:1904.09675.
+
+
+A
+Implementation Details
+A.1
+Hyperparameters
+Table 3 reports the full set of hyperparameters used to train the mixing coefficients α for our main results,
+separately for Oursπ0F ast and Oursπ0.5.
+Table 3: Hyperparameters used to optimise α for each VLA variant. λ1, λ2 weight Ltext and Lact respectively;
+λ3, λ4 weight the KL regularisation terms toward the VLM and VLA respectively.
+Hyperparameter
+Oursπ0F ast
+Oursπ0.5
+Optimiser
+Adam
+Adam
+Initial learning rate
+0.01
+0.01
+Learning rate schedule
+cosine decay
+cosine decay
+Total training steps
+20,000
+20,000
+λ1 (Ltext)
+1
+1
+λ2 (Lact)
+1
+5
+λ3 (KLVLM)
+0.01
+0.01
+λ4 (KLVLA)
+0.8
+10
+α initialisation
+Uniform(0, 1)
+Uniform(0, 1)
+SVD power iterations
+4
+4
+Batch size
+2
+2
+Number of GPUs
+1
+1
+A.2
+KL Regularisation Terms
+Language side.
+For the VLM side, πVLM and πα denote the token-level output distributions of the pure
+VLM and the merged model, respectively, computed over the language vocabulary at each generated
+position given the same visual observation and prompt. For π0-FAST, whose vocabulary jointly contains
+both language and action tokens, this distribution is restricted to the language sub-vocabulary, masking
+out action-token logits before computing the divergence. DKL(πα∥πVLM) is the standard categorical
+KL divergence between these two (vocabulary-restricted) token distributions, averaged over sequence
+positions, and is well-defined for both VLA variants since the language head is shared and discrete in
+both π0-FAST and π0.5.
+Action side — autoregressive VLA.
+For π0-FAST, actions are represented as discrete tokens drawn
+from a dedicated action sub-vocabulary, and πVLA, πα denote the corresponding token-level distributions
+restricted to this action sub-vocabulary, with language-token logits masked out. DKL(πα∥πVLA) is
+therefore also a standard categorical KL divergence, computed analogously to the language term above
+but over the disjoint action sub-vocabulary, ensuring that each KL term reflects only the corresponding
+modality.
+Action side — flow matching VLA.
+For π0.5, actions are continuous and generated via iterative
+denoising, so no closed-form categorical distribution exists over the action space. Following prior work on
+distribution matching for diffusion- and flow-based visuomotor policies (Jia et al., 2024; Ping et al., 2026),
+we approximate πVLA and πα as Gaussian distributions over the predicted velocity field. Concretely, for
+a given observation we sample N = 16 independent noise draws x(1)
+0 , . . . , x(N)
+0
+∼N(0, I), form the
+corresponding interpolated actions x(i)
+t
+= t x1 + (1 −t) x(i)
+0 , and compute the predicted velocities v(i)
+θVLA
+and v(i)
+θmerged under the pure VLA and the merged model respectively. We then estimate the empirical mean
+and variance of each set of velocity predictions,
+µθ = 1
+N
+N
+X
+i=1
+v(i)
+θ ,
+σ2
+θ = 1
+N
+N
+X
+i=1
+
+v(i)
+θ
+−µθ
+2
+,
+θ ∈{θVLA, θmerged},
+(8)
+
+
+and approximate πVLA ≈N(µθVLA, σ2
+θVLA), πα ≈N(µθmerged, σ2
+θmerged), for which the KL divergence
+admits the standard closed form:
+DKL(πα∥πVLA) = 1
+2
+ σ2
+θmerged
+σ2
+θVLA
++ (µθVLA −µθmerged)2
+σ2
+θVLA
+−1 + log
+σ2
+θVLA
+σ2
+θmerged
+!
+.
+(9)
+This Gaussian approximation is computed independently per action dimension and averaged. We note that
+this is an approximation of the true (intractable) distribution induced by the iterative denoising process,
+justified by the fact that the velocity field at a fixed timestep is approximately unimodal in practice.
+A.3
+Dataset Collection
+Action dataset Dact.
+For each VLA variant, we construct Dact by relabeling existing expert demonstra-
+tions from the LIBERO dataset available on LeRobot (Liu et al., 2023a; Cadene et al., 2026). Concretely,
+we take the visual observations, proprioceptive states, and task instructions from the expert trajectories
+and query the pure VLA to obtain its predicted action chunks for each observation, storing the resulting
+pairs. This collection is performed once per VLA variant and reused throughout training and ablation, and
+yields a total of 5,000 examples.
+Language dataset Dtext.
+For each visual observation collected above, we additionally query the pure
+VLM with a captioning prompt to obtain a corresponding scene description, producing paired examples
+(xi, ci) ∈Dtext, also totalling 5,000 examples. Both Dact and Dtext are split into disjoint train and test
+partitions, and all reported metrics are computed on test examples.
+A.4
+Training Cost
+Training the mixing coefficients α for our main results takes approximately 3 hours on a single NVIDIA
+H100 GPU for 20,000 steps. Both source models (θVLM and θVLA) remain frozen throughout, and only
+α is updated. At our chosen practical rank, this amounts to a total of 381,587 learnable parameters for
+Oursπ0F ast and 381,605 for Oursπ0.5 across all layers weight matrices — in both cases roughly four
+orders of magnitude smaller than the ∼3B frozen parameters of the VLA backbone alone. This makes our
+approach substantially cheaper than retraining or co-training a VLA from scratch.
+B
+Environment and Task Definitions
+LIBERO.
+LIBERO (Liu et al., 2023a) is a simulation benchmark for lifelong robot manipulation
+built on the Robosuite simulator, comprising several task suites each containing 10 tasks with 50 expert
+demonstrations per task. We evaluate on three of its suites: LIBERO-Spatial, where the robot must place
+a bowl on a plate among visually identical bowls that differ only in their spatial location relative to other
+objects, testing spatial reasoning under a fixed set of objects; LIBERO-Object, where the robot must
+pick and place a different, unique target object into a basket across tasks while the layout remains fixed,
+testing object-centric generalisation; and LIBERO-Goal, where both the objects and their spatial layout
+are held fixed while the task goal varies, testing the transfer of procedural, goal-directed behaviour. Each
+suite is designed to disentangle a specific axis of generalisation (spatial, object, or goal knowledge), and
+observations consist of third-person and wrist-camera RGB images.
+Robocasa.
+RoboCasa (Nasiriany et al., 2026) is a large-scale simulation benchmark for household robot
+manipulation in photorealistic kitchen environments, comprising a set of atomic skills (e.g. pick-and-
+place, opening/closing doors and drawers, turning knobs, pressing buttons) together with longer-horizon
+composite tasks. We evaluate on three atomic kitchen tasks: Open Fridge, requiring the robot to open a
+refrigerator door; Setup Cup, requiring the robot to pick up a cup and place it in a target location; and
+Navigate Kitchen, requiring the robot to move within the kitchen environment to reach a target location
+before completing a manipulation sub-goal. Compared to LIBERO, RoboCasa tasks are evaluated across
+a larger number of randomised scene layouts and object instances, making the benchmark substantially
+more challenging: even strong VLA baselines such as π0.5 average only around 39% success rate across
+these tasks in our setting, reflecting the benchmark’s greater diversity in scene configurations and the
+longer effective horizon of some tasks (e.g. Navigate Kitchen).
+
+
+Table 4: Task success rate (%) on three RoboCasa kitchen tasks. All fixed-coefficient merging baselines collapse to
+zero, while our merged models retain meaningful performance on both VLA variants.
+Model
+Type
+Open
+Fridge
+Setup
+Cup
+Navigate
+Kitchen
+PaliGemma
+VLM
+0
+0
+0
+π0Fast
+VLA
+78
+68
+89
+π0.5
+71
+58
+25
+Model Soupα=0.3
+Merged
+0
+0
+0
+Model Soupα=0.5
+0
+0
+0
+Model Soupα=0.7
+0
+0
+0
+Model Soupα=0.9
+0
+0
+0
+DARE
+0
+0
+0
+SLERP
+0
+0
+0
+Oursπ0F ast
+56
+61
+78
+Oursπ0.5
+65
+49
+21
+B.1
+Additional Results on RoboCasa
+Table 4 reports task success rate on three RoboCasa kitchen tasks — Open Fridge, Setup Cup, and
+Navigate Kitchen — complementing the LIBERO results presented in the main paper. The overall trends
+are consistent with those observed on LIBERO: the pure VLM achieves zero success rate everywhere, both
+pure VLAs establish strong baselines, and all fixed-coefficient merging methods (Model Soup, DARE,
+SLERP) collapse entirely to zero success rate across all tasks. Our merged models retain meaningful
+action performance on both VLA variants: Oursπ0F ast reaches 56/61/78 (versus 78/68/89 for the pure
+π0-FAST), and Oursπ0.5 reaches 65/49/21 (versus 71/58/25 for the pure π0.5). The performance drop
+relative to the pure VLAs is more pronounced on RoboCasa than on LIBERO, reflecting the greater
+difficulty of this benchmark: even the pure VLAs average only around 50–78% across tasks, and Navigate
+Kitchen proves particularly challenging for π0.5 (25% for the pure VLA, 21% after merging). Despite
+this increased difficulty, our method remains the only merging approach that retains non-trivial action
+performance while simultaneously recovering the vision-language and embodied reasoning capabilities
+reported in the main paper.
+C
+Analysis of the Merged Model
+C.1
+Models Similarity
+To better understand what the learned α coefficients produce in practice, we analyse the per-layer
+alignment of the merged model with respect to both source models, for both VLA variants. For each layer
+l, we compute three cosine similarities: sim(θ(l)
+VLM, θ(l)
+VLA) — the baseline distance between the two source
+models — sim(θ(l)
+merged, θ(l)
+VLM), and sim(θ(l)
+merged, θ(l)
+VLA), where θmerged denotes the merged model for the
+corresponding VLA variant. These are computed directly on the reconstructed merged weight matrices
+using the learned α.
+Figure 6 reports these three curves across all 602 layers for both VLA variants. Several observations
+emerge, most of which hold consistently across both panels. First, the baseline similarity between VLM
+and VLA (blue) is consistently the lowest in both cases, confirming that VLA fine-tuning significantly
+displaces the weights from their original VLM values; this displacement grows with layer depth, dropping
+from ∼0.80–0.85 in the earliest layers to ∼0.65–0.70 in the deepest ones, indicating that fine-tuning
+increasingly diverges from the VLM as depth increases, for both the autoregressive and flow matching
+VLA. Second, and most importantly, the merged model remains significantly closer to both source models
+than the VLM and VLA are to each other in both cases — orange and green curves lie well above the
+blue baseline throughout. This indicates that the merged model does not simply interpolate between two
+
+
+Oursπ0F AST
+0
+100
+200
+300
+400
+500
+600
+layer index
+0.70
+0.75
+0.80
+0.85
+0.90
+cosine similarity
+Similarity(
+VLM,
+VLA)
+Similarity(
+Merged,
+VLM)
+Similarity(
+Merged,
+VLA)
+Oursπ0.5
+0
+100
+200
+300
+400
+500
+600
+layer index
+0.65
+0.70
+0.75
+0.80
+0.85
+0.90
+0.95
+1.00
+cosine similarity
+Similarity(
+VLM,
+VLA)
+Similarity(
+Merged,
+VLM)
+Similarity(
+Merged,
+VLA)
+Figure 6: Per-layer similarity to source models. (Top) Oursπ0F ast. (Bottom) Oursπ0.5. For each of the 602 weight
+matrices, we compute the cosine similarity between the VLM and VLA weights (blue), between the merged model
+and the VLM (orange), and between the merged model and the VLA (green). In both cases, the merged model
+is consistently closer to the VLA than to the VLM across all layers, while remaining well above the VLM–VLA
+baseline throughout.
+distant models but finds a position in weight space that is simultaneously close to both sources, with no
+significant drop in alignment relative to either, regardless of the underlying VLA architecture. Third, the
+merged model is consistently and substantially closer to the VLA than to the VLM across all layers in
+both panels (green above orange throughout), indicating that the learned α coefficients globally preserve
+a large share of the VLA adaptation while still maintaining a clear margin of proximity to the VLM.
+The main difference between the two panels is the magnitude of this gap: for Oursπ0.5 (bottom), the
+green curve sits substantially higher (∼0.97–0.98) and more tightly clustered than for Oursπ0F ast (top,
+∼0.88–0.93), while the orange curves are comparable in both cases (∼0.83–0.93). This is consistent
+with the merged π0.5 model retaining a stronger and more uniform alignment with the VLA across layers,
+in line with the higher action success rates observed for Oursπ0.5 in Table 1. Both the orange and blue
+curves exhibit a regular sawtooth pattern in both panels, consistent with the alternation between different
+weight types (attention and feed-forward) within each transformer block. Additionally, the orange curve
+partially recovers around layer index 350–400 before declining again toward the end of the network in
+both cases. This structured behaviour emerges directly from the optimisation of α, confirming that the
+learned coefficients successfully navigate the trade-off between both source models rather than collapsing
+toward either one, irrespective of the VLA’s action decoding strategy.
+C.2
+Merging coefficients analysis
+To examine how the learned coefficients are distributed across the singular spectrum, we average α(l)
+k
+across all layers at each rank index k (where k = 0 corresponds to the largest singular value σ(l)
+0 within
+each layer), for both VLA variants.
+
+
+Oursπ0.5
+0
+200
+400
+600
+800
+1000
+1200
+component index k (0 = largest )
+0.0
+0.2
+0.4
+0.6
+0.8
+mean 
+k
+Mean  vs. rank index 0.5
+raw mean  
+Gaussian-smoothed
+Oursπ0F AST
+0
+200
+400
+600
+800
+1000
+1200
+component index k (0 = largest )
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+mean 
+k
+Mean  vs. rank index 0FAST
+raw mean  
+Gaussian-smoothed
+Figure 7: Mean α vs. rank index. (Top) Oursπ0.5. (Bottom) Oursπ0F ast. For each rank index k, we average α(l)
+k
+across all 602 layers. Both VLA variants show the same overall pattern: mean α is near 0 for the most dominant
+directions and rises monotonically toward the tail of the spectrum, confirming that this asymmetry is not specific to
+a single action decoding strategy.
+Figure 7 shows the same overall pattern for both VLA variants: mean α is near 0 for the most dominant
+directions of the task vector and rises monotonically toward the tail of the spectrum. For Oursπ0.5 (top),
+mean α is exactly 0 for k < 200 and rises to a peak around 0.8 near k ≈1050 before declining slightly
+toward the tail. For Oursπ0F ast (bottom), the trend is similar, with mean α starting close to, though not
+exactly at, 0 (∼0.1 at k = 0) and plateauing around 0.65–0.7 from k ≈600 onward. The consistency of
+this monotonic pattern across both VLA architectures indicates that the low-rank/high-rank asymmetry
+exists between language and action recovery. This pattern directly complements the rank ablation of
+Section 4.3: when the model is restricted to a low rank, only the dominant directions are available,
+leaving the optimisation with little room to inject VLA-relevant adaptation, which is consistent with action
+prediction degrading sharply at low rank while language recovers comparatively quickly, for both VLA
+variants. Conversely, the gradual rise of mean α toward the tail of the spectrum in both panels shows that
+the directions necessary for action prediction are spread broadly across the weaker components, consistent
+with the diffuse nature of the VLA adaptation observed throughout this work.
+C.3
+Additional Qualitative Examples
+Figure 8 shows six additional captioning examples spanning diverse scenes, from tabletop manipulation
+to kitchen environments. Across all examples, the pure VLA output degrades into either a single
+repeated keyword (e.g. “Wood Wood Wood ....”, “Robot Bot Bot ...”), a short fragment stripped of
+grammatical structure (e.g. “Colored”, “@Water @@”), or garbled non-linguistic tokens (e.g. “˙p.w˚Γ
+f tools”), consistent with the catastrophic forgetting of language modelling capabilities discussed in
+Section 4.2. In contrast, our merged model consistently recovers full, grammatically coherent sentences
+that correctly identify the objects and setting present in the scene (e.g. “A collection of tools including
+screwdrivers, wrenches, and bolts.”, “A 3D rendering of a kitchen scene featuring a stovetop and oven,
+including a sink.”). We note that our merged model’s captions occasionally diverge stylistically from
+the pure VLM’s — favouring phrases such as “3D rendering of...” — but remain semantically accurate
+and fluent, indicating that language coherence is recovered even when the exact phrasing differs from
+the original VLM. These qualitative observations are consistent with the quantitative captioning scores
+reported in Table 1, where the pure VLA collapses on ROUGE-L, METEOR and BERTScore while our
+merged model recovers most of the pure VLM’s performance.
+
+
+Figure 8: Qualitative captioning examples. Given the same visual observation, the VLM produces coherent scene
+descriptions, the VLA (π0.5) generates fragmented or incomplete text due to catastrophic forgetting, and Oursπ0.5
+merged model recovers meaningful captions while retaining action capabilities.

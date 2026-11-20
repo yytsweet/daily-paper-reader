@@ -1,0 +1,971 @@
+Wireless Edge-Assisted Adaptive Latent Reasoning
+for Vision-Language-Action Models in Physical AI
+Fatih Temiz and Melike Erol-Kantarci, Fellow, IEEE
+School of Electrical Engineering and Computer Science, University of Ottawa, Ottawa, Canada
+Emails: {ftemi033, melike.erolkantarci}@uottawa.ca
+Abstract—Vision-language-action (VLA) models enable em-
+bodied artificial intelligence (AI) by translating visual observa-
+tions and language instructions into robotic actions. Emerging
+use cases in physical AI are expected to drive the need for
+efficient inference and communication, as the computational
+demands of the VLA models pose challenges for real-time control
+with limited onboard resources. Test-time scaling through latent
+reasoning allows these models to refine hidden representations
+without generating explicit chain-of-thought (CoT) tokens, but
+introduces a trade-off between task success, inference latency,
+and energy consumption. In this paper, we address the efficient
+collaborative inference under a realistic communication scenario.
+We propose a wireless edge-assisted framework for adaptive
+latent reasoning (WEALR) that augments onboard computation
+with edge computing. A decision-making agent jointly selects the
+execution location and latent-reasoning convergence threshold.
+We formulate this joint adaptation as a constrained Markov
+decision process (CMDP). A Lagrangian-constrained deep re-
+inforcement learning (CDRL) approach, namely trust region
+policy optimization Lagrangian (TRPO-Lag), learns to balance
+task performance and resource consumption under varying
+wireless conditions and task requirements. We evaluate the
+framework using LIBERO manipulation tasks, profiled VLA
+inference costs, and ray-traced wireless channels. Experimental
+results demonstrate that TRPO-Lag achieves up to 23% higher
+feasibility-weighted task success rate compared to benchmark
+CDRL methods.
+Index
+Terms—Constrained
+Deep
+Reinforcement
+Learning
+(CDRL), Latent Reasoning, Physical AI, Vision-Language-Action
+(VLA) Models
+I. INTRODUCTION
+Physical artificial intelligence (AI) brings perception, rea-
+soning and action into embodied systems that interact with
+the physical world [1]. Vision-language-action (VLA) models,
+such as OpenVLA [2], support this capability by translating
+visual observations and language instructions into robotic
+actions. Advances in these models create opportunities for
+generalizable physical AI, but their computational demands
+challenge deployment on resource-constrained robots. Task
+performance must therefore be balanced against onboard com-
+putation, energy consumption, and latency requirements [3],
+[4]. In particular, timely robotic control requires commu-
+nication and inference to jointly satisfy a latency service-
+level objective (SLO). We refer to robots capable of visual
+perception, instruction understanding, planning, reasoning, and
+action execution as physical AI devices (PADs) in this paper.
+Edge computing augments limited onboard computation by
+enabling PADs to offload inference to nearby edge servers,
+but its benefits depend on wireless propagation conditions
+[5]. This deployment perspective aligns with the vision of
+using radio access network (RAN) infrastructure to support
+AI applications at the network edge, such as mobile switching
+offices (MSO) [6]. However, faster edge computation comes
+at the cost of wireless transmission delay. In indoor envi-
+ronments such as homes and warehouses, blockage and mul-
+tipath propagation create heterogeneous line-of-sight (LOS)
+and non-line-of-sight (NLOS) conditions. Changes in PAD
+position affect achievable uplink (UL) rates and can offset the
+computational advantage of edge execution. Effective offload-
+ing must therefore account for wireless conditions alongside
+computation and control-latency requirements. Evaluating this
+tradeoff requires environment-specific channel models that
+capture blockage, multipath propagation, and spatial variations
+in link quality, which ray tracing can provide [7], [8].
+Reliable physical interaction requires VLA models to inter-
+pret diverse visual observations and language instructions and
+generate appropriate actions across tasks of varying difficulty.
+Supporting these capabilities motivates increasing model ca-
+pacity through parameter scaling or allocating additional com-
+putation during inference.Sparse mixture-of-experts (MoE)
+architectures enable parameter scaling while limiting computa-
+tion per input by activating only a subset of model parameters
+[9]. However, their memory and computational requirements
+can still challenge deployment on resource-constrained PADs.
+Test-time scaling offers a complementary approach that adjusts
+computational effort within a fixed model, making it particu-
+larly attractive for wireless edge deployment, where available
+resources and latency requirements limit inference costs [5].
+Unlike explicit reasoning methods such as chain-of-thought
+(CoT), which generate intermediate text through sequential
+decoding, latent reasoning refines hidden representations with-
+out producing intermediate text tokens, potentially reducing
+the decoding overhead and latency associated with textual
+reasoning. The recurrent-depth architecture in [10] enables
+large language models (LLMs), which serve as backbones
+of VLAs, to vary computational depth through shared pa-
+rameters, offering adjustable inference effort within a fixed
+model footprint. For robotic inference, recurrent-depth VLA
+(RD-VLA) applies a related principle through a weight-tied
+recurrent action head and a convergence-based stopping cri-
+terion to adapt the number of reasoning iterations across
+observations [11]. For example, grasping a small object may
+require more reasoning than moving through an unobstructed
+region. A single convergence threshold can therefore yield
+arXiv:2611.19131v1  [cs.RO]  14 Nov 2026
+
+
+different reasoning depths across stages of a task and different
+tasks. Additional reasoning may improve action quality but
+also increases inference latency and resource consumption,
+motivating adaptive control of reasoning effort. These con-
+siderations motivate jointly selecting VLA execution location
+and reasoning effort under wireless, energy, and computation
+constraints.
+Related studies address complementary aspects of collab-
+orative inference. The device-cloud framework in [12] uses
+resource-constrained reinforcement learning (RL) to select
+LLM inference locations and multimodal inputs. Also, the
+EcoVLA approach proposed in [13] selects energy-efficient
+VLA co-inference schemes under real-time constraints, adapt-
+ing to network fluctuations and edge workload variations. The
+authors of [14] propose MORES, a reasoning-as-a-service
+framework that distributes recurrent hidden-state updates be-
+tween devices and servers, jointly adapting reasoning com-
+putation and latent-feature pruning under heterogeneous wire-
+less conditions. While conversational LLM services typically
+prioritize response quality, VLAs must deliver actions within
+deadlines imposed by ongoing physical control [3].
+Meeting these deadlines requires balancing task success
+against communication delay and resource consumption. Cu-
+mulative budgets couple decisions across requests, and shared
+edge resources couple decisions across PADs, motivating a
+constrained Markov decision process (CMDP) formulation.
+Constrained deep reinforcement learning (CDRL) addresses
+such problems by separating performance objectives from
+explicit operating limits [15]. This motivates the use of CDRL
+methods, including Lagrangian variants of proximal policy op-
+timization (PPO) and trust region policy optimization (TRPO),
+as well as constrained policy optimization (CPO), for resource
+management in wireless networks. In particular, PPO-Lag has
+been adopted for joint unmanned aerial vehicle (UAV) altitude
+control and Internet of Things (IoT) channel access [16].
+In this paper, we propose Wireless Edge-Assisted Adaptive
+Latent Reasoning (WEALR), a framework that jointly adapts
+VLA execution location and reasoning effort. For each robotic
+task request, an agent selects local or edge execution and
+a reasoning convergence threshold. This threshold governs
+termination of the latent reasoning loop while allowing the
+realized reasoning depth to vary across observations within
+the task. We use TRPO-Lag, which learns the policy and
+constraint multipliers, connecting adaptive latent reasoning
+with wireless offloading and cumulative resource management.
+The key contributions are as follows:
+1) We develop WEALR to jointly select VLA execution
+location and reasoning threshold according to task re-
+quirements, wireless conditions, and available resources.
+2) We formulate a CMDP with per-PAD energy, shared
+edge-reasoning, and SLO constraints, and apply TRPO-
+Lag to optimize robotic task success.
+3) We evaluate task success, feasibility, and policy behavior
+using LIBERO manipulation tasks [17], profiled VLA
+inference costs, and ray-traced channels under varying
+wireless conditions and resource budgets.
+II. SYSTEM MODEL AND PROBLEM
+FORMULATION
+We consider an edge-computing system comprising N
+PADs and an edge server each equipped with AI acceleration
+hardware co-located with an indoor base station (BS), as
+shown in Fig. 1 (a). Both PADs and the server host pretrained
+VLA models with preloaded checkpoints; cold-start latency
+is neglected [13]. Each episode comprises K requests, with
+request k originating from PAD ik and belonging to task suite
+qk. The controller selects an execution location and reasoning
+threshold for each request, fixed throughout the task. Requests
+are served sequentially, with only one active UL transmission
+at a time [14]. We use synchronous VLA inference: each cycle
+begins after the previous action chunk is executed, avoiding
+potentially stale observations in asynchronous execution [3].
+A. System Model
+1) Latent Reasoning for VLAs: The VLA processes vi-
+sual observations and language instructions to generate ac-
+tion chunks, each comprising a sequence of actions (e.g.,
+five). During each inference cycle, recurrent updates refine
+the hidden representations until the predicted action chunk
+stabilizes, as illustrated in Fig. 1(b) and (c). Following RD-
+VLA, convergence is assessed using the squared Euclidean
+distance between consecutive predicted action chunks as a
+proxy for the Kullback-Leibler (KL) divergence between their
+corresponding action distributions:
+∆(r)
+k,m = ∥a(r)
+k,m −a(r−1)
+k,m ∥2
+2,
+(1)
+dk,m(τk) = min
+
+{r : ∆(r)
+k,m < τk} ∪{dmax}
+
+.
+(2)
+where a(r)
+k,m denotes the predicted action chunk at recurrent up-
+date r, m indexes inference cycles, and dmax is the maximum
+reasoning depth. Thus, a single threshold governs each task,
+while the realized depth varies across observations. Unlike
+fixed-depth reasoning [14], a task-level threshold adapts depth
+across observations, potentially reducing recurrent updates
+while maintaining task success [11].
+An offline dataset profiles task success, inference latency,
+energy, and recurrent-update counts across task suites and
+candidate thresholds, as summarized in Fig. 2. Increasing the
+convergence threshold reduces the mean recurrent iterations
+per inference across all suites, but generally lowers task
+success, with the largest degradation observed in LIBERO-
+10, which involves long-horizon tasks [17]. These tradeoffs
+motivate adaptive threshold selection and provide the profiles
+used by the resource-management environment.
+2) Communication Model: We consider an orthogonal fre-
+quency division multiplexing (OFDM) UL channel in which
+single-antenna PADs communicate with a BS equipped with
+M antennas. Indoor channels are generated using DeepMIMO
+by mapping each PAD’s position to the nearest channel loca-
+tion, capturing geometry-dependent blockage and LOS/NLOS
+multipath propagation [7]. PAD mobility follows the random
+
+
+Fig. 1: Overview of the proposed WEALR framework.
+0.0001
+0.0002
+0.0005
+0.001
+0.005
+0.01
+Convergence threshold τ
+0%
+20%
+40%
+60%
+80%
+100%
+Offline task success
+0.0001
+0.0002
+0.0005
+0.001
+0.005
+0.01
+Convergence threshold τ
+0
+2
+4
+6
+8
+10
+12
+Mean recurrent iterations / prediction
+Spatial
+Goal
+Object
+LIBERO-10
+Fig. 2: VLA task performance versus inference cost
+waypoint model. For request k, the channel of PAD ik on sub-
+carrier n is hik,k[n] ∈CM. To represent bandwidth availability
+under exogenous traffic at the BS, Bk is sampled uniformly
+from a predefined set B for each request and mapped to a
+central contiguous subcarrier set Lk. The total transmit power
+Ptx is allocated equally across the active subcarriers. With
+maximum-ratio combining, the UL signal-to-noise ratio (SNR)
+and achievable rate are:
+γik,k[n] = Ptx∥hik,k[n]∥2
+2
+LkN0FNF∆f ,
+(3)
+RUL
+ik,k = ∆f
+X
+n∈Lk
+log2(1 + γik,k[n]) ,
+(4)
+where Lk is the active subcarrier set, Lk = |Lk|, ∆f is the
+subcarrier spacing, N0 is the noise spectral density, and FNF
+is the linear receiver noise figure. Only the requesting PAD
+transmits, excluding interference among the modeled PADs.
+Each inference cycle uploads two uncompressed 224 × 224
+RGB images (DUL ≈2.41 Mbit), neglecting prompt and
+proprioceptive payloads. The upload latency and transmit
+energy for inference cycle m of request k are:
+T UL
+k,m = DUL
+RUL
+ik,k
+,
+EUL
+k,m = PtxT UL
+k,m.
+(5)
+Downlink transmission delay and receive energy are neglected
+due to the small returned action-chunk payload (e.g., 140
+bytes). We assume that the PAD remains stationary during
+each task execution and the UL rate remains fixed throughout
+each task.
+3) Computation Model: Let ℓk = 0 and ℓk = 1 denote
+local and edge execution, respectively. The inference latencies
+T loc
+k,m(τk) and T edge
+k,m (τk) account for the respective hardware
+capabilities and selected convergence threshold. The total
+chunk latency is
+Tk,m = (1 −ℓk)T loc
+k,m(τk) + ℓk
+h
+T UL
+k,m + T edge
+k,m (τk)
+i
+.
+(6)
+To account for the server’s finite computation capacity shared
+among PADs, edge workload is measured in reasoning itera-
+tions [14]. PAD energy and edge reasoning consumption for
+task k are
+ek =
+Mk
+X
+m=1
+
+(1 −ℓk)Eloc
+k,m(τk) + ℓkEUL
+k,m
+
+,
+(7)
+gk = ℓk
+Mk
+X
+m=1
+dk,m(τk),
+(8)
+where Mk is the number of inference chunks, Eloc
+k,m(τk) and
+EUL
+k,m denote PAD inference and UL transmission energy,
+respectively, and dk,m(τk) is the reasoning iteration count.
+Locomotion energy is excluded, since PAD motion is indepen-
+dent of the inference execution location. Cumulative energy
+for PAD i and shared edge consumption are Ei = P
+k 1{ik =
+i}ek and Gedge = P
+k gk.
+A task violates the SLO if more than a fraction η of its
+chunks exceed the deadline TSLO:
+zk = 1
+(
+1
+Mk
+Mk
+X
+m=1
+1{Tk,m > TSLO} > η
+)
+.
+(9)
+
+
+B. Problem Formulation and CMDP Framework
+1) Problem Statement: We maximize expected task success
+subject to PAD energy, edge reasoning, and SLO constraints:
+max
+πθ
+Eπθ
+" K
+X
+k=1
+yk
+#
+(10)
+s.t.
+Eπθ
+
+max
+i
+Ei
+Emax
+
+≤1,
+(10a)
+Eπθ
+Gedge
+Gmax
+
+≤1,
+(10b)
+Eπθ
+"
+1
+K
+K
+X
+k=1
+zk
+#
+≤ϵ.
+(10c)
+where yk = 1 if the PAD successfully completes the intended
+task. Here, Ei is PAD i’s total energy consumption, Gedge is
+the total edge recurrence count, and Emax and Gmax are their
+respective budgets. Constraints bound expected episode costs;
+episode feasibility is assessed using realized costs.
+2) CMDP Formulation: The underlying system is modeled
+as a finite-horizon CMDP with K decision steps, one per task
+request. The policy πθ(ak | ok) specifies action probabilities
+given a nine-dimensional observation. Since the individual
+remaining energies of non-requesting PADs are omitted, this
+observation provides an approximate state representation.
+a) Observation Space: Before serving request k, the
+agent observes
+ok =
+"
+qk,
+Erem
+ik,k
+Emax
+, Grem
+k
+Gmax
+, RUL
+ik,k, k
+K , max
+i∈N
+Eused
+i,k
+Emax
+#
+,
+(11)
+where qk is a four-dimensional one-hot task-suite encoding
+(Spatial, Object, Goal, or LIBERO-10). Here, Erem
+ik,k = Emax−
+Eused
+ik,k denotes the remaining energy of requesting PAD ik,
+while the last term represents the maximum consumed-energy
+ratio across all PADs. In addition, Grem
+k
+= Gmax −Pk−1
+t=1 gt
+is the remaining edge reasoning budget, where gt denotes the
+edge recurrence count for request t.
+b) Action Space: Each action selects an execution loca-
+tion and a convergence threshold, both fixed throughout the
+task:
+ak = (lk, τk),
+lk ∈{0, 1},
+τk ∈{10−4, 2×10−4, 5×10−4, 10−3, 5×10−3, 10−2}, (12)
+yielding 12 possible actions.
+c) Reward and Costs: Upon task completion, the reward
+is rk = yk and the costs are
+cE
+k =
+maxi Eused
+i,k+1 −maxi Eused
+i,k
+Emax
+,
+(13)
+cG
+k =
+gk
+Gmax
+,
+cS
+k = zk
+K .
+(14)
+These costs measure PAD energy, edge reasoning, and SLO
+violations, respectively. With Eused
+i,1
+= 0 and Ei = Eused
+i,K+1,
+their episode sums recover the quantities in (10a)–(10c).
+III. CDRL-BASED ADAPTIVE LATENT REASONING
+A. TRPO-Lagrangian
+We adopt TRPO-Lag to solve (10), combining trust-region
+policy updates with learned constraint penalties [15], [18].
+Given observation ok, the actor samples ak = (lk, τk) from the
+12 available actions. The selected configuration is maintained
+throughout the task, after which success and resource costs
+are recorded.
+Let J = {E, G, S} index the constraints, with cumulative
+costs Cj = PK
+k=1 cj
+k and limits (dE, dG, dS) = (1, 1, ϵ). The
+policy maximizes the Lagrangian objective:
+L(θ, λ) = Eπθ
+" K
+X
+k=1
+rk
+#
+−
+X
+j∈J
+λj
+Eπθ[Cj] −dj
+sj
+,
+(15)
+where λj ≥0 is an adaptive multiplier and sj > 0 scales the
+corresponding cost. Unlike manual reward shaping with fixed
+weights, this formulation dynamically adapts the penalties to
+satisfy the constraints directly [16].
+To optimize (10), we employ an alternating primal-dual
+scheme. In the primal step, a reward critic and three cost critics
+estimate future success and cumulative costs from ok. Using
+generalized advantage estimation (GAE), we form
+bALag
+k
+= bAR
+k −
+X
+j∈J
+λj
+sj
+bAj
+k.
+(16)
+This advantage is normalized over the rollout, yielding eALag
+k
+.
+With the multipliers fixed, the actor update solves the sampled
+trust-region problem
+max
+θ
+bE
+ πθ(ak | ok)
+πθold(ak | ok)
+eALag
+k
+
+(17)
+s.t.
+bE[DKL(πθold(· | ok) ∥πθ(· | ok))] ≤δKL.
+Here, bE denotes the rollout average. The KL bound limits
+changes in the probabilities of offloading and threshold choices
+between updates. We approximately solve (17) using damped
+conjugate gradients and backtracking, accepting only steps that
+improve the surrogate objective and satisfy the KL bound. The
+critics are fitted to their respective GAE return targets. In the
+dual step, after each window of W completed episodes, the
+multipliers are updated using a projected multiplier update:
+λj ←
+"
+λj + αλ
+bCj −dj
+sj
+#
++
+,
+j ∈J ,
+(18)
+where bCj is the mean episode cost, sj = dj is the constraint-
+specific scaling factor, αλ is the dual learning rate, and [x]+ =
+max(0, x). Thus, exceeding a resource or SLO limit increases
+its penalty, while operating below the limit reduces it.
+IV. SIMULATION SCENARIOS AND RESULTS
+A. Experimental Settings and Baselines
+1) Experimental Settings: We consider N = 5 PADs served
+by an indoor BS with a co-located edge server, with three PAD
+locations sampled from LOS regions and two from NLOS
+
+
+0
+250
+500
+Steps (x1e3)
+82
+84
+86
+88
+90
+92
+94
+Successful tasks per episode
+PPO
+PPO-Lag
+TRPO
+TRPO-Lag
+CPO
+0
+250
+500
+Steps (x1e3)
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+Max. robot energy / budget
+0
+250
+500
+Steps (x1e3)
+0.4
+0.6
+0.8
+1.0
+1.2
+Edge recurrence / budget
+0
+250
+500
+Steps (x1e3)
+1
+2
+3
+4
+5
+6
+SLO violation rate / limit
+Fig. 3: Training Performance and Normalized Constraint Costs
+regions. Each episode comprises K = 100 task requests.
+Methods are trained across three random seeds and evaluated
+deterministically over 100 held-out episodes. Table I lists
+the simulation parameters and TRPO-Lag hyperparameters.
+The offline dataset described in Section II-A1 comprises
+2,400 RD-VLA rollouts across four LIBERO task suites, ten
+tasks per suite, six convergence thresholds, and ten rollouts
+per task–threshold configuration. Before training, rollouts are
+partitioned into fixed training (80%) and test (20%) subsets. In-
+ference latency and GPU power are profiled on an RTX 4090,
+with power sampled through NVML and energy computed
+by trapezoidal integration. To emulate Jetson Thor execution,
+profiled latency and energy are scaled by empirical factors sT
+and sE, respectively [3], [4], [19].
+We evaluate WEALR using an offline, profile-driven simu-
+lator. At each decision step, a task request is sampled, and
+the controller selects its execution location and reasoning
+threshold based on observation ok. A matching RD-VLA
+rollout is then sampled from the corresponding dataset split.
+Its recorded task outcome and action-chunk-level statistics
+are combined with hardware cost scaling and the simulated
+wireless link to determine task success, end-to-end latency,
+PAD energy consumption, and edge reasoning cost.
+TABLE I: TRPO-Lag and Simulation Parameters.
+Simulation
+Value
+TRPO-Lag
+Value
+DeepMIMO scenario
+I3_2p4
+Hidden layers
+[64, 64]
+fc
+2.4 GHz
+Training steps
+5×105
+M
+32
+Rollout length
+1024
+B
+{1, 2, 5} MHz
+Critic batch size
+64
+Ptx
+20 dBm
+Critic epochs
+10
+FNF
+7 dB
+αV
+3×10−4
+v (PAD Velocity)
+[0.5, 1.5] m/s
+γ
+1
+ϵ, η, TSLO
+0.05, 0.1, 200ms
+λGAE
+0.95
+sT
+1.69
+δKL
+0.01
+sE
+0.535
+CG iterations
+10
+Emax
+2.27 kJ
+αλ
+0.05
+Gmax
+1.94×104
+W
+40
+2) Benchmark Methods: We compare TRPO-Lag with:
+Task-aware heuristic (TAH), which selects a fixed action per
+task suite using training-data estimates; Task and rate-aware
+heuristic (TRAH), which additionally considers the current
+achievable UL rate; Random, which uniformly samples the
+twelve actions; PPO and TRPO, which maximize task suc-
+cess without constraints [15], [18]; CPO, which incorporates
+all three constraints into trust-region policy updates [15]; and
+PPO-Lag, which handles the same constraints using adaptive
+Lagrange multipliers [15], [16].
+B. Results
+In terms of CDRL performance, Fig. 3 compares learn-
+ing performance and normalized CMDP constraint costs. All
+methods improve task success during training, reaching ap-
+proximately 92-94 successful tasks per episode, equivalent
+to the average episode reward. However, maximizing success
+alone does not ensure feasible operation. PPO and TRPO
+maintain SLO violation rates approximately four times the
+prescribed limit, while their edge reasoning costs approach
+or exceed the budget during training. In contrast, TRPO-Lag
+and PPO-Lag reduce SLO violations below the limit while
+maintaining comparable task success. TRPO-Lag stabilizes at
+approximately 0.8 of the maximum PAD energy budget and
+0.7 of the edge reasoning budget. CPO also controls resource
+consumption, but its SLO violation rate remains close to the
+constraint boundary. Fig. 4 evaluates task success under the
+0%
+20%
+40%
+60%
+80%
+100%
+Success rate
+TRPO-Lag
+PPO-Lag
+CPO
+TRAH
+PPO
+TRPO
+TAH
+Random
+Task success
+Feasibility-weighted success
+Fig. 4: Task Success and Constraint-Aware Performance
+operating constraints on the test data. Although most methods
+achieve task success rates near 97%, their feasibility-weighted
+success differs substantially. TRPO-Lag achieves approxi-
+mately 90%, compared with 85% for PPO-Lag, 73% for CPO,
+and 64% for TRAH, corresponding to relative improvements
+of approximately 6%, 23%, and 41%, respectively. This favor-
+able balance between task success and feasibility is consistent
+with the aggregate benchmark findings in [15] and can be
+partly attributed to the combination of KL-constrained policy
+updates and adaptive constraint penalties. Unconstrained PPO
+achieves only approximately 4% feasibility-weighted success,
+while TRPO, TAH, and Random yield approximately zero.
+This gap highlights the importance of explicitly accounting
+for operating constraints when optimizing task success.
+
+
+25
+50
+75
+100
+Achievable uplink rate (Mbps)
+0%
+20%
+40%
+60%
+80%
+100%
+Offloading probability
+PPO
+PPO-Lag
+TRPO
+TRPO-Lag
+CPO
+0%
+15%
+30%
+Task SLO violations
+PPO
+PPO-Lag
+TRPO
+TRPO-Lag
+CPO
+Random
+Fig. 5: Offloading Behavior and SLO violations
+In terms of offloading policy, Fig. 5 illustrates adaptation
+to wireless conditions. TRPO-Lag rarely offloads below ap-
+proximately 25 Mbps, where communication delay limits the
+benefit of edge execution. Its offloading probability increases
+with achievable UL rate, reaching approximately 88% at
+high rates, demonstrating channel-aware inference decisions.
+Although PPO-Lag and CPO offload more frequently in this
+region, TRPO-Lag achieves the lowest overall SLO violation
+rate, approximately 2.2%, compared with approximately 3%
+for PPO-Lag and 3.4% for CPO. PPO and TRPO offload
+frequently even at low rates and incur violation rates near 19%.
+Fig. 6 explains the learned suite-dependent decisions through
+Spatial
+Goal
+Object LIBERO-10
+Task suite
+0%
+20%
+40%
+60%
+80%
+100%
+Threshold (τ) selection
+10−4
+2×10−4
+5×10−4
+10−3
+5×10−3
+10−2
+Spatial
+Goal
+Object LIBERO-10
+Task suite
+0%
+20%
+40%
+60%
+80%
+100%
+Execution location selection
+37.0%
+63.0%
+60.3%
+39.7%
+73.0%
+27.0%
+32.1%
+67.9%
+Local
+Edge
+Fig. 6: TRPO-Lag action distribution by task suite
+the offline characteristics in Fig. 2. TRPO-Lag predominantly
+selects τ = 10−3 for Goal and Object, preserving high task
+success while requiring fewer recurrent iterations than stricter
+thresholds. For LIBERO-10, which comprises longer-horizon
+tasks, it selects τ = 5 × 10−4 in approximately 82% of
+requests, consistent with the substantial success degradation
+observed at larger thresholds. Location selection complements
+these decisions: Spatial and LIBERO-10 are offloaded in
+63.0% and 67.9% of requests, whereas Goal and Object are
+primarily executed locally. These results indicate that TRPO-
+Lag also learns suite-dependent operating points that preserve
+task success while reducing inference latency and managing
+shared edge resources.
+V. CONCLUSION
+In conclusion, this paper proposed the WEALR framework
+for adaptive latent reasoning of VLA models in wireless edge-
+assisted robotic networks. By formulating the joint optimiza-
+tion of execution location and latent convergence threshold
+as a CMDP, our Lagrangian-CDRL approach dynamically
+balances task success against PAD energy budgets, shared
+edge-reasoning limits, and latency SLO constraints under
+time-varying wireless conditions. Evaluations across LIBERO
+manipulation tasks with profiled hardware costs and realistic
+channel models demonstrate that the proposed framework
+effectively satisfies resource constraints while achieving up
+to a 23% gain in feasibility-weighted task success rate over
+baselines. Future work may explore concurrent robotic task
+requests with joint wireless and reasoning optimization.
+ACKNOWLEDGEMENT
+This work has been supported by the NSERC Canada
+Research Chairs Program.
+REFERENCES
+[1] C.
+Wang
+et
+al.,
+“Phyai:
+Real-time
+physical
+ai
+at
+the
+edge,
+scalable
+rollouts
+in
+the
+cloud,”
+2026.
+[Online].
+Available:
+https://arxiv.org/abs/2608.03682
+[2] M. J. Kim et al., “Openvla: An open-source vision-language-action
+model,” in Proc. CoRL, ser. PMLR, vol. 270, 06–09 Nov 2025, pp.
+2679–2713.
+[3] W.
+Jiang
+et
+al.,
+“How
+fast
+can
+i
+run
+my
+vla?
+demystifying
+vla inference performance with vla-perf,” 2026. [Online]. Available:
+https://arxiv.org/abs/2602.18397
+[4] K. Zhou et al., “Characterizing vision-language-action models across
+XPUs: Constraints and acceleration for on-robot deployment,” in Forty-
+third ICML, 2026.
+[5] H. Luo et al., “Ai reasoning for wireless communications and network-
+ing: A survey and perspectives,” ACM Comput. Surv., vol. 58, no. 13,
+Jun. 2026.
+[6] L. Kundu et al., “Ai-ran: Transforming ran with ai-driven computing
+infrastructure,” IEEE Commun. Mag., vol. 64, no. 1, pp. 168–174, 2026.
+[7] A. Alkhateeb, “Deepmimo: A generic deep learning dataset for
+millimeter wave and massive mimo applications,” 2019. [Online].
+Available: https://arxiv.org/abs/1902.06435
+[8] M. Farzanullah et al., “Wireless multimodal foundation model (wmfm):
+Integrating vision and communication modalities for 6g isac systems,”
+2025. [Online]. Available: https://arxiv.org/abs/2512.23897
+[9] F. Temiz, S. Salehi, and M. Erol-Kantarci, “Wisdom: Wireless
+sparse
+decision
+transformer
+with
+mixture-of-experts
+for
+multi-
+task
+mobile
+network
+optimization,”
+2026.
+[Online].
+Available:
+https://arxiv.org/abs/2609.00284
+[10] J. Geiping et al., “Scaling up test-time compute with latent reasoning:
+A recurrent depth approach,” in The Thirty-ninth NeurIPS, 2025.
+[11] Y. Tur et al., “Recurrent-depth vla: Implicit test-time compute scaling
+of vision-language-action models via latent iterative reasoning,” 2026.
+[Online]. Available: https://arxiv.org/abs/2602.07845
+[12] L. Yuan et al., “Device-Cloud Collaborative LLM Inference with Multi-
+Modal, Multi-Task, Multi-Turn Conversations ,” IEEE Trans. Netw.,
+no. 01, pp. 1–1, Jul. 2026.
+[13] A. Zhou et al., “Ecovla: Energy-efficient device-edge co-inference for
+vision-language-action models under real-time constraints,” in Advanced
+Parallel Processing Technologies, 2027, pp. 625–631.
+[14] G. Liu, H. Du, and K. Huang, “MORES: Mobile reasoning-as-a-
+service via distributed LLM inference-time scaling,” arXiv preprint
+arXiv:2607.08116, 2026.
+[15] A. Ray, J. Achiam, and D. Amodei, “Benchmarking safe exploration
+in
+deep
+reinforcement
+learning,”
+OpenAI,
+Nov.
+2019.
+[Online].
+Available:
+https://openai.com/index/benchmarking-safe-exploration-in-
+deep-reinforcement-learning/
+[16] S. Khairy et al., “Constrained deep reinforcement learning for energy
+sustainable multi-uav based random access iot networks with noma,”
+IEEE JSAC, vol. 39, no. 4, pp. 1101–1115, 2021.
+[17] B. Liu et al., “Libero: Benchmarking knowledge transfer for lifelong
+robot learning,” arXiv preprint arXiv:2306.03310, 2023.
+[18] J. Schulman et al., “Trust region policy optimization,” in Proc. ICML,
+2015, pp. 1889–1897.
+[19] K. Soltani et al., “Energy-efficient split learning for resource-constrained
+environments: A smart farming solution,” in 2025 IEEE MASS, 2025,
+pp. 111–119.

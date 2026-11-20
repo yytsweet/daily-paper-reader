@@ -1,0 +1,2232 @@
+ACiT: Proprioceptive-Prior Action Chunking with Inverted
+Transformers
+Haixiang Wu1
+Zhihao Guan1
+Yang Yang1
+1Nanjing University of Science and Technology, Nanjing, China
+Abstract
+Visuomotor policies condition action prediction on vi-
+sual and proprioceptive observations.
+While histori-
+cal proprioceptive sequences carry rich dynamic pri-
+ors, current methods treat them as equal to high-
+dimensional vision, causing the proprioceptive signal
+to be overwhelmed. To identify what is lost in equal-
+conditioning fusion, we analyze proprioceptive data
+and find that strong inter-joint coupling is the key
+action-determining structure. This finding aligns with
+the neural sensorimotor loop, in which proprioception
+first forms a body-centered prior and vision is later cal-
+ibrated via parietal remapping.
+Inspired by this, we
+propose ACiT, Proprioceptive-Prior Action Chunking
+with Inverted Transformers, which reinforces histor-
+ical joint-coupling as the primary condition with vi-
+sion as a later calibration. This design is instantiated
+through three modules: Inverted State Encoding builds
+a proprioceptive prior via per-joint tokens and inter-
+joint self-attention. State-Visual Grounding lets joint
+tokens query visual evidence, making vision goal- and
+calibration-only.
+Inverted Action Chunking decodes
+per-joint trajectories independently.
+ACiT improves
+success rates on most LIBERO, RoboTwin 2.0, and
+real-world tasks, with the largest gains on those that re-
+quire dynamics and coordination. The same condition-
+ing design transferred to the VLA backbone π0-ACiT
+yields significant gains with better execution efficiency.
+1 Introduction
+Visuomotor policies predict actions from multi-view obser-
+vations and proprioception.
+Early work conditioned on a
+single current state, where ACT maps the current joint state
+and images to an action chunk [41]. Diffusion Policy con-
+ditions on a short observation history instead [8]. A single
+frame proved insufficient to resolve action ambiguity, while
+history carries dynamics and hidden-state information, so
+proprioceptive history was explicitly incorporated. Recent
+models such as A2A and Chronos explicitly model proprio-
+ceptive history [12, 42]. Another line discretizes historical
+states or actions into tokens to better integrate with LLM
+backbones, at the cost of losing continuous coupling struc-
+ture [14, 22, 28]. Reconstruction-only tokenization can also
+erode control-relevant information [16]. These works vali-
+date the value of using history from both continuous and dis-
+crete directions, and state history is becoming a consensus
+for action prediction.
+These advances have not converged at the conditioning in-
+terface. First, mainstream methods map historical proprio-
+ceptive states as an independent modality, either discretely
+or continuously, and place them alongside a pooled global
+visual vector as conditions for action generation. This naive
+fusion lets high-dimensional, low-SNR visual features en-
+tangle and dominate the conditioning, leading to degraded
+robustness or spurious shortcuts [15, 38]. Second, we ana-
+lyze the state history and the action itself: the effective di-
+mensionality of the action distribution is far below the num-
+ber of joints, and joints are strongly coupled, as shown in
+Fig. 1(a). However, existing methods model temporal depen-
+dencies and pack all joints into one vector, so the inter-joint
+coupling, a structure critical to action, can only be implicit
+inside the token.
+Therefore, how to encode historical state information, how
+to fuse modalities, and how to feed the result into action de-
+coding is an open problem. Inspired by neuroscience, the hu-
+man chain from peripheral proprioception to body-centered
+action generation is as follows (Fig. 1(b)): muscle and joint
+receptors continuously encode joint angle, velocity, and ten-
+sion and project through large-diameter myelinated affer-
+ents [29, 36]. The somatosensory cortex and posterior pari-
+etal cortex aggregate proprioceptive history into a body-state
+representation, forming a body-centered prior [1, 2]. The
+posterior parietal cortex then remaps visual goals from retinal
+coordinates into body-centered coordinates, with propriocep-
+tive context modulating this remapping [2, 10]. Finally, the
+parietal-motor pathway sends the calibrated body-centered
+representation to action generation [23, 37]. The key compu-
+tational asymmetry is that proprioception provides a continu-
+ous, low-latency body-state stream, whereas visual goals are
+remapped and integrated into the body-centered representa-
+tion afterward.
+We map this sensorimotor loop to Bayesian cue integra-
+tion:
+the fast, continuous proprioceptive stream forms a
+prior over the body state, visual goals provide goal evidence
+(a likelihood-like term), and calibrating the prior yields a
+posterior-like body-centered representation for action gener-
+ation. Based on this, we propose ACiT on top of ACT, the
+1
+arXiv:2611.20719v1  [cs.RO]  16 Nov 2026
+
+
+(c) Conditioning: ACT vs. ACiT
+ACT
+symmetric fusion
+single frame
+vision
+concat
+one shared condition
+PPC
+ACiT
+state-primary fusion
+S1 ~ prior
+joint coupling
+within + cross arm
+V1 ~ vision patches
+M1 ~ per-joint trajectories
+(b) Biological Loop
+(a) Embodiment
+Joint State Histories
+Left Arm (L)
+Right Arm (R)
+6 of 14 shown
+q
+t
+Effective Dimensionality
+Action Correlation
+Vision
+Proprioception
+Inspiration
+S1
+PPC
+M1
+V1
+Figure 1: Motivation. (a) Embodiment: a dual-arm robot has 14 joints, each with its own state history, while the action
+space has a much lower effective dimensionality (PR 1.44–4.42) and strong inter-joint coupling, the state therefore should not
+be compressed into one shared vector. (b) Biological inspiration: proprioception forms a body-centered prior in S1, vision
+reaches PPC via V1 only to remap and calibrate the goal, and M1 issues the command. The two modalities are not symmetric,
+and their order is fixed. (c) Conditioning interface: ACT concatenates a single-frame state with vision into one condition
+shared by all joints; ACiT keeps the per-joint prior as the primary condition, retrieves visual evidence per joint, and decodes
+one trajectory per joint.
+smallest architecture that still carries the full interface (multi-
+view images, proprioception, and a chunked action decoder),
+so that the encoder and the head stay fixed while only the
+conditioning changes. It has three modules. First, Inverted
+State Encoding compresses each joint’s entire history into
+a token and directly models inter-joint coupling with self-
+attention. Second, State-Visual Grounding treats vision as a
+per-joint goal-calibration signal and does not let it directly
+enter the encoder. Third, Inverted Action Chunking treats
+each joint as a token on the action side, and each joint inde-
+pendently generates its complete trajectory chunk. The de-
+coder does not need to translate between “visual coordinates”
+and “joint coordinates”.
+The historical proprioceptive se-
+quence and action generation share a more consistent feature
+space. To separate the interface from the backbone, we port
+the same conditioning to a pretrained VLA and obtain π0-
+ACiT, which keeps π0’s architecture and changes only how
+the state enters it. Experiments on LIBERO, RoboTwin 2.0,
+and real-world manipulation tasks show that ACiT and π0-
+ACiT improve success on most tasks, with improved robust-
+ness under visual perturbations, especially on tasks that de-
+pend on dynamics and joint coordination.
+Our contributions are as follows:
+• We formulate the conditioning interface as Bayesian
+sensorimotor cue integration, with history as the prior
+and vision as the calibration evidence, and realize it as
+an explicit asymmetric fusion.
+• We propose ACiT, which uses three inverted Trans-
+former modules to explicitly build and preserve the
+inter-joint coupling dynamics in the state history instead
+of flattening them.
+• We validate ACiT on LIBERO, RoboTwin 2.0, and real-
+world tasks, where it improves the average success rate
+by 5.7 to 10.8 points over the strongest baseline. π0-
+ACiT improves the average success rate by 26.9 points
+at 20.2% lower inference latency than π0.
+2 Related Work
+History in the conditioning interface. Early visuomotor
+policies condition on a single frame: ACT maps the cur-
+rent joint state and images to an action chunk [41], and Dif-
+fusion Policy instead uses a short observation window [8].
+Later work makes the state history explicit in the condi-
+tioning input [12, 42].
+A parallel line discretizes states
+or actions so that autoregressive backbones can consume
+them [14, 21, 22, 28], at the cost of losing continuous struc-
+ture, and reconstruction-only tokenization can erode control-
+relevant information [16]. Under both interfaces propriocep-
+tion enters as one flat vector or a one-dimensional token se-
+quence, so the coupling among joints stays implicit.
+Vision and proprioception under fusion. Pooling both
+modalities into one condition leaves nothing to stop the high-
+dimensional visual stream from dominating and introducing
+spurious shortcuts [15, 38]. One line responds by letting the
+robot state steer vision, through robot-centric pooling [43]
+or active visual attention [39], yet the asymmetry is applied
+2
+
+
+to perception rather than to the conditioning itself. Large
+VLA backbones inherit the same symmetric interface, con-
+catenating one proprioceptive token with visual and language
+tokens [4, 5, 25].
+Structure as an inductive bias. Topology-aware models
+inject the kinematic graph as a structural bias for cross-
+embodiment transfer [24, 27].
+ACiT shares that motiva-
+tion but acts on the conditioning interface: it carries his-
+tory per joint, keeps the resulting prior primary, and lets each
+joint retrieve its own visual calibration in a single generation
+pipeline. Appendix D expands the comparison.
+3 Method
+3.1 Preliminaries
+Let the robot have D joints, with state st ∈RD and action
+at ∈RD at time t. An action-chunking policy predicts
+At = [at,...,at+T−1] ∈RT×D,
+(1)
+and executes its first few steps. The state history is St =
+[st−H+1,...,st] ∈RH×D, where H is the history length (num-
+ber of past frames). V ∈RN×dv denotes the visual token ma-
+trix, whose rows are the N visual tokens.
+Most chunk-based policies share one skeleton [8, 41]: a
+Transformer encoder [34] maps the observations Ot to a
+condition, and a decoder emits the chunk, p(At | Ot) =
+Decθ
+ Encφ(Ot)
+
+. What differs across methods is how the
+proprioceptive history is represented inside that condition,
+which is the axis ACiT changes. The encoder and the de-
+coder are those of the host policy (Sec. D.1). The equal-
+conditioning baseline we depart from places the current state
+and vision side by side as conditions:
+πθ
+ At | st, V
+
+.
+(2)
+Bayesian Sensorimotor Formulation. Let bt be the latent
+body-centered state and g the task goal (vision, or vision and
+language in a VLA). The ideal visuomotor computation fac-
+torizes into two stages,
+p(bt | St,V) ∝p(bt | St) p(V | bt,g),
+(3)
+p(At | St,V) =
+Z
+p(At | bt) p(bt | St,V)dbt.
+(4)
+Equation (3) states that visual evidence calibrates a proprio-
+ceptive prior into a posterior body-state estimate, and Equa-
+tion (4) marginalizes over this posterior to produce the action
+distribution. This formulation mirrors Bayesian cue integra-
+tion in sensorimotor control [13, 33].
+ACiT Instantiation. Rather than modeling explicit proba-
+bility distributions, ACiT uses deterministic representations
+to instantiate this computation:
+πθ
+ At | Gt
+
+,
+Gt = fθ(St, V),
+(5)
+where Gt is a deterministic representation of the posterior-
+like body state in Eq. (3), and the action head πθ(At | Gt)
+replaces the integration in Eq. (4). The function fθ is fac-
+torized into per-joint history encoding with a body-centered
+prior (Sec. 3.2) followed by state-visual grounding (Sec. 3.3).
+The action head consumes Gt in Sec. 3.4. This is a computa-
+tional analogy, not a literal probabilistic model. bt is distinct
+from the CVAE latent z used for training.
+3.2 Inverted State Encoding
+For each joint j, ACiT applies a depthwise 1D convolution
+along time with kernel size κ, followed by a shared temporal
+projection:
+u(j)
+i
+=
+⌊κ/2⌋
+∑
+τ=−⌊κ/2⌋
+k(j)
+τ
+¯s(j)
+i+τ,
+i = 1,...,H,
+(6)
+where κ is the kernel size, ¯s(j)
+i
+= s(j)
+t−H+i is the i-th frame
+in the history window, k(j)
+τ
+is the joint-specific convolu-
+tion weight at offset τ, and zero padding is applied at both
+ends.
+We use κ = 3 by default, giving weights k(j) =
+[k(j)
+−1,k(j)
+0 ,k(j)
+1 ].
+The convolved features are stacked into
+u(j) = [u(j)
+1 ,...,u(j)
+H ]⊤∈RH.
+A shared linear layer and a joint-identity embedding then
+project the temporal feature to a d-dimensional token:
+h(j) = Wtime u(j) +e(j) ∈Rd,
+(7)
+where Wtime ∈Rd×H is shared across joints and e(j) ∈Rd is a
+learnable joint-identity embedding. Stacking all joint tokens
+gives Xt = [h(1);...;h(D)] ∈RD×d. The depthwise convo-
+lution captures local temporal patterns such as velocity and
+acceleration without mixing joints. The history is in effect
+a multivariate time series with one channel per joint, and
+the coupling we care about is a dependency between chan-
+nels rather than between time steps.
+Treating each chan-
+nel as a token and letting attention operate across channels
+is the inverted formulation that has been shown to capture
+variate-wise structure in forecasting [19]. Here the variates
+are joints, and their dependency is the coupling that deter-
+mines the action.
+Proprioceptive prior. The joint tokens then attend to each
+other, so that the coupling structure is represented explicitly
+rather than hidden inside a flattened vector:
+Q = XtWQ,
+K = XtWK,
+Zx = XtWV,
+(8)
+Pt = softmax
+QK⊤
+√dk
+
+Zx ∈RD×d,
+(9)
+where Q,K,Zx are the queries, keys and values, dk is the key
+dimension, and Pt = [˜h(1);...; ˜h(D)] is a deterministic rep-
+resentation of the prior p(bt | St) in Eq. (3), i.e., the body-
+centered prior from which the action is eventually generated.
+3.3 State-Visual Grounding
+Given the prior Pt, vision now enters only as evidence. Each
+prior token serves as a query to the visual tokens:
+Qc = PtW c
+Q,
+Kc = VW c
+K,
+Zc = VW c
+V,
+(10)
+Gt = softmax
+QcK⊤
+c
+√dk
+
+Zc ∈RD×d.
+(11)
+3
+
+
+Robot
+Proprioception
+Depthwise
+1D CNN
+Joint
+Tokens
+Depthwise
+1D CNN
+Depthwise
+1D CNN
+Depthwise
+1D CNN
+Joint 1
+Joint 2
+Joint 3
+Joint D
+Joint Self-Attention
+Attention Map
+Multi-View Observations
+J2V Cross-Attention
+(Key,Value)
+Query
+Memory
+Grounded Joint
+Tokens
+Query
+Learnable Joint
+Quries
+Transformer Decoder
+(c) Inverted Action Chunking
+(b) Visual Grounding
+(a) Inverted State Encoding
+Joint 1
+Joint 2
+Joint J
+Time
+Value
+State History
+Joint 1
+Joint 2
+Joint 3
+Joint D
+Action Chunk
+Visual Tokens
+Attention Map
+CVAE
+1
+2
+3
+L
+Self-Attention on Queries
+Cross-Attention to Memory
+Feed-Forward Network 
+Per-Joint T-Step Trajectories
+Gererated Robot Motion
+Vision Encoder
+Figure 2: ACiT architecture, organized by its three modules. (a) Inverted State Encoding: per-joint depthwise 1D convolutions
+turn each joint’s history into one token, and self-attention among the tokens gives the proprioceptive prior Pt. (b) State-Visual
+Grounding: the joint tokens query the visual tokens of the multi-view observations and produce grounded tokens Gt. (c)
+Inverted Action Chunking: Gt is the memory of a transformer decoder whose learnable joint queries output one T-step
+trajectory per joint.
+Equation (11) is the concrete instantiation of the mapping fθ
+in Eq. (5), where Gt = [c(1);...;c(D)] is the grounded con-
+dition and a deterministic representation of the posterior-like
+body state in Eq. (3). All blocks use pre-LN residual connec-
+tions followed by a feed-forward network. Visual evidence
+is thus retrieved into a body-centered state rather than fused
+symmetrically with proprioception. This is consistent with
+visual targets being remapped into body-centered reference
+frames [2, 10] and with vision modulating, rather than re-
+placing, the body schema [1].
+3.4 Inverted Action Chunking
+The action head is interchangeable. With the ACT trans-
+former decoder, D learned joint queries Qa ∈RD×d attend to
+the memory M = [Gt;m]. As in the self- and cross-attention
+blocks above, each head computes
+O = softmax
+QaK⊤
+m
+√dk
+
+Zm ∈RD×d,
+(12)
+where Km = MW a
+K, Zm = MW a
+V , and m = Wmz is a learned
+token embedding of the CVAE latent z defined below. The
+CVAE latent is used only here. State-visual grounding is in-
+dependent of z. With a conditional 1D U-Net, the denoiser
+is conditioned on Gt and m and produces the same per-joint
+output layout. In both cases, a shared linear projection maps
+every joint output to a full trajectory:
+ˆa(j) = Wo o(j),
+Wo ∈RT×d,
+(13)
+and concatenation gives ˆAt = [ˆa(1);...; ˆa(D)] ∈RT×D. The
+action is thus modeled as D joint trajectories rather than T
+time-step vectors.
+3.5 Training Objective
+Following ACT [41], we use a CVAE [31] latent z ∼qφ(z |
+St,At) = N (µ φ, diag(σ 2
+φ)), where z = µ φ + σ φ ⊙ε with
+ε ∼N (0,I), and z = 0 at inference. The objective is the
+standard CVAE loss [31]:
+L = ED
+h
+1
+TD∥ˆAt −At∥1 +λ KL(qφ∥p)
+i
+,
+(14)
+where ED is the expectation over demonstrations, qφ abbre-
+viates qφ(z | St,At), p abbreviates p(z) = N (0,I), KL de-
+notes the Kullback-Leibler divergence, and λ sets the weight
+of this term.
+4 Experiments
+4.1 Experimental Setup
+Benchmarks and Tasks. We evaluate on two simula-
+tion benchmarks and a real-world dual-arm platform.
+RoboTwin 2.0 [7] is a dual-arm manipulation benchmark
+with 14-DoF joint states and actions and three cameras (a top
+camera and two wrist cameras). We use six tasks: Lift Pot,
+Pick Dual Bottles, Handover Block, Move Can Pot, Place
+Dual Shoes and Shake Bottle, abbreviated as Lift, Pick Dual,
+Handover, Move Can, Shoes and Shake. Each task has an
+easy and a randomized hard split, the latter varying object
+pose, color and background (Appendix A.1). LIBERO [18]
+is a single-arm benchmark with 7-DoF actions, 8-DoF states,
+and two cameras.
+We evaluate on Spatial, Object, and
+LIBERO-10. We exclude Goal, which requires language in-
+structions.
+Real-World Platform. We build a dual-arm platform from
+two reBot Arm B601-DM arms [30]. Each arm has six DoF, a
+4
+
+
+Figure 3:
+Real-world platform and tasks.
+The Dual
+reBotArm-B601-DM performs four tasks: (a) pick cube, (b)
+stack cube, (c) lift pot, and (d) handover cube.
+1.5 kg payload, and ±0.2 mm repeatability. A global camera
+and two wrist cameras provide observations. We evaluate
+four tasks: pick cube and stack cube with one arm, and lift
+pot and handover cube with two arms. Hyperparameters and
+per-task protocols are in Appendix A.2.
+Baselines and Comparisons. For small action policies we
+compare three baselines.
+ACT [41] uses a CVAE and a
+transformer decoder on the ACT backbone and conditions
+on the current frame only.
+Diffusion Policy [8] and the
+flow-matching baseline [17] share the same observation en-
+coder and the same 1-D U-Net, and both condition on a pro-
+prioceptive history. They differ only in the generative ob-
+jective (DDPM [11] versus flow matching [17]) and in the
+sampler. The task-specific policies are trained from scratch
+with LeRobot [6] in PyTorch [26], on a shared ResNet-
+18 [9] backbone and with AdamW [20]. The VLA keeps
+its PaliGemma backbone. Simulation runs in MuJoCo [32]
+through RoboTwin [7].
+4.2 Main Results on Simulation Benchmarks
+Figure 5 compares ACiT with ACT, DP, and FM on LIBERO
+and RoboTwin 2.0. On LIBERO the gain appears on Spa-
+tial, where success depends on precise placement and there-
+fore needs a different visual reference for each joint. On
+Object the strong baselines are near saturation and ACiT
+matches them, while on LIBERO-10 the four methods are
+left arm
+right arm
+1 2 3 4 5 6 7 1 2 3 4 5 6 7
+(a) Pick Dual Bottles
+joint self-attention, head 7
+left arm
+right arm
+1 2 3 4 5 6 7 1 2 3 4 5 6 7
+(b) Place Dual Shoes
+joint self-attention, head 5
+(c) Pick Dual Bottles
+joint-to-vision, right arm gripper
+(d) Place Dual Shoes
+joint-to-vision, left elbow
+Figure 4: Joint attention of ACiT. Top: joint self-attention
+inside the Inverted State Encoding on two tasks, averaged
+over five episodes and ten frames, with the left arm (joints
+1–7) and the right arm (joints 8–14) marked. Bottom: joint-
+to-vision cross attention inside State-Visual Grounding, for
+the gripper of the right arm and for the elbow of the left arm.
+close and the LIBERO mean is carried by Spatial.
+On
+RoboTwin 2.0 the pattern is sharper: ACiT leads on the
+tasks limited by inter-arm coordination (Pick Dual Bottles,
+Place Dual Shoes), and its margin over the strongest baseline
+grows under randomization on the tasks limited by velocity
+and phase (Shake Bottle, Move Can Pot), where a flat condi-
+tion cannot express the motion that the scene excites.
+What the Attention Does. Figure 4 shows what the two at-
+tention mechanisms do. In the top row the joint self-attention
+is sparse: a few pairs carry most of it, and they are not lim-
+ited to neighboring joints, including pairs that span the two
+arms. Joint-level tokens carry this structure, which a flat-
+tened state vector cannot. In the bottom row a joint’s query
+does not spread over the frame but lands on the objects its
+motion depends on, the bottle a gripper takes in Pick Dual
+Bottles and, in Place Dual Shoes, both the shoe to lift and the
+box to place it in. Vision enters as evidence addressed to a
+joint, not as one summary of the scene.
+4.3 Real-World Experiments
+Fig. 3 shows the four real-world tasks, and one of the most
+direct pieces of evidence of the gain appears in failure recov-
+ery. Figure 6 is a closed-loop trace of ACiT: the grasp fails
+at Step 2, the arm falls back to the previous state at Step 3
+and re-attempts at Step 4, completing the pick at Step 6. In
+the rollouts we inspected, the baselines do not back off at the
+failure point and instead keep searching in place.
+A failed grasp is a proprioceptive event: the gripper closes
+to its limit without an object and the arm does not take the
+load it expects, while vision stays misleading because the
+cube is still in the workspace, only displaced. Under equal
+5
+
+
+LIBERO-10
+Object
+Spatial
+0
+20
+40
+60
+80
+100
+Success rate (%)
+50
+99
+88
+28
+73
+73
+50
+99
+71
+51
+86
+74
+(a) LIBERO
+Lift Pot
+Pick Dual
+Handover
+Move Can
+Shoes
+Shake
+0
+20
+40
+60
+80
+100
+Success rate (%)
+55
+61
+69
+64
+38
+89
+57
+49
+32
+69
+20
+88
+49
+55
+74
+49
+15
+89
+44
+24
+46
+42
+14
+70
+4
+14
+0
+19
+0
+47
+1
+2
+0
+1
+0
+25
+1
+0
+0
+0
+0
+0
+0
+0
+0
+2
+0
+3
+(b) RoboTwin 2.0
+ACiT
+ACT
+DP
+FM
+Figure 5: Main results on the simulation benchmarks. Left: LIBERO. Right: RoboTwin 2.0. Pale bars denote easy and solid
+bars denote randomized hard. A number above a pale bar is its easy rate, and a number on a solid bar is its hard rate. ACiT is
+first in each group.
+Figure 6: Closed-loop recovery on the real robot. Top: global view. Bottom: gripper view. After a grasp failure (Step 2), ACiT
+falls back to the previous state (Step 3) and re-attempts (Step 4), completing the pick (Step 6).
+conditioning the visual evidence can dominate the propri-
+oceptive one, which leaves the policy holding the pose or
+closing again. ACiT lets proprioception carry the state and
+reduces vision to a per-joint calibration, so the condition re-
+flects a closed and empty gripper, and the decoded chunk is
+the back-off-and-retry segment that the demonstrations con-
+tain.
+Figure 7 reports the success rates under in-distribution,
+out-of-distribution (unseen object colors and initial poses)
+and dark-background conditions. ACiT is the strongest or
+tied-strongest method in every condition and task, and its
+margin grows under the two shifts: with a dark background
+it still picks cube at 83%, against less than 40% for the base-
+lines.
+4.4 Transfer to a Large VLA
+We apply ACiT’s conditioning to the post-training of the
+mainstream π0 model [4], which yields π0-ACiT. Both mod-
+els are fine-tuned end-to-end per task, with the PaliGemma
+VLM [3] and the flow-matching expert keeping their archi-
+tecture and objective. Only π0’s single-frame proprioceptive
+token is replaced by Gt from the Inverted State Encoding and
+State-Visual Grounding of ACiT.
+4.4.1
+Simulation Benchmarks
+Fig. 8 compares the two models on six RoboTwin tasks. The
+gains land on the same group of tasks as the ACT-family re-
+sults of Fig. 5: both backbones improve where one frame
+cannot determine each joint’s action on its own (Pick Dual
+Bottles, Handover Block, Place Dual Shoes) and stay flat
+where it can (Lift Pot, Move Can Pot, Shake Bottle). Two
+backbones that differ in size, visual prior and action head
+agree on which tasks benefit, so the gain comes from the
+conditioning interface rather than from a property of a back-
+bone. On the randomized hard split it moves to Shake Bottle
+and Lift Pot, whose actions depend on velocity and on the
+phase relation between joints, a relation that exists only in
+the history. Randomization removes the same fraction for
+both models, so the gain is not a tolerance to visual shift.
+6
+
+
+Pick
+cube
+Stack
+cube
+Lift
+pot
+Handover
+cube
+0
+20
+40
+60
+80
+100
+Success rate (%)
+46.7
+56.7
+76.7
+93.3
+33.3
+43.3
+56.7
+63.3
+16.7
+23.3
+26.7
+33.3
+26.7
+33.3
+36.7
+50
+(a) In-distribution
+Pick
+cube
+Stack
+cube
+Lift
+pot
+Handover
+cube
+36.7
+36.7
+46.7
+53.3
+6.7
+13.3
+13.3
+23.3
+6.7
+6.7
+13.3
+16.7
+0
+13.3
+20
+43.3
+(b) Unseen OOD
+Pick
+cube
+Stack
+cube
+Lift
+pot
+Handover
+cube
+16.7
+26.7
+36.7
+83.3
+13.3
+23.3
+23.3
+43.3
+0
+0
+13.3
+16.7
+0
+0
+3.3
+33.3
+(c) Dark-background OOD
+ACiT
+ACT
+DP
+FM
+Figure 7: Real-world results. Success rates for ACiT, ACT, DP, and FM on four tasks under in-distribution, unseen-OOD, and
+dark-background-OOD conditions. ACiT is shown first in each group.
+Lift
+Pot
+Pick
+Dual
+Handover
+Move
+Can
+Shoes
+Shake
+0
+20
+40
+60
+80
+100
+Success rate (%)
+87
+69
+54
+55
+17
+95
+84
+57
+42
+58
+14
+97
+π0-ACiT
+π0
+44
+15
+7
+23
+7
+69
+36
+10
+8
+19
+0
+55
+Figure 8: Transferring the conditioning design to a large
+VLA on RoboTwin 2.0. Success rate of π0-ACiT (left bar
+of each task) and π0 (right bar). The pale bar is the easy rate
+and the solid bar drawn on top of it is the randomized-hard
+rate, so the pale cap is the drop caused by randomization.
+Numbers above the pale bars are easy rates, numbers on the
+solid bars hard rates.
+4.4.2
+Real-World Transfer
+Fig. 9 repeats the comparison on the dual-arm B601 plat-
+form. π0-ACiT improves over π0 on average across the four
+tasks and three conditions (57.0 against 39.4). The gain is
+largest under the dark-background shift, where π0 nearly fails
+on the two dual-arm tasks and π0-ACiT still completes them.
+In distribution and under the unseen shift π0-ACiT matches
+the ACT-based ACiT, so the interface transfers to a large pre-
+trained backbone at a lower cost per action (Table 3). Aver-
+aged over the 12 RoboTwin settings (6 tasks, 2 splits) and the
+12 real-world settings (4 tasks, 3 conditions), π0-ACiT raises
+the success rate over π0 by 26.9 points.
+4.5 Ablation
+Table 1 removes one module at a time, keeping the his-
+tory length, the encoder, the protocol and the action head
+fixed. Equal fusion self-attends visual and joint tokens to-
+gether.
+w/o joint attn keeps the per-joint 1D convolution
+Pick
+cube
+Stack
+cube
+Lift
+pot
+Handover
+cube
+0
+20
+40
+60
+80
+100
+Success rate (%)
+π0-ACiT
+π0
+In-dist.
+Unseen
+Dark
+40
+70
+70
+83.3
+90
+96.7
+40
+40
+5050
+66.770
+0
+3030
+40
+5050
+10
+30
+40
+40
+5050
+Figure 9: Real-world π0/π0-ACiT transfer on the B601 plat-
+form. Each task has six bars: π0-ACiT under in-distribution,
+unseen-object/background, and dark-background conditions
+(light to dark orange), followed by π0 under the same condi-
+tions (light to dark blue).
+but drops the attention among joint tokens, and flat state
+drops both. Flat decode replaces per-joint decoding with one
+shared query.
+Removing any one module hurts on every benchmark, so
+the three are complementary rather than redundant. The con-
+ditioning relation costs most, the state-side variants next and
+the action-side factorization least, in five of the six settings.
+The exception is the unseen condition, where flat state falls
+further than equal fusion, so under unreliable vision the per-
+joint state representation matters more than the fusion rela-
+tion.
+4.6 Robustness
+Training Seeds. Two further seeds leave the task ranking
+unchanged and move each task by at most eight points. Av-
+eraged over the tasks the success rate is 62.7 ± 0.6, so the
+aggregate in Fig. 5 does not depend on the seed, while a sin-
+gle task carries the few points of spread that 100 episodes
+leave.
+History Length. Figure 10 shows a flat optimum: perfor-
+7
+
+
+Table 1: Module ablation (mean success rate %). Small num-
+bers give the change relative to the full model, per-task rates
+in Appendix B.1.
+Variant
+LIBERO
+RoboTwin
+Real world
+easy
+hard
+ID
+unseen
+dark
+ACiT (full)
+79.0
+62.7
+14.0
+60.0
+34.1
+44.1
+equal fusion
+58.3
+−20.7
+52.3
+−10.4
+5.0
+−9.0
+48.4
+−11.6
+17.5
+−16.6
+13.3
+−30.8
+w/o joint attn
+69.3
+−9.7
+57.0
+−5.7
+9.8
+−4.2
+52.5
+−7.5
+23.3
+−10.8
+28.3
+−15.8
+flat state
+65.3
+−13.7
+53.3
+−9.4
+7.0
+−7.0
+49.2
+−10.8
+15.0
+−19.1
+21.6
+−22.5
+flat decode
+75.0
+−4.0
+60.0
+−2.7
+11.8
+−2.2
+54.2
+−5.8
+25.8
+−8.3
+41.6
+−2.5
+Table 2: Training-seed variance of ACiT (easy split, success
+rate over 100 episodes, hence integer).
+Task
+seed 1000 seed 1001 seed 1002 mean ± std
+Lift Pot
+55
+56
+54
+55.0±1.0
+Pick Dual
+61
+63
+59
+61.0±2.0
+Handover
+69
+69
+69
+69.0±0.0
+Move Can
+64
+60
+68
+64.0±4.0
+Place Dual Shoes
+41
+35
+38
+38.0±3.0
+Shake Bottle
+88
+89
+90
+89.0±1.0
+mance peaks at eight frames, changes little between four and
+sixteen, and is clearly worse with a single frame, whose cost
+is largest under the dark-background shift. We keep eight
+frames throughout.
+4.7 Efficiency
+Table 3 reports inference cost and model size. ACiT adds
+only 8.6 M parameters over ACT (92.6 M against 84.0 M)
+and keeps its one-step sampler, at 0.48 ms per action, while
+DP and FM pay ten integrator steps at a 3.2× larger model.
+The same holds after transfer: π0-ACiT needs 4.73 ms per
+action against 5.93 ms for π0, at the same ten steps and essen-
+tially the same size (4.05 B against 4.03 B), so the reduction
+comes from the interface, not from a cheaper sampler.
+5 Conclusion
+We presented ACiT, which treats historical joint coupling as
+the primary condition and vision as a later calibration: each
+joint carries its own history, retrieves its own visual evidence
+and decodes its own trajectory. It improves most LIBERO,
+RoboTwin 2.0 and real-world tasks, and transfers to a pre-
+trained VLA at lower cost.
+Limitations. ACiT is instantiated only with a continuous
+action head, so it does not cover the discrete action tokens
+that autoregressive VLAs rely on. Extending it there needs
+demonstration data beyond what our dual-arm platform pro-
+vides, which we leave to future work.
+1
+4
+8
+16
+H
+0
+50
+100
+Success rate (%)
+(a) Simulation
+RoboTwin easy
+RoboTwin hard
+LIBERO
+1
+4
+8
+16
+H
+0
+50
+100
+Success rate (%)
+(b) Real world
+In-dist.
+Unseen
+Dark
+Figure 10: History length of the conditioning input. (a) Sim-
+ulation: RoboTwin easy and hard, and LIBERO. (b) Real
+world: in-distribution, unseen and dark-background.
+All
+curves peak at H=8 or tie it at 16; the per-task rates are in
+Appendix B.
+Table 3: Inference cost on one RTX 3090, at the 240 × 320
+observation resolution used throughout the RoboTwin exper-
+iments. Steps counts integrator steps (network evaluations in
+brackets), and the last two columns are per executed action.
+Method
+Params
+Steps
+ms/act.
+Control (Hz)
+ACT
+84.0 M
+1 (1)
+0.36
+2794
+DP
+293.2 M
+10 (10)
+2.12
+471
+FM
+293.2 M
+10 (20)
+3.74
+267
+ACiT
+92.6 M
+1 (1)
+0.48
+2064
+π0
+4.03 B
+10 (10)
+5.93
+169
+π0-ACiT
+4.05 B
+10 (10)
+4.73
+211
+Acknowledgments
+We thank Shenzhen Zhibo Data Technology Co., Ltd. for
+the professional collection of the real-robot data used in this
+work.
+References
+[1] Minoru Asada. Proprioception and body schema. In
+The Sense of Self: Perspectives from Science and Zen
+Buddhism. Oxford University Press, 2018.
+doi: 10.
+1093/oso/9780199674923.003.0018.
+[2] Marie
+Avillac,
+Sophie
+Denève,
+Etienne
+Olivier,
+Alexandre Pouget, and Jean-René Duhamel. Reference
+frames for representing visual and tactile locations in
+parietal cortex.
+Nature Neuroscience, 8(7):941–949,
+2005. doi: 10.1038/nn1480.
+[3] Lucas Beyer, Andreas Steiner, André Susano Pinto,
+Alexander Kolesnikov,
+Xiao Wang,
+Daniel Salz,
+Maxim Neumann, Ibrahim Alabdulmohsin, Michael
+Tschannen, Emanuele Bugliarello, et al. Paligemma:
+A versatile 3B VLM for transfer.
+arXiv preprint
+arXiv:2407.07726, 2024.
+[4] Kevin Black, Noah Brown, Danny Driess, et al. π0:
+A vision-language-action flow model for general robot
+control. arXiv preprint, 2024.
+[5] Kevin Black et al.
+π0.5: A vision-language-action
+model with open-world generalization. https://www.
+8
+
+
+physicalintelligence.company/blog/pi05,
+2025.
+[6] Remi Cadene,
+Simon Alibert,
+Alexander Soare,
+Quentin Gallouedec, Adil Zouitine, and Thomas Wolf.
+LeRobot: State-of-the-art machine learning for real-
+world robotics in PyTorch.
+https://github.com/
+huggingface/lerobot, 2024.
+[7] Tianxing Chen et al. Robotwin 2.0: A scalable data
+generator and benchmark with strong domain random-
+ization for robust bimanual robotic manipulation. arXiv
+preprint arXiv:2506.18088, 2025.
+[8] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau,
+Yilun Du, Benjamin Burchfiel, Russ Tedrake, and Shu-
+ran Song. Diffusion policy: Visuomotor policy learning
+via action diffusion. In Robotics: Science and Systems
+(RSS), 2023.
+[9] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian
+Sun.
+Deep residual learning for image recognition.
+In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2016.
+[10] Tobias Heed, Verena N. Buchholz, Andreas K. Engel,
+and Brigitte Röder. Tactile remapping: From coordi-
+nate transformation to integration in sensorimotor pro-
+cessing. Trends in Cognitive Sciences, 19(5):251–258,
+2015. doi: 10.1016/j.tics.2015.03.001.
+[11] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising
+diffusion probabilistic models. In Advances in Neural
+Information Processing Systems (NeurIPS), 2020.
+[12] Jindou Jia, Gen Li, Xiangyu Chen, Tuo An, Yux-
+uan Hu, Jingliang Li, Xinying Guo, and Jianfei
+Yang. Action-to-action flow matching. arXiv preprint
+arXiv:2602.07322, 2026.
+[13] Konrad P. Körding and Daniel M. Wolpert. Bayesian in-
+tegration in sensorimotor learning. Nature, 427(6971):
+244–247, 2004. doi: 10.1038/nature02169.
+[14] Seungjae Lee, Yibin Wang, Haritheja Etukuru, H. Jin
+Kim, Nur Muhammad Mahi Shafiullah, and Lerrel
+Pinto. Behavior generation with latent actions. In In-
+ternational Conference on Machine Learning (ICML),
+2024.
+[15] Jijie Li, Xu Yang, Junhong Zou, Chunhai Zhao,
+Chaoyang Zhao, Zhen Lei, and Xiangyu Zhu. Object-
+centric conditioning for visuomotor flow matching. In
+Conference on Robot Learning (CoRL), 2026.
+[16] Wenjie Li, Yash Jangir, Ignacy Stepka, Yash Agar-
+wal, Marion Kipsang, and Yonatan Bisk. Lost in re-
+construction: Aligning action representations with lan-
+guage in vision-language-action models. arXiv preprint
+arXiv:2608.10484, 2026.
+[17] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu,
+Maximilian Nickel, and Matt Le. Flow matching for
+generative modeling. In International Conference on
+Learning Representations (ICLR), 2023.
+[18] Bo Liu, Yifan Zhu, Chongkai Gao, Yuxuan Feng, Qiang
+Liu, Yuke Zhu, and Peter Stone. Libero: Benchmark-
+ing knowledge transfer for lifelong robot learning. In
+Advances in Neural Information Processing Systems
+(NeurIPS), 2023.
+[19] Yong Liu, Tengge Hu, Haoran Zhang, Haixu Wu, Shiyu
+Wang, Lintao Ma, and Mingsheng Long. itransformer:
+Inverted transformers are effective for time series fore-
+casting. In International Conference on Learning Rep-
+resentations (ICLR), 2024.
+[20] Ilya Loshchilov and Frank Hutter. Decoupled weight
+decay regularization. In International Conference on
+Learning Representations (ICLR), 2019.
+[21] Huaihai Lyu, Chaofan Chen, Senwei Xie, Pengwei
+Wang, Xiansheng Chen, Shanghang Zhang, and Chang-
+sheng Xu. Omnisat: Compact action token, faster auto
+regression. arXiv preprint arXiv:2510.09667, 2025.
+[22] Xiangkai Ma, Lekai Xing, Han Zhang, Wenzhong Li,
+and Sanglu Lu.
+Unifying perception and action: A
+hybrid-modality pipeline with implicit visual chain-of-
+thought for robotic action generation. arXiv preprint
+arXiv:2511.19859, 2025.
+[23] R. Chris Miall and Daniel M. Wolpert. Forward mod-
+els for physiological motor control. Neural Networks,
+9(8):1265–1279, 1996. doi: 10.1016/S0893-6080(96)
+00035-4.
+[24] Yaru Niu, Yunzhe Zhang, Mingyang Yu, Changyi
+Lin, Chenhao Li, Yikai Wang, Yuxiang Yang, Wen-
+hao Yu, Tingnan Zhang, Zhenzhen Li, Jonathan Fran-
+cis, Bingqing Chen, Jie Tan, and Ding Zhao.
+Hu-
+man2locoman: Learning versatile quadrupedal manip-
+ulation with human pretraining. In Robotics: Science
+and Systems (RSS), 2025.
+[25] NVIDIA.
+Gr00t n1:
+An open foundation model
+for generalist humanoid robots.
+arXiv preprint
+arXiv:2503.14734, 2025.
+[26] Adam Paszke, Sam Gross, Francisco Massa, Adam
+Lerer,
+James Bradbury,
+Gregory Chanan,
+Trevor
+Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga,
+et al. PyTorch: An imperative style, high-performance
+deep learning library. In Advances in Neural Informa-
+tion Processing Systems (NeurIPS), 2019.
+[27] Austin Patel and Shuran Song. Get-zero: Graph embod-
+iment transformer for zero-shot embodiment general-
+ization. In IEEE International Conference on Robotics
+and Automation (ICRA), 2025.
+9
+
+
+[28] Karl Pertsch, Kyle Stachowicz, Brian Ichter, et al. Fast:
+Efficient action tokenization for vision-language-action
+models. In Robotics: Science and Systems (RSS), 2025.
+[29] Uwe Proske and Simon C. Gandevia. The propriocep-
+tive senses: Their roles in signaling body shape, body
+position and movement, and muscle force. Physiolog-
+ical Reviews, 92(4):1651–1697, 2012. doi: 10.1152/
+physrev.00048.2011.
+[30] Seeed Studio.
+rebot arm b601-dm:
+Fully open-
+source 6-dof robotic arm.
+https://github.com/
+Seeed-Projects/reBot-DevArm, 2026.
+[31] Kihyuk Sohn, Honglak Lee, and Xinchen Yan. Learn-
+ing structured output representation using deep condi-
+tional generative models. In Advances in Neural Infor-
+mation Processing Systems (NeurIPS), 2015.
+[32] Emanuel Todorov, Tom Erez, and Yuval Tassa. Mu-
+JoCo:
+A physics engine for model-based control.
+In IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), 2012.
+[33] Robert J. van Beers, Anne C. Sittig, and Jan J. De-
+nier van der Gon.
+Integration of proprioceptive and
+visual position-information: An experimentally sup-
+ported model.
+Journal of Neurophysiology, 81(3):
+1355–1364, 1999. doi: 10.1152/jn.1999.81.3.1355.
+[34] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need.
+In Advances in Neural Information Processing Systems
+(NeurIPS), 2017.
+[35] Fangyuan Wang, Peng Zhou, Jiaming Qi, Shipeng Lyu,
+Chengyang He, David Navarro-Alarcon, and Guodong
+Guo.
+Think proprioceptively:
+State-grounded vi-
+sual token selection for vla policies.
+arXiv preprint
+arXiv:2602.06575, 2026.
+[36] Uwe Windhorst. Muscle proprioceptive feedback and
+spinal networks. Brain Research Bulletin, 73(4-6):155–
+202, 2007. doi: 10.1016/j.brainresbull.2007.03.010.
+[37] Daniel M. Wolpert, Zoubin Ghahramani, and Michael I.
+Jordan. An internal model for sensorimotor integration.
+Science, 269(5232):1880–1882, 1995. doi: 10.1126/
+science.7569931.
+[38] Yilin Wu, Rutav Shah, Shuaiyi Huang, Sumedh A.
+Sontakke, Homanga Bharadhwaj, Andrea Bajcsy, Max
+Simchowitz, and Guanya Shi. Memory without cura-
+tion: Learning multi-stream latent memory for robot
+policies. arXiv preprint arXiv:2610.14406, 2026.
+[39] Lei Xiao, Jifeng Li, Juntao Gao, Feiyang Ye, Yan Jin,
+Jingjing Qian, Jing Zhang, Yong Wu, and Xiaoyuan
+Yu. Ava-vla: Improving vision-language-action models
+with active visual attention. In IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR),
+2026.
+[40] Senlan Yao, Chenyu Yang, Jaehoon Kim, Aristotelis
+Sympetheros, and Robert K. Katzschmann. Learning
+robust dexterous in-hand manipulation from joint sen-
+sors with proprioceptive transformer.
+arXiv preprint
+arXiv:2605.21330, 2026.
+[41] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and
+Chelsea Finn. Learning fine-grained bimanual manip-
+ulation with low-cost hardware. In Robotics: Science
+and Systems (RSS), 2023.
+[42] Yulin Zhou, Yimeng Wang, Nengyu Wang, Shaojia
+Xing, Shiyun Tu, Xiang Li, Jingkai Zhang, Ningbo
+Jiang, Yuankai Lin, Hua Yang, Xiangrui Zeng, and
+Zhouping Yin.
+Chronos: A physics-informed full-
+history framework for non-markovian long-horizon
+manipulation. arXiv preprint arXiv:2606.30318, 2026.
+[43] Zheyu Zhuang, Ville Kyrki, and Danica Kragic. Rais-
+ing body ownership in end-to-end visuomotor policy
+learning via robot-centric pooling. In IEEE/RSJ Inter-
+national Conference on Intelligent Robots and Systems
+(IROS), 2024.
+10
+
+
+A Experimental Setup
+A.1 Simulation Benchmarks
+RoboTwin 2.0 is a bimanual platform with two 6-DoF arms
+and parallel grippers, simulated for table-top manipulation.
+We use six tasks, shown in Fig. 11. Lift Pot lifts a pot by
+both handles and holds it; Pick Dual Bottles grasps and lifts
+two bottles at once; Handover Block passes a block from one
+arm to the other; Move Can Pot lays the can against the pot;
+Place Dual Shoes places two shoes into a box; Shake Bottle
+lifts a bottle and shakes it. Each task comes with an easy split
+(demo_clean) and a randomized split (demo_randomized)
+in which object poses, object colors and the scene back-
+ground are randomized. All numbers are 100 episodes per
+task, and the success criterion is the one shipped with the
+benchmark, listed in Table 4.
+LIBERO evaluates single-arm table-top manipulation with
+language instructions.
+We use three suites: LIBERO-10
+(ten long-horizon tasks), LIBERO-Object (objects unseen in
+training) and LIBERO-Spatial (spatial relations), with 100
+episodes per suite.
+A.2 Implementation Details
+The ACT-family models share one protocol: 50,000 train-
+ing steps, batch size 16, action chunk 50 with 50 executed
+steps, seed 1000, and AdamW [20]. The visual backbone is a
+ResNet-18 [9]. All models are implemented in PyTorch [26]
+with LeRobot [6], and the simulator is MuJoCo [32]. For
+run-to-run variation we follow the protocol of ACT [41],
+which reports three training seeds on simulation and a sin-
+gle trained policy on hardware, where every additional seed
+needs a full physical re-evaluation. Table 2 of the main paper
+reports the same sweep. ACiT uses a state history of H=8
+frames. ACT conditions on the current state only; DP and
+FM take H=2 frames and flatten them into the global condi-
+tion, which is the setting their original papers use. DP and
+FM execute 32 steps in the 50k_final runs and 10 in the
+5task runs.
+Architecturally, ACiT keeps the ACT transformer (d=512,
+eight heads, FFN width 3200, four encoder and seven de-
+coder layers, 32-d CVAE latent) and adds a two-layer state
+encoder followed by a two-layer cross-attention block. The
+π0 backbone is left intact; π0-ACiT adds a two-layer state en-
+coder and a single grounding layer to it and keeps the flow-
+matching action expert unchanged.
+For the VLA transfer (Sec. 4.4), we initialize π0-ACiT
+from pi0_base. The PaliGemma [3] backbone and the flow-
+matching action expert keep their original architecture, and
+π0’s single-frame proprioceptive token is replaced by the two
+conditioning modules of ACiT. The Inverted State Encoding
+encodes each joint’s eight-frame history with a 1D convolu-
+tion and a linear projection into a joint token, and forms the
+proprioceptive prior by inter-joint self-attention. State-Visual
+Grounding then applies a joint-level cross-attention over the
+visual tokens, producing Gt as the proprioceptive condition
+of the action expert. The Inverted Action Chunking is not
+transferred, and the flow-matching objective is unchanged,
+so the action head keeps its architecture and capacity and
+Table 4: Success conditions of the six RoboTwin tasks, as
+implemented by the benchmark. A rollout counts as a suc-
+cess only when every condition of its task holds at the same
+step.
+Task
+Success condition
+Lift Pot
+pot above 0.82 m and upright, both TCPs
+within 3 cm of its handles
+Pick Dual Bottles
+both bottles within 10 cm of their targets
+and above 0.89 m
+Handover Block
+block within 3 cm of the target pose and
+right gripper open
+Move Can Pot
+can tipped on its side beside the pot
+(<20 cm, 3.5 cm, 15◦), at table height,
+both grippers open
+Place Dual Shoes
+both shoes at the target pose (5 cm, 0.07
+quaternion) and both grippers open
+Shake Bottle
+bottle raised above 0.8 m
+only the conditioning side changes. Both models are trained
+per task with full fine-tuning, batch size 32, for 50k steps on
+two A100 GPUs.
+Evaluation follows the benchmark defaults: 240 × 320
+on RoboTwin for every model, with 100 episodes per task,
+256 × 256 on LIBERO with 100 episodes per suite, and 30
+rollouts per task and condition on the real-world platform,
+where training uses 50 demonstrations per task, the same
+recipe as above, and all rollouts run on a single RTX 3090.
+B Ablations, Sensitivity and Cost
+B.1 Module Ablation
+Tables 5 and 6 give the per-task rates behind Table 1. The
+three removals do not fail in the same places. Equal fusion
+costs the most on Handover Block and Place Dual Shoes, the
+two tasks whose success turns on coupling between joints,
+and it is almost free on Move Can Pot. Flat state costs a
+nearly constant amount on every task, which is what one ex-
+pects when the model loses the per-joint state representation
+rather than a specific coupling. Flat decode is the opposite:
+it loses on Pick Dual Bottles and Place Dual Shoes, where
+each joint needs its own trajectory, and it gains on Handover
+Block and Move Can Pot, where one shared trajectory keeps
+the joints in phase.
+B.2 Sensitivity to History Length
+History length is a hyperparameter of the conditioning inter-
+face rather than a module, so we report it separately. Tables 7
+and 8 vary the number of proprioceptive frames and keep ev-
+erything else fixed. The same pattern appears everywhere:
+one frame is the weakest, four recovers most of the gap, eight
+is best on RoboTwin and on the real platform and matches
+four on LIBERO, and sixteen is slightly worse, which is what
+one expects when extra frames add redundancy but no new
+dynamics.
+B.3 Inference Cost
+Cost is measured on a single RTX 3090 (24 GB) with batch
+size 1 and fp16, and each entry of Table 3 averages 100 calls
+11
+
+
+(a) Lift Pot
+(b) Pick Dual Bottles
+(c) Handover Block
+(d) Move Can Pot
+(e) Place Dual Shoes
+(f) Shake Bottle
+Figure 11: The six RoboTwin 2.0 tasks used in Sec. 4.2, viewed from the head camera. Both arms are visible in each panel; the
+randomized split varies object poses, colors and the background of the same scenes.
+Table 5: Per-task module ablation on the simulation benchmarks (success rate, %, 100 episodes per task).
+RoboTwin (easy)
+RoboTwin (hard)
+LIBERO
+Variant
+Lift
+Pick
+Hand.
+Move
+Shoes
+Shake
+Mean
+Lift
+Pick
+Hand.
+Move
+Shoes
+Shake
+Mean
+10
+Obj.
+Spa.
+Mean
+ACiT
+55
+61
+69
+64
+38
+89
+62.7
+4
+14
+0
+19
+0
+47
+14.0
+50
+99
+88
+79.0
+equal fusion
+56
+50
+30
+68
+22
+88
+52.3
+1
+2
+0
+2
+0
+25
+5.0
+30
+73
+72
+58.3
+w/o joint attn
+39
+60
+69
+62
+30
+82
+57.0
+3
+6
+0
+12
+0
+38
+9.8
+38
+90
+80
+69.3
+flat state
+48
+50
+58
+56
+28
+80
+53.3
+2
+3
+0
+7
+0
+30
+7.0
+35
+85
+76
+65.3
+flat decode
+54
+45
+79
+74
+23
+85
+60.0
+5
+8
+1
+16
+0
+41
+11.8
+45
+95
+85
+75.0
+Table 6: Per-task module ablation on the real-world platform (success rate, %; 30 rollouts per cell).
+In-distribution
+Unseen
+Dark background
+Variant
+Pick
+Stack
+Pot
+Hand.
+Mean
+Pick
+Stack
+Pot
+Hand.
+Mean
+Pick
+Stack
+Pot
+Hand.
+Mean
+ACiT
+93.3
+63.3
+33.3
+50.0
+60.0
+53.3
+23.3
+16.7
+43.3
+34.1
+83.3
+43.3
+16.7
+33.3
+44.1
+equal fusion
+76.7
+56.7
+23.3
+36.7
+48.4
+40.0
+6.7
+6.7
+16.7
+17.5
+30.0
+13.3
+0.0
+10.0
+13.3
+w/o joint attn
+80.0
+56.7
+30.0
+43.3
+52.5
+43.3
+13.3
+13.3
+23.3
+23.3
+53.3
+23.3
+13.3
+23.3
+28.3
+flat state
+70.0
+56.7
+23.3
+46.7
+49.2
+33.3
+6.7
+6.7
+13.3
+15.0
+43.3
+23.3
+6.7
+13.3
+21.6
+flat decode
+83.3
+46.7
+30.0
+56.7
+54.2
+43.3
+13.3
+13.3
+33.3
+25.8
+73.3
+30.0
+20.0
+43.3
+41.6
+Table 7: History length on the simulation benchmarks (success rate, %, 100 episodes per task). H is the history length, in
+frames.
+RoboTwin (easy)
+RoboTwin (hard)
+LIBERO
+H
+Lift
+Pick
+Hand.
+Move
+Shoes
+Shake
+Mean
+Lift
+Pick
+Hand.
+Move
+Shoes
+Shake
+Mean
+10
+Obj.
+Spa.
+Mean
+1
+52
+45
+60
+58
+34
+85
+55.7
+2
+5
+0
+12
+0
+35
+9.0
+46
+91
+82
+73.0
+4
+54
+56
+66
+62
+36
+87
+60.2
+3
+10
+0
+16
+0
+42
+11.8
+51
+99
+88
+79.3
+8
+55
+61
+69
+64
+38
+89
+62.7
+4
+14
+0
+19
+0
+47
+14.0
+50
+99
+88
+79.0
+16
+54
+60
+68
+63
+37
+88
+61.7
+4
+13
+0
+18
+0
+45
+13.3
+49
+98
+87
+78.0
+after 20 warm-up calls on the RoboTwin Lift Pot checkpoints
+at 50k steps. The table reports the cost per executed action,
+which divides one inference by the number of actions run
+without re-planning, i.e., what a closed-loop controller pays.
+The figures below are per inference, so that samplers can
+be compared directly. Step counts alone do not fix the cost,
+because integrators differ in how many network evaluations
+(NFE) they spend per step. DP and FM share the same U-
+Net and the same parameter count but not the same sampler:
+DP takes one evaluation per DDIM step, whereas FM inte-
+12
+
+
+Table 8: History length on the real-world platform (success rate, %; 30 rollouts per cell).
+In-distribution
+Unseen
+Dark background
+H
+Pick
+Stack
+Pot
+Hand.
+Mean
+Pick
+Stack
+Pot
+Hand.
+Mean
+Pick
+Stack
+Pot
+Hand.
+Mean
+1
+76.7
+46.7
+23.3
+40.0
+46.7
+43.3
+16.7
+13.3
+33.3
+26.6
+70.0
+33.3
+10.0
+20.0
+33.3
+4
+86.7
+56.7
+30.0
+46.7
+55.0
+46.7
+20.0
+13.3
+36.7
+29.2
+76.7
+36.7
+13.3
+26.7
+38.4
+8
+93.3
+63.3
+33.3
+50.0
+60.0
+53.3
+23.3
+16.7
+43.3
+34.1
+83.3
+43.3
+16.7
+33.3
+44.1
+16
+90.0
+60.0
+30.0
+46.7
+56.7
+50.0
+20.0
+16.7
+40.0
+31.7
+83.3
+43.3
+16.7
+33.3
+44.1
+grates with a midpoint rule that evaluates the network twice
+per step, so its ten steps cost twenty evaluations (119.8 ms
+per inference) and match DP at twenty steps (120.5 ms); at an
+equal budget of ten evaluations the two coincide (67.5 against
+68.1 ms). We therefore report both steps and NFE, and read
+cost differences across families as sampler differences unless
+the NFE budget is held fixed.
+B.4 Seed Variance
+Table 2 of the main paper repeats the training of ACiT and
+ACT on RoboTwin with two further seeds. The evaluation
+episodes are shared across runs, so the only source of vari-
+ation is the training itself, and the spread across seeds stays
+small relative to the gap between the two models.
+C Analysis
+C.1 Failure Cases
+Figs. 12 and 13 also show how the methods fail once the
+scene is shifted. The baselines fail at the grasp itself: under
+a changed background, ACT and FM approach the cube with
+an offset and close on empty space, and DP pushes it away
+before closing; under a changed object color the same offset
+appears, which is the behavior expected when a single frame
+has to carry both the pose and the appearance. ACiT keeps
+the grasp in the same frames and fails later, when placing
+the object. Its remaining failures are therefore concentrated
+in placement precision and in the phase of a handover, not
+in grasp stability, which is consistent with Fig. 7: the gap to
+the baselines is smallest on the two tasks whose success is
+dominated by the grasp and largest under the dark shift.
+Figs. 14–19 replay one episode of each task under all four
+policies, with the checker outcome and the number of steps
+used marked on the last frame; the success conditions are
+listed in Table 4; every row of a figure shares the same ini-
+tial state. On Place Dual Shoes success requires both shoes
+inside the box with the target orientation and both grippers
+open, which only ACiT satisfies. On Pick Dual Bottles ACiT
+lifts the bottle within a fraction of the step budget while the
+baselines never leave the table. On Lift Pot ACiT and DP
+both succeed, with ACiT finishing in fewer steps, while ACT
+and FM fail. On Move Can Pot only ACiT brings the can to
+the pot. On Shake Bottle DP never lifts the bottle, and on
+LIBERO-Spatial all four policies succeed with ACiT taking
+the fewest steps.
+C.2 Action-Space Dependency Metrics
+The motivation for the architecture rests on two properties
+of the action distribution: its effective dimensionality is far
+below the number of joints, and the joints are strongly cou-
+pled, with part of that coupling delayed in time. We measure
+both on the demonstration data, using only the joint signals
+st,at ∈R14 and no visual information.
+For the action matrix A ∈RN×14, after centering and form-
+ing C =
+1
+N−1 ˜A⊤˜A with eigenvalues λ1 ≥··· ≥λ14 ≥0, the
+participation ratio is
+PR =
+ ∑14
+i=1 λi
+2
+∑14
+i=1 λ 2
+i
+∈[1, 14],
+(15)
+so that PR = 1 means a single effective direction and PR = 14
+means fourteen independent ones. Coupling is measured by
+the mean pairwise correlation between joints of the left and
+the right arm, both at lag zero and maximized over lags in
+[−45,45] frames.
+Table 9 gives the two statistics for the four dual-arm tasks.
+Every task sits far below the ceiling of 14, between 1.44 and
+4.42, and the cross-arm correlation is higher at the best lag
+than at lag zero on all four tasks. A single instantaneous joint
+vector therefore cannot carry either the low effective rank or
+the delayed coupling.
+C.3 Attention Maps and Head Matching
+Fig. 20 compares the two matrices. For each dual-arm task
+we compute the mean 14×14 self-attention map of each head
+over 5 episodes and 10 frames, symmetrize it, and compare
+it with the absolute zero-lag action-correlation matrix using
+Spearman correlation over off-diagonal entries.
+The best
+head per task is only weakly aligned: Lift Pot 0.05 (head
+5), Pick Dual 0.12 (head 6), Handover 0.18 (head 2), and
+Shoes 0.26 (head 5). Thus head-level attention is not a reli-
+able proxy for the action-correlation structure. We therefore
+report it as a qualitative supplement to the quantitative statis-
+tics of §C.2.
+D Extended Related Work
+D.1 Proprioceptive History: Representation and Condi-
+tioning
+Action policies are moving from single-frame proprioceptive
+conditions to explicit history modeling. In the continuous
+route, ACT [41] maps the current joint state and visual ob-
+servations to an action chunk with a CVAE. Diffusion Pol-
+icy [8] conditions on the last H observations, proprioception
+included, concatenated into one global vector before condi-
+tional denoising; its own ablation reports that a vision-based
+policy degrades as H grows, which suggests that a flattened
+history does not scale. A2A [12] embeds historical proprio-
+ceptive sequences into the latent space of action generation,
+and Chronos [42] treats observation history as the latent state
+of the policy. Meanwhile, another route discretizes historical
+13
+
+
+Pick cube
+Stack cube
+Lift pot
+Handover cube
+ACT
+DP
+FM
+ACiT
+Figure 12: Out-of-distribution dark background. ACT, DP, FM and ACiT on the four tasks under the background shift.
+Pick cube
+Stack cube
+ACT
+DP
+FM
+ACiT
+Figure 13: Out-of-distribution unseen initial state and color, on Pick cube and Stack cube.
+actions or state-action trajectories into tokens for autoregres-
+sive VLAs at the cost of losing continuous coupling: VQ-
+BeT [14] uses a residual VQ-VAE to encode continuous ac-
+tion chunks into discrete latent codes and adds a continuous
+offset for precision. FAST [28] compresses action chunks in
+the frequency domain with DCT and BPE, substantially re-
+ducing autoregressive training cost. OmniSAT [21] further
+uses B-spline encoding and multi-stage residual quantization
+to quantize position, rotation, and gripper subspaces sepa-
+rately. VITA [22] learns a shared discrete latent space for
+vision and action and internalizes visual dynamics as an im-
+plicit chain of thought. Both continuous and discrete routes
+validate the value of using history [35, 40]. However, under
+either interface, proprioception is still represented as a flat
+vector or a one-dimensional token sequence, and the contin-
+uous coupling among joints is not explicitly modeled.
+At the fusion level, mainstream methods symmetrically
+concatenate vision and proprioception into the same attention
+stack. A few works instead let the robot state actively guide
+vision: RcP [43] uses proprioceptive-state correspondence
+to guide robot-centric pooling of image features, extracting
+robot-centric visual representations robust to self-distractors.
+AVA-VLA [39] uses a recurrent history belief to reweight
+current visual tokens. These explorations show that proprio-
+14
+
+
+success · 221 steps
+failure
+failure
+failure
+time
+Place Dual Shoes
+ACiT
+ACT
+DP
+FM
+Figure 14: Qualitative comparison on Place Dual Shoes, same task and episode under four policies. The outcome and the
+number of steps are marked on the last frame. Only ACiT leaves both shoes in the box and releases them; ACT keeps a shoe in
+its closed gripper, and DP and FM stop with one shoe outside the box.
+Table 9:
+Action-space statistics on the four dual-arm
+RoboTwin tasks. Move Can Pot and Shake Bottle are single-
+arm and are not listed, because their cross-arm quantities are
+undefined.
+Task
+PR
+within-L within-R cross(0) cross(best)
+Lift Pot
+1.44
+0.602
+0.579
+0.802
+0.956
+Pick Dual Bottles 2.71
+0.341
+0.324
+0.579
+0.881
+Handover Block
+1.92
+0.422
+0.596
+0.405
+0.716
+Place Dual Shoes
+4.42
+0.341
+0.301
+0.352
+0.670
+ception should not be only a passive condition, but they stop
+at perceptual filtering and do not carry structured joint priors
+through to action generation.
+D.2 Topology-Aware Morphological Bias
+Standard VLA policies are usually embodiment-agnostic and
+must infer kinematic structure from data.
+GET-Zero [27]
+proposes a Graph Embodiment Transformer that uses em-
+bodiment graph connectivity as a learned structural bias in
+attention, enabling zero-shot adaptation to new joint config-
+urations and link lengths. Human2LocoMan [24] further pro-
+poses a Modularized Cross-embodiment Transformer (MXT)
+that uses embodiment-specific tokenizers and detokenizers
+on a shared Transformer trunk to handle heterogeneous bod-
+ies. These works establish that joints are not independent
+dimensions and that the kinematic graph should be an ex-
+plicit inductive bias. However, existing topology methods
+mainly target cross-embodiment transfer and action-interface
+design. They do not treat continuous per-joint proprioceptive
+history as a generative prior, nor let each joint retrieve its own
+visual calibration signal. ACiT unifies continuous per-joint
+history, kinematic topology, and per-joint visual grounding
+in a single inverted generation pipeline.
+15
+
+
+success · 100 steps
+failure
+failure
+failure
+time
+Pick Dual Bottles
+ACiT
+ACT
+DP
+FM
+Figure 15: Qualitative comparison on Pick Dual Bottles. ACiT lifts the bottle clear of the table and finishes well inside the step
+budget, while ACT, DP and FM leave both bottles in place.
+16
+
+
+success · 102 steps
+failure
+success · 108 steps
+failure
+time
+Lift Pot
+ACiT
+ACT
+DP
+FM
+Figure 16: Qualitative comparison on Lift Pot. ACiT and DP both raise the pot, with ACiT finishing in fewer steps, while ACT
+and FM fail to lift it.
+17
+
+
+success · 158 steps
+failure
+failure
+failure
+time
+Move Can Pot
+ACiT
+ACT
+DP
+FM
+Figure 17: Qualitative comparison on Move Can Pot. ACiT places the can against the pot and finishes in 158 steps; ACT never
+moves it into place, DP does not approach it, and FM knocks it away from its start position.
+18
+
+
+success · 94 steps
+failure
+failure
+failure
+time
+Shake Bottle
+ACiT
+ACT
+DP
+FM
+Figure 18: Qualitative comparison on Shake Bottle. ACiT, ACT and FM shake the bottle, while DP never lifts it and is marked
+failure.
+19
+
+
+success · 71 steps
+success · 75 steps
+success · 73 steps
+success · 78 steps
+time
+LIBERO-Spatial
+ACiT
+ACT
+DP
+FM
+Figure 19: Qualitative comparison on LIBERO-Spatial. All four policies solve the episode, and ACiT finishes in the fewest
+steps.
+20
+
+
+action
+correlation
+best
+head
+Lift Pot
+head 5, ρ=0.05
+Pick Dual Bottles
+head 6, ρ=0.12
+Handover Block
+head 2, ρ=0.18
+Place Dual Shoes
+head 5, ρ=0.26
+Figure 20: Action correlation matrix (left) versus the best-matching self-attention head (right) for each dual-arm task. The
+Spearman correlation over off-diagonal entries is shown above each attention map.
+21

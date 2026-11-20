@@ -1,0 +1,3604 @@
+Preprint
+LATENT ACTION POLICIES FROM SUBOPTIMAL DATA
+Donghyeon Ki1,∗, Xiaoyu Chen2, Jun Ho Seo1, Hayeong Lee1, Kyungyoon Kim1,
+Byung-Jun Lee1,†, Li Zhao2,†
+1Korea University
+2Microsoft Research Asia
+ABSTRACT
+Latent Action Models (LAMs) learn control representations from action-free video,
+but existing pipelines typically train latent policies with behavioral cloning, without
+an explicit policy improvement objective. Although offline RL offers a natural
+approach to policy improvement, standard methods do not transfer directly to
+learned latent action spaces. We find that the structure of learned latent actions
+makes naive offline RL unreliable: directly maximizing value over latent actions
+or fitting a unimodal policy can produce latent actions that cannot be realized by
+physical execution, while the latent representation can merge physical controls
+that receive different rewards. To understand when latent-space optimization
+remains valid, we derive conditions under which policy improvement transfers to
+decoded execution and under which latent and physical optima align. Building on
+these insights, we propose LAPIS for goal-conditioned latent policy improvement,
+grounding value-based policy improvement in observed state–latent transitions
+and using a conditional flow policy to capture their multimodal structure. LAPIS
+outperforms baselines on most tasks, with the clearest gains in visual manipulation,
+and remains effective even with only 1% action labels, where competing methods
+largely collapse.
+1
+INTRODUCTION
+Latent Action Models (LAMs) have emerged as a promising paradigm for learning control represen-
+tations from action-free video by inferring latent actions that explain observed state transitions (Ye
+et al., 2025; Chen et al., 2025; 2024). Because latent-action learning captures transition and outcome
+structure rather than task optimality, it can naturally exploit large collections of diverse and suboptimal
+video, including failed trajectories that would be poor demonstrations but remain informative for
+learning how the environment changes. Yet existing LAM pipelines typically train the resulting latent
+policies with behavioral cloning (BC) (Schmidt & Jiang, 2024; Ye et al., 2025; Chen et al., 2024;
+Bruce et al., 2024), without explicitly optimizing latent policies for improved task return. This creates
+a gap between the broad data that LAMs can learn from and the policies that current pipelines can
+extract from it.
+Offline reinforcement learning (RL) offers a natural way to improve beyond the observed behav-
+ior (Levine et al., 2020; Kostrikov et al., 2022; Fujimoto et al., 2019; Ki et al., 2025; Lu et al., 2025),
+but applying standard offline RL directly in a learned latent action space is not straightforward. We
+identify three properties that distinguish learned latent actions from physical actions. The first two
+concern realizability—whether the transition outcome represented by a latent action can be physically
+produced from the current state: (i) state-conditioned realizability, whereby a latent action realizable
+at one state can be unrealizable at another; and (ii) non-convex realizable set, whereby interpolating
+between realizable latent actions can yield unrealizable ones. The third, (iii) outcome-based abstrac-
+tion, arises because distinct physical controls that reach the same outcome can map to the same latent
+action.
+These properties expose two distinct failure modes of naive offline RL in latent action spaces. The
+first is an optimization–execution mismatch. Because the realizable latent set is state-dependent and
+∗Interns at Microsoft Research Asia.
+†Corresponding authors.
+1
+arXiv:2611.24482v1  [cs.LG]  18 Nov 2026
+
+
+Preprint
+high-Q, unrealizable
+mode-averaged, unrealizable
+high-Q, unrealizable
+mode-averaged, unrealizable
+(c) Outcome-based abstraction
+Same outcome, different rewards
+Reward
+Same state
+Same outcome
+IDM
+same latent
+Our setting: Goal-Conditioned RL
+Same state Same outcome
+Fixed goal
+Same outcome, same goal → same reward
+Latent Action Model
+Learn latents from state transitions
+Decoder
+Map latent actions to physical actions
+Decoder
+Figure 1: Overview of LAPIS. Left: a Latent Action Model learns latent actions from action-
+free trajectories and a decoder from limited action labels. Middle: naive offline RL can produce
+unrealizable latent actions through value maximization or unimodal policy fitting, while outcome-
+based abstraction can merge reward-distinct controls. Right: LAPIS performs support-aware policy
+improvement with critic-guided filtering and a multimodal flow policy, instantiated with an outcome-
+compatible goal-conditioned objective.
+potentially non-convex, standard offline RL can move outside this set by directly maximizing latent-
+action value or through unimodal policy fitting, producing latent actions that cannot be faithfully
+realized by physical execution. This raises the question: when does latent-space policy improvement
+transfer to decoded physical execution? The second is an objective mismatch. Because outcome-
+based abstraction can merge physical controls with different rewards, the optimal latent policy need
+not correspond to the optimal physical policy. This raises a separate question: when do the latent and
+physical policy optima align?
+To answer these questions, we analyze paired physical- and latent-action batch MDPs constructed
+from the same observed transitions. For the first question, we show that batch-constrained latent
+policy improvement transfers to physical execution under deterministic dynamics and supported
+outcome identifiability. For the second, we show that latent and physical optima align under an
+outcome-determined objective within the decoder-covered, batch-constrained physical policy class.
+These results characterize when latent-space policy improvement remains valid and provide the
+principles behind our method.
+Building on these insights, we introduce LAPIS (Latent Action Policy Improvement on Support),
+a latent policy improvement framework motivated by these failure modes. Rather than directly
+optimizing a latent actor toward arbitrary high-value actions, LAPIS grounds value-based policy
+improvement in observed state–latent transitions and uses a conditional flow policy to capture their
+potentially multimodal structure. LAPIS is instantiated with a goal-conditioned objective based on
+future states, which is naturally compatible with the outcome semantics captured by latent actions.
+At inference, classifier-free guidance provides a simple way to adjust the emphasis between behavior
+and high-value policy branches. With the same LAM and 5% action labels, LAPIS achieves the
+highest success among latent-space methods on all five OGBench visual manipulation tasks and
+outperforms prior semi-supervised offline RL baselines on nearly all tasks with only 5% or 1% action
+labels. Further experiments examine the contributions of these design choices.
+2
+RELATED WORK
+Latent action models from action-free video
+A growing body of work learns controllable represen-
+tations from action-free video by inferring latent actions that explain observed transitions (Edwards
+2
+
+
+Preprint
+et al., 2019; Rybkin et al., 2019; Baker et al., 2022; Bruce et al., 2024; Google DeepMind, 2024).
+Recent approaches learn such representations using discrete or continuous latent codes and extend
+latent action modeling to richer video and vision-language-action settings (Schmidt & Jiang, 2024;
+Ye et al., 2025; Chen et al., 2024; Gao et al., 2025; Zhang et al., 2025; Chen et al., 2025). Their
+control pipelines predominantly train latent policies by behavioral cloning and use a small labeled
+set to decode latent actions into physical controls. LAPO (Schmidt & Jiang, 2024) additionally
+incorporates reinforcement learning by applying online PPO to fine-tune the physical action policy
+after latent-action pretraining. In contrast, we study policy improvement directly in the learned latent
+action space using offline data, with scarce action labels used for physical action decoding.
+Action-free and semi-supervised reinforcement learning.
+A related line of work studies learning
+control from trajectories with missing or limited action annotations, using inferred actions, latent
+representations, or other forms of auxiliary supervision to exploit action-free experience (Torabi et al.,
+2018; Baker et al., 2022; Ghosh et al., 2023; Park et al., 2023; Zheng et al., 2023). Most closely
+related is LAQ (Chang et al., 2022), which performs Q-learning over latent actions from state-only
+data but relies on a hand-specified controller for execution. In contrast, we learn a latent action
+space from action-free data together with a physical-action decoder from scarce action labels, and
+study offline policy improvement directly in this learned latent action space. This setting makes the
+relationship between latent-space optimization and decoded physical execution central, motivating
+our analysis of when latent policy improvement transfers to physical control. Further related work is
+discussed in Appendix A.
+3
+PRELIMINARIES
+Goal-conditioned reinforcement learning
+We model the environment as an MDP M =
+(S, A, p, r, γ), with dynamics p(s′ | s, a), bounded reward r, and initial-state distribution µ0. We write
+(s, a, s′) = (st, at, st+1) for a transition. A policy π(a | s) induces the usual state-action and state
+value functions Qπ
+M and V π
+M, with expected return JM(π) = Es0∼µ0[V π
+M(s0)]. We refer to M as the
+ground MDP to distinguish it from the batch MDPs introduced in Section 5. In the goal-conditioned
+setting, the policy additionally conditions on a goal g, π(a | s, g). Contrastive RL (Eysenbach et al.,
+2022) casts goal-conditioned control as density-ratio estimation, bypassing explicit modeling of
+transition dynamics or reward functions. The goal-reaching reward is (1 −γ) p(s′=g | s, a), and the
+corresponding goal-conditioned value equals the discounted future-state occupancy:
+Qπ
+g (s, a) = pπ(st+=g | s, a) = (1 −γ)
+∞
+X
+k=1
+γk−1pπ(st+k=g | st = s, at = a),
+(1)
+where the right-hand side denotes the discounted occupancy of future states visited from (s, a)
+under π. To illustrate the contrastive principle, consider a critic parameterized as a bilinear score
+fϕ(s, a, g) = ϕ(s, a)⊤ψ(g)/
+√
+d and trained by noise-contrastive binary classification, with a positive
+goal g+ sampled from the future-state occupancy and a negative goal g−∼pB sampled from the
+dataset state distribution,
+max
+ϕ,ψ E(s,a), g+, g−
+log σ(fϕ(s, a, g+)) + log(1 −σ(fϕ(s, a, g−)))
+
+.
+(2)
+For the ideal binary classification problem, the optimal score is the log density ratio, f ∗=
+log Qπ
+g −log pB(g) wherever the ratio is defined. LAPIS uses a TD-InfoNCE estimator, detailed in
+Appendix E.3. In the offline setting, directly maximizing this critic can drive the actor outside the
+support of the fixed behavior data, so offline CRL regularizes policy improvement with behavioral
+cloning,
+LCRL(π) = E(s,a,g)∼D
+
+−fϕ(s, π(s, g), g) + α ∥π(s, g) −a∥2
+2
+
+,
+improving the actor toward high-value actions while keeping it close to the observed behavior.
+Latent action models
+A Latent Action Model (LAM) learns a latent action space Z from an action-
+free dataset B = {(si, s′
+i)}N
+i=1 by training an inverse dynamics model I and a forward dynamics
+model F, with z = I(s, s′) and ˆs′ = F(s, z) with a bottlenecked latent representation,
+min
+I,F E(s,s′)∼B
+
+∥s′ −F(s, I(s, s′))∥2
+2
+
+.
+(3)
+3
+
+
+Preprint
+Relabeling each transition by its latent action zi = I(si, s′
+i) yields the latent dataset Bz =
+{(si, zi, s′
+i)}N
+i=1. A separate small labeled dataset Bdec = {(si, ai, s′
+i)}Ndec
+i=1 with Ndec ≪N supplies
+the action supervision for the decoder.
+The deployed system composes a latent policy with a decoder. The latent policy πz(z | s) selects a
+latent transition at the current state, and the state-marginal decoder Ψ(a | z) maps the chosen latent
+to a physical action, trained on Bdec by maxΨ EBdec[log Ψ(a | z)] and frozen thereafter. Deployment
+samples z ∼πz(· | s) then a ∼Ψ(· | z), giving the deployed policy ¯π = Ψ◦πz. Section 5 introduces
+an ideal state-conditioned batch decoder Ψ∗(a | s, z) only for the transfer analysis.
+4
+LATENT ACTION STRUCTURE AND FAILURES
+A latent policy selects a latent action representing a desired transition outcome, which must ultimately
+be realized through physical control at deployment. Section 4.1 characterizes the realizability and
+abstraction structure of learned latent actions. Section 4.2 then shows how realizability can break the
+connection between latent-space optimization and physical execution, while outcome abstraction can
+misalign latent and physical objectives.
+4.1
+STRUCTURAL PROPERTIES OF LEARNED LATENT ACTION SPACES
+To quantify whether a target latent can be physically realized from the current state, we define its
+realization error as the infimum of its distance to the latents of reachable outcomes. We use it as a
+diagnostic (Figure 2, Appendix B) and to bound the transfer gap outside the data (Appendix D.9).
+Definition 1 (Latent realizability). Let R(s) := S
+a∈A supp p(· | s, a) be the set of successor states
+reachable from s. The latent realization error of a target latent z at state s is
+δ(s, z) =
+inf
+s′∈R(s)
+I(s, s′) −z
+
+2,
+and z is ϵ-realizable at s if δ(s, z) ≤ϵ, defining the realizable set Zϵ
+real(s) = {z : δ(s, z) ≤ϵ}.
+The observed set Bz contains only a subset of realizable state–latent pairs; absence from Bz does not
+imply unrealizability. Figure 2 illustrates the properties discussed below.
+State-conditioned realizability
+Whether a latent is realizable depends on the current state: the
+same z can be realizable from s1 but not s2, so realizability is a property of the pair (s, z), not of z
+alone (Zϵ
+real(s1)̸ = Zϵ
+real(s2)). In Figure 2(a), we take latents with known realizations at their source
+states and search for physical realizations of the same latents from other states. Latents have near-zero
+realization error at their source states, while 73% of transfers to other states exceed the diagnostic
+threshold under finite search. LAPO (Schmidt & Jiang, 2024, Sec. 4.1) notes that the action behind a
+latent can depend on the state; this is harmless when imitating the latents observed at s, but offline
+RL moves away from them and can select latents that are realizable only from other states.
+Non-convex realizable set
+Even at a fixed state, the space between two realizable latents need not
+be realizable. For z1, z2 ∈Zϵ
+real(s), an interpolation zα = (1 −α)z1 + αz2 need not be realizable,
+so Zϵ
+real(s) need not be convex. In Figure 2(b), we select pairs of realizable endpoint latents at the
+same state and search for physical realizations along the interpolation between them. The endpoints
+admit known physical realizations, while interior errors exceed the diagnostic threshold.
+Outcome-based abstraction
+The encoder z = I(s, s′) labels the transition outcome rather than
+the physical command, so distinct actions reaching the same successor from s share a latent. In
+Figure 2(c), we search for substantially different action chunks that reach each target outcome within
+a fixed tolerance; 95% of sampled targets admit at least two such realizations.
+4.2
+WHY THE PROPERTIES BREAK NAIVE OFFLINE RL
+These properties become consequential when offline RL is applied in the learned latent space, giving
+rise to two distinct failure modes: an optimization–execution mismatch and an objective mismatch.
+4
+
+
+Preprint
+Source latent zj
+Evaluation state si
+0
+8
+Realization error
+0.00
+0.25
+0.50
+0.75
+1.00
+Interpolation 
+0
+1
+2
+3
+4
+Realization error
+1
+5
+10
+15
+Realizations Nreal
+0.00
+0.02
+0.04
+0.06
+0.08
+0.10
+0.12
+Probability
+P(N
+2) = 0.95
+Figure 2: Structural properties of learned latent action spaces. Top row: concept schematics
+for (a) state-conditioned realizability (the same latent can be realizable at s1 but not s2), (b) the
+non-convex realizable set (interpolating two realizable latents can pass through unrealizable ones),
+and (c) outcome-based abstraction (distinct physical controls reaching the same successor share one
+latent). Bottom row: empirical diagnostics for the experimental LAM on visual-cube-singl
+e-play-v0; the diagnostic protocol is in Appendix B.
+Optimization–execution mismatch
+State-conditioned realizability and a non-convex realizable set
+imply that physically realizable latent actions depend on the current state, while interpolations between
+realizable latents can be unrealizable. As a result, directly optimizing the actor to maximize learned
+value can move it toward unrealizable latents despite behavior regularization, while a unimodal
+actor can place probability between separated realizable modes and generate unrealizable latents.
+Thus, even when the critic favors a high-value latent action z, if z is unrealizable, decoding and
+physical execution can reach a different successor than the outcome represented by z. Consequently,
+latent-space policy improvement need not translate to improvement after decoding,
+Jlatent(π′
+z) ≥Jlatent(πz)̸
+=⇒
+JM(Ψ ◦π′
+z) ≥JM(Ψ ◦πz).
+Here Jlatent denotes the learned latent-space optimization objective.
+Objective mismatch
+Outcome-based abstraction can erase reward-relevant distinctions between
+physical controls. When distinct controls a1̸ = a2 reach the same successor s′, they share the latent
+action z = I(s, s′), even if an action-dependent reward assigns r(s, a1, s′)̸ = r(s, a2, s′). Because
+the latent policy can select only z, it cannot distinguish between these reward-distinct physical
+controls. Consequently, a policy that is optimal in the latent-action MDP need not decode to an
+optimal physical-action policy,
+π∗
+z ∈arg max
+πz∈ΠBz JMBz (πz)̸
+=⇒
+(Ψ∗◦π∗
+z) ∈arg max
+π∈ΠBa JM(π).
+Here, ΠBa and ΠBz denote the physical and latent policy classes restricted to observed state–action
+and state–latent pairs, respectively, and Ψ⋆is the batch-exact decoder defined in Section 5.
+These failure modes raise two questions: when does latent-space policy improvement transfer to
+physical execution, and when do latent and physical policy optima align? Section 5 establishes
+conditions for both, which motivate the design of LAPIS in Section 6.
+5
+WHEN DOES LATENT POLICY IMPROVEMENT WORK?
+To answer these questions, we construct paired batch MDPs from the same observed transitions under
+physical and latent action representations,
+MBa = (S ∪{sabs}, A, pBa, rBa, γ),
+MBz = (S ∪{sabs}, Z, pBz, rBz, γ).
+5
+
+
+Preprint
+The two MDPs are constructed from Ba = {(si, ai, s′
+i)}N
+i=1 and its latent relabeling Bz =
+{(si, zi, s′
+i)}N
+i=1, with zi = I(si, s′
+i), while unobserved pairs transition to the zero-reward absorbing
+state sabs. Because realizability is state-conditioned, support in MBz is over observed pairs (s, z), not
+z globally. We further assume supported outcome identifiability: each supported (s, z) corresponds
+to a unique successor FB(s, z), so that a supported latent action has a well-defined transition outcome
+at each state. This supported successor map is distinct from the learned forward predictor F. For the
+analysis, we deploy a latent policy through the batch-exact state-conditioned decoder Ψ∗(a | s, z),
+which selects physical actions observed at s to produce the successor represented by z in the batch.
+The support domain, initial-state and terminal conventions, batch rewards, and decoder construction
+are specified in Appendix C.1. All exact results below use this common construction. Appendix A.4
+discusses how our analysis extends classical batch-constrained RL and MDP abstraction to learned
+latent actions.
+5.1
+WHEN DOES LATENT POLICY IMPROVEMENT TRANSFER?
+We first ask when an improvement measured in the latent batch MDP is preserved by decoded
+physical execution. To avoid selecting unrealizable latent actions, we restrict the latent policy to
+state–latent transitions observed in the batch.
+Definition 2 (Batch-constrained policy). A policy is batch-constrained if its trajectory uses only
+observed state–action pairs in Ba. A latent batch-constrained policy is defined analogously over Bz.
+Every observed state–latent pair (s, z) ∈Bz has a physical realization by construction (δ(s, z) = 0 in
+Definition 1), and the batch-exact decoder Ψ∗selects physical actions observed at s that realize this
+outcome. A batch-constrained latent policy selects only latent actions that are physically realizable at
+the current state.
+Support alone, however, does not ensure exact transfer. Under stochastic dynamics, the same decoded
+action can reach a different successor from the one used to evaluate z in the latent batch MDP,
+breaking the correspondence between latent evaluation and physical execution. We therefore assume
+deterministic ground dynamics, which leads to Theorem 1.
+Assumption 1 (Deterministic ground dynamics). The successor is a deterministic function of the
+current state and physical action, s′ = T(s, a).
+Theorem 1 (On-support policy improvement transfer). Under Assumption 1, let πz be a batch-
+constrained latent policy. Then the latent return equals the decoded physical return, JMBz (πz) =
+JM(Ψ∗◦πz), and consequently, for any two such latent policies πz and π′
+z,
+JMBz (π′
+z) ≥JMBz (πz)
+=⇒
+JM(Ψ∗◦π′
+z) ≥JM(Ψ∗◦πz).
+Proof. See Appendix C.2.
+Thus, return improvement between batch-constrained latent policies transfers to their batch-exact
+decoded policies. Appendix D.3 extends this exact result to stochastic dynamics, bounding the
+transfer gap by the mismatch between the latent batch transition and the transition induced by decoded
+execution. Appendix D.9 bounds the gap outside the data via the realization error (Definition 1).
+5.2
+WHEN DO LATENT AND PHYSICAL OPTIMA ALIGN?
+Even when latent policy improvement transfers to decoded execution as in Theorem 1, this alone does
+not guarantee alignment between the optimal latent and physical-action policies. Under a generic
+action-dependent reward, outcome-based abstraction can collapse reward-distinct physical controls
+into the same latent action, removing potentially necessary distinctions for physical optimality.
+Assumption 2 (Outcome-determined reward). The reward depends on a transition only through the
+current and next states, r(s, a, s′) = r(s, s′).
+Under Assumption 2, physical actions reaching the same successor from the same state receive the
+same immediate reward, removing the reward ambiguity introduced by outcome-based abstraction.
+We therefore obtain the following alignment result.
+6
+
+
+Preprint
+Algorithm 1 LAPIS training and deployment
+Require: transition batch B, labeled set Bdec, guidance scale w
+1: Train IDM I(s, s′), FDM F(s, z), and decoder Ψ(a | z); form Bz
+2: repeat
+3:
+Score with fϕ(s, z, g) and gate with G(s, z, g) in Eq. (4)
+4:
+Fit vθ(xt, t; s, g, o) by minimizing Lactor in Eq. (5)
+5: until convergence
+6: Deploy: generate z with vCFG
+w
+and execute a ∼Ψ(· | z)
+Theorem 2 (Optimal-policy alignment). Under Assumptions 1–2, for the same initial distribution µ0,
+π∗
+z ∈arg max
+πz∈ΠBz JMBz (πz)
+=⇒
+(Ψ∗◦π∗
+z) ∈arg max
+π∈ΠBa JM(π).
+Proof. See Appendix C.3.
+6
+LAPIS: POLICY IMPROVEMENT ON SUPPORT
+Section 5 motivates batch-constrained latent policy improvement over supported state–latent transi-
+tions. LAPIS follows this principle by using critic-guided filtering to select high-value transitions
+from the observed state–latent pairs and a conditional flow policy to capture their potentially mul-
+timodal distribution. We instantiate LAPIS in goal-conditioned RL, using future states as goals to
+obtain a reward-label-free objective compatible with outcome-based latent actions. Appendix D
+relates the practical algorithm to the supported-improvement analysis and explains how the learned
+components instantiate its principles.
+Critic-guided transition filtering
+LAPIS fits a goal-conditioned contrastive critic fϕ(s, z, g) for
+the behavior latent policy πz
+β and uses it to score only the state–latent transitions observed in Bz. We
+retain high-value transitions using a learned state–goal threshold,
+G(s, z, g) := 1
+
+fϕ(s, z, g) > ˆV (s, g)
+
+,
+(4)
+where ˆV (s, g) is learned by expectile regression in the critic’s score space (Appendix E.3). We show
+in Appendix C.4 that, for the optimal density-ratio score f ⋆, critic-guided filtering corresponds to a
+supported reweighting that preserves support and improves return. For the TD-InfoNCE critic used
+in practice, this guarantee does not apply directly: its score is determined only up to an offset c(s, z),
+which can change the ordering of latents (Appendix D.7). We therefore compare the raw score with
+an offset-free score in Section 7.6.
+Multimodal policy extraction
+To capture the potentially multimodal distribution of gated high-
+value transitions, LAPIS uses conditional flow matching (Lipman et al., 2023). For x0 ∼N(0, I)
+and target latent z, we use the linear path xt = (1 −t)x0 + tz with target velocity z −x0. The
+velocity model vθ(xt, t; s, g, o) is trained with two branches: o=0 models all observed transitions,
+while o=1 models only the high-value transitions selected by G(s, z, g),
+Lactor = E
+
+G(s, z, g) ∥vθ(xt, t; s, g, 1) −(z −x0)∥2
+2 + λ ∥vθ(xt, t; s, g, 0) −(z −x0)∥2
+2
+
+.
+(5)
+At inference, classifier-free guidance (Ho & Salimans, 2022) combines the behavior and high-value
+branches,
+vCFG
+w
+= (1 −w) vθ(·; 0) + w vθ(·; 1),
+where w=0 recovers the behavior branch, w=1 the high-value branch, and w>1 further emphasizes
+the high-value branch.
+7
+EXPERIMENTS
+Our experiments address six questions: (Q1) How does LAPIS perform in learned latent action
+spaces, and does standard goal-conditioned offline RL remain effective? (Q2) How does LAPIS
+7
+
+
+Preprint
+Table 1: Success rate (%) on the OGBench visual suite. Gray columns use real actions with 100%
+labels; the others use the LAM with 5% labels. LAPIS† uses the same critic with IDQL-style selection
+(Appendix E.8).
+100% labels (oracle)
+5% labels (w/ LAM)
+Task
+GCBC F-GCBC GCIVL GCIQL
+QRL
+HIQL
+CRL
+LAPIS F-GCBC GCIVL GCIQL QRL HIQL CRL LAPIS LAPIS†
+antmaze-medium
+12 ±0
+8 ±1
+23 ±3
+12 ±2
+0 ±0
+94 ±2
+95 ±2
+48 ±3
+8 ±1
+26 ±5
+7 ±2
+34 ±4 89 ±2 11 ±2
+49 ±3
+89 ±4
+antmaze-large
+4 ±2
+1 ±0
+6 ±1
+3 ±1
+1 ±1
+66 ±3
+85 ±3
+14 ±3
+1 ±0
+6 ±2
+2 ±1
+9 ±3
+49 ±4
+3 ±1
+10 ±2
+58 ±6
+antmaze-giant
+0 ±0
+0 ±0
+1 ±1
+0 ±0
+1 ±1
+8 ±5
+47 ±1
+0 ±0
+0 ±0
+1 ±1
+0 ±0
+0 ±0
+3 ±2
+0 ±0
+0 ±0
+4 ±2
+antmaze-teleport
+5 ±0
+7 ±1
+8 ±1
+7 ±1
+10 ±4
+42 ±4
+51 ±1
+23 ±1
+6 ±1
+6 ±2
+4 ±1
+14 ±7 34 ±3
+6 ±1
+21 ±3
+39 ±6
+cube-single
+4 ±2
+11 ±2
+58 ±8
+30 ±7
+28 ±14 86 ±6 18 ±10
+45 ±4
+4 ±1
+45 ±3
+5 ±2
+5 ±4
+56 ±6
+4 ±2
+62 ±5
+33 ±8
+cube-double
+1 ±1
+5 ±3
+10 ±3
+2 ±1
+5 ±1
+38 ±5
+1 ±0
+30 ±6
+4 ±1
+9 ±4
+1 ±1
+1 ±1
+18 ±9
+1 ±0
+31 ±6
+10 ±2
+cube-triple
+14 ±2
+19 ±0
+16 ±2
+16 ±2
+16 ±1
+21 ±1
+13 ±3
+22 ±1
+16 ±1
+16 ±1
+12 ±6
+12 ±5 17 ±2 11 ±4
+20 ±0
+10 ±4
+cube-quadruple
+5 ±1
+11 ±3
+0 ±0
+7 ±1
+4 ±1
+11 ±3
+4 ±1
+16 ±1
+10 ±3
+0 ±0
+3 ±1
+4 ±1
+4 ±2
+4 ±2
+14 ±3
+1 ±1
+scene
+13 ±2
+20 ±3
+25 ±4
+12 ±2
+14 ±2
+43 ±6
+13 ±3
+45 ±1
+9 ±2
+17 ±2
+6 ±1
+7 ±1
+22 ±7
+6 ±4
+29 ±4
+16 ±3
+compare with goal-conditioned baselines adapted to limited action supervision? (Q3) How important
+is it to keep latent policy improvement on supported state–latent transitions? (Q4) Which components
+of LAPIS drive its gains? (Q5) How does decoder conditioning affect performance across action-label
+budgets? (Q6) Does the offset in the TD-InfoNCE score change the gate’s decisions?
+Benchmarks
+We evaluate on the OGBench visual suite (Park et al., 2025a), covering cube and
+scene manipulation as well as antmaze navigation, and additionally on visual D4RL Franka
+Kitchen (Fu et al., 2020; Gupta et al., 2020) for multi-subtask manipulation. All tasks are evaluated
+in a goal-conditioned offline RL setting with 64 × 64 RGB observations; example observations from
+OGBench and Kitchen are shown in Figures 5 and 6, respectively. We use x% labels to denote
+a setting where x% of the trajectories have action annotations while the remaining 100−x% are
+available as action-free data, and evaluate at 100%, 5%, and 1% labels.
+Baselines and evaluation
+In Tables 1–3, magenta method names indicate the use of a LAM. We
+compare LAPIS against GCBC, flow-based GCBC (F-GCBC), GCIVL (Park et al., 2025a), goal-
+conditioned IQL (GCIQL; Kostrikov et al., 2022), QRL (Wang et al., 2023), HIQL (Park et al., 2023),
+and contrastive RL (CRL; Eysenbach et al., 2022) in Table 1. Table 3 extends the comparison to
+goal-conditioned baselines adapted to limited action supervision, adding SS-ORL (Zheng et al., 2023)
+and VPT-RL (Baker et al., 2022). For OGBench, we report success rates as mean ± std over four
+seeds, evaluating 20 episodes on each of five tasks per environment. All latent action models use a
+temporal gap of H = 3, with zt = I(st, st+H). The controller executes only the first decoded action
+before replanning, and Theorem 1′ in Appendix C.5 extends Theorem 1 to this setting. Detailed
+implementation settings for each algorithm are provided in Appendix E.
+7.1
+GOAL-CONDITIONED OFFLINE RL IN LEARNED LATENT ACTION SPACES (Q1)
+Table 1 compares goal-conditioned offline RL methods in the learned latent action space with 5%
+labels, with a 100%-label oracle as a reference; results without LAM pretraining are in Appendix E.10.
+LAPIS is best on all five manipulation tasks and, compared with LAPIS trained on real actions with
+100% labels, loses little performance on every task except scene. CRL maximizes the critic with a
+unimodal BC-regularized actor, so it can leave the observed latent modes for unrealizable high-value
+latents or average separated modes; LAPIS instead filters observed state–latent transitions and fits
+their multimodal distribution with a flow policy. On antmaze, LAM+HIQL exceeds LAPIS, as
+long-horizon navigation favors less conservative extraction than the LAPIS gate (Appendix F.1). With
+the same critic, IDQL-style selection (LAPIS†) closes this gap on all four antmaze tasks.
+Table 2: Normalized score (%) on visual D4RL
+Kitchen with 100% and 5% action labels.
+100% labels (oracle)
+5% labels (w/ LAM)
+Task
+GCIQL CRL LAPIS GCIQL
+CRL
+LAPIS
+partial
+21 ±9
+28 ±4
+60 ±4
+19 ±9
+26 ±12
+44 ±6
+mixed
+22 ±3
+31 ±9
+53 ±7
+21 ±9
+25 ±12
+41 ±5
+Beyond OGBench: visual Franka Kitchen
+We further evaluate on visual D4RL Franka
+Kitchen, a multi-subtask manipulation bench-
+mark.
+Table 2 reports the percentage of re-
+quired subtasks completed on the partial and
+mixed target-task sets; details are provided in
+Appendix E.1. LAPIS also consistently outper-
+forms GCIQL and CRL on both target-task sets with 100% and 5% action labels.
+8
+
+
+Preprint
+Table 3: Success rate (%) on the OGBench visual suite with 5% and 1% action labels. We compare
+LAPIS with goal-conditioned methods adapted to learning under limited physical-action supervision.
+With 1% labels, the LAM, decoder, and policy of LAPIS are all trained with 1% labels, unlike the
+decoder study in Table 5.
+5% labels
+1% labels
+Task
+SS-ORL
+VPT-RL
+GCIVL
+HIQL
+LAPIS
+SS-ORL
+VPT-RL
+GCIVL
+HIQL
+LAPIS
+antmaze-medium
+23 ±3
+11 ±2
+2 ±1
+42 ±38
+49 ±3
+0 ±0
+0 ±1
+0 ±0
+0 ±0
+29 ±6
+antmaze-large
+6 ±1
+4 ±2
+0 ±1
+7 ±13
+10 ±2
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+7 ±3
+antmaze-giant
+1 ±1
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+antmaze-teleport
+13 ±1
+8 ±1
+3 ±3
+12 ±12
+21 ±3
+4 ±4
+3 ±2
+0 ±0
+2 ±2
+11 ±2
+cube-single
+55 ±3
+48 ±6
+0 ±0
+24 ±8
+62 ±5
+0 ±0
+0 ±0
+0 ±0
+2 ±4
+50 ±6
+cube-double
+11 ±6
+17 ±13
+0 ±0
+5 ±2
+31 ±6
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+20 ±8
+cube-triple
+9 ±5
+15 ±9
+0 ±0
+13 ±4
+20 ±0
+0 ±0
+0 ±0
+0 ±0
+1 ±1
+17 ±1
+cube-quadruple
+0 ±0
+2 ±3
+0 ±0
+6 ±1
+14 ±3
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+10 ±3
+scene
+0 ±0
+0 ±0
+0 ±0
+5 ±1
+29 ±4
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+9 ±3
+9
+10
+Support distance dBC
+BC end
+( =10, w=0)
+aggressive
+( =0, w=30)
+2.5
+3.0
+3.5
+dBC
+11
+12
+Realization dround
+BC end
+( =10, w=0)
+aggressive
+( =0, w=30)
+6.0
+6.5
+dround
+BC end
+( =10, w=0)
+aggressive
+( =0, w=30)
+0
+20
+40
+Success rate (%)
+Success rate
+CRL
+LAPIS
+BC
+Figure 3: Support–success diagnostic (antmaze). We sweep CRL’s BC coefficient α and LAPIS
+guidance w, measuring support distance dBC, realization round-trip error dround, and task success.
+7.2
+COMPARISON UNDER LIMITED ACTION SUPERVISION (Q2)
+We next compare LAPIS with goal-conditioned baselines adapted to learning under limited physical-
+action supervision. These adaptations use hindsight goal relabeling, with implementation details
+provided in Appendix E.4. Apart from antmaze-giant, where every method stays near zero
+at both label budgets, LAPIS is the strongest method with 5% labels, and with 1% labels it still
+succeeds while the competing methods largely collapse (Table 3). These results show that LAPIS can
+effectively exploit action-free trajectories even when physical action supervision is extremely limited.
+7.3
+EFFECT OF SUPPORTED POLICY IMPROVEMENT (Q3)
+We examine whether successful latent policy improvement remains close to the behavior-supported
+latent region. Starting from behavior-like policies, we strengthen critic-driven improvement by
+decreasing CRL’s BC coefficient α and increasing LAPIS guidance w. Figure 3 measures dBC, the
+distance from a policy latent to the nearest latent sampled from the BC policy at the same state–goal
+pair, and dround, the round-trip latent error obtained by decoding a selected latent into physical
+control, executing it in the environment, and measuring the distance between the original latent
+and the latent re-encoded from the resulting transition; lower values indicate more faithful physical
+realization. As CRL becomes more aggressive, both distances increase and task success collapses,
+whereas LAPIS remains closer to the behavior-supported region.
+7.4
+WHICH COMPONENTS DRIVE LAPIS? (Q4)
+LAPIS combines critic-guided filtering with a multimodal flow actor. To isolate their contributions,
+we perform a 2 × 2 ablation crossing the policy-improvement mechanism {max-Q, gate} and
+actor parameterization {deterministic, flow}, while keeping the LAM, decoder, critic, and training
+budget fixed (Table 4(a)). Critic-guided filtering consistently improves success with either actor
+parameterization, while the flow actor provides a further gain when combined with the gate.
+Extraction rule versus critic. Table 4(b) crosses two critics (TD-InfoNCE, IQL) with four ex-
+traction rules (gate, AWR (Peng et al., 2019), IDQL-style selection (Hansen-Estruch et al., 2023),
+DDPG+BC (Park et al., 2025b); Appendix E.8) at fixed LAM, decoder, and labels. The critic matters
+most: under the same rule, switching to the IQL critic lowers success in 10 of the 12 comparable
+9
+
+
+Preprint
+Table 4: Success rate (%) with 5% action labels (mean ± std over four seeds); bold marks the best
+value in each column of each panel. (a) Improvement × actor. (b) Critic × extraction rule with the
+same LAMs and decoders.
+(a) Improvement × actor
+Improvement
+Actor
+antmaze-medium
+cube-single
+scene
+CRL (max-Q)
+det
+11 ±2
+4 ±2
+6 ±4
+CRL (max-Q)
+flow
+5 ±2
+5 ±3
+7 ±4
+LAPIS (gate)
+det
+43 ±4
+36 ±6
+16 ±4
+LAPIS (gate)
+flow
+49 ±3
+62 ±5
+29 ±4
+(b) Critic × extraction rule
+Critic
+Extraction rule
+antmaze-medium
+cube-single
+cube-double
+scene
+TD-InfoNCE
+Gate + flow (LAPIS)
+49 ±3
+62 ±5
+31 ±6
+29 ±4
+TD-InfoNCE
+AWR-weighted flow
+57 ±12
+54 ±6
+25 ±4
+20 ±4
+TD-InfoNCE
+IDQL-style selection
+89 ±4
+33 ±8
+10 ±2
+16 ±3
+IQL
+Gate + flow
+32 ±4
+42 ±14
+12 ±4
+20 ±3
+IQL
+AWR-weighted flow
+18 ±4
+55 ±8
+13 ±4
+19 ±4
+IQL
+IDQL-style selection
+66 ±5
+28 ±8
+5 ±2
+5 ±2
+IQL
+DDPG+BC flow
+38 ±7
+6 ±4
+5 ±1
+9 ±1
+cells and leaves the other two similar. With the TD-InfoNCE critic, the gate is best on manipulation,
+whereas IDQL-style selection is best on antmaze-medium (LAPIS† in Table 1). DDPG+BC,
+which maximizes the critic directly, is among the lowest on manipulation, consistent with the max-Q
+rows of Table 4(a).
+7.5
+EFFECT OF DECODER CONDITIONING (Q5)
+Table 5: Task success (%) across decoder types
+and action-label budgets.
+Env
+Decoder
+100% labels 5% labels 1% labels
+cube
+Ψ(a | z)
+54 ±2
+62 ±5
+50 ±6
+Ψ(a | s, z)
+74 ±4
+55 ±6
+46 ±3
+scene
+Ψ(a | z)
+25 ±4
+29 ±4
+24 ±5
+Ψ(a | s, z)
+38 ±6
+20 ±5
+16 ±3
+antmaze Ψ(a | z)
+48 ±6
+49 ±3
+44 ±5
+Ψ(a | s, z)
+52 ±4
+27 ±2
+38 ±4
+We compare state-marginal Ψ(a | z) and state-
+conditioned Ψ(a | s, z) decoders across label bud-
+gets, keeping the 5%-label LAM fixed and vary-
+ing only decoder supervision (Table 5). With 5%
+and 1% action labels, the marginal decoder achieves
+higher success rates across all three domains. With
+full action supervision, the state-conditioned de-
+coder performs better in every domain. Conditioning
+on the state closes the transfer gap in theory (Theo-
+rem 1), but in practice it pays off only when labels
+are plentiful. LAPO (Schmidt & Jiang, 2024, Sec. 6.2) attributes the plateau of latent-only decoders
+to state dependence; with scarce labels, however, a state-conditioned decoder does not help, so LAPIS
+uses Ψ(a | z).
+7.6
+DOES THE SCORE OFFSET CHANGE THE GATE? (Q6)
+Table 6: f versus ¯f in trained critics.
+antmaze cube scene
+Spearman
+0.79
+0.86
+0.87
+Gate agreement
+87%
+91%
+91%
+The LAPIS gate (Equation (4)) uses the raw TD-
+InfoNCE score f, which is determined only up to an
+offset c(s, z). The offset-free score ¯f removes this offset
+but requires a log-partition estimate (Appendix D.7). To
+see whether the offset matters in practice, we compare
+the two scores on candidate latents in trained LAPIS
+critics (Table 6). They rank the candidates similarly, and gates on the two scores make the same
+keep/drop decision for about 90% of transitions. The raw score is thus a practical surrogate for ¯f.
+8
+CONCLUSION
+We study offline policy improvement in latent action spaces learned from action-free data. We show
+that state-conditioned realizability, non-convex realizable sets, and outcome-based abstraction can
+make standard offline RL unreliable, and characterize when latent improvement transfers to physical
+10
+
+
+Preprint
+execution. In goal-conditioned RL, LAPIS performs support-aware policy improvement through
+critic-guided filtering over observed state–latent transitions and a multimodal flow policy. With only
+5% action labels, LAPIS recovers much of the performance of its fully supervised counterpart and
+outperforms baselines on most tasks, especially in manipulation.
+REFERENCES
+Anurag Ajay, Aviral Kumar, Pulkit Agrawal, Sergey Levine, and Ofir Nachum. OPAL: Offline
+primitive discovery for accelerating offline reinforcement learning. In International Conference on
+Learning Representations (ICLR), 2021.
+Kavosh Asadi, Dipendra Misra, and Michael L. Littman. Lipschitz continuity in model-based
+reinforcement learning. In International Conference on Machine Learning (ICML), 2018.
+Bowen Baker, Ilge Akkaya, Peter Zhokov, Joost Huizinga, Jie Tang, Adrien Ecoffet, Brandon
+Houghton, Raul Sampedro, and Jeff Clune. Video PreTraining (VPT): Learning to act by watching
+unlabeled online videos. In Advances in Neural Information Processing Systems (NeurIPS), 2022.
+Jake Bruce, Michael D Dennis, Ashley Edwards, Jack Parker-Holder, Yuge Shi, Edward Hughes,
+Matthew Lai, Aditi Mavalankar, Richie Steigerwald, Chris Apps, Yusuf Aytar, Sarah Bechtle,
+Feryal Behbahani, Stephanie Chan, Nicolas Heess, Lucy Gonzalez, Simon Osindero, Sherjil Ozair,
+Scott Reed, Jingwei Zhang, Konrad Zolna, Jeff Clune, Nando de Freitas, Satinder Singh, and Tim
+Rocktäschel. Genie: Generative interactive environments. In International Conference on Machine
+Learning (ICML), 2024.
+Théo Cachet, Christopher R. Dance, and Olivier Sigaud. Bridging environments and language
+with rendering functions and vision-language models. In International Conference on Machine
+Learning (ICML), volume 235 of Proceedings of Machine Learning Research, pp. 5135–5188,
+2024.
+Matthew Chang, Arjun Gupta, and Saurabh Gupta. Learning value functions from undirected
+state-only experience. In International Conference on Learning Representations (ICLR), 2022.
+Xiaoyu Chen, Junliang Guo, Tianyu He, Chuheng Zhang, Pushi Zhang, Derek Cathera Yang, Li Zhao,
+and Jiang Bian. IGOR: Image-GOal representations are the atomic control units for foundation
+models in embodied AI. arXiv preprint arXiv:2411.00785, 2024.
+Xiaoyu Chen, Hangxing Wei, Pushi Zhang, Chuheng Zhang, Kaixin Wang, Yanjiang Guo, Rushuai
+Yang, Yucen Wang, Xinquan Xiao, Li Zhao, Jianyu Chen, and Jiang Bian. villa-X: Enhancing
+latent action modeling in vision-language-action models. arXiv preprint arXiv:2507.23682, 2025.
+Ashley D Edwards, Himanshu Sahni, Yannick Schroecker, and Charles L Isbell. Imitating latent
+policies from observation. In International Conference on Machine Learning (ICML), 2019.
+Benjamin Eysenbach, Tianjun Zhang, Sergey Levine, and Ruslan Salakhutdinov. Contrastive learning
+as goal-conditioned reinforcement learning. In Advances in Neural Information Processing Systems
+(NeurIPS), 2022.
+Kevin Frans, Seohong Park, Pieter Abbeel, and Sergey Levine. Diffusion guidance is a controllable
+policy improvement operator. arXiv preprint arXiv:2505.23458, 2025.
+Justin Fu, Aviral Kumar, Ofir Nachum, George Tucker, and Sergey Levine. D4RL: Datasets for deep
+data-driven reinforcement learning. arXiv preprint arXiv:2004.07219, 2020.
+Scott Fujimoto, David Meger, and Doina Precup. Off-policy deep reinforcement learning without
+exploration. In International Conference on Machine Learning (ICML), 2019.
+Shenyuan Gao, Siyuan Zhou, Yilun Du, Jun Zhang, and Chuang Gan. AdaWorld: Learning adaptable
+world models with latent actions. In International Conference on Machine Learning (ICML), 2025.
+Carles Gelada, Saurabh Kumar, Jacob Buckman, Ofir Nachum, and Marc G. Bellemare. DeepMDP:
+Learning continuous latent space models for representation learning. In International Conference
+on Machine Learning (ICML), 2019.
+11
+
+
+Preprint
+Dibya Ghosh, Chethan Anand Bhateja, and Sergey Levine. Reinforcement learning from passive
+data via latent intentions. In International Conference on Machine Learning (ICML), 2023.
+Google DeepMind. Genie 2: A large-scale foundation world model. Technical report, Google
+DeepMind, 2024.
+Abhishek Gupta, Vikash Kumar, Corey Lynch, Sergey Levine, and Karol Hausman. Relay policy
+learning: Solving long-horizon tasks via imitation and reinforcement learning. In Proceedings of
+the Conference on Robot Learning, volume 100 of Proceedings of Machine Learning Research, pp.
+1025–1037. PMLR, 2020.
+Philippe Hansen-Estruch, Ilya Kostrikov, Michael Janner, Jakub Grudzien Kuba, and Sergey Levine.
+IDQL: Implicit Q-learning as an actor-critic method with diffusion policies. arXiv preprint
+arXiv:2304.10573, 2023.
+Jonathan Ho and Tim Salimans. Classifier-free diffusion guidance. arXiv preprint arXiv:2207.12598,
+2022.
+Donghyeon Ki, JunHyeok Oh, Seong-Woong Shim, and Byung-Jun Lee. Prior-guided diffusion
+planning for offline reinforcement learning. In Advances in Neural Information Processing Systems
+(NeurIPS), 2025.
+Ilya Kostrikov, Ashvin Nair, and Sergey Levine. Offline reinforcement learning with implicit
+Q-learning. In International Conference on Learning Representations (ICLR), 2022.
+Sergey Levine, Aviral Kumar, George Tucker, and Justin Fu. Offline reinforcement learning: Tutorial,
+review, and perspectives on open problems. arXiv preprint arXiv:2005.01643, 2020.
+Lihong Li, Thomas J. Walsh, and Michael L. Littman. Towards a unified theory of state abstraction for
+MDPs. In Proceedings of the International Symposium on Artificial Intelligence and Mathematics,
+2006.
+Yaron Lipman, Ricky T Q Chen, Heli Ben-Hamu, Maximilian Nickel, and Matt Le. Flow matching
+for generative modeling. In International Conference on Learning Representations (ICLR), 2023.
+Haofei Lu, Dongqi Han, Yifei Shen, and Dongsheng Li. What makes a good diffusion planner for
+decision making? In International Conference on Learning Representations (ICLR), 2025.
+Corey Lynch, Mohi Khansari, Ted Xiao, Vikash Kumar, Jonathan Tompson, Sergey Levine, and
+Pierre Sermanet. Learning latent plans from play. In Conference on Robot Learning (CoRL), 2020.
+Vivek Myers, Andre He, Kuan Fang, Homer Walke, Philippe Hansen-Estruch, Ching-An Cheng,
+Mihai Jalobeanu, Andrey Kolobov, Anca Dragan, and Sergey Levine. Goal representations for
+instruction following: A semi-supervised language interface to control. In Conference on Robot
+Learning (CoRL), 2023.
+Seohong Park, Dibya Ghosh, Benjamin Eysenbach, and Sergey Levine.
+HIQL: Offline goal-
+conditioned RL with latent states as actions. In Advances in Neural Information Processing
+Systems (NeurIPS), 2023.
+Seohong Park, Kevin Frans, Benjamin Eysenbach, and Sergey Levine. OGBench: Benchmarking
+offline goal-conditioned RL. In International Conference on Learning Representations (ICLR),
+2025a.
+Seohong Park, Qiyang Li, and Sergey Levine. Flow Q-learning. In International Conference on
+Machine Learning (ICML), 2025b.
+Xue Bin Peng, Aviral Kumar, Grace Zhang, and Sergey Levine. Advantage-weighted regression:
+Simple and scalable off-policy reinforcement learning. arXiv preprint arXiv:1910.00177, 2019.
+Karl Pertsch, Youngwoon Lee, and Joseph J Lim. Accelerating reinforcement learning with learned
+skill priors. In Conference on Robot Learning (CoRL), 2020.
+12
+
+
+Preprint
+Balaraman Ravindran and Andrew G. Barto. SMDP homomorphisms: An algebraic approach to
+abstraction in semi-markov decision processes. In Proceedings of the 18th International Joint
+Conference on Artificial Intelligence, pp. 1011–1016, 2003.
+Oleh Rybkin, Karl Pertsch, Konstantinos G Derpanis, Kostas Daniilidis, and Andrew Jaegle. Learning
+what you can do before doing anything. In International Conference on Learning Representations
+(ICLR), 2019.
+Dominik Schmidt and Minqi Jiang. Learning to act without actions. In International Conference on
+Learning Representations (ICLR), 2024.
+Faraz Torabi, Garrett Warnell, and Peter Stone. Behavioral cloning from observation. In International
+Joint Conference on Artificial Intelligence (IJCAI), 2018.
+Tongzhou Wang, Antonio Torralba, Phillip Isola, and Amy Zhang. Optimal goal-reaching reinforce-
+ment learning via quasimetric learning. In International Conference on Machine Learning (ICML),
+2023.
+Seonghyeon Ye, Joel Jang, Byeongguk Jeon, Sejune Joo, Jianwei Yang, Baolin Peng, Ajay Man-
+dlekar, Reuben Tan, Yu-Wei Chao, Bill Yuchen Lin, Lars Liden, Kimin Lee, Jianfeng Gao, Luke
+Zettlemoyer, Dieter Fox, and Minjoon Seo. Latent action pretraining from videos. In International
+Conference on Learning Representations (ICLR), 2025.
+Chuheng Zhang, Tim Pearce, Pushi Zhang, Kaixin Wang, Xiaoyu Chen, Wei Shen, Li Zhao, and
+Jiang Bian. What do latent action models actually learn? In Advances in Neural Information
+Processing Systems (NeurIPS), 2025.
+Chongyi Zheng, Ruslan Salakhutdinov, and Benjamin Eysenbach. Contrastive difference predictive
+coding. In International Conference on Learning Representations (ICLR), 2024.
+Qinqing Zheng, Mikael Henaff, Brandon Amos, and Aditya Grover. Semi-supervised offline rein-
+forcement learning with action-free trajectories. In International Conference on Machine Learning
+(ICML), 2023.
+Wenxuan Zhou, Sujay Bajracharya, and David Held. PLAS: Latent action space for offline reinforce-
+ment learning. In Conference on Robot Learning (CoRL), 2020.
+13
+
+
+Preprint
+A
+EXTENDED RELATED WORK
+A.1
+OFFLINE RL IN LEARNED LATENT OR SKILL SPACES
+Prior work has used learned latent or skill representations to constrain policy optimization to behavior-
+like controls. PLAS (Zhou et al., 2020) learns a continuous latent action space with a conditional VAE
+and performs offline policy optimization through a behavior-trained decoder. Skill-based methods
+such as OPAL (Ajay et al., 2021), SPiRL (Pertsch et al., 2020), and latent planning approaches (Lynch
+et al., 2020) instead learn temporally extended action representations and optimize high-level policies
+over them. These approaches typically rely on action-labeled experience to learn the latent control
+representation or its low-level execution model. In contrast, we study offline policy improvement in a
+latent action space learned primarily from action-free trajectories, using scarce action labels only to
+ground latent decisions in physical control.
+A.2
+ACTION-FREE AND SEMI-SUPERVISED REINFORCEMENT LEARNING
+Learning control from trajectories with missing actions has been studied through imitation from
+observation (Torabi et al., 2018), action inference from video (Baker et al., 2022), latent-intention
+learning (Ghosh et al., 2023), hierarchical goal-conditioned learning (Park et al., 2023), and semi-
+supervised offline RL (Zheng et al., 2023). These approaches exploit action-free experience through
+inferred actions, state or goal abstractions, or value learning without complete action supervision.
+Our setting differs in that policy improvement is performed directly in a learned latent action space
+and physical actions are needed only for decoding. This makes the relationship between latent-space
+optimization and physical execution a central part of the problem.
+A.3
+OFFLINE GOAL-CONDITIONED AND CONTRASTIVE RL
+Offline goal-conditioned RL learns multi-goal policies from fixed datasets without additional envi-
+ronment interaction. Contrastive RL (Eysenbach et al., 2022) formulates goal-conditioned control
+through density-ratio estimation of future-state occupancy, while subsequent work develops related
+contrastive objectives for offline control (Zheng et al., 2024). LAPIS adopts this goal-conditioned
+formulation in the learned latent-action space, using future states as goals and a contrastive critic to
+estimate which observed state–latent transitions are useful for reaching them.
+Recent work has also explored expressive generative policies and guidance-based policy extraction
+(Lipman et al., 2023; Ho & Salimans, 2022; Frans et al., 2025). Most closely related, CFGRL (Frans
+et al., 2025) derives classifier-free guidance as a controllable policy-improvement operator; in its value-
+free goal-conditioned formulation, guidance combines unconditional and goal-conditioned generative
+policy branches without an explicit value function. LAPIS shares guided flow-based extraction,
+but differs in where policy improvement is introduced. LAPIS first estimates goal-conditioned
+future-state occupancy with a TD-InfoNCE critic and filters only observed state–latent transitions
+to construct a high-value distribution whose support remains within the observed conditional latent
+support. The flow policy then models this support-aware target, and classifier-free guidance is applied
+only at inference.
+This distinction is particularly important in learned latent-action spaces. Unlike physical actions, a
+latent action is a learned transition label whose usefulness depends on state-conditioned realizability
+and on whether decoding faithfully produces the represented outcome. Thus, improving a generative
+policy over latents does not by itself imply improved physical execution. Our transfer analysis
+characterizes when latent-space improvement survives decoding, while the direct comparison in
+Appendix E.5 shows that increasing goal guidance can improve physical-action CFGRL but does not
+provide consistent improvement when the same construction is applied directly in the learned latent
+space.
+A.4
+RELATION TO BATCH-CONSTRAINED RL AND MDP ABSTRACTION
+Our theoretical analysis is related to classical results in batch-constrained reinforcement learning
+and MDP abstraction, but addresses a different cross-representation question. Batch-constrained RL
+studies policy evaluation and improvement when the policy is restricted to actions represented in a
+14
+
+
+Preprint
+fixed offline dataset, thereby avoiding extrapolation to unsupported physical actions (Fujimoto et al.,
+2019). In our setting, however, the policy acts in a learned action space: observed physical transitions
+are relabeled by an inverse model as latent actions, and each latent decision must subsequently be
+decoded back to physical control. Consequently, restricting the policy to observed latent actions is
+not sufficient by itself to establish correspondence with physical execution. The latent support is
+state-dependent, a supported pair (s, z) must identify the transition outcome represented by z, and
+the decoder must realize that outcome through physical actions.
+Theorem 1 characterizes this additional structure. We construct physical- and latent-action batch
+MDPs from the same observed transitions and introduce supported outcome identifiability together
+with a batch-exact decoder that links a supported latent decision to its physical realizations. Under de-
+terministic dynamics, this construction yields exact equality between the return of a batch-constrained
+latent policy and that of its decoded physical policy. Thus, the result extends the batch-constrained
+perspective from policy optimization within a fixed action space to policy improvement through a
+learned action representation whose semantics and physical execution must themselves be related.
+Our optimality analysis is also connected to MDP homomorphism and abstraction theory, which
+studies when an abstract decision process preserves the value structure of the underlying MDP
+(Ravindran & Barto, 2003; Li et al., 2006). The latent actions considered here induce an outcome-
+based action abstraction learned from observed transitions: distinct physical controls can map to
+the same latent action whenever they produce the same represented outcome. This abstraction can
+preserve execution while discarding distinctions that matter for reward. Theorem 2 identifies the
+corresponding condition for optimality alignment: when reward is determined by the transition
+outcome, an optimal latent policy decodes to an optimal policy within the decoder-covered, batch-
+constrained physical policy class. The counterexample in Appendix C.3 shows that this condition is
+substantive: latent-to-physical return transfer can hold exactly even when latent and physical optima
+do not align.
+Taken together, these results connect batch-constrained and abstraction-based reasoning to learned
+latent actions, where the representation is inferred from action-free transitions rather than given a
+priori. The additional questions are therefore not only whether a policy remains within dataset support
+or whether an abstraction preserves an MDP, but whether a learned latent label identifies a physically
+executable outcome and whether the distinctions removed by that representation are compatible with
+the downstream objective.
+15
+
+
+Preprint
+B
+EMPIRICAL REALIZABILITY DIAGNOSTICS
+The bottom-row diagnostics in Figure 2 evaluate the three structural properties discussed in Sec-
+tion 4.1 on visual-cube-single-play-v0. All latent-space distances are computed in the
+standardized, quantized latent coordinates used throughout the experiments.
+State-conditioned realizability.
+For Figure 2(a), we select latents with known physical realizations
+at their source states and evaluate whether the same latents can be realized from other query states.
+For each state–latent pair, realization error is approximated by finite search over physical action
+chunks. The candidate set combines known realizing chunks, dataset chunks retrieved from nearby
+states and re-executed at the query state, and multi-start cross-entropy-method (CEM) refinements
+within the environment’s action bounds. Rows correspond to query states and columns to source
+latents.
+Non-convex realizable set.
+For Figure 2(b), we select pairs of separated latents that are both
+realizable from the same state and linearly interpolate between them. Realization error is evaluated on
+a uniform interpolation grid. The action chunks realizing both endpoints are included in the candidate
+set at every interpolation point, together with the same dataset-based and CEM search used above.
+Confidence bands are computed across latent pairs.
+Diagnostic threshold.
+Panels (a–b) use a common threshold calibrated from two finite-search
+error samples. Let Dself contain errors for known-realizable source latents searched at their source
+states without supplying their original realizing chunks, and let Dcross contain errors for those latents
+searched from different states. Using 16 anchor states and CEM population 256 with 5 iterations, we
+set
+ϵ = Q0.9(Dself) + Q0.1(Dcross)
+2
+≈3.14,
+where Qp denotes the empirical p-quantile. We use the rounded value 3.14 in both panels.
+Outcome-based abstraction.
+For Figure 2(c), we test whether substantially different physical
+action chunks can realize the same target outcome. For each target, targeted CEM search minimizes
+outcome distance, with restarts repelled from previously discovered chunks to encourage distinct re-
+alizations. Outcome distance is Euclidean in simulator generalized-position coordinates standardized
+using a candidate rollout pool at each anchor state, while action distance is Euclidean over flattened
+chunks. A candidate is retained when its outcome distance is at most τout and its distance from every
+previously retained chunk is at least τa. We use 12 anchor states with 8 target outcomes each and 20
+CEM restarts per target, all run without early stopping. At each anchor, τout is set to the 1st percentile
+of pairwise outcome distances and τa to the 40th percentile of pairwise action-chunk distances. Each
+target’s observed source chunk is included as the first realization.
+Search-budget robustness.
+Because realization error is estimated through finite action-space
+search, we additionally repeat the search with a substantially larger CEM budget. The default search
+uses population 256 and 5 iterations, while the enlarged search uses population 1024 and 12 iterations.
+We also evaluate a known-realizable floor by searching for source latents without providing their
+original realizing action chunks. This comparison tests whether the conclusions of panels (a–b)
+persist under substantially stronger search, without interpreting failure to find a realization as proof
+of global unrealizability. Results are summarized in Table 7.
+Table 7: Realization error under different search budgets (lower is better; ϵ = 3.14). Interpolation
+denotes interior points in Figure 2(b), and state swap denotes off-diagonal pairs in Figure 2(a).
+Search
+Population × iterations
+Interpolation
+State swap
+Default
+256 × 5
+4.02
+4.12
+Enlarged
+1024 × 12
+3.69
+3.51
+16
+
+
+Preprint
+C
+PROOFS AND THEORETICAL DERIVATIONS
+(a) Ground MDP
+True dynamics
+(b) Dataset
+Finite sample
+(c) Real batch MDP
+Real actions retained
+(d) Latent batch MDP
+Outcome relabeling
+Sample
+Counts
+Relabel
+Valid action, absent from the dataset
+One action can have multiple outcomes
+Unseen action → absorbing sink
+Counts define empirical probabilities
+unobserved
+Finite, partial coverage of the MDP
+Figure 4: Paired real-action and latent-action batch MDPs. (a) A real action in the ground MDP
+can induce multiple outcomes. (b,c) The finite dataset defines an empirical real-action batch MDP,
+with unseen actions routed to an absorbing sink. (d) Relabeling transitions by z = I(s, s′) separates
+distinct outcomes while merging different real actions that reach the same successor.
+We first formalize the paired physical and latent batch MDPs, then establish policy improvement
+transfer, optimal-policy alignment, and the supported reweighting guarantee underlying LAPIS.
+Appendix C.1 fixes notation and gives the exact construction of the paired physical and latent batch
+MDPs together with the batch-exact decoder Ψ∗. Appendix C.2 proves the on-support transfer
+result (Theorem 1). Appendix C.3 defines the decoder-covered policy class and proves optimal-
+policy alignment (Theorem 2). Appendix C.4 establishes the supported reweighting guarantee
+underlying LAPIS’s policy improvement principle. The correspondence between this analysis and
+practical LAPIS, together with the associated diagnostics, is discussed in Appendix D. We discuss
+the relationship of these results to classical batch-constrained RL and MDP abstraction theory in
+Appendix A.4.
+C.1
+BATCH-MDP DEFINITIONS AND DECODER
+Throughout the analysis, we assume bounded rewards, Rmax := sups,a,s′ |r(s, a, s′)| < ∞, and a
+discount factor 0 ≤γ < 1. For a policy π in an MDP N, we write JN (π) = Es0∼µ0[V π
+N (s0)], using
+the same initial-state distribution µ0 for all comparisons. For the analysis, Ba pairs each observed
+transition with the physical action that generated it, whether or not that action label is available to the
+learning algorithm. The batch-MDP rewards are defined for the analysis; the learning algorithm does
+not require reward labels.
+Support domain and termination.
+Let SB be the set of states and successors observed in the
+batch, and let N(s, a, s′) denote the number of occurrences of (s, a, s′) in Ba. The observed physical
+and latent actions at state s are
+AB(s) :=
+(
+a :
+X
+s′
+N(s, a, s′) > 0
+)
+,
+ZB(s) :=
+(
+I(s, s′) :
+X
+a
+N(s, a, s′) > 0
+)
+.
+We assume supp µ0 ⊆SB and consider a nonempty class of policies that remain on observed
+pairs until true termination. True terminal states have zero-reward absorbing self-loops in both the
+physical and latent processes. A trajectory cutoff is not treated as termination: a policy that reaches a
+nonterminal state with no observed continuation is excluded from the comparison class. All exact
+comparisons concern states reachable from µ0 under the policies being compared.
+Both batch MDPs are defined on S ∪{sabs}, with unobserved pairs routed to the zero-reward
+absorbing state sabs. Starting from SB, their transitions remain within the finite set SB ∪{sabs}, even
+when the ground state space is continuous. For a fixed policy, the Bellman operator is a γ-contraction
+on bounded functions and has a unique fixed point. Sums in the exact analysis are over finite empirical
+support; in the continuous-kernel extension of Appendix D.3, they are interpreted as integrals.
+17
+
+
+Preprint
+Definition 3 (Real action batch MDP). The physical-action batch MDP MBa
+=
+(S ∪
+{sabs}, A, pBa, rBa, γ) uses the empirical transition probabilities
+pBa(s′ | s, a) =
+N(s, a, s′)
+P
+˜s N(s, a, ˜s)
+for a ∈AB(s).
+On observed transitions, rBa(s, a, s′) = r(s, a, s′). For unobserved pairs, pBa(sabs | s, a) = 1.
+The sink is absorbing, and all transitions into or within it receive zero reward. Consequently,
+∥V π
+MBa ∥∞≤Rmax/(1 −γ) for every policy π.
+Definition 4 (Supported outcome identifiability). At a fixed state s, any two observed successors
+s′
+1, s′
+2 satisfy
+I(s, s′
+1) = I(s, s′
+2)
+=⇒
+s′
+1 = s′
+2.
+Thus, each z ∈ZB(s) identifies a unique observed successor, denoted FB(s, z).
+This condition applies only to observed successors at the same state. It allows distinct physical actions
+to share a latent when they reach the same successor, but excludes different observed successors from
+sharing a latent. The map FB is an exact lookup on the supported transition graph, not the learned
+forward predictor F in Equation (3). Its definition does not require exact reconstruction by F, and
+the analysis evaluates FB only at supported pairs.
+Definition 5 (Latent action batch MDP). Relabel each observed transition with zi = I(si, s′
+i) to
+obtain Bz = {(si, zi, s′
+i)}N
+i=1, and let N z(s, z, s′) denote the relabeled transition counts. Under
+Definition 4, the latent-action batch MDP MBz = (S ∪{sabs}, Z, pBz, rBz, γ) has, for z ∈ZB(s),
+pBz(· | s, z) = δFB(s,z),
+rBz(s, z) =
+P
+a N(s, a, FB(s, z))r(s, a, FB(s, z))
+P
+a N(s, a, FB(s, z))
+.
+The transition kernel is equivalently obtained by normalizing the relabeled counts. The reward
+averages the physical rewards associated with the represented successor, using their empirical
+frequencies. For unsupported pairs, pBz(sabs | s, z) = 1 and rBz(s, z) = 0, with the same
+absorbing-sink convention as in MBa. For every latent policy πz, ∥V πz
+MBz ∥∞≤Rmax/(1 −γ).
+Batch-exact decoder.
+For a supported pair (s, z), write s′
+z = FB(s, z). The batch-exact decoder
+selects physical actions according to their observed frequencies among transitions from s to s′
+z:
+Ψ∗(a | s, z) =
+N(s, a, s′
+z)
+P
+b N(s, b, s′z) =
+πβ,B(a | s)pBa(s′
+z | s, a)
+P
+b πβ,B(b | s)pBa(s′z | s, b),
+(6)
+Here, πβ,B(a | s) = P
+s′ N(s, a, s′)/ P
+b,s′ N(s, b, s′) is the empirical action distribution at s. The
+denominators in Equation (6) are positive on the supported domain.
+Equation (6) is an empirical Bayes decoder: it conditions the batch action distribution on the
+represented successor using pBa, rather than the ground transition kernel p. Under deterministic
+ground dynamics, these kernels agree on observed state–action pairs, so the decoded actions reproduce
+the represented successor. Under stochastic dynamics, an action observed to reach s′
+z may reach
+a different successor when executed again. This analytical decoder Ψ∗(a | s, z) is distinct from
+the learned state-marginal decoder Ψ(a | z) used by LAPIS; their relationship is discussed in
+Appendix D.4.
+Illustrative example.
+Figure 4 illustrates how the same observed transitions define the physical- and
+latent-action batch MDPs. The physical-action batch MDP retains the empirical successor distribution
+of each observed action and routes the unobserved action a3 to the absorbing sink, even though it
+is valid in the ground MDP. Relabeling by z = I(s, s′) separates the two observed successors of
+a1 into distinct latents z1 and z2, while assigning the transitions of both a1 and a2 to s2 the same
+latent z2. The batch-exact decoder selects physical actions according to their frequencies for that
+successor: the three a1-transitions and five a2-transitions to s2 give decoding probabilities 3/8 and
+5/8, respectively. Because a1 is stochastic, decoding z2 need not reproduce s2, despite its unique
+successor in the latent batch MDP. This distinction motivates the deterministic-dynamics assumption
+used for exact transfer in the following subsection.
+18
+
+
+Preprint
+C.2
+PROOF OF THEOREM 1
+We first establish that batch constraints are preserved by decoding: selecting only observed latent
+actions at a state also restricts physical execution to actions observed at that state.
+Remark 1 (Batch constraints under decoding). At any state s, if πz(· | s) is supported on ZB(s), then
+the decoded physical policy (Ψ∗◦πz)(· | s) is supported on AB(s).
+Proof. By Equation (6), Ψ∗(a | s, z) > 0 only if N(s, a, FB(s, z)) > 0, which implies a ∈AB(s).
+Averaging these decoder distributions over z ∼πz(· | s) therefore preserves the physical-action
+support restriction.
+Under deterministic dynamics, these decoded actions also reproduce the successor represented by
+the selected latent. Together with the batch reward construction, this correspondence yields equality
+between latent and decoded physical returns.
+Theorem 1 (On-support policy improvement transfer). Under Assumption 1, every batch-constrained
+latent policy πz satisfies JMBz (πz) = JM(Ψ∗◦πz). Consequently, return improvement between
+two such latent policies transfers to their batch-exact decoded physical policies.
+Proof. Fix a supported pair (s, z) and write s′
+z = FB(s, z). Every action selected by Ψ∗(· | s, z) was
+observed to produce s′
+z from s. Under Assumption 1, each such action satisfies T(s, a) = s′
+z, giving
+X
+a
+Ψ∗(a | s, z)p(· | s, a) = δs′z = pBz(· | s, z).
+The decoder weights also match those used to define the latent reward:
+X
+a
+Ψ∗(a | s, z)r(s, a, s′
+z) =
+P
+a N(s, a, s′
+z)r(s, a, s′
+z)
+P
+a N(s, a, s′z)
+= rBz(s, z).
+Thus, the one-step transition and expected reward agree for every supported pair. Individual decoded
+actions may receive different rewards, but their expectation matches the latent reward; Assumption 2
+is not required.
+Starting from the common initial distribution µ0, the latent policy selects only supported latents, and
+Remark 1 ensures that decoding selects observed physical actions. The transition identity above
+then implies, by induction, that the two processes have the same state distribution at every step.
+The continuation and terminal conventions in Appendix C.1 ensure that both processes remain
+well-defined on this common reachable support.
+Averaging over πz, the two processes therefore share the state-level transition kernel and expected
+reward
+Pπz(· | s) =
+X
+z
+πz(z | s)δFB(s,z),
+¯rπz(s) =
+X
+z
+πz(z | s)rBz(s, z).
+Both V πz
+MBz and V Ψ∗◦πz
+M
+satisfy
+V = ¯rπz + γPπzV
+on the common reachable support. Since γ < 1, this Bellman equation has a unique bounded solution,
+so the two value functions agree there. Averaging over µ0 establishes return equality. Applying this
+equality separately to πz and π′
+z proves the improvement implication.
+C.3
+PROOF OF THEOREM 2 AND THE DECODER-COVERED POLICY CLASS
+Theorem 1 establishes return equality between a latent policy and its own decoded physical policy.
+This does not yet imply that an optimal latent policy attains the best return available to batch-
+constrained physical policies.
+To see why, consider a deterministic one-step problem with two equally frequent observed actions
+satisfying T(s, a1) = T(s, a2) = sterm, but receiving rewards 1 and 0, respectively. Both actions
+share one latent, and the batch-exact decoder selects each with probability 1/2. The latent and
+decoded returns are therefore both 1/2, consistent with Theorem 1. A physical policy can instead
+19
+
+
+Preprint
+select a1 and obtain return 1. Thus, outcome-based abstraction can create an optimality gap even
+without off-support actions or decoder error.
+To establish alignment, we construct a value-equivalent latent counterpart for each physical policy in
+the comparison class. We first define the required coverage in terms of represented successors.
+Definition 6 (Decoder-covered policy). Under deterministic dynamics, a physical policy π is decoder-
+covered from µ0 if, at every nonterminal state reachable under π from µ0, each action in its support
+satisfies
+T(s, a) = FB(s, z)
+for some z ∈ZB(s).
+This condition requires the successor itself to be represented in the batch, rather than merely requiring
+its code I(s, T(s, a)) to have appeared. Under Assumption 1, every batch-constrained physical policy
+is decoder-covered because each observed action reaches its recorded successor. Coverage can also
+include unobserved actions that reach the same successors as observed actions, although Theorem 2
+compares only the batch-constrained subclass.
+Under Assumption 2, actions reaching the same successor from a given state also receive the same
+reward. We can therefore group a decoder-covered policy’s action probabilities by successor without
+changing its return.
+Lemma 1 (Decoder-covered lift). Under Assumptions 1–2, a decoder-covered physical policy π has
+the latent lift
+πz(z | s) =
+X
+a
+π(a | s)1[T(s, a) = FB(s, z)],
+z ∈ZB(s),
+on its reachable support. This lift is batch-constrained and satisfies JM(π) = JM(Ψ∗◦πz) =
+JMBz (πz). The lift may be extended arbitrarily outside the reachable domain. For a continuous
+physical-action policy, the sum over a is interpreted as an integral; the supported latent set remains
+finite.
+Proof. Decoder coverage ensures that every selected action reaches a represented successor. Since
+the encoder is deterministic and supported outcome identifiability holds, each action is assigned to
+exactly one supported latent. The displayed probabilities therefore sum to one and define a policy
+supported on ZB(s).
+By construction, at every reachable nonterminal state,
+X
+z
+πz(z | s)δFB(s,z) =
+X
+a
+π(a | s)δT (s,a).
+The left-hand side is also the successor distribution induced by Ψ∗◦πz, as established in the proof of
+Theorem 1. Thus, π and its lifted-and-decoded policy have the same successor distribution. Under
+Assumption 2, they also have the same expected reward.
+Starting from µ0, these identities imply that the two policies induce the same state distributions
+at every step. Their value functions satisfy the same Bellman equation on the common reachable
+support and hence agree there, giving
+JM(π) = JM(Ψ∗◦πz).
+The lift selects only observed latents along this reachable support and satisfies the continuation
+convention of Appendix C.1, so it is batch-constrained. Theorem 1 then gives the remaining equality
+with JMBz (πz).
+Every batch-constrained physical policy therefore has a latent counterpart with the same return.
+Conversely, decoding a batch-constrained latent policy preserves its return and produces a batch-
+constrained physical policy. These two correspondences establish optimal-policy alignment.
+Theorem 2 (Optimal-policy alignment). Under Assumptions 1–2, for the same initial distribution
+µ0,
+π∗
+z ∈arg max
+πz∈ΠBz JMBz (πz)
+=⇒
+(Ψ∗◦π∗
+z) ∈arg max
+π∈ΠBa JM(π).
+20
+
+
+Preprint
+Proof. Let π∗
+z maximize JMBz over ΠBz. For any π ∈ΠBa, decoder coverage follows from
+Assumption 1, and Lemma 1 provides a lift eπz ∈ΠBz with the same return. Consequently,
+JM(π) = JMBz (eπz) ≤JMBz (π∗
+z) = JM(Ψ∗◦π∗
+z),
+where the inequality follows from latent optimality and the last equality follows from Theorem 1.
+Moreover, (Ψ∗◦π∗
+z) ∈ΠBa by Remark 1 and the reachable-support argument in Theorem 1. The
+decoded policy therefore belongs to the physical comparison class and attains at least as much return
+as every policy in that class, proving the claimed optimality. In particular,
+JM(Ψ∗◦π∗
+z) = max
+π∈ΠBa JM(π) = JMBz (π∗
+z).
+The alignment concerns the stated batch-constrained policy classes, not the unrestricted physical
+optimum.
+C.4
+SUPPORTED REWEIGHTING GUARANTEE
+We now formalize the policy-improvement principle underlying critic-guided filtering. The update
+reweights a fixed reference policy toward higher-value latent actions without introducing actions
+outside its support. Throughout this subsection, we fix a goal g and use the common closed supported
+comparison domain of Appendix C.1.
+We first show that a reweighting that favors higher-value actions cannot decrease the expected action
+value under the reference policy.
+Lemma 2 (Co-monotone reweighting). Fix (s, g) and a reference latent policy µ(· | s, g) on the
+finite supported latent set. Let ω(z) be bounded, nonnegative, and nondecreasing in Qµ(s, z, g), with
+Cω := Eµ[ω] > 0. Then the reweighted policy
+µω(z | s, g) = µ(z | s, g)ω(z)
+Cω
+satisfies
+Eµω[Qµ(s, z, g)] ≥Eµ[Qµ(s, z, g)] = V µ(s, g).
+Proof. Let z, ˜z be independent samples from µ(· | s, g), and abbreviate Qz = Qµ(s, z, g). Since the
+weights are nondecreasing in value,
+0 ≤1
+2E[(Qz −Q˜z)(ω(z) −ω(˜z))] = Eµ[Qω] −Eµ[Q]Eµ[ω].
+Dividing by Cω > 0 gives
+Eµω[Q] = Eµ[Qω]
+Cω
+≥Eµ[Q],
+which proves the claim.
+The weights need not depend directly on the numerical value of Qµ. Advantage-based weights and
+thresholded scores also satisfy the required ordering.
+Corollary 1. A bounded, nonnegative, nondecreasing function h of the advantage
+Aµ(s, z, g) = Qµ(s, z, g) −V µ(s, g)
+defines weights ω(z) = h(Aµ(s, z, g)) satisfying Lemma 2 whenever the normalizing mass is positive.
+More generally, the thresholded weights
+ω(z) = 1[f(s, z, g) > b(s, g)]
+satisfy Lemma 2 whenever f(s, ·, g) is nondecreasing in Qµ(s, ·, g), b is independent of z, and the
+normalizing mass is positive.
+Proof. Subtracting a baseline independent of z preserves the value ordering. Applying a nondecreas-
+ing function or thresholding a nondecreasing score at a z-independent cutoff likewise preserves this
+ordering. The resulting weights therefore satisfy Lemma 2 under the stated positivity condition.
+21
+
+
+Preprint
+This observation connects value-based reweighting to the contrastive score used to motivate LAPIS.
+Remark 2 (Density-ratio scores and value ordering). For the binary density-ratio objective introduced
+in Section 3, the optimal score is
+f ⋆(s, z, g) = log Qµ(s, z, g) −log pB(g)
+wherever the ratio is defined. At fixed (s, g), the term −log pB(g) is independent of z, so f ⋆preserves
+the ordering of Qµ. A z-independent score threshold therefore produces nonnegative weights that are
+nondecreasing in value; the threshold need not equal V µ(s, g). Appendix D.7 relates this score-space
+filtering principle to the learned critic.
+Applying the statewise inequality at every state yields a return guarantee for the reweighted policy.
+When all weights vanish, retaining the reference policy makes the update well-defined.
+Proposition 1 (Goal-conditioned supported improvement). Let πz
+β be a batch-constrained reference
+policy, with advantage Az
+β in MBz. For η > 0, define
+πz
+η(z | s, g) ∝πz
+β(z | s, g)h(Az
+β(s, z, g))η,
+where h is bounded, nonnegative, and nondecreasing. At states with zero normalizing mass, set
+πz
+η = πz
+β, and define πz
+0 = πz
+β. Then
+supp πz
+η(· | s, g) ⊆supp πz
+β(· | s, g),
+JMBz (πz
+η; g) ≥JMBz (πz
+β; g).
+Under the conditions of Theorem 1, the same return ordering holds for their batch-exact decoded
+physical policies.
+Proof. Reweighting cannot assign positive probability to a latent action outside the reference policy’s
+support, and the fallback leaves the reference policy unchanged. The updated policy therefore remains
+batch-constrained on the common supported domain.
+For η > 0, the weights h(Az
+β)η remain nonnegative and nondecreasing in the reference action value.
+At each state with positive normalizing mass, Lemma 2 gives
+Ez∼πzη(·|s,g)
+h
+Q
+πz
+β
+MBz (s, z, g)
+i
+≥V
+πz
+β
+MBz (s, g).
+At fallback states, or when η = 0, equality holds. Writing Vβ = V
+πz
+β
+MBz (·, g) and T πz
+η for the updated
+policy’s Bellman operator, this inequality is
+T πz
+ηVβ ≥Vβ.
+By monotonicity, repeated application of T πz
+η produces a nondecreasing sequence starting from Vβ.
+Since the operator is a γ-contraction, this sequence converges to V
+πz
+η
+MBz (·, g), establishing pointwise
+value improvement. Averaging over µ0 proves the return inequality.
+Both policies are batch-constrained, so Theorem 1 transfers this ordering to their decoded physical
+returns under its assumptions. The argument holds for each fixed goal and therefore also after
+averaging over a common goal distribution.
+The exponent η controls distributional reweighting and is distinct from the flow-guidance scale w
+in Section 6. In particular, for the hard gate h = 1[· > 0], we have hη = h for every η > 0,
+so the reweighted policy is independent of η over this range. The proposition concerns this exact
+distributional update; guided flow samples need not follow the same distribution. Their relationship
+is discussed in Appendix D.8.
+C.5
+H-STEP ENDPOINT LATENTS: PROOF OF THEOREM 1′
+Theorem 1′ (On-support transfer for H-step latents). Let MBz
+H be the latent batch MDP over
+observed endpoint latents with the empirical one-step transition p(1)
+B,H and reward r(1)
+B,H given (st, zt),
+and Ψ∗
+H(a | s, z) the empirical first-action decoder (Definition 7). Under Assumption 1, every latent
+policy πz batch-constrained in MBz
+H satisfies JMBz
+H (πz) = JM(Ψ∗
+H ◦πz), so return improvement
+transfers to the decoded policies. Supported outcome identifiability is not required, and p(1)
+B,H(· | s, z)
+may be stochastic. For H = 1 under supported outcome identifiability, MBz
+1 = MBz and Ψ∗
+1 = Ψ∗,
+recovering Theorem 1.
+22
+
+
+Preprint
+The deployed controller labels each recorded step with an H-step endpoint latent and executes only
+the first decoded action before replanning (Appendix D.6). This subsection defines the corresponding
+latent batch MDP and proves Theorem 1′. We keep the conventions of Appendix C.1 for rewards, the
+absorbing sink, initial states, and termination.
+Setting.
+For every recorded step (st, at, st+1) whose endpoint st+H is also recorded, let
+zt = I(st, st+H), and let N(s, a, z, s′) count the occurrences of (st, at, zt, st+1) = (s, a, z, s′).
+Marginal counts omit arguments, for example N(s, z) = P
+a,s′ N(s, a, z, s′) and N(s, a, z) =
+P
+s′ N(s, a, z, s′).
+Definition 7 (H-step endpoint latent batch MDP). The latent batch MDP MBz
+H
+= (S ∪
+{sabs}, Z, p(1)
+B,H, r(1)
+B,H, γ) has observed latents ZB,H(s) = {z : N(s, z) > 0} and, for z ∈ZB,H(s),
+p(1)
+B,H(s′ | s, z) = N(s, z, s′)
+N(s, z) ,
+r(1)
+B,H(s, z) =
+P
+a,s′ N(s, a, z, s′) r(s, a, s′)
+N(s, z)
+.
+Unsupported pairs transition to sabs with zero reward, as in Definition 5. The first-action batch
+decoder is
+Ψ∗
+H(a | s, z) = N(s, a, z)
+N(s, z) .
+The kernel p(1)
+B,H is the one-step successor distribution conditioned on the endpoint latent introduced in
+Appendix D.6. No identifiability condition is imposed: the same z at s may be followed by different
+first actions and different successors, so p(1)
+B,H(· | s, z) can be stochastic even under deterministic
+ground dynamics. Because r(1)
+B,H averages bounded rewards, ∥V πz
+MBz
+H ∥∞≤Rmax/(1 −γ) for every
+latent policy. A latent policy is batch-constrained in MBz
+H if it selects only z ∈ZB,H(s) along its
+reachable states, with the continuation convention of Appendix C.1. Decoded execution samples
+z ∼πz(· | s) and a ∼Ψ∗
+H(· | s, z), executes a, and samples again at the next state.
+The case H = 1.
+Then zt = I(st, st+1) and N(s, a, z, s′) = N(s, a, s′)1[z = I(s, s′)]. Under
+supported outcome identifiability (Definition 4), N(s, z, s′) > 0 for z ∈ZB(s) only if s′ = FB(s, z).
+Hence MBz
+1 = MBz and Ψ∗
+1(a | s, z) = N(s, a, FB(s, z))/ P
+b N(s, b, FB(s, z)) = Ψ∗(a | s, z),
+and Theorem 1 is the case H = 1 of Theorem 1′.
+Proof of Theorem 1′. Batch constraints under decoding. Ψ∗
+H(a | s, z) > 0 implies N(s, a, z) > 0,
+hence a ∈AB(s), as in Remark 1.
+Transition and reward identities. Under Assumption 1, every recorded step from (s, a) reaches
+T(s, a), so N(s, a, z, s′) = N(s, a, z)1[s′ = T(s, a)]. For a supported pair (s, z),
+X
+a
+Ψ∗
+H(a | s, z) p(s′ | s, a) =
+X
+a
+N(s, a, z)1[T(s, a) = s′]
+N(s, z)
+=
+X
+a
+N(s, a, z, s′)
+N(s, z)
+= p(1)
+B,H(s′ | s, z),
+X
+a
+Ψ∗
+H(a | s, z) r(s, a, T(s, a)) =
+P
+a,s′ N(s, a, z, s′) r(s, a, s′)
+N(s, z)
+= r(1)
+B,H(s, z).
+Thus the decoded one-step transition and expected reward agree with those of MBz
+H at every supported
+pair.
+Return equality. The remainder is the proof of Theorem 1 with δFB(s,z) and rBz replaced by
+p(1)
+B,H(· | s, z) and r(1)
+B,H. Averaging over πz, both processes have the state-level kernel Pπz(· | s) =
+P
+z πz(z | s)p(1)
+B,H(· | s, z) and expected reward ¯rπz(s) = P
+z πz(z | s)r(1)
+B,H(s, z) on the common
+reachable support, so V πz
+MBz
+H and V Ψ∗
+H◦πz
+M
+solve the same Bellman equation V = ¯rπz + γPπzV ,
+whose bounded solution is unique for γ < 1. Averaging over µ0 gives return equality, and applying it
+to two policies gives the improvement implication.
+23
+
+
+Preprint
+Correspondence with practical LAPIS.
+LAPIS selects zt at st, executes only the first decoded
+action (E = 1), and selects again at st+1, which is decoded execution in MBz
+H. Its critic prop-
+agates value from (st, zt) to (st+1, zt+1) with the recorded continuation zt+1 = I(st+1, st+1+H)
+(Appendix D.6), so it evaluates the behavior latent policy in the same MDP. Theorem 1′ covers the
+batch-exact first-action decoder; Proposition 2 with reference kernel p(1)
+B,H covers learned decoders
+(Appendix D.3).
+24
+
+
+Preprint
+D
+THEORY–PRACTICE CORRESPONDENCE
+The analysis in Section 5 isolates the conditions under which latent policy improvement remains
+valid after physical execution. Practical LAPIS realizes these conditions through learned latent
+representations, decoding, value estimation, and policy extraction. This appendix makes each
+correspondence explicit and extends the exact analysis to the learned components used in practice.
+Exact transfer arises as the zero-mismatch case of the transition and reward correspondence below;
+supported reweighting defines the target distribution approximated by the learned policy.
+D.1
+LEARNED REPRESENTATIONS AND SUPPORTED OUTCOME IDENTIFIABILITY
+Supported outcome identifiability (Definition 4) requires each supported state–latent pair (s, z)
+to identify a unique observed successor FB(s, z). In practice, this structure is learned through the
+inverse model I and forward model F. Reconstruction connects the learned representation to outcome
+identification. If two observed successors are assigned the same latent, I(s, s′
+1) = I(s, s′
+2) = z, then
+∥s′
+1 −s′
+2∥2 ≤∥s′
+1 −F(s, z)∥2 + ∥s′
+2 −F(s, z)∥2.
+Thus, when both transitions are reconstructed accurately, successors sharing a latent are close in the
+reconstruction metric. The theorem states supported outcome identifiability as an exact structural
+condition, while the reconstruction objective encourages this structure on observed transitions.
+The experimental policy operates on quantized latent codes. Identifiability concerns whether the code
+supplied to the policy and decoder distinguishes the observed outcomes relevant for control. The
+learned predictor F and the exact supported lookup FB play complementary roles: F is trained to
+reconstruct outcomes, whereas FB states the exact correspondence on the observed transition graph.
+Accurate reconstruction encourages outcome consistency; exact identifiability additionally requires
+that the supported code distinguish these outcomes.
+D.2
+STATE REPRESENTATIONS AND MARKOV CONTROL
+The analysis in Section 5 uses Markov states to isolate the relationship between latent decisions
+and physical execution from perceptual representation learning. The experiments use single-frame
+RGB observations processed by learned visual encoders. Practical LAPIS applies the latent policy
+improvement principle to this learned observation representation.
+Different underlying states can produce indistinguishable observations, so the observation-level
+process need not be exactly Markov. This concerns the state representation, whereas latent-action
+realizability concerns whether a selected latent transition can be physically executed from the current
+state. The exact results characterize the control-level correspondence under Markov state information.
+Temporal or recurrent representations provide possible ways to retain additional state information;
+the analysis applies when the resulting representation satisfies the stated Markov and transition
+conditions.
+D.3
+APPROXIMATE TRANSFER UNDER EXECUTION MISMATCH
+Theorem 1 gives exact return equality when supported latent transitions are executed through the
+batch-exact decoder under deterministic dynamics. More generally, the same correspondence admits
+a quantitative extension whenever decoded execution induces transitions and rewards close to those
+used for latent evaluation. We state the bound for a decoder bΨ(a | s, z), which includes both Ψ∗and
+the state-marginal choice bΨ(a | s, z) = Ψ(a | z).
+Reference latent process.
+The bound compares decoded execution with a reference latent batch
+MDP. For one-step latents this is MBz with (ZB, pBz, rBz). For the H-step endpoint latents of the
+deployed controller it is MBz
+H with (ZB,H, p(1)
+B,H, r(1)
+B,H) (Definition 7). We write the statements
+below for MBz. They hold verbatim for MBz
+H after replacing pBz and rBz by p(1)
+B,H and r(1)
+B,H,
+since the argument uses only the two Bellman equations and the reward bound, not the form of the
+reference kernel. Because the controller executes only the first decoded action before replanning
+25
+
+
+Preprint
+(Appendix D.6), bΨ(a | s, z) denotes the distribution of this first action; for a chunk decoder, it is the
+first-action marginal of the decoded chunk.
+Fix a latent policy πz that is batch-constrained in MBz. We compare the two processes on a common
+Markov state space and decision interval, with the same γ, reward bound Rmax, and initial distribution
+µ0. Use the ambient-space batch kernels of Appendix C.1, extend the ground process with the same
+absorbing sink, and define πz and bΨ as probability kernels throughout this space. Where an empirical
+policy or decoder is undefined, fix an arbitrary probability-kernel extension. The occupancy below
+includes any off-support visits under this specified execution. Sums over continuous variables denote
+integrals.
+The decoder induces
+˜pbΨ(s′ | s, z) :=
+X
+a
+bΨ(a | s, z) p(s′ | s, a),
+˜rbΨ(s, z) :=
+X
+a
+bΨ(a | s, z)
+X
+s′
+p(s′ | s, a) r(s, a, s′).
+For this fixed decoder, define the mismatches
+ϵp(s, z) := DTV
+ pBz(· | s, z), ˜pbΨ(· | s, z)
+
+,
+ϵr(s, z) :=
+rBz(s, z) −˜rbΨ(s, z)
+,
+where DTV(P, Q) = supA |P(A) −Q(A)|. Let dbΨ◦πz be the normalized γ-discounted occupancy
+of (s, z) under decoded execution in M from µ0, with z ∼πz(· | s). Write ¯ϵp = Ed b
+Ψ◦πz [ϵp] and
+¯ϵr = Ed b
+Ψ◦πz [ϵr].
+Proposition 2 (Approximate transfer under execution mismatch). For a batch-constrained latent
+policy πz and the fixed, globally defined decoder bΨ above,
+JM(bΨ ◦πz) −JMBz (πz)
+ ≤
+¯ϵr
+1 −γ + 2γRmax
+(1 −γ)2 ¯ϵp.
+(7)
+Zero transition and reward mismatch yields exact return equality. In particular, bΨ = Ψ∗under
+Assumption 1 recovers Theorem 1. With reference MBz
+H, bΨ = Ψ∗
+H under Assumption 1 makes both
+mismatches zero by the identities in the proof of Theorem 1′, which recovers Theorem 1′.
+Proof. Step 1: Bellman residual. Write V1 = V
+bΨ◦πz
+M
+and V2 = V πz
+MBz . Their Bellman equations are
+V1(s) =
+X
+z
+πz(z | s)
+h
+˜rbΨ(s, z) + γ
+X
+s′
+˜pbΨ(s′ | s, z)V1(s′)
+i
+,
+V2(s) =
+X
+z
+πz(z | s)
+h
+rBz(s, z) + γ
+X
+s′
+pBz(s′ | s, z)V2(s′)
+i
+.
+Let ( ¯PbΨh)(s) = P
+z,s′ πz(z | s)˜pbΨ(s′ | s, z)h(s′). Subtracting the equations gives ∆= δ + γ ¯PbΨ∆,
+where ∆= V1 −V2 and
+δ(s) =
+X
+z
+πz(z | s)
+h
+˜rbΨ(s, z) −rBz(s, z) + γ
+X
+s′
+(˜pbΨ −pBz)(s′ | s, z)V2(s′)
+i
+.
+Step 2: bounding the residual. Definition 5 gives ∥V2∥∞≤Rmax/(1 −γ). The total-variation
+inequality |EP h −EQh| ≤2∥h∥∞DTV(P, Q) therefore yields
+|δ(s)| ≤
+X
+z
+πz(z | s)
+h
+ϵr(s, z) + 2γRmax
+1 −γ ϵp(s, z)
+i
+.
+Step 3: occupancy-weighted bound. Since ¯PbΨ is a stochastic operator and γ < 1, unrolling the
+residual along decoded execution gives
+JM(bΨ ◦πz) −JMBz (πz)
+ ≤
+X
+t≥0
+γtE[|δ(st)|]
+≤
+1
+1 −γ Ed b
+Ψ◦πz
+
+ϵr + 2γRmax
+1 −γ ϵp
+
+,
+26
+
+
+Preprint
+which is the stated bound. If bΨ = Ψ∗and Assumption 1 holds, the supported transition and expected-
+reward identities in the proof of Theorem 1 make both mismatches zero along the rollout. This
+recovers exact transfer without requiring Assumption 2.
+For the fixed decoder, let εbΨ(πz) denote the right-hand side of Equation (7), using the occupancy of
+bΨ ◦πz.
+Corollary 2 (Approximate improvement transfer). For batch-constrained latent policies πz, π′
+z and
+the same decoder bΨ, define ∆z = JMBz (π′
+z) −JMBz (πz). Then
+JM(bΨ ◦π′
+z) −JM(bΨ ◦πz) ≥∆z −εbΨ(π′
+z) −εbΨ(πz).
+Thus a latent improvement exceeding the two execution-gap bounds transfers to physical improvement.
+Proposition 2 and Corollary 2 hold unchanged with MBz
+H as the reference.
+Proof. Add and subtract the two latent returns and apply Proposition 2 separately to π′
+z and πz.
+Interpretation.
+The bound accounts jointly for stochastic dynamics and decoder approximation
+through their induced transition and reward mismatch. Its quantitative usefulness depends on this
+mismatch being small in the stated metric: a point mass and an atomless transition law have total-
+variation distance one even if they are geometrically close. Appendix D.6 describes the experimental
+controller.
+D.4
+LEARNED DECODING UNDER SCARCE ACTION SUPERVISION
+The batch-exact decoder establishes an exact correspondence, while successful execution funda-
+mentally requires realizing the represented successor. Recovering a particular recorded action
+distribution is unnecessary when alternative controls induce the same transition and reward. Under
+Assumptions 1–2, a decoder satisfying
+bΨ
+ {a : T(s, a) = FB(s, z)} | s, z
+
+= 1
+on visited supported pairs induces the same successor and reward as the latent transition. Hence
+ϵp = ϵr = 0 in Proposition 2, even if its action distribution differs from the empirical weights of Ψ∗.
+In this outcome-compatible setting, consistent execution of the latent outcome, rather than recovery
+of a particular recorded action, is sufficient for transfer.
+Explicit state conditioning is therefore not a requirement of the transfer argument when the decoder
+realizes the represented outcome on every visited supported pair. LAPIS learns a state-marginal
+decoder Ψ(a | z) from scarce action labels. Table 5 compares it with a state-conditioned decoder
+using the same frozen 5%-label LAM across decoder-label budgets; within each budget, the remaining
+policy and training setup is shared between decoder variants. Marginal decoding achieves higher
+success across all three domains at 1% and 5% labels, while state conditioning performs better with
+full supervision. These results support marginal decoding for the scarce-label setting studied here.
+D.5
+GOAL-CONDITIONED OBJECTIVES AND OUTCOME ALIGNMENT
+Theorem 2 requires physical controls that produce the same transition outcome to receive the same
+reward. The goal-conditioned objective used by LAPIS satisfies this condition under the deterministic
+dynamics of Assumption 1. Contrastive RL uses the goal-reaching reward
+rg(s, a) = (1 −γ)p(s′ = g | s, a).
+Under Assumption 1, s′ = T(s, a), so
+rg(s, a) = (1 −γ)1[T(s, a) = g].
+Consequently, if two physical actions produce the same successor,
+T(s, a1) = T(s, a2) = s′,
+27
+
+
+Preprint
+then
+rg(s, a1) = rg(s, a2) = (1 −γ)1[s′ = g].
+Thus, in the deterministic setting analyzed in Section 5, the goal-conditioned reward depends on a
+physical control only through its transition outcome. Outcome-based abstraction therefore preserves
+the reward distinctions relevant to the goal-conditioned objective, providing the objective-alignment
+condition used in Theorem 2.
+D.6
+REPRESENTATION HORIZON AND RECEDING-HORIZON CONTROL
+The analysis in Section 5 is stated at the policy decision interval, where a latent action represents
+the successor of a single transition. In visual latent-action learning, however, the temporal gap used
+to construct the latent representation also controls how much transition information is visible to
+the encoder. We distinguish three quantities: the LAM temporal gap H in zt = I(st, st+H); the
+physical-action chunk size C, the number of actions predicted by a real-action policy or a latent-action
+decoder; and the execution horizon E, the number of actions executed before replanning. The symbol
+H refers only to the LAM temporal gap and does not apply to real-action policies without a LAM.
+Our default LAM uses a representation horizon of H = 3,
+zt = I(st, st+3),
+but LAPIS remains a one-step receding-horizon controller: the decoder predicts a chunk of C = 3
+actions, only the first action is executed (E = 1), and the policy replans from st+1. The critic
+likewise propagates value at this one-step interval using st+1 and the recorded continuation latent
+zt+1 = I(st+1, st+4). Thus, the longer temporal gap changes the representation used for control,
+rather than requiring longer open-loop execution.
+Representation and execution horizons.
+We empirically separate these two roles by varying the
+representation horizon and the number of decoded actions executed before replanning. Both H = 1
+and our default H = 3 controller execute a single action before replanning. With this execution
+scheme, reducing the representation horizon from H = 3 to H = 1 sharply reduces task success
+across all three representative domains. Conversely, keeping the H = 3 representation but executing
+the full three-action chunk does not account for the benefit of the longer horizon: one-step replanning
+achieves higher mean performance in all three domains, with a particularly large difference on
+AntMaze.
+Table 8: LAM temporal gap H and execution horizon E. Success rate (%) on representative tasks.
+The decoder chunk size is C = H in these ablations; E is the number of decoded actions executed
+before replanning.
+Setting
+H
+E
+AntMaze-medium
+Cube-single
+Scene
+One-step representation
+1
+1
+4 ±1
+2 ±1
+0 ±0
+LAPIS
+3
+1
+49 ±3
+62 ±5
+29 ±4
+Full-chunk execution
+3
+3
+9 ±5
+56 ±3
+26 ±7
+The control results are consistent with the representation diagnostics. With matched frozen LAMs,
+increasing the temporal gap from H = 1 to H = 3 raises held-out action-decodability R2 from 0.501
+to 0.597 on AntMaze, 0.586 to 0.778 on Cube, and 0.628 to 0.811 on Scene (Table 18). Adjacent
+visual observations can contain only small action-dependent changes, whereas a longer gap exposes
+more visible transition structure to the latent bottleneck. Together, the representation probes and
+control results indicate that H = 3 is useful primarily as a representation horizon, while one-step
+replanning remains effective for closed-loop execution.
+Connection to the one-step analysis.
+When H = 1, the encoded endpoint coincides with the suc-
+cessor at the control interval, giving the direct latent–successor correspondence analyzed in Section 5.
+For H > 1, an endpoint latent can in principle summarize trajectories with different intermediate
+successors even though execution and value propagation remain one-step. The appropriate practical
+object is therefore the one-step successor distribution conditioned on the endpoint latent,
+p(1)
+B,H(s+ | s, z) := Pr
+B
+ st+1 = s+ | st = s, I(st, st+H) = z
+
+.
+28
+
+
+Preprint
+The corresponding physical process is the one-step transition induced by the first decoded action.
+Theorem 1′ gives exact transfer for this object: in the H-step endpoint latent batch MDP MBz
+H,
+whose transition kernel is p(1)
+B,H, decoding with the first-action batch decoder Ψ∗
+H preserves return
+under deterministic dynamics (Appendix C.5). For learned decoders, Proposition 2 with reference
+kernel p(1)
+B,H bounds the gap (Appendix D.3). The critic bootstraps from (st, zt) to (st+1, zt+1) and
+therefore evaluates latent policies in this same MDP.
+This distinction allows the analytical and practical roles of the temporal horizon to be separated
+cleanly: the batch-MDP analysis (Theorems 1 and 1′) isolates the conditions required for exact
+latent-to-physical correspondence, while the longer observation gap provides a substantially more
+informative representation for the visual domains studied here.
+First-step execution fidelity.
+Although the H = 3 latent represents an endpoint three steps ahead,
+the deployed controller executes only the first decoded action before replanning. We therefore directly
+evaluate whether this longer-horizon representation preserves accurate one-step execution. On 100
+held-out transitions per environment, we encode the corresponding latent, decode the action chunk,
+execute only its first action, and measure the resulting next-state cube-position error. The deployed
+H = 3 configuration achieves lower error than the H = 1 configuration on both Cube (1.51 vs. 3.26
+mm) and Scene (0.80 vs. 1.22 mm). The same trend holds on transitions where the cube actually
+moves, with 3.59 vs. 7.69 mm on Cube and 4.20 vs. 6.42 mm on Scene (Table 9). These results
+provide direct evidence that the practical H = 3 representation can preserve accurate first-step
+execution of the measured object transition despite encoding a longer-horizon endpoint, supporting
+its use with one-step receding-horizon control. This diagnostic compares existing configurations
+using held-out dataset latents and a geometric next-state metric; the configurations differ in temporal
+gap, decoder chunking, and training augmentation.
+Table 9: First-step cube-position error (mm, ↓) on matched held-out transitions using seed-0 models
+(C = H, E = 1). Moving subsets have recorded cube displacement > 1 mm.
+Environment
+Subset
+n
+H = 1
+H = 3
+v-cube-single-play
+All
+100
+3.26
+1.51
+Moving
+42
+7.69
+3.59
+v-scene-play
+All
+100
+1.22
+0.80
+Moving
+19
+6.42
+4.20
+D.7
+LEARNED VALUE ORDERING AND CRITIC-GUIDED REWEIGHTING
+Proposition 1 formalizes policy improvement as reweighting a supported reference distribution
+toward higher-value latent actions. LAPIS implements this principle through the learned critic
+and the gate in Equation (4). For a fixed critic and threshold snapshot, let qB(z | s, g) denote
+the conditional distribution of observed latent transitions presented to the actor, including its goal-
+relabeling procedure. Define the selected mass
+ZG(s, g) = Ez∼qB(·|s,g) [G(s, z, g)] ,
+and, whenever ZG(s, g) > 0, the gated distribution
+qG(z | s, g) = qB(z | s, g)G(s, z, g)
+ZG(s, g)
+.
+(8)
+Because the gate only removes examples,
+supp qG(· | s, g) ⊆supp qB(· | s, g) ⊆ZB(s)
+at sampled state–goal pairs. Thus, at the target-distribution level, critic-guided filtering is exactly a
+supported reweighting of observed state–latent transitions.
+The improvement result does not require the critic score to be a calibrated numerical estimate of Q; it
+requires the score to preserve the ordering of the reference action values over z at fixed (s, g). For
+29
+
+
+Preprint
+the ideal binary density-ratio objective in Remark 2,
+f ⋆(s, z, g) = log Qµ(s, z, g) −log pB(g),
+and the second term is independent of z. Hence f ⋆preserves the ordering of Qµ, and thresholding it
+at any z-independent state–goal threshold produces weights that are nondecreasing in value.
+In the supported comparison of Appendix C.4, take the reference policy to be
+µ(· | s, g) = qB(· | s, g),
+with qG = µ when ZG(s, g) = 0. Whenever the score preserves the ordering of
+Qµ
+MBz (s, ·, g),
+Corollary 1 and Proposition 1 give
+JMBz (qG; g) ≥JMBz (qB; g).
+Under the conditions of Theorem 1, this ordering transfers to batch-exact decoded execution, while
+Corollary 2 provides the corresponding approximate-transfer statement for learned decoding.
+Practical LAPIS uses the TD-InfoNCE critic and the learned score-space threshold described in
+Appendix E.3. The gate is applied only to observed state–latent transitions, so for every fixed
+critic and threshold snapshot it defines an exact supported reweighting qG of the actor-training
+distribution qB; this support property holds for any score. During joint training, the critic and hence
+the reweighted target evolve, while the actor is trained toward the target defined by the current gate.
+Whether this reweighting also improves the reference depends on whether the learned score preserves
+the reference-value ordering over z, which the TD-InfoNCE objective does not determine, as follows.
+Score offset in TD-InfoNCE.
+Both cross-entropy terms in Equation (11) are softmaxes over
+candidate goals within the same row (si, zi), and the bootstrap weights Wij are softmaxes over goals
+as well. Adding any function c(s, z) to the score therefore leaves the loss unchanged, so the optimum
+is determined only up to such an offset, as noted for TD-InfoNCE by Zheng et al. (2024, Sec. 3.1).
+An offset that depends on z can change the ordering of latents at fixed (s, g) and hence the raw-score
+gate in Equation (4). The L2-normalized bilinear parameterization of Appendix E.3 bounds the score,
+|f| ≤1/τrep, but does not remove the offset: a component of the normalized goal features shared
+across goals contributes a term that depends only on (s, z). Neither the ensemble minimum nor
+the threshold ˆV (s, g), which does not depend on z, removes it. Preservation of value ordering by
+the learned score is therefore an empirical property of the trained critic, not a consequence of the
+objective.
+Offset-free score.
+Let pc denote the critic’s candidate-goal distribution (Appendix E.3) and define
+¯f(s, z, g) = f(s, z, g) −log Eg′∼pc
+
+exp f(s, z, g′)
+
+.
+Remark 3 (Offset-free scores and value ordering). Suppose the optimal TD-InfoNCE critic satisfies
+exp f ⋆(s, z, g) = ec(s,z)Qµ(s, z, g)/pc(g) for an arbitrary c, where Qµ(s, z, ·) is the discounted
+future-state occupancy density (Zheng et al., 2024, Sec. 3.1) and pc > 0 on its support. Since
+Eg′∼pc[Qµ(s, z, g′)/pc(g′)] = 1, we have log Epc[exp f ⋆(s, z, g′)] = c(s, z), so
+¯f ⋆(s, z, g) = log Qµ(s, z, g) −log pc(g)
+for every offset c. At fixed (s, g) the last term does not depend on z, so ¯f ⋆preserves the ordering
+of Qµ. Remark 2, Corollary 1, and Proposition 1 therefore apply with ¯f ⋆in place of the binary
+density-ratio score f ⋆.
+The log-partition in ¯f can be estimated by a log-sum-exp over the candidate goals in a minibatch, the
+same normalization TD-InfoNCE uses for its importance weights, but this finite-sample estimate is
+biased and noisy. We therefore measure how closely the raw score f, which the gate uses, follows ¯f
+in trained LAPIS critics (Table 6 in Section 7.6). The protocol for that table is as follows. We use
+antmaze-medium, cube-single, and scene with four seeds each, average the 300k, 400k,
+and 500k checkpoints within each seed, and report the mean over seeds. For each training state,
+we score 16 candidate latents, the dataset latent and 15 samples from the behavior branch, and
+estimate the log-partition of ¯f with 16,384 goals from pc, averaged over four independent draws. The
+30
+
+
+Preprint
+threshold rule, a stand-in for ˆV , keeps the dataset latent if its score exceeds the 0.9-expectile of the
+scores of the 15 sampled latents. Standard deviations across seeds are below 0.01 for the correlation
+and below 1% for the agreement. Table 4(b) compares the TD-InfoNCE critic with an IQL critic,
+whose regression targets make values directly comparable across z, under fixed extraction rules.
+Consistent with this supported-update view, Table 4(a) shows that replacing direct max-Q actor
+optimization with critic-guided filtering improves performance for both deterministic and flow actors.
+D.8
+FLOW-BASED EXTRACTION AND GUIDED INFERENCE
+The remaining correspondence is between the supported target distribution defined by critic-guided
+filtering and the learned flow policy. For a fixed gate snapshot, define
+ℓ(o)
+θ (s, z, g) = Ex0,t
+h
+∥vθ(xt, t; s, g, o) −(z −x0)∥2
+2
+i
+,
+xt = (1 −t)x0 + tz,
+where noise and time are sampled as in Equation (5). Conditioning the actor objective on (s, g) gives
+Lactor(s, g) = EqB
+h
+G ℓ(1)
+θ
+i
++ λEqB
+h
+ℓ(0)
+θ
+i
+= ZG(s, g)EqG
+h
+ℓ(1)
+θ
+i
++ λEqB
+h
+ℓ(0)
+θ
+i
+.
+(9)
+Thus, the high-value branch is trained toward qG, while the behavior branch is trained toward qB.
+The full loss averages over sampled (s, g), with ZG(s, g) retaining the original weighting across
+state–goal contexts. When ZG(s, g) = 0, the gated loss term vanishes; the reference-policy fallback
+in Appendix D.7 is used only to define the ideal policy comparison. Equation (9) therefore gives the
+direct correspondence between the practical flow-matching objective and the supported reweighting
+analyzed in Appendix C.4.
+The support inclusion established in Appendix D.7 is exact for the target distributions qB and qG.
+A finite-capacity neural flow approximates these conditional distributions while sharing statistical
+strength across visual states. At inference, generated continuous latents are projected to the learned
+product codebook before decoding. This projection restricts samples to the learned code space, but
+does not by itself guarantee state-conditioned support; that depends on how faithfully the learned
+policy represents its conditional target.
+Classifier-free guidance combines the two learned velocity fields,
+vCFG
+w
+= (1 −w)vθ(·; 0) + wvθ(·; 1).
+At w = 0, inference uses the branch trained toward qB, while w = 1 uses the branch trained toward
+qG. Values w > 1 extrapolate the velocity field toward the high-value branch and therefore need
+not preserve the exact support guarantee of qG. This extrapolation differs from direct max-Q actor
+optimization, however. Direct max-Q updates the selected latent by following critic values in the
+continuous latent space, including regions where the critic is not grounded by observed transitions.
+In LAPIS, the critic is used first to select high-value examples only among observed state–latent
+transitions, producing qG ⊆qB; guidance then extrapolates between policy fields trained on qB and
+this supported high-value reweighting. The guidance direction is therefore anchored to distributions
+constructed entirely from observed state–latent transitions, although sufficiently strong extrapolation
+can still move generated samples away from their exact support.
+The supported-reweighting result thus identifies qG at w = 1 as the theoretical anchor, while w > 1
+provides an inference-time extension that trades stricter adherence to this target for stronger emphasis
+on the high-value branch. The guidance scale w is distinct from the distributional exponent η in
+Proposition 1, and the supported-improvement guarantee does not by itself extend to arbitrary w > 1.
+The experiments provide complementary evidence for these stages. Table 4(a) shows that the flow
+actor improves policy extraction when paired with critic-guided filtering. Table 14 further separates
+the supported high-value branch from guidance extrapolation. Across the visual manipulation tasks,
+w = 1, which uses the branch trained toward qG, already captures most of the improvement from
+the behavior branch w = 0 to the default w = 3 policy. Stronger guidance therefore provides
+an additional empirical refinement rather than being solely responsible for the gains of LAPIS.
+Section 7.3 further compares the effect of stronger direct max-Q optimization and stronger guidance
+31
+
+
+Preprint
+through behavior-support distance dBC, realization round-trip error dround, and task success. As CRL
+becomes more aggressive, its support distance and realization error increase while success collapses,
+whereas LAPIS remains closer to the behavior-supported region over the guidance sweep. These
+results show that guided inference stays closer to the behavior-supported region than unconstrained
+critic maximization in this comparison.
+The direct CFGRL comparison in Appendix E.5 further illustrates why this distinction matters in
+a learned latent action space. Goal-conditioned CFGRL benefits from increasing guidance when
+applied to physical actions, most clearly on AntMaze, but provides no consistent improvement
+when the same construction is applied directly to learned latent actions. In contrast, LAPIS obtains
+large gains already at w = 1, before extrapolative guidance, with its high-value branch trained
+toward the critic-filtered supported target qG rather than the unfiltered goal-conditioned behavior
+distribution. Together with the component ablation in Table 4(a), this provides empirical evidence
+that support-aware target construction, rather than guidance alone, is consequential for latent policy
+improvement.
+D.9
+REALIZATION ERROR AND RETURN
+Proposition 2 measures execution mismatch in total variation, which equals one between two distinct
+point masses even when the two successors are geometrically close. The analysis of Section 5 restricts
+policies to observed state–latent pairs, where δ(s, z) = 0 (Definition 1). Here we bound how far
+latent and decoded returns can separate when the executed latents are not realized exactly, under
+Lipschitz conditions that are standard in the analysis of latent and model-based RL (Asadi et al.,
+2018; Gelada et al., 2019).
+Let MF denote the latent outcome process that, from state s and latent z, moves to the predicted
+successor F(s, z) with reward r(s, F(s, z)). For a decoder bΨ(a | s, z), state-conditioned or not,
+define its expected one-step round-trip error and its excess over the realization error,
+ηbΨ(s, z) = Ea∼bΨ(·|s,z)
+I
+ s, T(s, a)
+
+−z
+
+2,
+ϵbΨ(s, z) = ηbΨ(s, z) −δ(s, z) ≥0,
+where the inequality holds because T(s, a) ∈R(s).
+Proposition 3 (Return gap under realization error). Suppose Assumptions 1 and 2 hold, and (i) the
+forward model is accurate on reachable outcomes up to ϵF ≥0, ∥F(s, I(s, s′)) −s′∥2 ≤ϵF for
+every s′ ∈R(s); (ii) F(s, ·) is LF -Lipschitz, ∥F(s, z) −F(s, z′)∥2 ≤LF ∥z −z′∥2; (iii) r(s, ·),
+extended to all states with |r| ≤Rmax, is Lr-Lipschitz, and the latent value V πz
+MF is LV -Lipschitz in
+the state. Then, for any latent policy πz and decoder bΨ,
+JMF (πz) −JM(bΨ ◦πz)
+ ≤(Lr + γLV )
+h
+LF
+X
+t≥0
+γt E
+
+δ(st, zt) + ϵbΨ(st, zt)
+
++
+ϵF
+1 −γ
+i
+,
+where the expectation is over decoded execution of bΨ ◦πz in M from µ0.
+Proof. Write VF = V πz
+MF and VE = V
+bΨ◦πz
+M
+. For a state s, with z ∼πz(· | s), a ∼bΨ(· | s, z) and
+s′ = T(s, a), the Bellman equations give
+VF (s) −VE(s) = E
+h
+r
+ s, F(s, z)
+
+−r(s, s′) + γ
+ VF (F(s, z)) −VF (s′)
+
++ γ
+ VF (s′) −VE(s′)
+i
+.
+Since s′ ∈R(s), (i) and (ii) give
+∥F(s, z) −s′∥2 ≤∥F(s, z) −F(s, I(s, s′))∥2 + ∥F(s, I(s, s′)) −s′∥2 ≤LF ∥z −I(s, s′)∥2 + ϵF .
+By (iii), the first two terms are bounded in absolute value by (Lr + γLV )
+ LF ∥z −I(s, s′)∥2 + ϵF
+
+,
+and the conditional expectation of ∥z−I(s, s′)∥2 given (s, z) is ηbΨ(s, z) = δ(s, z)+ϵbΨ(s, z). Hence
+|VF (s) −VE(s)| ≤(Lr + γLV )
+
+LF E
+
+δ(s, z) + ϵbΨ(s, z)
+
++ ϵF
+
++ γ E
+VF (s′) −VE(s′)
+.
+Unrolling this inequality along decoded execution, using that both values are bounded by Rmax/(1 −
+γ) so the remainder vanishes, and averaging over s0 ∼µ0 gives the claim.
+32
+
+
+Preprint
+Interpretation.
+The bound has three terms. The realization error δ depends only on which latents
+the policy selects; it is zero for latents of transitions observed at the current state. The excess ϵbΨ
+depends only on the decoder; with the batch-exact decoder Ψ∗, execution of a batch-constrained
+policy stays on observed transitions, and both terms vanish. The last term is the forward model’s
+own error and does not depend on the policy. With a finite codebook, distinct reachable outcomes
+can share a latent, so ϵF > 0 in general; ϵF = 0 would require a global form of supported outcome
+identifiability (Definition 4). Theorem 1 states the batch-constrained case exactly for MBz, without
+a forward model. For a fixed forward model, decoder and Lipschitz constants, the bound therefore
+grows linearly with the realization error of the latents the policy selects. The H-step analogue of ηbΨ
+is the round-trip error dround of Figure 3. As for Lipschitz bounds in model-based RL, condition
+(iii) is an idealization; in particular, it excludes 0/1 success rewards, so for our tasks the statement is
+qualitative. Proposition 3 is stated for one-step latents, and the same argument extends it to H-step
+latents, with the H-step transition and the discounted H-step reward in place of T and r, and γH in
+place of γ.
+33
+
+
+Preprint
+E
+EXPERIMENTAL DETAILS AND ADDITIONAL ANALYSES
+This appendix provides the experimental setup and supplementary analyses. We describe the bench-
+marks and evaluation protocols (Appendix E.1), latent-action representation learning and decoding
+(E.2), LAPIS critic and policy learning (E.3), and baseline implementations (E.4). We then report ad-
+ditional sampling, control, and guidance analyses (E.5), analyze action decodability and temporal-gap
+effects in the learned latent representation (E.6), and present qualitative rollouts (E.7).
+E.1
+DATASETS AND EVALUATION
+Benchmarks and label regimes.
+We use the OGBench (Park et al., 2025a) visual cube, scene,
+and antmaze-navigate domains with 64 × 64 RGB observations. Manipulation actions have
+five dimensions (end-effector position change, yaw change, and gripper control), while antmaze
+actions are eight-dimensional joint torques. For the ablations in Tables 4–6, we use one representative
+task from each family: visual-cube-single-play, visual-scene-play, and visual
+-antmaze-medium-navigate; Table 4(b) also includes visual-cube-double-play.
+The diagnostics in Figure 3 focus on visual-antmaze-medium-navigate. Latent-action
+methods use all observed transitions for LAM and latent-policy learning, while the data used by the
+action-scarce baselines are specified in Appendix E.4.
+cube
+scene
+antmaze
+Figure 5: Example observations, rendered from our own environment instances, spanning the cube
+and scene manipulation families and the antmaze navigation family.
+OGBench evaluation.
+Each of four seeds is evaluated on 20 episodes per task at the 300k, 400k,
+and 500k checkpoints. We average these checkpoint scores within each seed, then report the mean
+and standard deviation across seeds. All entries of Table 1 follow this protocol.
+Visual Franka Kitchen.
+Kitchen uses 64 × 64 rendered RGB observations, nine-dimensional
+bounded actions, and the original D4RL simulator with a 280-step episode limit. The partial
+variant targets microwave, kettle, light switch, and slide cabinet; mixed targets microwave, kettle,
+bottom burner, and light switch. Goal images are rendered with the evaluation camera after setting the
+required objects to their target configurations and the robot to its initial posture. Completed subtasks
+are removed from the remaining-task set, and an episode terminates when all required subtasks are
+completed or the time limit is reached.
+Table 2 reports the percentage of required subtasks completed, averaged over evaluation episodes:
+¯C =
+1
+Neval
+Neval
+X
+j=1
+100nc,j
+Nj
+,
+34
+
+
+Preprint
+where nc,j of the Nj = 4 required subtasks are completed in episode j. All latent policies use the
+canonical partial training split and are evaluated against both target-task sets; mixed does not
+denote a separately trained latent policy. Each seed uses its own frozen LAM and decoder trained for
+500k updates, with the H = 3, C = 3, E = 1 receding-horizon setup described in Appendix D.6.
+For seeds 0–3, we average the 300k, 400k, and 500k policy-checkpoint scores (20 episodes per
+target-task set per checkpoint), then report the mean and population standard deviation across the four
+seed averages. Table 2 reports LAPIS at guidance w = 3; the latent LAPIS run uses a TD-InfoNCE
+critic and a log-sum-exp value baseline. The real-action oracle results are reported separately from
+the latent policies.
+partial
+t = 0
+t = 225
+t = 450
+mixed
+Figure 6: Example observations from visual Franka Kitchen. Rows show partial (top) and mixed
+(bottom); columns show steps t = 0, 225, 450 of illustrative LAPIS rollouts with guidance w = 3 and
+reset seed 0. The displayed simulator states are rendered at 512 × 512 using the evaluation camera,
+while policy observations remain 64 × 64. These illustrative 450-step rollouts are separate from the
+280-step D4RL evaluations reported in Table 2.
+E.2
+LATENT ACTION MODEL AND DECODER
+Representation learning.
+The IDM/FDM pair is a product-quantized transition autoencoder trained
+by pixel reconstruction with independent cross-crop inputs. It uses single-frame observations,
+temporal gap H = 3, and IDM encoder scale 4. The codebook configuration is M:Hz:D:K =
+2:4:8:128: two codebooks, four slots per codebook, eight embedding coordinates, and 128 entries per
+codebook, giving 64 flattened latent coordinates. We denote the continuous encoder output by ze and
+its quantization by zq.
+Latent coordinates and codebook projection.
+The policy, critic, and decoder use quantized latents
+standardized per codebook and embedding dimension:
+[N(zq)]mhd = (zq)mhd −µmd
+σmd
+,
+(10)
+where the frozen means µmd and stabilized standard deviations σmd are shared across slots h. The
+same transform is applied to the codebook entries. Generated continuous latents are projected to the
+nearest product-codebook entries in these coordinates before decoding.
+35
+
+
+Preprint
+Action decoding.
+The experimental state-marginal flow decoder Ψ(a | z) is trained on labeled
+examples to predict three-action chunks from standardized quantized latents and is frozen for deploy-
+ment. Predicted actions are clipped to the environment bounds and executed with the receding-horizon
+procedure of Appendix D.6. The state-conditioned variant in Table 5 additionally takes s as input.
+For Table 5, we keep the same frozen 5%-label LAM across all decoder-label budgets and vary only
+decoder supervision.
+E.3
+CRITIC AND POLICY LEARNING
+Shared policy-learning settings.
+Table 10 consolidates the optimization, architecture, critic, flow-
+policy, and evaluation hyperparameters used by LAPIS on OGBench. In Table 1, the physical-action
+chunk sizes C for F-GCBC, GCIQL, CRL, and LAPIS are (3, 1, 1, 3), respectively, while their latent-
+action counterparts use C = 3. All latent-action methods use the H = 3 LAM of Appendix E.2, and
+all settings execute only the first physical action before replanning (E = 1; Appendix D.6).
+Table 10: LAPIS hyperparameters for OGBench policy learning.
+Setting
+Visual manipulation
+Visual antmaze
+Adam learning rate
+3 × 10−4
+3 × 10−4
+Batch size
+256
+256
+Gradient steps
+500k
+500k
+Visual encoder
+small IMPALA
+small IMPALA
+Policy MLP trunk
+(512, 512, 512)
+(512, 512, 512)
+Layer normalization
+yes
+yes
+paug (random crop)
+0.5
+0.0
+Discount γ
+0.99
+0.99 (0.995 giant)
+LAPIS critic
+TD-InfoNCE
+TD-InfoNCE
+Critic ensemble size
+2
+2
+Critic feature dimension
+512
+512
+Critic temperature τrep
+0.1
+0.1
+Gate expectile τ
+0.9
+0.9
+Flow time-embedding dimension
+64
+64
+Flow training-time distribution
+Beta(1.5, 1.0)
+Beta(1.5, 1.0)
+Maximum training time tmax
+0.999
+0.999
+Flow sampling steps
+10 Euler
+10 Euler
+Behavior-branch weight λ
+0.1
+0.1
+Evaluation guidance w
+3
+3
+Evaluation episodes
+20
+20
+Categorical TD objective.
+LAPIS uses categorical TD-InfoNCE on both visual manipulation
+and antmaze. For a minibatch of n recorded transitions, let s+
+i = sti+1 and let z+
+i be the LAM
+label inferred from its recorded continuation. Critic candidate goals are sampled from a mixture of
+current states, future states in recorded trajectories, and random dataset states. With ensemble index
+e ∈{1, 2}, define
+Lnext
+ije
+= fϕ,e(si, zi, s+
+j ),
+Lgoal
+ije = fϕ,e(si, zi, gj),
+Wij = sg
+h
+softmaxj
+
+min
+e
+f ¯ϕ,e(s+
+i , z+
+i , gj)
+i
+,
+where sg denotes stop-gradient and ¯ϕ is the target critic. For CE(ℓ, y) = −P
+j yj log softmaxj(ℓ)
+and Iij = 1[i = j], the loss is
+LTD = 1
+2n
+X
+i,e
+h
+(1 −γ) CE(Lnext
+i,:,e , Ii,:) + γ CE(Lgoal
+i,:,e, Wi,:)
+i
+.
+(11)
+The first term predicts immediate successors; the second propagates future-state occupancy through
+behavior continuations using a detached categorical bootstrap (Zheng et al., 2024). Appendix E.5
+reports the goal-candidate sampling ablation.
+36
+
+
+Preprint
+Score-space gate.
+The score fϕ in Equation (4) is the ensemble minimum fmin(s, z, g) =
+mine fϕ,e(s, z, g). For actor-training goals g, we fit the state–goal threshold by expectile regression,
+L ˆV = E
+h
+ρτ
+
+sg[fmin(s, z, g)] −ˆV (s, g)
+i
+,
+ρτ(u) = |τ −1[u < 0]|u2,
+(12)
+with the expectile τ specified in Table 10. The gate is sg[1[fmin > ˆV ]]. The critic, score threshold,
+and actor are updated jointly as in Algorithm 1.
+Critic features and flow policy.
+The bilinear critic uses L2-normalized features with temperature
+τrep:
+fϕ,e(s, z, g) = ⟨ϕe(s, z)/∥ϕe(s, z)∥2, ψe(g)/∥ψe(g)∥2⟩
+τrep
+.
+The critic dimensions and all flow-training and guided-inference hyperparameters are summarized in
+Table 10.
+E.4
+BASELINE IMPLEMENTATIONS
+Table 1 baselines.
+All entries of Table 1 are from our runs. The fully supervised GCBC, GCIVL,
+GCIQL, QRL, and HIQL use the OGBench implementations and pixel-based hyperparameters (Park
+et al., 2025a). With 5% labels, GCIVL, QRL, and HIQL use the same implementations and hy-
+perparameters in the latent action space, with the same LAM and decoder as LAPIS. LAPIS† is
+described in Appendix E.8. F-GCBC replaces the Gaussian GCBC head with our flow-matching
+actor and is not an OGBench baseline. GCIQL in Table 1 follows standard goal-conditioned IQL,
+learning an action-conditioned critic Q(s, a, g) and value function V (s, g) and extracting the actor
+from their advantage. CRL follows the upstream OGBench implementation with a DDPG+BC actor
+and InfoMax/InfoNCE critic, with hyperparameters tuned per domain. The domain-specific BC
+coefficient is reported in Table 11. F-GCBC, CRL, and LAPIS use the shared visual encoder, batch
+size, and augmentation settings within a domain. The method-specific action-chunk sizes used in
+Table 1 are summarized in Appendix E.3, and their sensitivity is examined in Table 13.
+Table 11: CRL-specific OGBench hyperparameter.
+Setting
+Visual manipulation
+Visual antmaze
+BC coefficient α
+3.0
+0.1
+Action-scarce baselines.
+Table 3 uses goal-conditioned physical-action adaptations designed for
+limited action supervision. In particular, its GCIVL entry, a value-only variant that the original
+submission labeled GCIQL, is distinct from the standard action-conditioned GCIQL used in Table 1;
+Appendix F.2 discusses this protocol difference. Let DL contain genuinely labeled transitions and B
+the action-free transitions, with goal-reaching reward r(s, g). We use the following value-learning,
+labeled-action, and inverse-prediction objectives:
+LV = Es,s′,g
+
+Lτ
+2
+ r(s, g) + γ ¯V (s′, g) −V (s, g)
+
+,
+Lτ
+2(u) = |τ −1[u < 0]|u2,
+LAWR
+π
+= E(s,a,g)∼DL[−exp(αA) log π(a | s, g)] ,
+LIDM = E(s,a,s′)∼DL∥Ia(s, s′) −a∥2
+2,
+ˆa = Ia(s, s′) on B,
+LBC = E[−log π(a | s, g)],
+where ¯V is the target value and τ is the upper expectile. The methods combine these objectives as
+follows:
+• GCIVL (Park et al., 2025a; Kostrikov et al., 2022): LV plus a flat AWR actor with the
+action-free advantage A = V (s′, g) −V (s, g). It learns no action-conditioned Q and
+corresponds to GCIVL in OGBench.
+37
+
+
+Preprint
+• HIQL (Park et al., 2023): LV plus two AWR actors—a high-level actor over subgoals
+(Ah = V (st+k, g) −V (s, g)) and a low-level actor over actions toward the subgoal (Aℓ=
+V (s′, st+k) −V (s, st+k), on DL). We use the OGBench HIQL implementation with its
+learned subgoal representation, which the high-level actor predicts and the low-level actor
+conditions on. All HIQL runs in Table 3 use this representation.
+• VPT-RL (VPT-style action inference) (Baker et al., 2022): train Ia via LIDM, pseudo-label
+B, then extract a value-guided (classifier-free-guided flow) RL policy from the (pseudo-
+)labeled real actions—the LAPIS policy objective of Equation (5) applied to actions instead
+of latents.
+• SS-ORL (Zheng et al., 2023): offline RL (LV + AWR actor) on the union DL ∪{(s, ˆa, s′) :
+(s, s′) ∈B} of true and IDM-pseudo-labeled actions.
+Action-free value objectives use all transitions. GCIVL’s physical-action actor and HIQL’s low-level
+actor use genuine labels; HIQL’s subgoal learning also uses action-free trajectories. The inverse-
+action predictor is fitted on genuine labels, and pseudo-label-based policy objectives use the union of
+genuine and inferred actions. Architecture and optimization settings follow the shared recipe where
+applicable.
+E.5
+ADDITIONAL CONTROL AND SAMPLING ABLATIONS
+Goal-candidate sampling.
+Because the LAM represents H = 3 endpoint transitions, we test
+whether future-state candidates for critic training should also be restricted to the same temporal
+grid. We compare the standard sampling scheme, which allows arbitrary future offsets, with a
+grid-restricted variant that rounds each trajectory-future offset k to H max(1, round(k/H)), with
+H = 3. Current-state and random-state candidates, actor-goal sampling, the next-state positive, and
+one-step bootstrapping are unchanged. The ablation therefore changes only the temporal sampling
+of future candidates in Equation (11). Table 12 uses the standard LAPIS reference from Table 1.
+Standard sampling achieves higher success than grid-restricted sampling on cube (62 vs. 53), scene
+(29 vs. 23), and antmaze (49 vs. 34), supporting future-goal candidates without a temporal-grid
+restriction.
+Table 12: Goal-candidate sampling ablation for LAPIS (success rate %). Only the trajectory-future
+candidate component is grid-restricted; the standard reference is from Table 1.
+Task
+Standard candidates
+Grid-restricted candidates
+v-cube-single-play
+62 ±5
+53 ±4
+v-scene-play
+29 ±4
+23 ±3
+v-antmaze-medium-navigate
+49 ±3
+34 ±7
+Action chunk size in real-action policies.
+Table 13 compares action chunk sizes C = 1 and
+C = 3 on three representative tasks, with one action executed before replanning in both settings.
+This ablation helps separate the policy-improvement mechanism from the method-specific action
+chunking used in the fully supervised block of Table 1.
+Table 13: Success rate (%) of real-action policies with 100% action labels (mean ± standard deviation
+over four seeds). Results for C = 1 and LAPIS are reproduced from Table 1. New C = 3 results
+average the 300k, 400k, and 500k checkpoints within each seed.
+Method
+C
+AntMaze-medium
+Cube-single
+Scene
+GCIQL
+1
+12 ±2
+30 ±7
+12 ±2
+GCIQL
+3
+19 ±2
+24 ±4
+3 ±1
+CRL
+1
+95 ±2
+18 ±10
+13 ±3
+CRL
+3
+95 ±1
+23 ±10
+13 ±1
+LAPIS
+3
+48 ±3
+45 ±4
+45 ±1
+38
+
+
+Preprint
+Table 14: Success rate (%) of latent-action LAPIS with 5% action labels at different guidance scales.
+Task
+w = 0
+w = 1
+w = 3
+v-antmaze-medium-navigate
+30 ±6
+51 ±5
+49 ±3
+v-antmaze-large-navigate
+7 ±2
+8 ±2
+10 ±2
+v-antmaze-giant-navigate
+0 ±0
+0 ±0
+0 ±0
+v-antmaze-teleport-navigate
+14 ±4
+16 ±4
+21 ±3
+v-cube-single-play
+13 ±1
+53 ±3
+62 ±5
+v-cube-double-play
+13 ±1
+29 ±4
+31 ±6
+v-cube-triple-play
+18 ±1
+20 ±1
+20 ±0
+v-cube-quadruple-play
+10 ±4
+13 ±3
+14 ±3
+v-scene-play
+18 ±3
+25 ±4
+29 ±4
+Table 15: Goal-conditioned CFGRL in physical and learned latent action spaces. Success rate
+(%). The comparison focuses on the effect of increasing guidance within each action representation.
+Task
+Action space
+w = 0
+w = 1
+w = 3
+v-antmaze-medium-navigate
+Real
+7.2 ±1.9
+15.0 ±1.0
+24.1 ±4.0
+Latent
+6.7 ±1.5
+5.0 ±0.7
+6.1 ±0.9
+v-cube-single-play
+Real
+0.7 ±0.2
+1.5 ±1.7
+4.0 ±5.8
+Latent
+0.5 ±0.5
+0.6 ±0.3
+0.2 ±0.2
+v-scene-play
+Real
+2.8 ±0.5
+4.4 ±1.0
+3.9 ±1.0
+Latent
+1.8 ±0.5
+1.6 ±0.8
+1.7 ±0.9
+Guidance scale.
+Table 14 evaluates LAPIS at w ∈{0, 1, 3}. Here w = 0 uses the behavior
+branch, w = 1 uses the high-value branch trained toward the supported target qG, and w = 3 further
+extrapolates in the high-value direction. On all visual manipulation tasks, most of the improvement
+from w = 0 to the default w = 3 is already obtained at w = 1. For example, success increases from
+13 to 53 to 62 on cube-single, from 13 to 29 to 31 on cube-double, and from 18 to 25 to 29 on scene.
+Thus, stronger guidance provides additional gains in some tasks, but the supported high-value branch
+itself accounts for the dominant improvement in these manipulation domains.
+CFGRL in physical and learned latent action spaces.
+Because LAPIS adopts classifier-free
+guided policy extraction, we additionally compare with the value-free goal-conditioned formulation
+of CFGRL (Frans et al., 2025). In this setting, standard flow-based GCBC corresponds to w = 1,
+while w > 1 strengthens goal guidance at inference without learning an explicit value function. We
+apply the same CFGRL construction both to physical actions and directly to learned latent actions,
+and sweep w ∈{0, 1, 3}. In the latent-action setting, CFGRL uses the same latent action model and
+decoder as LAPIS. Table 15 reports checkpoint-averaged success rates.
+Increasing guidance improves physical-action CFGRL most clearly on AntMaze, where success
+rises from 7.2 at w = 0 to 24.1 at w = 3. In contrast, directly applying the same goal-conditioned
+guidance mechanism in the learned latent space produces no consistent improvement across the three
+domains: performance remains nearly unchanged, or decreases, as w increases. Thus, the gains
+associated with classifier-free guidance in an executable physical action space do not automatically
+transfer when the guided variable is a learned latent action.
+This difference is consistent with the cross-representation issue studied in Section 5. CFGRL’s
+goal-conditioned construction treats the generated variable as the action whose future-goal occupancy
+defines the improvement signal. For a physical action, this action is executed directly. A learned latent
+action, however, is an outcome label inferred from an observed transition and must subsequently
+be decoded into physical control. Improving a distribution over latent actions therefore does not by
+itself guarantee improvement after decoding: the selected latent must be appropriate for the current
+state and its represented transition must be faithfully realized by the decoder. These are precisely
+39
+
+
+Preprint
+the additional correspondences captured by supported outcome identifiability and latent-to-physical
+execution in Theorem 1.
+LAPIS addresses this issue before guided inference. Rather than using guidance itself to construct
+an improved latent policy, LAPIS first scores only observed state–latent transitions and forms the
+critic-filtered distribution qG(z | s, g), whose support is contained in the observed conditional
+distribution qB(z | s, g). The high-value flow branch is then trained toward qG, and classifier-free
+guidance is applied only after this support-aware target has been constructed. This distinction is
+already visible without extrapolative guidance: at w = 1, latent CFGRL remains weak on AntMaze-
+medium, Cube-single, and Scene, whereas the LAPIS high-value branch reaches 51%, 53%, and
+25%, respectively (Table 14). Thus, the main difference is not the use of classifier-free guidance itself,
+but the construction of the latent policy-improvement target on observed state–latent transitions.
+E.6
+ACTION DECODABILITY OF THE LATENT REPRESENTATION
+Probe protocol.
+We fit a two-hidden-layer MLP (256 units per layer, ReLU activations) from the
+frozen, unquantized latent ze to the current action at. For each OGBench task, we use independently
+trained H = 3 LAMs at 500k training steps. The MLP is trained on the labeled 5% of training
+trajectories. For OGBench, probe validation and test trajectories are disjoint subsets of the official
+validation dataset. For D4RL Kitchen, we use four independently trained partial-data LAMs (seeds
+0–3) at 500k steps with H = 3, and split held-out rendered episodes into disjoint probe validation
+and test sets. Latent standardization uses probe training data only; we select the MLP by validation
+MSE over at most 200 epochs and report test R2 in Tables 16 and 17.
+For action coordinate d, let SSEd = P
+i(aid −ˆaid)2 and SSTd = P
+i(aid −¯ad)2 on the test set. We
+report R2
+d = 1 −SSEd/SSTd and the variance-weighted aggregate
+R2
+Overall = 1 −
+P
+d SSEd
+P
+d SSTd
+.
+For Tables 16–18, we first average the three probe runs within each LAM seed. Per-coordinate entries
+are then averaged across LAM seeds, while Overall reports the mean ± sample standard deviation
+across LAM seeds.
+Table 16: MLP action-decodability R2 on held-out OGBench trajectories (ze →at, H = 3). Overall
+is the variance-weighted R2. Cube/scene actions have five coordinates; antmaze actions have eight.
+Task
+a0
+a1
+a2
+a3
+a4
+a5
+a6
+a7
+Overall R2
+v-antmaze-medium-navigate
+0.68
+0.47
+0.61
+0.62
+0.70
+0.49
+0.62
+0.49
+0.597 ±0.001
+v-antmaze-large-navigate
+0.69
+0.46
+0.60
+0.61
+0.70
+0.42
+0.64
+0.53
+0.596 ±0.001
+v-antmaze-giant-navigate
+0.71
+0.50
+0.63
+0.59
+0.68
+0.45
+0.58
+0.47
+0.588 ±0.003
+v-antmaze-teleport-navigate
+0.65
+0.50
+0.59
+0.61
+0.63
+0.41
+0.63
+0.48
+0.575 ±0.002
+v-cube-single-play
+0.83
+0.92
+0.96
+0.03
+0.83
+–
+–
+–
+0.778 ±0.000
+v-cube-double-play
+0.80
+0.91
+0.95
+−0.10
+0.81
+–
+–
+–
+0.740 ±0.001
+v-cube-triple-play
+0.84
+0.94
+0.97
+−0.01
+0.83
+–
+–
+–
+0.773 ±0.000
+v-cube-quadruple-play
+0.85
+0.94
+0.97
+0.19
+0.84
+–
+–
+–
+0.806 ±0.001
+v-scene-play
+0.90
+0.92
+0.94
+0.57
+0.79
+–
+–
+–
+0.811 ±0.000
+Table 17: MLP action-decodability R2 on held-out D4RL Kitchen trajectories (ze →at, H = 3).
+Overall is the variance-weighted R2.
+Task
+a0
+a1
+a2
+a3
+a4
+a5
+a6
+a7
+a8
+Overall R2
+D4RL Kitchen 0.91 0.46 0.43
+0.81
+0.50
+0.45
+0.53
+0.38
+0.33
+0.660 ±0.008
+Temporal gap and action decodability.
+We compare H = 1 and H = 3 representations using
+matched samples and frozen 500k LAMs. Both probes predict the same current action at from the
+unquantized latent ze using the MLP protocol above. Table 18 reports variance-weighted test R2. The
+40
+
+
+Preprint
+H = 3 representation gives higher action decodability in all three domains. A plausible explanation
+is that a longer observation gap exposes more visible action-dependent changes, making the transition
+signal easier to retain under visual augmentation and quantization. These probes quantify the action
+information recoverable from the learned representations.
+Table 18: Temporal gap and action decodability. Variance-weighted test R2 for an MLP predicting at
+from ze, using matched samples and frozen 500k LAMs.
+Environment
+H = 1
+H = 3
+v-antmaze-medium-navigate
+0.501 ±0.002
+0.597 ±0.001
+v-cube-single-play
+0.586 ±0.001
+0.778 ±0.000
+v-scene-play
+0.628 ±0.001
+0.811 ±0.000
+E.7
+QUALITATIVE ROLLOUTS
+Start
+Goal
+Window
+Drawer
+Cube
+LAM + BC
+approach; no change
+open 
+ re-close
+cube unchanged
+Window
+Drawer
+Cube
+LAM + CRL
+cube moved
+no approach
+no approach
+Window
+Drawer
+Cube
+closed
+opened
+cube unchanged
+LAPIS
+Figure 7: Qualitative rollouts on scene (5% labels), shared start and goal.
+Figure 7 compares rollouts from a shared start state with the goal of closing the window, opening
+the drawer, and keeping the cube unchanged. Each panel overlays the gripper trajectory and two
+interaction frames on the final state, with per-subtask outcomes below. Recorded simulator posi-
+tions confirm that LAM+BC opens then re-closes the drawer and leaves the window unchanged;
+LAM+CRL neither opens the drawer nor closes the window and moves the cube off-target; LAPIS
+completes all three subtasks.
+E.8
+EXTRACTION RULE AND CRITIC
+Table 4(b) separates the contribution of the extraction rule from that of the critic in the same latent
+space. All entries use the same frozen LAMs and decoders, 5% action labels, flow-actor architecture,
+training budget, and evaluation protocol as LAPIS (four seeds; the 300k, 400k, and 500k checkpoints
+are averaged within each seed). The TD-InfoNCE critic is the LAPIS critic. The IQL critic is
+goal-conditioned IQL (Kostrikov et al., 2022) over latent actions with expectile 0.9. The extraction
+rules are as follows.
+• Gate + flow: the LAPIS actor of Equation (5), evaluated at w = 3. With the TD-InfoNCE
+critic this is LAPIS (Table 1).
+• AWR-weighted flow: the high-value branch is trained with unnormalized weights exp(βA),
+clipped at 100, instead of the gate (Peng et al., 2019), with a per-environment temperature
+β; the behavior branch is unchanged. Evaluated at w = 3.
+• IDQL-style selection: 32 latents are sampled from the behavior branch (w = 0) of the
+trained flow actor, and the one with the highest critic value is executed (Hansen-Estruch
+et al., 2023). With the TD-InfoNCE critic this is LAPIS† (Table 1).
+• DDPG+BC flow: a one-step policy is trained to maximize the critic while being distilled
+from a flow behavior policy, as in FQL (Park et al., 2025b).
+41
+
+
+Preprint
+Results are in Table 4(b) (Section 7.4); this grid was Table 18 in the previous revision.
+E.9
+EXECUTION FAILURE OF GENERATED LATENTS
+Protocol.
+We measure whether latents generated by a policy are executed faithfully, on
+cube-single and scene with four seeds, at every decision step of the evaluation episodes
+(five tasks and 20 episodes per task). At each decision step we save the full simulator state, decode
+the selected latent into its three-action chunk, execute the chunk open loop, re-encode the start obser-
+vation and the observation three steps later, and record the round-trip error ρ = ∥I(ot, ˜ot+3) −z∥2 in
+the standardized quantized latent coordinates used for dround in Figure 3. We then restore the saved
+state and continue the episode; for every run we checked that restoring reproduces the simulator state
+exactly and that probing does not change the episode.
+Reference and failure rate.
+For each task and LAM, we set the simulator to 2,000 dataset states
+and execute the decoded chunk of the recorded dataset latent z = I(st, st+3), which gives a reference
+distribution of ρ. A decision step fails when ρ exceeds the 95th percentile of this reference distribution,
+so dataset latents fail 5% of the time by construction. The threshold is computed for the LAM and
+decoder that each policy uses.
+Settings.
+LAPIS at w = 3 (the reported setting); LAPIS at w = 3 without codebook projection,
+where the generated continuous latent is decoded directly; AWR-weighted flow (Appendix E.8) at
+w = 3; and max-Q, CRL-style critic maximization with a flow actor (Eysenbach et al., 2022), as in
+Table 4(a).
+Table 19: Execution failure rate (%, ↓) of generated latents: the fraction of decision steps whose
+round-trip error exceeds the 95th percentile of dataset latents. Mean ± std over four seeds. Bold
+marks the lowest rate among policies in each row.
+Task
+Dataset latents
+LAPIS (w = 3)
+AWR-flow
+max-Q
+cube-single
+5.0
+5.8 ±2.3
+7.1 ±0.8
+6.7 ±1.6
+scene
+5.0
+12.6 ±3.3
+15.4 ±4.7
+24.0 ±4.7
+Table 20: Effect of codebook projection on LAPIS at w = 3, evaluated on the same checkpoints with
+and without projection. The success difference is paired by seed (mean ± std over four seeds).
+cube-single
+scene
+Failure rate (%), with / without projection
+5.8 / 5.8
+12.6 / 12.4
+Success difference, without −with (points)
+−2.3 ±4.0
++1.5 ±6.5
+Results.
+LAPIS latents fail at nearly the dataset rate on cube-single (5.8% vs. 5%) and at the
+lowest rate among the compared methods on scene (12.6%), where max-Q fails about twice as
+often (24.0%). Removing codebook projection leaves the failure rate unchanged, and the success
+difference lies within seed variation (Table 20). Executability and performance therefore come from
+the latents generated by the policy itself, not from the projection. For guidance strength, the dround
+panel of Figure 3 reports the mean round-trip error of LAPIS over w on antmaze-medium.
+42
+
+
+Preprint
+E.10
+5% LABELS WITHOUT LAM
+Table 21 reports the 5%-label setting without LAM pretraining, where policies are trained on the
+labeled trajectories only.
+Table 21: Success rate (%) on the OGBench visual suite with 5% action labels and without LAM
+pretraining.
+Task
+F-GCBC
+GCIVL
+GCIQL
+QRL
+HIQL
+CRL
+LAPIS
+antmaze-medium
+3 ±0
+3 ±1
+4 ±1
+0 ±0
+8 ±5
+8 ±1
+2 ±1
+antmaze-large
+1 ±0
+1 ±0
+0 ±0
+0 ±1
+2 ±2
+0 ±1
+0 ±0
+antmaze-giant
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+antmaze-teleport
+2 ±1
+1 ±1
+1 ±1
+1 ±1
+3 ±2
+1 ±1
+2 ±1
+cube-single
+2 ±1
+5 ±1
+7 ±2
+8 ±3
+5 ±1
+1 ±1
+4 ±1
+cube-double
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+1 ±1
+0 ±0
+0 ±0
+cube-triple
+0 ±0
+2 ±1
+0 ±0
+0 ±0
+4 ±0
+0 ±0
+1 ±1
+cube-quadruple
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+0 ±0
+scene
+2 ±1
+4 ±2
+1 ±1
+2 ±2
+8 ±2
+3 ±1
+4 ±0
+43
+
+
+Preprint
+F
+ADDITIONAL DISCUSSION OF EXPERIMENTAL SETTINGS
+This appendix provides additional context for several experimental comparisons whose interpretation
+involves differences in policy-improvement mechanisms, supervision protocols, decoder training,
+or environment dynamics. These details are complementary to the implementation specifications in
+Appendix E and the theory–practice correspondence in Appendix D.
+F.1
+ANTMAZE PERFORMANCE AND CONSERVATIVE EXTRACTION
+Table 1 shows a substantial gap between fully supervised real-action CRL and real-action LAPIS on
+AntMaze, particularly on the larger mazes. These results highlight a tradeoff of the support-aware
+update used by LAPIS under full physical-action supervision.
+LAPIS is motivated by a failure specific to learned latent-action spaces: direct value maximization
+can select latent actions whose represented transitions are not physically realizable after decoding.
+The latent realizability failure underlying this mismatch is absent when the policy directly outputs
+physical actions, although ordinary offline-RL distribution shift remains. In this setting, restricting
+policy improvement toward behavior-supported transitions can be unnecessarily conservative, while
+more aggressive critic-driven optimization may be beneficial. Conversely, in the learned latent-action
+setting, direct maximization can move the policy toward unrealizable latents, motivating the supported
+update used by LAPIS.
+The larger gap on more difficult AntMaze tasks is therefore consistent with a cost of conservative
+policy extraction in long-horizon navigation. Accordingly, the fully supervised results provide
+physical-action references for the limited-supervision comparisons. Our main question is whether
+effective policy improvement can be retained after replacing physical actions with learned latent
+actions under limited action supervision.
+F.2
+PROTOCOL DIFFERENCES ACROSS BASELINE TABLES
+The GCIQL entries in Table 1 and the GCIVL entries in Table 3 (labeled GCIQL in the original
+submission) differ in their value-learning and policy-extraction objectives. Table 1 uses an action-
+conditioned critic and a state–goal value function, with policy extraction based on the Q −V
+advantage. This formulation is applied to physical actions at the stated label budgets and to learned
+latent actions in the LAM setting.
+Table 3 uses an action-scarce adaptation that learns a state–goal value function from all observed
+transitions, without requiring action labels for value learning. Its physical-action policy is trained only
+on labeled transitions, weighted by the value difference between successive states. The two tables
+therefore use different methods rather than repeated evaluations of the same procedure. Because the
+Table 3 variant learns no action-conditioned Q, it corresponds to GCIVL in OGBench (Park et al.,
+2025a), and we name it accordingly. GCIVL in Tables 1 and 21 is the standard OGBench GCIVL,
+trained only on transitions with (physical or latent) actions; the Table 3 variant also learns its value
+from action-free transitions.
+F.3
+INTERPRETING DECODER LABEL-BUDGET TRENDS
+Table 5 isolates decoder supervision from latent representation learning: all label budgets use the same
+frozen LAM trained with 5% action labels, while only the amount of action supervision available to
+the decoder is varied. Thus, the non-monotonic performance of the state-marginal decoder across
+1%, 5%, and 100% decoder labels is not caused by changes in the learned latent representation.
+The state-marginal decoder Ψ(a | z) aggregates physical realizations across states without observing
+the current state. If the same latent code admits different appropriate controls at different states,
+broader coverage can make the empirical conditional p(a | z) more heterogeneous, partially offsetting
+the benefit of additional labeled examples. By contrast, the state-conditioned decoder Ψ(a | s, z) can
+use the current state to resolve such variation when sufficient supervision is available.
+This provides a plausible interpretation of the pattern in Table 5: the marginal decoder performs
+better under 1% and 5% supervision, where sharing action information across states can be beneficial,
+while the state-conditioned decoder performs better with full supervision. The fact that the marginal
+44
+
+
+Preprint
+cube score at 5% exceeds its 100%-label score should therefore not be interpreted as evidence that
+fewer labels are intrinsically preferable; rather, performance reflects the interaction between decoder
+conditioning, labeled-data coverage, and finite-sample optimization. LAPO (Schmidt & Jiang, 2024,
+Sec. 6.2) reports the related observation that a decoder with access only to the latent action plateaus
+as labeled data grows, which it attributes to latents that are not state-invariant; it does not compare
+against a state-conditioned decoder. Table 5 thus measures the gap between the analyzed decoder Ψ∗
+and the implemented Ψ(a | z), and shows that it depends on the label budget.
+F.4
+STOCHASTIC TELEPORT DYNAMICS
+The visual-antmaze-teleport benchmark provides a concrete case in which the deterministic-dynamics
+assumption used for the exact transfer result does not hold globally. In the OGBench teleport
+environment, entering an inbound teleport region sends the agent to a randomly selected outbound
+portal. Thus, the same physical state and control can induce different successor states at a teleport
+transition. This violates Assumption 1 and means that the exact equality in Theorem 1 is not expected
+to apply at such transitions. The stochastic teleport implementation can be verified directly in
+OGBench.
+This case is instead described by the approximate-transfer analysis in Appendix D.3. For a decoded
+latent policy, Proposition 2 bounds the return discrepancy by
+JM(bΨ ◦πz) −JMBz (πz)
+ ≤
+¯ϵr
+1 −γ + 2γRmax
+(1 −γ)2 ¯ϵp,
+where ¯ϵp measures the transition mismatch between latent evaluation and decoded physical execution
+and ¯ϵr measures the corresponding reward mismatch. Random teleportation can increase ϵp because
+a latent transition inferred from one observed teleport outcome need not reproduce that same outcome
+when the decoded action is executed again. The exact deterministic result is recovered when these
+mismatches vanish.
+The teleport task evaluates performance under stochastic transitions, for which the transition- and
+reward-mismatch framework in Appendix D.3 provides the relevant theoretical perspective.
+F.5
+STANDALONE F-GCBC AND THE LAPIS BEHAVIOR BRANCH
+Table 1 reports F-GCBC as a standalone flow-based goal-conditioned behavioral-cloning baseline,
+whereas w = 0 in Table 14 evaluates the behavior-conditioned branch of a jointly trained LAPIS
+actor. Although both are trained from observed latent transitions using flow matching, they are not
+the same trained policy. LAPIS uses a single conditional velocity model vθ(·; o) whose o = 0 branch
+is trained toward the observed distribution qB and whose o = 1 branch is simultaneously trained
+toward the critic-filtered distribution qG through Equation (5). The two losses therefore update shared
+model parameters.
+Consequently, setting w = 0 at inference selects the behavior-conditioned velocity field of the jointly
+trained two-branch model. Table 14 is an inference-time guidance ablation within a fixed LAPIS actor,
+whereas Table 1 evaluates a separately trained F-GCBC policy. Their different training objectives
+and parameter sharing explain the difference between their scores.
+45
+
+
+Preprint
+G
+FUTURE WORK AND LIMITATIONS
+G.1
+FUTURE WORK
+A promising direction is to extend LAPIS from goal-conditioned to language-conditioned control.
+Prior work has shown that language instructions can be grounded into visual goal representations
+and executed through goal-conditioned policies (Myers et al., 2023; Cachet et al., 2024). This
+suggests that LAPIS could retain its latent-space policy-improvement framework while replacing
+explicit visual goals with language-derived goal representations, enabling policy improvement for
+instruction-following and vision-language-action settings. Extending the framework and its transfer
+analysis to partially observed settings using temporal or recurrent state representations is another
+important direction.
+G.2
+LIMITATIONS
+Our experiments are limited to simulated visual manipulation and navigation benchmarks, and we
+focus on goal-conditioned control with limited physical-action supervision. Consequently, we do
+not empirically study objectives with action-dependent rewards, where outcome-based abstraction
+can create a mismatch between latent and physical policy objectives. Real-robot deployment and
+language-conditioned control also remain outside the scope of the current evaluation.
+Our exact transfer and alignment results rely on deterministic dynamics, supported outcome identifia-
+bility, batch-constrained execution through the batch-exact decoder, and Markov state information.
+Practical LAPIS uses learned visual state representations, a learned state-marginal decoder, an H = 3
+latent representation with one-step replanning, and classifier-free guidance, so these conditions are
+not instantiated exactly. We explicitly study these departures in Appendix D and through targeted
+empirical analyses. The approximate-transfer analysis accounts for transition and decoder mismatch,
+while decoder-conditioning, temporal-horizon, and first-step execution analyses examine learned
+decoding and the H > 1 receding-horizon controller. For guided inference, the w = 1 high-value
+branch provides the supported target underlying our analysis, and the guidance sweep shows that it
+already captures most of the improvement on the manipulation tasks; w > 1 provides an additional
+inference-time extrapolation beyond this exact support guarantee. The direct CFGRL comparison
+further shows that guidance alone does not provide consistent improvement when applied directly in
+the learned latent space, reinforcing the role of support-aware target construction in practical LAPIS.
+46

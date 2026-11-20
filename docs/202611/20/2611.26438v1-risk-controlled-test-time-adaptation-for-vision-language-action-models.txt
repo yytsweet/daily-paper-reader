@@ -1,0 +1,2845 @@
+Risk-Controlled Test-Time Adaptation for Vision-Language-Action Models
+Zixuan Liu1
+Hashem Haghbayan2
+Zizhan Zheng1
+Siavash Khajavi3
+1Department of Computer Science, Tulane University
+2Department of Computing, University of Turku
+3Department of Industrial Engineering and Management, Aalto University
+{zliu41, zzheng3}@tulane.edu
+hashem.haghbayan@utu.fi
+siavash.khajavi@aalto.fi
+Abstract
+Retrieval-augmented
+vision-language-action
+(VLA)
+models enable efficient test-time adaptation by leveraging
+expert demonstrations as additional context without up-
+dating model parameters. However, even when retrieved
+demonstrations are relevant to the current task, the VLA
+may fail to effectively utilize the retrieved information,
+ultimately leading to task failure. To address this challenge,
+we propose R2-VLA, a risk-controlled retrieval-augmented
+VLA framework that enables reliable test-time adaptation
+by satisfying a user-specified task success rate requirement
+with minimal expert assistance. Specifically, R2-VLA learns
+an uncertainty predictor that estimates the uncertainty of
+the VLA’s predicted actions given the retrieved demonstra-
+tions, guiding when to act autonomously or request expert
+assistance. We further introduce a task-level risk-control
+procedure that calibrates the uncertainty threshold to
+satisfy a user-specified task-failure risk requirement. More-
+over, R2-VLA continually incorporates expert corrections
+into its retrieval memory to improve future adaptation
+while preserving the prescribed task-level risk guarantee.
+Experiments across three VLA backbones and four LIBERO
+benchmark suites demonstrate that R2-VLA improves aver-
+age task success by 9.2–11.2 percentage points, achieving
+the desired target with fewer expert requests. These results
+highlight the effectiveness of connecting the usefulness of
+retrieved demonstrations with task-level risk control to
+enable successful robotic manipulation.
+1. Introduction
+Recent advances in vision-language-action (VLA) mod-
+els [7–9, 22, 32, 37, 38, 40] have enabled a single policy to
+perform a broad range of robotic manipulation tasks, high-
+lighting their potential as general-purpose robotic control
+policies. However, even strong pre-trained VLAs often re-
+quire substantial fine-tuning or retraining to maintain reli-
+able performance under distribution shifts, such as new en-
+vironments, unseen objects, or novel task instructions [45],
+limiting their ability to rapidly adapt at deployment time. In
+contrast, Large Language Models (LLMs) can adapt to new
+tasks at inference time through in-context learning (ICL):
+given only a small number of input-output demonstrations
+as context, an LLM can adjust its behavior without up-
+dating its model parameters [10, 15, 28]. Inspired by this
+paradigm, recent work such as RICL [36] introduces in-
+context adaptation to pre-trained VLAs. Specifically, RICL
+maintains a compact retrieval buffer of expert demonstra-
+tions and, at each decision step, retrieves demonstrations
+relevant to the current observation as additional context for
+the VLA policy, enabling effective adaptation to previously
+unseen deployment conditions without parameter updates.
+The effectiveness of retrieval-based in-context adapta-
+tion depends critically on which demonstrations are re-
+trieved, since these examples determine what task-specific
+information is provided to the VLA at deployment. Prior
+work [36, 45], including RICL, relies on visual similar-
+ity between the current observation and observations in
+the retrieval buffer to select relevant demonstrations. Re-
+cent approaches have explored improved retrieval mecha-
+nisms [21, 25, 44], such as incorporating task instructions
+and learning embeddings that better capture behavioral rele-
+vance. However, improving retrieval quality does not neces-
+sarily guarantee successful task execution [26]. Even when
+the retrieved demonstrations are relevant to the current task,
+the VLA may still fail to translate the retrieved information
+into appropriate actions for its current state. As illustrated
+in Fig. 1(a), RICL retrieves behaviorally relevant demon-
+strations but nevertheless moves the bowl in the wrong di-
+rection, ultimately leading to task failure. This suggests the
+usefulness of retrieved demonstrations depends not solely
+on their relevance to the current task, but ultimately on
+1
+arXiv:2611.26438v1  [cs.CV]  19 Nov 2026
+
+
+Figure 1. Qualitative comparison of RICL and R2-VLA on the LIBERO-GOAL task “Put the bowl on top of the cabinet” using π0-FAST.
+(a) RICL retrieves behaviorally relevant demonstrations from the same task, yet still produces an incorrect action at step 85: instead of
+moving the bowl toward the cabinet, the policy moves it away from the target. This error leads to continued execution in the wrong
+direction and ultimately task failure. (b) R2-VLA detects such uncertain actions using its learned uncertainty predictor and requests expert
+assistance when the predicted uncertainty exceeds the threshold ˆλ, enabling successful task completion.
+whether they enable the VLA to successfully complete it.
+In this work, we propose R2-VLA, a risk-controlled
+retrieval-augmented VLA framework that enables reliable
+test-time adaptation by satisfying a user-specified task suc-
+cess rate. As discussed above, retrieving relevant demon-
+strations alone is insufficient for successful task execution,
+as the VLA may still fail to effectively utilize the retrieved
+information. Therefore, R2-VLA enables the VLA to deter-
+mine when it can act autonomously and when additional as-
+sistance is necessary to successfully complete the task. To
+this end, we augment the VLA with a learned uncertainty
+predictor that estimates how uncertain the VLA is about its
+predicted actions, given the current observation, retrieved
+demonstrations, and its own prior knowledge. When the
+predicted uncertainty is below a specified threshold, the
+VLA executes its own action autonomously (ACT). Oth-
+erwise, it requests expert assistance (ASK) to avoid poten-
+tially incorrect actions, as illustrated in Fig. 1 (b). How-
+ever, determining an appropriate uncertainty threshold is
+nontrivial, as the predicted uncertainty does not directly
+correspond to task-level success. We therefore introduce
+a risk-control procedure that calibrates the threshold to sat-
+isfy a user-specified task-failure risk requirement. In this
+way, R2-VLA directly connects the usefulness of retrieved
+demonstrations to their ability to support successful task
+completion.
+To summarize, our contributions are as follows:
+1.
+We propose R2-VLA, a risk-controlled retrieval-augmented
+VLA framework that learns to estimate the uncertainty of its
+predicted actions given retrieved demonstrations and deter-
+mines when to ACT or ASK to satisfy a user-specified task-
+level failure risk requirement. 2. We theoretically establish
+a connection between uncertainty prediction accuracy and
+task-level failure risk (Theorem 1). We further extend R2-
+2
+
+
+VLA to continual adaptation by incorporating expert cor-
+rections into the retrieval buffer and theoretically establish
+that the prescribed task-level risk can be preserved through-
+out adaptation (Theorem 2). 3. We conduct extensive ex-
+periments across three VLA backbones and four LIBERO
+benchmark suites, demonstrating consistent improvements
+of 9.2–11.2 percentage points in average task success over
+RICL, while meeting the desired target in most settings with
+minimal expert assistance.
+2. Preliminary
+Problem Setup. In this paper, we consider a general robotic
+manipulation setting [36, 45], where a pre-trained vision-
+language-action (VLA) policy πθ, parameterized by θ, is re-
+quired to perform novel tasks in unseen environments with-
+out any test-time parameter updates. Each task is specified
+by a natural language instruction ltext. At timestep t, the
+agent observes multi-view images It = (Itop
+t
+, Iside
+t
+, Iwrist
+t
+),
+corresponding to the top, side, and wrist camera views, to-
+gether with a proprioceptive state st. A standard VLA pol-
+icy predicts an action according to ˆat ∼πθ(· | xt), where
+xt = (It, st, ltext) denotes the current input.
+Re-training for In-Context Learning (RICL). To im-
+prove test-time adaptability without updating model pa-
+rameters, [36] introduce Re-training for In-Context Learn-
+ing (RICL), which conditions the VLA on retrieved ex-
+pert demonstrations provided as in-context examples. Let
+Dret
+=
+{mi}Nret
+i=1
+denote a retrieval buffer containing
+Nret expert demonstration frames, where each entry is
+mi = (Ii, si, ltext
+i
+, ai).
+Here, Ii = (Itop
+i
+, Iside
+i
+, Iwrist
+i
+)
+denotes the multi-view observations at the demonstration
+state, si is the corresponding proprioceptive state, ltext
+i
+is
+the task instruction, and ai is the expert action or action
+chunk, i.e., an array of actions over multiple timesteps.
+These demonstrations are not used to update the VLA pa-
+rameters at deployment.
+Instead, they provide external
+context for adapting the policy to the current task.
+At
+each timestep t during deployment, given the current in-
+put xt = (It, st, ltext), RICL retrieves a small set of rel-
+evant entries from Dret. Let fDINO denote a frozen DI-
+NOv2 image encoder [30]. RICL uses the top-view im-
+age Itop
+t
+as the retrieval query and compares it with the
+top-view image of each demonstration entry. Specifically,
+for each mi ∈Dret, it computes the distance dt(i) =
+∥fDINO(Itop
+t
+) −fDINO(Itop
+i
+)∥2. The M nearest entries are
+then selected as (j1, . . . , jM) = TopMsmallest
+i∈{1,...,Nret} dt(i),
+with dt(j1) ≤dt(j2) ≤· · · ≤dt(jM). The resulting re-
+trieved context is Mt = (mj1, . . . , mjM ), where entries
+are ordered from the nearest to the farthest neighbor. RICL
+then conditions on both the retrieved context and the current
+input to predict the next action, ˆat ∼πθ(· | Mt, xt).
+Risk Control. Risk control provides a general framework
+for calibrating a decision-making system so that a user-
+specified notion of risk remains below a desired level [1, 2,
+4]. In general, risk-control methods use a held-out calibra-
+tion dataset to determine whether a decision rule satisfies
+a prescribed population-level risk requirement. Formally,
+consider a family of decision rules {πλ : λ ∈Λ} indexed
+by a calibration parameter λ, and let L(πλ; Z) ∈[0, 1] de-
+note the loss incurred when applying πλ to a random ex-
+ample Z. The corresponding population risk is R(λ) =
+EZ∼P
+
+L(πλ; Z)
+
+, where P denotes the deployment distri-
+bution. Given a user-specified target risk ϵ, the goal is to use
+a held-out calibration set Dcal to select a parameter ˆλ such
+that R(ˆλ) ≤ϵ.
+We provide a more detailed discussion of related work on
+retrieval-augmented VLA and risk control in Appendix 6.
+3. Risk-Controlled Retrieval-Augmented VLA
+Even behaviorally relevant demonstrations do not necessar-
+ily enable a retrieval-augmented VLA to complete a task
+successfully. We therefore propose R2-VLA, which deter-
+mines when the VLA can act autonomously and when it
+should request expert assistance, with the goal of satisfying
+a user-specified task success requirement while minimizing
+the frequency of expert assistance. We first formulate the
+R2-VLA policy (Section 3.1), then describe how the uncer-
+tainty predictor is learned (Section 3.2) and how its thresh-
+old is calibrated using task outcomes (Section 3.3). Finally,
+we introduce continual deployment adaptation (Section 3.4)
+and present the theoretical results (Section 3.5).
+3.1. R2-VLA Framework
+R2-VLA adopts an uncertainty-guided ACT/ASK decision
+framework built upon a retrieval-augmented VLA policy πθ
+with a fixed retrieval buffer Dret. At each decision step
+t, the current input xt and retrieved context Mt are pro-
+vided to the VLA, which predicts an action ˆat. We augment
+the VLA with a lightweight uncertainty predictor Uψ that
+outputs a scalar uncertainty score ˆut = Uψ(Mt, xt) > 0
+from its internal representations, reflecting the VLA’s own
+assessment of the uncertainty associated with its predicted
+action. Thus, the augmented model produces (ˆat, ˆut) =
+πθ,ψ(· | Mt, xt). Given a threshold λ that specifies the
+maximum tolerable predicted action uncertainty, R2-VLA
+follows the decision rule:
+πλ
+θ,ψ(Mt, xt) =
+(
+ˆat,
+ˆut ≤λ
+(ACT),
+aE
+t ,
+ˆut > λ
+(ASK),
+where aE
+t denotes the expert action provided only when
+ASK is triggered. A lower threshold generally makes the
+policy more cautious, whereas a higher threshold permits
+autonomous execution at more decision points.
+The objective of R2-VLA is to satisfy a user-specified
+task success rate requirement while minimizing the fre-
+3
+
+
+quency of expert assistance. Formally, let Z = (ξ, ltext)
+denote a task instance, where ξ represents the initial en-
+vironment configuration, including the initial states of the
+robot and objects, and ltext denotes the task instruction. Let
+P denote the deployment distribution over task instances.
+Executing πλ
+θ,ψ from Z produces a trajectory τ λ(Z) of T
+decision steps.
+We define the task-level failure loss as
+L(λ; Z) = I{τ λ(Z) fails}, and the corresponding popula-
+tion risk as R(λ) = EZ∼P[L(λ; Z)]. For the same trajec-
+tory, define its ASK rate as H(λ; Z) = 1
+T
+PT
+t=1 I{ˆut > λ},
+and its average as H(λ) = EZ∼P[H(λ; Z)]. Given a user-
+specified maximum task-failure risk ϵ, equivalently a target
+success rate of 1 −ϵ, our objective is to select a threshold
+from the candidate set Λ that minimizes the frequency of
+expert assistance while satisfying the prescribed task-level
+risk requirement. Formally, we solve:
+min
+λ∈Λ
+H(λ)
+subject to
+R(λ) ≤ϵ.
+(1)
+Solving Eq. (1) is challenging for two reasons. First, the
+deployment distribution P is unknown, making it difficult
+to directly evaluate the population risk R(λ) and ASK rate
+H(λ). Second, changing the threshold can alter subsequent
+trajectories, so H(λ) is not monotonic in λ, requiring us to
+evaluate each candidate threshold in Λ. To address these
+challenges, we next describe how R2-VLA learns an uncer-
+tainty predictor to guide ACT/ASK decisions and uses held-
+out task rollouts to select a statistically certified threshold
+that minimizes the empirical ASK rate among candidates.
+3.2. Learning the Uncertainty Predictor
+As discussed above, the uncertainty predictor provides a
+per-step signal to guide ACT/ASK decisions by assessing
+the VLA’s uncertainty about its predicted action from its
+internal representations, rather than relying on external re-
+trieval quality metrics, such as the DINO distance used by
+RICL. We characterize action uncertainty through the dis-
+crepancy between the VLA’s predicted action and the cor-
+responding expert action, where a large discrepancy indi-
+cates that the VLA’s predicted action deviates from the de-
+sired expert behavior, potentially leading to task failure. We
+therefore train the uncertainty predictor to estimate this dis-
+crepancy, as detailed below.
+We first train the original retrieval-augmented RICL
+VLA πθ using a predefined retrieval buffer Dret and the
+corresponding training data, as detailed in Appendix 8.2.
+After the VLA has been trained, we freeze θ and optimize
+only Uψ. This separation ensures that the target used to
+train the uncertainty head remains fixed. If πθ were updated
+simultaneously, its predicted action ˆat would continuously
+change during training and cause the moving target prob-
+lem [16]. At training step t, the frozen VLA predicts ˆat
+given (Mt, xt). Let aE
+t denote the corresponding expert
+action, which serves as the ground-truth reference for un-
+certainty learning. We define the action uncertainty ut as
+the normalized discrepancy between the VLA’s predicted
+action ˆat and the expert action aE
+t :
+ut = dA(ˆat, aE
+t ) =
+v
+u
+u
+t 1
+HD
+H
+X
+h=1
+D
+X
+d=1
+ 
+ˆat,h,d −aE
+t,h,d
+σd
+!2
+.
+where D is the action dimension, H is the number of ac-
+tions in an action chunk, and σd is the standard deviation of
+action dimension d, estimated once from the training data.
+This normalization accounts for the fact that different ac-
+tion dimensions, such as translation, rotation, and gripper
+control, may operate on substantially different numerical
+scales. We train the uncertainty predictor to approximate
+the action discrepancy, i.e., ˆut ≈ut, by minimizing the fol-
+lowing uncertainty regression loss
+LU =
+1
+E[T]E
+" T
+X
+t=1
+SmoothL1
+ log(ˆut + η), log(ut + η)
+
+#
+,
+where η = 10−4 > 0 is a numerical stabilization constant.
+A key challenge is ensuring that the uncertainty head
+learns failure modes specifically induced by retrieval. If it
+is trained only with ordinary retrieval contexts from Dret,
+most retrieved demonstrations may be helpful, providing
+relatively few examples in which retrieval actively degrades
+the resulting action.
+We therefore augment uncertainty-
+head training with deliberately degraded retrieval contexts,
+including wrong-task retrieval, visually similar retrieval as-
+sociated with a different goal, and random or uninformative
+retrieval, as detailed in Appendix 8.3 Table 3. Crucially,
+these corrupted contexts are used to teach the uncertainty
+head action uncertainty, rather than retrieval abnormality.
+A poor or unusual retrieval should not necessarily result in
+high uncertainty if the VLA can still produce the correct ac-
+tion from its pretrained knowledge. In this case, ut ≈0,
+and the desired uncertainty remains small. Conversely, a
+retrieved context may appear behavior relevant while steer-
+ing the VLA toward an incorrect behavior, in which case
+ut ≫0 and the uncertainty should be correspondingly
+large. We provide an ablation study on the effect of incorpo-
+rating corrupted retrieval contexts during uncertainty-head
+training in Appendix 9.2, Table 6.
+3.3. Risk-Controlled Calibration
+After training the uncertainty predictor, R2-VLA produces
+both an action prediction and a predicted uncertainty score.
+During deployment, all model parameters remain frozen,
+and the policy executes its predicted action when ˆut ≤
+λ and requests expert assistance otherwise, as defined in
+Sec. 3.1. To solve the threshold selection problem in Eq. (1),
+we adopt the risk-control framework introduced in Sec. 2
+4
+
+
+to identify thresholds that satisfy the prescribed task-failure
+risk requirement with high probability and select the one
+with the lowest empirical ASK rate among the certified
+candidates.
+Specifically, since the deployment distribu-
+tion P is unknown, we construct a held-out calibration set
+Dcal = {Zi}Ncal
+i=1 to empirically estimate the population
+risk R(λ) and ASK rate H(λ). The calibration set consists
+of independent task instances sampled from P and is dis-
+joint from the data used for retrieval and uncertainty learn-
+ing. Each task instance Zi = (ξi, ltext
+i
+) specifies an initial
+environment configuration and task instruction. We con-
+sider a sufficiently large, predefined candidate threshold set
+Λ = {λ1, . . . , λK}, with details on its construction pro-
+vided in Appendix 8.1. Since H(λ) is not monotonic in λ,
+we estimate both R(λ) and H(λ) for each candidate thresh-
+old λ ∈Λ to identify the best λ for solving Eq. (1).
+The complete procedure is summarized in Algorithm 1.
+For each λ ∈Λ and calibration instance Zi, we reset the
+environment to ξi and execute the R2-VLA policy πλ
+θ,ψ
+until termination, producing a trajectory τ λ
+i .
+We record
+the episode-level failure loss as Li(λ) = I{τ λ
+i fails} and
+compute the total number of failed calibration episodes as
+Fλ = PNcal
+i=1 Li(λ) (Algorithm 1, Lines 4–6). We then
+determine whether the observed failure count Fλ is suffi-
+ciently small to reject the hypothesis that the task-failure
+risk exceeds the prescribed target ϵ. Following [2], we for-
+mulate this as the hypothesis test H0,λ : R(λ) > ϵ. Thus,
+certifying λ amounts to finding sufficient evidence against
+this hypothesis. Because each episode-level loss is binary,
+if the true failure probability were exactly equal to the tar-
+get ϵ, then the number of failures among Ncal independent
+calibration episodes would follow B ∼Binomial(Ncal, ϵ).
+We therefore compute pλ = Pr(B ≤Fλ) (Algorithm 1,
+Line 9). This quantity measures how likely it would be to
+observe Fλ or fewer failures if the true failure rate were at
+ϵ. If pλ is small, the observed failure count is unusually low
+even under this boundary case, providing evidence against
+the hypothesis H0,λ.
+Since we evaluate multiple candidate thresholds, we
+must also control the probability of falsely certifying any
+threshold whose task-failure risk exceeds ϵ. Using Bonfer-
+roni correction [2] with confidence parameter δ, we con-
+struct the certified set bΛsafe ⊆Λ, which contains all can-
+didate thresholds that pass the statistical risk-control test:
+bΛsafe =
+
+λ ∈Λ : pλ ≤
+δ
+K
+	
+(Algorithm 1, Line 12). The
+correction allocates the total error probability δ across the
+K hypothesis tests. Consequently, with probability at least
+1 −δ, every threshold in bΛsafe satisfies R(λ) ≤ϵ. A de-
+tailed justification is provided in Appendix 7.2, Theorem 3.
+For calibration episode Zi, let Ti denote its number of de-
+cision steps and ˆui,t the predicted uncertainty at step t. Its
+observed ASK rate is Hi(λ) =
+1
+Ti
+PTi
+t=1 I{ˆui,t > λ} (Al-
+gorithm 1, Line 7), and the average calibration ASK rate
+Algorithm 1 Risk-Controlled Calibration of the ACT/ASK
+Threshold
+Require: Fixed retrieval buffer Dret, calibration set Dcal,
+candidate thresholds Λ = {λ1, . . . , λK}, R2-VLA pol-
+icy {πλ
+θ,ψ : λ ∈Λ}, target failure rate ϵ, confidence
+level δ
+Ensure: Calibrated threshold ˆλ
+1: for λ ∈Λ do
+2:
+Fλ ←0, Hλ ←0
+3:
+for Zi = (ξi, ltext
+i
+) ∈Dcal do
+4:
+Reset environment to ξi, execute πλ
+θ,ψ using Dret
+and record trajectory τ λ
+i of length Ti
+5:
+Li(λ) ←I{τ λ
+i fails}
+6:
+Fλ ←Fλ + Li(λ)
+7:
+Compute Hi(λ) =
+1
+Ti
+PTi
+t=1 I{ˆui,t > λ}, where
+ui,t is the uncertainty at step t
+8:
+end for
+9:
+pλ ←Pr[B ≤Fλ], B ∼Binomial(Ncal, ϵ)
+10:
+bH(λ) ←
+1
+Ncal
+PNcal
+i=1 Hi(λ)
+11: end for
+12: bΛsafe ←
+
+λ ∈Λ : pλ ≤
+δ
+K
+	
+13: ˆλ ←arg minλ∈bΛsafe bH(λ)
+14: return ˆλ
+is bH(λ) =
+1
+Ncal
+PNcal
+i=1 Hi(λ) (Algorithm 1, Line 10). We
+then choose ˆλ = arg minλ∈bΛsafe bH(λ) (Algorithm 1, Line
+13). Thus, ˆλ provides an approximate solution to Eq. (1),
+minimizing the empirical ASK rate among thresholds that
+satisfy the statistical risk-control criterion.
+3.4. Continual Deployment Adaptation
+The risk-control procedure in Sec. 3.3 calibrates the thresh-
+old ˆλ for a fixed retrieval buffer Dret.
+During deploy-
+ment, however, every ASK decision provides new expert
+experience at states where the current retrieval memory
+is insufficient. We therefore use these expert corrections
+to continually expand the retrieval buffer and improve fu-
+ture adaptation as summarized in Algorithm 2. Formally,
+we organize deployment into adaptation rounds indexed by
+q = 0, 1, . . . , Q. In practice, a new adaptation round can
+be triggered after a fixed number of deployment rollouts.
+At the beginning of round q, R2-VLA uses a fixed retrieval
+buffer D(q)
+ret together with its calibrated threshold ˆλ(q) (Al-
+gorithm 2, Line 1). Throughout the round, R2-VLA fol-
+lows the ACT/ASK decision rule (Algorithm 2, Lines 5–8).
+Whenever ASK is triggered, the external expert provides a
+corrective action aE
+t for the current input xt. All corrections
+collected during round q are stored in a temporary correc-
+tion buffer B(q)
+corr = {(xm, aE
+m)}N(q)
+corr
+m=1 (Algorithm 2, Line 8).
+At the end of the round, these corrections are incorporated
+5
+
+
+Algorithm 2 Continual Deployment Adaptation with Risk
+Recalibration
+Require: Initial retrieval buffer D(0)
+ret, initial calibration set
+D(0)
+cal
+1: Obtain ˆλ(0) by running Algorithm 1 with D(0)
+ret and D(0)
+cal
+2: for q = 0, 1, . . . , Q −1 do
+3:
+Initialize correction buffer B(q)
+corr ←∅
+4:
+for each timestep t do
+5:
+if ˆut ≤ˆλ(q) then
+6:
+Execute ˆat
+7:
+else
+8:
+Request expert assistance, execute aE
+t and store
+the resulting expert correction in B(q)
+corr
+9:
+end if
+10:
+end for
+11:
+Update retrieval memory: D(q+1)
+ret
+←D(q)
+ret ∪B(q)
+corr
+12:
+Draw a fresh calibration set D(q+1)
+cal
+and obtain
+ˆλ(q+1) by running Algorithm 1 with D(q+1)
+ret
+and
+D(q+1)
+cal
+13: end for
+into the retrieval memory as D(q+1)
+ret
+= D(q)
+ret ∪B(q)
+corr (Algo-
+rithm 2, Line 11). Notice that updating the retrieval buffer
+changes the behavior of the R2-VLA policy, even though
+the model parameters remain frozen. For the same query xt,
+the updated memory D(q+1)
+ret
+may return a different retrieved
+context than D(q)
+ret, thereby changing both the predicted ac-
+tion ˆat and its uncertainty ˆut. Consequently, the previously
+calibrated threshold ˆλ(q) is not guaranteed to preserve the
+target task-failure rate after the memory update. We there-
+fore recalibrate the threshold after each memory update.
+Specifically, after constructing D(q+1)
+ret
+, we draw a fresh cal-
+ibration set D(q+1)
+cal
+and rerun the risk-control procedure in
+Algorithm 1 using the updated retrieval buffer (Algorithm 2,
+Line 12). This produces a new certified threshold ˆλ(q+1),
+which is then used throughout the next adaptation round.
+3.5. Theoretical Results
+We first analyze why the uncertainty predictor is relevant
+to the objective (1). Let RE denote the task-failure prob-
+ability obtained by executing the expert policy throughout
+the episode and let T denote the number of decision steps
+in an episode. Recall the average ASK rate H(λ) and the
+population uncertainty-regression loss under the trajectory
+distribution induced by the R2-VLA policy πλ
+θ,ψ as LU(λ).
+Theorem 1. Under Assumptions 1–2 detailed in Ap-
+pendix 7.1, for any threshold λ, any c > 1, and the constant
+L detailed in Appendix 7.1,
+R(λ) ≤RE + L(c −1)η E[T](1 −H(λ))
++ Lc E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
+|
+{z
+}
+Uncertainty during ACT
++
+E[T]LU(λ)
+SmoothL1(0, log c)
+|
+{z
+}
+Uncertainty prediction accuracy
+.
+The proof is provided in Appendix 7.1.
+Theorem 1
+decomposes the task-failure risk into several interpretable
+components. The first term represents the failure probabil-
+ity of the expert policy, while the second term arises from
+the numerical stabilization constant η and becomes neg-
+ligible when η is sufficiently small.
+The remaining two
+terms characterize the contribution of the learned uncer-
+tainty signal to task-level success rate. Specifically, the third
+term measures the cumulative predicted uncertainty over
+autonomously executed actions, indicating that task-failure
+risk can be reduced when the robot acts autonomously pri-
+marily in low-uncertainty states. The final term captures un-
+certainty prediction error through the uncertainty-regression
+loss LU(λ), highlighting the importance of accurately pre-
+dicting action discrepancy, particularly avoiding severe un-
+derestimation of large action errors. Together, these results
+provide theoretical motivation for learning an accurate un-
+certainty predictor and using it to determine when the VLA
+can act autonomously and when expert assistance is neces-
+sary. We next establish that the risk requirement can remain
+certified after retrieval-memory updates.
+Theorem 2. Consider adaptation rounds q = 0, . . . , Q in
+Algorithm 2. At each round q, let ˆλ(q) be the threshold se-
+lected by Algorithm 1 using confidence level δq =
+δ
+Q+1.
+Suppose that, conditional on the deployment history be-
+fore round q, the calibration episodes are drawn indepen-
+dently from the round-q deployment distribution.
+Then
+Pr
+
+Rq(ˆλ(q)) ≤ϵ, ∀q = 0, . . . , Q
+
+≥1 −δ.
+The proof is provided in Appendix 7.2.
+Theorem 2
+shows that continual growth of the retrieval memory does
+not invalidate the task-level risk guarantee, provided that
+the threshold is recalibrated after each memory update us-
+ing fresh calibration episodes.
+4. Experiments
+4.1. Experimental Setup
+We implement R2-VLA policy following the model archi-
+tecture adopted in RICL [36], which uses π0-FAST as the
+VLA backbone. To evaluate the generality of our method
+across different model architectures and scales, we ad-
+ditionally consider MiniVLA [5] and OpenVLA [22] as
+smaller- and larger-scale VLA models, respectively.
+We
+evaluate R2-VLA on LIBERO [24], a simulated robotic
+6
+
+
+Table 1. Task success and ASK rate on LIBERO. SR denotes success rate.
+Backbone
+Method
+Spatial
+Object
+Goal
+Long
+Avg. SR ↑
+Avg. ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR
+ASK ↓
+MiniVLA
+RICL
+58.9%
+–
+0.0%
+59.1%
+–
+0.0%
+60.6%
+–
+0.0%
+28.5%
+–
+0.0%
+51.8%
+0.0%
+R2-VLA
+67.1%↑8.2
+65.0%
+17.0%
+77.4%↑18.3
+65.0%
+16.9%
+71.0%↑10.4
+65.0%
+14.4%
+35.7%↑7.2
+35.0%
+34.9%
+62.8%↑11.0
+20.8%
+π0-FAST
+RICL
+74.5%
+–
+0.0%
+72.0%
+–
+0.0%
+70.4%
+–
+0.0%
+34.2%
+–
+0.0%
+62.8%
+0.0%
+R2-VLA
+83.2%↑8.7
+80.0%
+44.6%
+78.9%↑6.9
+80.0%
+43.2%
+83.1%↑12.7
+80.0%
+41.7%
+42.7%↑8.5
+40.0%
+66.3%
+72.0%↑9.2
+49.0%
+OpenVLA
+RICL
+67.3%
+–
+0.0%
+65.8%
+–
+0.0%
+64.7%
+–
+0.0%
+31.6%
+–
+0.0%
+57.4%
+0.0%
+R2-VLA 79.3%↑12.0
+75.0%
+31.8%
+76.5%↑10.7
+75.0%
+30.1%
+78.4%↑13.7
+75.0%
+26.8%
+40.2%↑8.6
+40.0%
+44.6%
+68.6%↑11.2
+33.3%
+Table 2. Comparison of expert assistance strategies on LIBERO using the π0-FAST backbone. SR denotes success rate, and ACT denotes
+the average expert-action discrepancy during autonomous execution.
+Expert Assistance Strategy
+Spatial
+Object
+Goal
+Long
+Avg. SR ↑Avg. ASK ↓
+SR ↑
+Target SR
+ASK ↓
+ACT ↓
+SR ↑
+Target SR ASK ↓ACT ↓
+SR ↑
+Target SR ASK ↓ACT ↓
+SR ↑
+Target SR ASK ↓ACT ↓
+RICL (no help)
+74.5%
+–
+0.0%
+–
+72.0%
+–
+0.0%
+–
+70.4%
+–
+0.0%
+–
+34.2%
+–
+0.0%
+–
+62.8%
+0.0%
+Random ASK
+76.7%
+80.0%
+44.6%
+2.64
+70.8%
+80.0%
+43.2%
+2.79
+77.4%
+80.0%
+41.7%
+2.43
+37.1%
+40.0%
+66.3%
+2.98
+65.5%
+49.0%
+DINO Distance + Risk Control
+80.3%
+80.0%
+55.3%
+2.31
+72.6%
+80.0%
+53.7%
+2.28
+78.4%
+80.0%
+51.5%
+2.36
+40.9%
+40.0%
+77.9%
+2.69
+68.1%
+59.6%
+Action Entropy + Risk Control
+80.2%
+80.0%
+54.9%
+2.01
+77.8%
+80.0%
+53.1%
+2.15
+81.5%
+80.0%
+51.0%
+1.96
+41.4%
+40.0%
+77.2%
+2.23
+70.2%
+59.1%
+Learned Uncertainty + Risk Control (ours) 83.2%
+80.0%
+44.6%
+1.58
+78.9%
+80.0%
+43.2%
+1.66
+83.1%
+80.0%
+41.7%
+1.46
+42.7%
+40.0%
+66.3%
+1.70
+72.0%
+49.0%
+manipulation benchmark based on the Franka Panda arm.
+LIBERO contains four suites designed to evaluate differ-
+ent forms of manipulation generalization: SPATIAL, OB-
+JECT, GOAL, and LONG. For each suite, we use 20 ex-
+pert demonstrations per task to construct the retrieval buffer
+and maintain a disjoint set of 20 demonstrations per task
+for risk calibration. During evaluation, when ASK is trig-
+gered, a separately trained expert policy provides the action
+for the current observation. We report task success over
+100 evaluation rollouts per task using a held-out evaluation
+set that is disjoint from both the retrieval and calibration
+buffers. In addition to task success rate, we report the ASK
+rate, denoted by bH(λ) as defined in Section 3.3, which mea-
+sures the fraction of decision points at which R2-VLA re-
+quests expert assistance. Additional implementation details
+are provided in Appendix 8. Additional ablation studies in-
+vestigating the effects of the target risk level ϵ, retrieval cor-
+ruption during uncertainty-head training, and calibration-set
+size Ncal are provided in Appendix 9.2.
+4.2. Results
+Table 1 reports the task success rates and ASK rate of
+R2-VLA compared with RICL. R2-VLA consistently im-
+proves task success over the corresponding RICL base-
+line across all backbone–task suite combinations, demon-
+strating the effectiveness of identifying uncertain retrieval-
+guided behaviors and requesting expert assistance. More-
+over, R2-VLA generally achieves the prescribed task-level
+success targets, which are typically set at least 5 percent-
+age points above the corresponding RICL baseline. Specif-
+ically, R2-VLA reaches or exceeds the target success rate
+in 11 of the 12 settings. The only exception is π0-FAST
+on LIBERO-OBJECT, where the achieved success rate of
+78.9% is slightly below the 80.0% target. This small divia-
+tion may be due to limited number of evaluation rollouts, as
+our risk-control guarantee in Theorem 2 is statistical rather
+than a deterministic guarantee on every evaluation set. The
+ASK rate further reflect the varying difficulty of successful
+execution across task suites. In particular, LIBERO-LONG,
+which exhibits the lowest success rate across all three back-
+bones, also requires the highest ASK rate. In contrast, the
+other suites generally require fewer expert assistance while
+still achieving their prescribed success targets. These re-
+sults suggest that R2-VLA can adapt its reliance on expert
+assistance to the uncertain of predicted execution across dif-
+ferent tasks and VLA architectures.
+Improved task success alone does not establish that
+the learned uncertainty identifies decision points where re-
+trieved demonstrations are insufficient for successful VLA
+execution, as task success may also improve simply by del-
+egating more actions to an expert. We therefore compare
+R2-VLA against a Random ASK baseline that requests ex-
+pert assistance at randomly selected decision points while
+matching the expert assistance frequency of our method.
+This comparison isolates the benefit of identifying uncertain
+retrieval-guided behaviors rather than merely increasing ex-
+pert involvement. To further investigate whether learning
+action uncertainty from the VLA is necessary, we consider
+two alternative uncertainty signals: (1) DINO Distance,
+which uses the visual feature distance employed by RICL
+for demonstration retrieval as its uncertainty score, and (2)
+Action Entropy, which instead estimates uncertainty from
+the VLA’s action distribution. The DINO Distance variant
+directly evaluates whether the original retrieval quality met-
+ric is sufficient to identify when retrieved demonstrations
+provide insufficient behavioral guidance, while the Action
+Entropy variant evaluates whether the model’s predictive
+uncertainty can identify uncertain actions without training
+an additional uncertainty estimator. For these two baselines,
+thresholds are independently calibrated using the same risk-
+7
+
+
+Figure 2. Continual memory adaptation of R2-VLA using the π0-FAST backbone across four LIBERO suites. From left to right: improve-
+ment in task success rate relative to the initial policy, reduction in ASK rate, calibrated threshold ˆλ, number of expert corrections added to
+retrieval memory, and recalibration wall time.
+control procedure as R2-VLA, allowing us to compare the
+resulting trade-offs between task success and ASK rate. We
+additionally report the average action discrepancy during
+ACT, defined as
+E[
+PT
+t=1 I{ACTt}ˆut]
+E[
+PT
+t=1 I{ACTt}] . This metric provides
+empirical support for the mechanism highlighted in Theo-
+rem 1 by evaluating whether R2-VLA effectively prevents
+actions with large expert discrepancies from being executed
+autonomously.
+Table 2 shows that R2-VLA outperforms all three base-
+lines. Specifically, under the same ASK budget, Random
+ASK achieves an average success rate that is 6.5 percentage
+points lower than R2-VLA. This demonstrates that the im-
+provement cannot be attributed solely to additional expert
+assistance. Instead, selectively identifying decision points
+where retrieval-guided behaviors are uncertain is critical for
+successful task execution. Compared with DINO Distance,
+R2-VLA achieves higher task success while requiring fewer
+expert assistance. This indicates that retrieval quality met-
+rics alone are insufficient to determine whether the retrieved
+demonstrations enable the VLA to successfully complete
+the task, as illustrated in Fig. 1(a). Similarly, R2-VLA out-
+performs Action Entropy, suggesting that uncertainty de-
+rived directly from the action distribution is less effective
+than our learned uncertainty predictor. Notably, R2-VLA
+achieves a more favorable empirical trade-off between task
+success and ASK rate than both DINO Distance and Ac-
+tion Entropy. Moreover, R2-VLA achieves the lowest ACT
+error across all four LIBERO suites. This further supports
+Theorem 1, showing that the learned uncertainty effectively
+identifies actions for autonomous execution, thereby con-
+tributing to lower task-level failure risk. Overall, these re-
+sults demonstrate the effectiveness of learning action un-
+certainty from retrieval-augmented VLA representations.
+Complete results for other VLA backbones are provided in
+Appendix 9.1 Table 5.
+We next evaluate whether expert corrections collected
+through ASK can improve future task success while reduc-
+ing the need for external assistance. Following Algorithm 2,
+we divide deployment into adaptation rounds. During each
+round, the retrieval buffer and calibrated threshold ˆλ re-
+main fixed, and expert corrections are collected whenever
+the robot requests assistance. At the end of each round,
+these corrections are incorporated into the retrieval mem-
+ory, followed by recalibration using Algorithm 1. Specif-
+ically, we execute fresh calibration using the updated re-
+trieval memory as detailed in Appendix 8.1, ensuring that
+calibration satisfies the requirement of Theorem 2. For con-
+sistent comparison across rounds, we evaluate each updated
+policy on the same held-out evaluation sets as before. We
+maintain the same fixed target success rate as in Table 1.
+Figure 2 illustrates the evolution of R2-VLA using the
+π0-FAST backbone across memory adaptation rounds. As
+expert corrections are progressively incorporated into the
+retrieval memory, task success consistently improves while
+the frequency of expert assistance decreases. Importantly,
+after the initial memory update, the observed success rates
+meet or exceed the prescribed targets across adaptation
+rounds, providing empirical evidence consistent with The-
+orem 2. Meanwhile, the decreasing ASK rate suggests that
+accumulated expert corrections provide increasingly useful
+retrieval experiences, enabling the VLA to achieve higher
+task success with less external assistance. We further exam-
+ine how the calibrated threshold ˆλ evolves as the retrieval
+memory grows. As shown in Figure 2, the threshold varies
+across adaptation rounds, with distinct patterns across task
+suites. These changes reflect the evolving distribution of
+uncertainty scores induced by updates to the retrieval mem-
+ory, which can alter both the retrieved demonstrations and
+the resulting action predictions. Therefore, a threshold cal-
+ibrated for an earlier retrieval buffer may no longer pro-
+vide the desired risk control after memory updates.
+By
+recalibrating ˆλ after each adaptation round, R2-VLA ad-
+justs its ACT/ASK decisions to the updated policy. The re-
+sults also show that this recalibration can be performed with
+relatively modest computational overhead, with calibration
+wall time remaining approximately stable across later adap-
+tation rounds. Together, these findings demonstrate that R2-
+VLA can progressively improve autonomous task execution
+and reduce expert dependence while empirically maintain-
+ing the prescribed task-level success rate requirement.
+8
+
+
+5. Conclusion
+In this work, we proposed R2-VLA, a risk-controlled
+retrieval-augmented VLA framework that enables reliable
+test-time adaptation by satisfying a user-specified task suc-
+cess rate requirement with minimal expert assistance. R2-
+VLA learns an uncertainty predictor to determine when to
+act autonomously and when to request expert assistance.
+We further introduced a risk-control procedure that cali-
+brates the uncertainty threshold to satisfy the prescribed
+task-level failure risk requirement. Moreover, R2-VLA sup-
+ports continual adaptation by incorporating expert correc-
+tions into retrieval memory and preserving task-level risk
+control. Experiments across various settings demonstrate
+consistent improvements in task success over RICL while
+requiring less frequent expert assistance. Overall, our work
+represents a step toward building more reliable and adaptive
+robotic systems that can recognize their own limitations,
+seek assistance when necessary, and continually improve
+through interaction with their environments.
+LLM Usage Statement
+OpenAI’s ChatGPT was used to assist with language
+editing, improving the organization of the manuscript,
+and
+refining
+the
+presentation.
+All
+research
+con-
+tributions,
+experimental results,
+and scientific claims
+were
+reviewed
+and
+validated
+by
+the
+authors,
+who
+take full responsibility for the content of this pa-
+per.
+References
+[1] Anastasios Angelopoulos, Stephen Bates, Adam Fisch, Li-
+hua Lei, and Tal Schuster. Conformal risk control. In In-
+ternational conference on learning representations, pages
+55198–55218, 2024. 3, 1
+[2] Anastasios N Angelopoulos, Stephen Bates, Emmanuel J
+Cand`es, Michael I Jordan, and Lihua Lei. Learn then test:
+Calibrating predictive algorithms to achieve risk control. The
+Annals of Applied Statistics, 19(2):1641–1662, 2025. 3, 5, 1
+[3] Alan Baddeley. Working memory: An overview. Working
+memory and education, pages 1–31, 2006. 1
+[4] Stephen Bates, Anastasios Angelopoulos, Lihua Lei, Jiten-
+dra Malik, and Michael Jordan.
+Distribution-free, risk-
+controlling prediction sets. Journal of the ACM (JACM), 68
+(6):1–34, 2021. 3, 1
+[5] Suneel Belkhale and Dorsa Sadigh. Minivla: A better vla
+with a smaller footprint. URL https://github. com/Stanford-
+ILIAD/openvla-mini, 2024. 6, 7
+[6] Andrew Bennett, Nathan Kallus, and Miruna Oprescu. Low-
+rank mdps with continuous action spaces, 2024. 2
+[7] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 1
+[8] Konstantinos Bousmalis, Giulia Vezzani, Dushyant Rao, Co-
+line Devin, Alex X Lee, Maria Bauz´a, Todor Davchev, Yuxi-
+ang Zhou, Agrim Gupta, Akhil Raju, et al. Robocat: A self-
+improving generalist agent for robotic manipulation. arXiv
+preprint arXiv:2306.11706, 2023.
+[9] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding,
+Danny Driess, Avinava Dubey, Chelsea Finn, et al. Rt-2:
+Vision-language-action models transfer web knowledge to
+robotic control. arXiv preprint arXiv:2307.15818, 2023. 1
+[10] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Sub-
+biah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakan-
+tan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Lan-
+guage models are few-shot learners. Advances in neural in-
+formation processing systems, 33:1877–1901, 2020. 1
+[11] Lingling Chen, Zongyao Lyu, and William J Beksi.
+Re-
+convla:
+An uncertainty-guided and failure-aware vision-
+language-action framework for robotic control.
+arXiv
+preprint arXiv:2604.16677, 2026. 1
+[12] Ziyi Chen, Yan Wen, Zhengmian Hu, and Heng Huang. Ro-
+bust reinforcement learning with general utility. Advances
+in Neural Information Processing Systems, 37:11290–11344,
+2024. 2
+[13] Sonia Chernova and Manuela Veloso.
+Confidence-based
+policy learning from demonstration using gaussian mixture
+models. In Proceedings of the 6th international joint confer-
+ence on Autonomous agents and multiagent systems, pages
+1–8, 2007. 1
+[14] Hyeonbeom Choi, Daechul Ahn, Youhan Lee, Taewook
+Kang,
+Seongwon Cho,
+and Jonghyun Choi.
+Scale:
+Self-uncertainty conditioned adaptive looking and execu-
+tion for vision-language-action models.
+arXiv preprint
+arXiv:2602.04208, 2026. 1
+[15] Qingxiu Dong, Lei Li, Damai Dai, Ce Zheng, Jingyuan Ma,
+Rui Li, Heming Xia, Jingjing Xu, Zhiyong Wu, Baobao
+Chang, et al. A survey on in-context learning. In Proceed-
+ings of the 2024 conference on empirical methods in natural
+language processing, pages 1107–1128, 2024. 1
+[16] Scott Fahlman and Christian Lebiere.
+The cascade-
+correlation learning architecture. Advances in neural infor-
+mation processing systems, 2, 1989. 4
+[17] Letian Fu, Huang Huang, Gaurav Datta, Lawrence Yunliang
+Chen, William Chung-Ho Panitch, Fangchen Liu, Hui Li,
+and Ken Goldberg. In-context imitation learning via next-
+token prediction. arXiv preprint arXiv:2408.15980, 2024. 1
+[18] Atef M Ghaleb, Ali S Allahloh, Sobhi Mejjaouli, Mo-
+hammed AH Ali, and Adel Al-Shayea.
+Uncertainty-
+calibrated safety gating for vision–language–action manipu-
+lation under domain shift: Reliability gains and intervention–
+efficiency trade-offs. Sensors, 26(10):3140, 2026. 1
+[19] Qiao Gu, Yuanliang Ju, Shengxiang Sun, Igor Gilitschenski,
+Haruki Nishimura, Masha Itkina, and Florian Shkurti. Safe:
+Multitask failure detection for vision-language-action mod-
+els. Advances in Neural Information Processing Systems, 38:
+40041–40076, 2026. 1
+[20] Ryan Hoque, Ashwin Balakrishna, Ellen Novoseller, Albert
+Wilcox, Daniel S Brown, and Ken Goldberg. Thriftydagger:
+9
+
+
+Budget-aware novelty and risk gating for interactive imita-
+tion learning. arXiv preprint arXiv:2109.08273, 2021. 1
+[21] Sanghwan Jang, Minjin Jeon, Minsoo Kim, Seongjin
+Choi, Dongha Kim, and Hwanjo Yu.
+Ra-vla: Retrieval-
+augmented vla for test-time adaptation.
+arXiv preprint
+arXiv:2608.25585, 2026. 1
+[22] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan
+Foster, Grace Lam, Pannag Sanketi, et al.
+Openvla: An
+open-source vision-language-action model. arXiv preprint
+arXiv:2406.09246, 2024. 1, 6, 7
+[23] Kaiqu Liang, Zixu Zhang, and Jaime F Fisac. Introspective
+planning: Aligning robots’ uncertainty with inherent task
+ambiguity. Advances in Neural Information Processing Sys-
+tems, 37:71998–72031, 2024. 2
+[24] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. Libero: Benchmarking knowl-
+edge transfer for lifelong robot learning. Advances in Neural
+Information Processing Systems, 36:44776–44791, 2023. 6
+[25] Yunze Liu, Jing Wang, Shenrui Wu, Wenkun He, Guanqi
+Zhan, Xianzheng Ma, Junyu Chen, Wenhang Ge, Haozhan
+Tang, Yuchao Gu, et al.
+Robota-embed: Unified vla em-
+beddings for robot in-context learning and evolution. arXiv
+preprint arXiv:2610.19495, 2026. 1
+[26] Zixuan Liu, Joris K¨oster, Zizhan Zheng, and Siavash Kha-
+javi.
+When does retrieval help?
+a study of in-context
+adaptation in vision-language-action models. arXiv preprint
+arXiv:2610.05492, 2026. 1
+[27] Zixuan Liu, Fangzheng Wu, Brian Summa, and Zizhan
+Zheng.
+Robust general utility for reinforcement learning,
+2026. 2
+[28] Haitao Mao, Guangliang Liu, Yao Ma, Rongrong Wang,
+Kristen Johnson, and Jiliang Tang.
+A survey to recent
+progress towards understanding in-context learning.
+In
+Findings of the Association for Computational Linguistics:
+NAACL 2025, pages 7317–7338, 2025. 1
+[29] Kunal Menda, Katherine Driggs-Campbell, and Mykel J
+Kochenderfer.
+Ensembledagger: A bayesian approach to
+safe imitation learning.
+In 2019 IEEE/RSJ International
+Conference on Intelligent Robots and Systems (IROS), pages
+5041–5048. IEEE, 2019. 1
+[30] Maxime Oquab, Timoth´ee Darcet, Th´eo Moutakanni, Huy
+Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez,
+Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al.
+Dinov2: Learning robust visual features without supervision.
+arXiv preprint arXiv:2304.07193, 2023. 3
+[31] Jeongeun Park, Juhan Park, Taekyung Kim, Sungjoon Choi,
+Dongyoon Han, and Sangdoo Yun. Retrieve, don’t retrain:
+Extending vision language action models to new tasks at test
+time. arXiv preprint arXiv:2606.15631, 2026. 1
+[32] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess,
+Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and
+Sergey Levine. Fast: Efficient action tokenization for vision-
+language-action models. arXiv preprint arXiv:2501.09747,
+2025. 1
+[33] Allen Z Ren, Anushri Dixit, Alexandra Bodrova, Sumeet
+Singh, Stephen Tu, Noah Brown, Peng Xu, Leila Takayama,
+Fei Xia, Jake Varley, et al. Robots that ask for help: Uncer-
+tainty alignment for large language model planners. arXiv
+preprint arXiv:2307.01928, 2023. 1
+[34] Edwin M Robertson. New insights in human memory inter-
+ference and consolidation. Current biology, 22(2):R66–R71,
+2012. 1
+[35] Ralf R¨omer, Maximilian Seeliger, Saida Liu, Ben Stur-
+gis, Marco Bagatella, Daniel Marta, Andreas Krause,
+and Angela P Schoellig.
+Uncertainty quantification for
+flow-based vision-language-action models.
+arXiv preprint
+arXiv:2606.18043, 2026. 1
+[36] Kaustubh Sridhar, Souradeep Dutta, Dinesh Jayaraman, and
+Insup Lee.
+Ricl: Adding in-context adaptability to pre-
+trained vision-language-action models. In 9th Annual Con-
+ference on Robot Learning. 1, 3, 6, 7
+[37] Gemini Robotics Team,
+Saminda Abeyruwan,
+Joshua
+Ainslie, Jean-Baptiste Alayrac, Montserrat Gonzalez Are-
+nas, Travis Armstrong, Ashwin Balakrishna, Robert Baruch,
+Maria Bauza, Michiel Blokzijl, et al.
+Gemini robotics:
+Bringing ai into the physical world.
+arXiv preprint
+arXiv:2503.20020, 2025. 1
+[38] Octo Model Team, Dibya Ghosh, Homer Walke, Karl
+Pertsch, Kevin Black, Oier Mees, Sudeep Dasari, Joey
+Hejna,
+Tobias Kreiman,
+Charles Xu,
+et al.
+Octo:
+An open-source generalist robot policy.
+arXiv preprint
+arXiv:2405.12213, 2024. 1
+[39] Endel Tulving et al. Episodic and semantic memory. Orga-
+nization of memory, 1(381-403):1, 1972. 1
+[40] Quan Vuong, Sergey Levine, Homer Rich Walke, Karl
+Pertsch, Anikait Singh, Ria Doshi, Charles Xu, Jianlan Luo,
+Liam Tan, Dhruv Shah, et al. Open x-embodiment: Robotic
+learning datasets and rt-x models.
+In Towards General-
+ist Robots: Learning Paradigms for Scalable Skill Acquisi-
+tion@ CoRL2023, 2023. 1
+[41] Jun Wang, Guocheng He, and Yiannis Kantaros.
+Proba-
+bilistically correct language-based multi-robot planning us-
+ing conformal prediction. IEEE Robotics and Automation
+Letters, 10(1):160–167, 2024. 2
+[42] Jun Wang, Yevgeniy Vorobeychik, and Yiannis Kantaros.
+Cofinellm:
+Conformal finetuning of llms for language-
+instructed robot planning. arXiv preprint arXiv:2511.06575,
+2025. 2
+[43] Siyu Xu, Yunke Wang, Zijian Wang, Dihao Zhu, Chenghao
+Xia, Chengbin Du, Daochang Liu, Tao Huang, and Chang
+Xu. Stellavla: In-context structured demonstration for gen-
+eralizable vision-language-action models.
+arXiv preprint
+arXiv:2608.11671, 2026. 1
+[44] Songhua Yang, Ziyu Liu, Xuetao Li, Ruqi Xiao, Kangxin
+Zhu, and Miao Li. Ici-vla: In-context imitation with spa-
+tiotemporally aligned demonstrations for vision-language-
+action models. arXiv preprint arXiv:2609.07581, 2026. 1
+[45] Yue Zhang, Rui Wang, Jiehong Lin, Zhongrui Wang, and
+Xiaojuan Qi. Retrieval-vla: Training-free in-context adap-
+tation for vision-language-action models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1358–1367, 2026. 1, 3
+10
+
+
+[46] Michelle Zhao, Henny Admoni, Reid Simmons, Aaditya
+Ramdas, and Andrea Bajcsy. Conformalized interactive im-
+itation learning: Handling expert shift and intermittent feed-
+back. In International Conference on Learning Representa-
+tions, pages 9238–9251, 2025. 1
+11
+
+
+Risk-Controlled Test-Time Adaptation for Vision-Language-Action Models
+Supplementary Material
+6. Related Work
+Retrieval-Augmented
+VLA.
+While
+recent
+vision-
+language-action (VLA) models, such as OpenVLA [22]
+and π0 [7],
+have demonstrated strong generalization
+through pretraining on large and diverse robot datasets,
+adapting them to new tasks often still requires task-
+specific fine-tuning or retraining, limiting their ability to
+behave as truly generalist agents.
+In contrast, humans
+can rapidly adapt to novel tasks by drawing on prior
+experience [3, 34, 39]. Motivated by this capability, recent
+work has explored in-context imitation learning, in which
+demonstrations of a new task are provided directly to
+the VLA at inference time, enabling adaptation without
+updating the model parameters.
+ICRT [17] is an early
+representative approach, formulating robot control as next-
+token prediction over sequences of visual observations,
+proprioceptive states, and actions.
+By placing one or
+more human teleoperation trajectories in the transformer’s
+context, ICRT can infer and execute previously unseen
+tasks without test-time parameter updates, demonstrating
+that the in-context learning behavior of autoregressive
+models can extend from language to continuous robotic
+control.
+More recently, RICL [36] showed that such
+capability does not naturally emerge in pretrained VLAs
+and proposed explicitly post-training a pretrained π0-FAST
+policy to exploit retrieved demonstrations. At deployment,
+RICL retrieves relevant states and actions from a small
+demonstration buffer and incorporates them into the model
+context, enabling adaptation to new manipulation tasks
+using roughly 10–20 demonstrations without updating
+model parameters.
+A parallel direction investigates whether existing frozen
+VLAs can benefit from demonstrations without additional
+in-context learning (ICL) training. Retrieval-VLA [45] en-
+ables training-free adaptation by identifying relevant past
+experiences and directly incorporating the retrieved infor-
+mation into the predictions of a frozen VLA. Since the VLA
+does not need to learn how to interpret retrieved demon-
+strations as in-context examples, this approach avoids ICL-
+specific post-training. Similarly, ReCAP [31] extends VLA
+policies to new tasks by conditioning on demonstrations
+from an external retrieval pool without task-specific retrain-
+ing. Beyond directly leveraging retrieved demonstrations,
+recent methods further explore how to improve their rel-
+evance and utilization. StellaVLA [43] converts retrieved
+trajectories into structured task plans, subgoals, and mo-
+tion descriptions to provide richer task-specific guidance.
+RA-VLA [21] introduces behavior-aligned retrieval and
+grounded execution to improve the relevance of retrieved
+demonstrations, while ICI-VLA [44] employs spatiotempo-
+rally aligned demonstrations to better match the current task
+phase and geometry. Collectively, these studies demonstrate
+the potential of retrieval-based adaptation for extending
+VLA capabilities without task-specific parameter updates.
+Building on these advances, our work addresses the com-
+plementary challenge of ensuring successful task execution
+given retrieved demonstrations by introducing uncertainty-
+guided expert assistance and task-level risk control.
+Uncertainty in Robotics. Uncertainty has long been used
+in robot learning to determine when autonomous execution
+of the robot should be deferred to an expert [13, 20, 29, 46].
+Early confidence-based learning-from-demonstration meth-
+ods allow a robot to request demonstrations in states where
+its learned policy is insufficiently confident [13]. This prin-
+ciple was later incorporated into interactive imitation learn-
+ing.
+EnsembleDAgger [29] uses ensemble disagreement
+to determine when a learned policy can safely act [29].
+More recently, ConformalDAgger [46] replaces heuristic
+uncertainty thresholds with online conformal calibration,
+enabling uncertainty estimates to adapt under deployment-
+time expert shift.
+Recent work has extended uncertainty estimation to
+VLA models. SAFE [19] estimates uncertainty from the
+internal representations of a VLA to assess the reliability
+of ongoing task execution and determine when intervention
+may be needed. ReconVLA [11] uses conformalized action
+uncertainty to compare candidate actions and select the least
+uncertain action for execution. [35] estimate epistemic un-
+certainty in flow-based VLAs to identify unreliable predic-
+tions and prioritize informative samples for active adapta-
+tion. SCALE [14] uses self-uncertainty to adapt both visual
+perception and action generation, encouraging broader ex-
+ploration under high uncertainty and more confident execu-
+tion under low uncertainty. [18] use calibrated uncertainty
+to gate control among normal VLA execution, pause-and-
+reobservation, and fallback planning.
+Collectively, these
+methods demonstrate the value of uncertainty estimation for
+identifying potentially incorrect robot actions and determin-
+ing when expert assistance is necessary. Building on these
+advances, our work introduces task-level risk control to cal-
+ibrate the uncertainty threshold, enabling the VLA to satisfy
+a user-specified task success requirement while minimizing
+the frequency of expert assistance.
+Risk Control for Robotics. Statistical risk-control tech-
+niques [1, 2, 4] have recently been applied to LLM-based
+robotic planning.
+KnowNo [33] uses conformal predic-
+tion to construct sets of candidate robot actions, execut-
+1
+
+
+ing autonomously when the prediction set is sufficiently
+unambiguous and otherwise requesting human assistance.
+Introspective Planning [23] improves the underlying LLM
+reasoning before conformal calibration to reduce unneces-
+sary clarification while retaining statistical success guaran-
+tees. [41] extends conformal planning to multi-robot sys-
+tems. [42] propose conformal-aware finetuning to reduce
+prediction-set size and human-help rates. In contrast, we
+study risk control for VLAs during closed-loop task execu-
+tion. Rather than calibrating the uncertainty of an individ-
+ual action, we calibrate the uncertainty threshold that de-
+termines when the VLA acts autonomously and when it re-
+quests expert assistance. The threshold is evaluated through
+complete task rollouts, so the resulting risk criterion directly
+reflects whether the induced VLA policy succeeds or fails
+at the task level. This formulation also accounts for the se-
+quential nature of VLA execution, where locally uncertain
+decisions can affect subsequent states and ultimately deter-
+mine task success.
+7. Proofs
+7.1. Proof of Theorem 1
+Before proving Theorem 1, we first recall several defini-
+tions from the main paper. Let aE
+t denote the expert action
+chunk at decision step t, and let RE denote the task-failure
+probability when the expert policy is executed throughout
+the episode. For the VLA prediction ˆat, recall that
+ut = dA(ˆat, aE
+t )
+denotes the discrepancy between the VLA-predicted action
+and the corresponding expert action. Let T denote the num-
+ber of decision steps in an episode. For a calibrated thresh-
+old λ, we define the population ASK rate as
+H(λ) =
+E
+hPT
+t=1 I{ˆut > λ}
+i
+E[T]
+.
+We further define
+SmoothL1(x, y) =
+( 1
+2(x −y)2,
+|x −y| ≤1,
+|x −y| −1
+2,
+|x −y| > 1,
+and let
+LU(λ) =
+E
+hPT
+t=1 SmoothL1 (log(ˆut + η), log(ut + η))
+i
+E[T]
+denote the population uncertainty-regression loss under the
+trajectory distribution induced by the R2-VLA policy with
+threshold λ.
+We next introduce the assumptions used to establish the
+risk bound.
+Assumption 1. Let
+P(· | x, a)
+denote the distribution of the next decision state after exe-
+cuting an action chunk a from state x. There exists L > 0
+such that, for any state x and action chunks a, a′,
+∥P(· | x, a) −P(· | x, a′)∥TV ≤L dA(a, a′).
+Assumption 1 is a standard smoothness condition for
+continuous-control systems. It requires the environment dy-
+namics to vary continuously with the executed action. If
+two action chunks are close, then the corresponding next-
+state distributions are also close. Similar Lipschitz-type as-
+sumptions on transition dynamics are commonly used in re-
+inforcement learning [6, 12, 27].
+Assumption 2. The expected number of decision steps is
+finite:
+E[T] < ∞.
+Assumption 2 is naturally satisfied in finite-horizon
+robotic manipulation tasks, where each episode terminates
+after task completion, failure, or a predefined maximum
+number of decision steps. We next prove Theorem 1.
+Proof. Fix c > 1. Consider a decision step t at which the
+robot acts autonomously, i.e.,
+ˆut ≤λ.
+We separate two cases according to whether the learned un-
+certainty substantially underestimates the true action error.
+First, suppose
+ut + η ≤c(ˆut + η).
+Rearranging gives
+ut ≤cˆut + (c −1)η.
+By definition,
+ut = dA(ˆat, aE
+t ),
+and therefore
+dA(ˆat, aE
+t ) ≤cˆut + (c −1)η.
+Applying Assumption 1 with a = ˆat and a′ = aE
+t , we ob-
+tain
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV ≤L dA(ˆat, aE
+t )
+≤L [cˆut + (c −1)η] .
+Now consider the complementary case
+ut + η > c(ˆut + η).
+2
+
+
+Since c > 1, taking logarithms gives
+log(ut + η) −log(ˆut + η) > log c > 0.
+Hence,
+|log(ut + η) −log(ˆut + η)| > log c.
+Recall that the SmoothL1 loss depends only on the magni-
+tude of the residual:
+SmoothL1(x, y) =
+( 1
+2|x −y|2,
+|x −y| ≤1,
+|x −y| −1
+2,
+|x −y| > 1.
+Therefore, a larger absolute residual always produces a no
+smaller SmoothL1 loss. Since
+|log(ut + η) −log(ˆut + η)| > log c,
+we have
+SmoothL1 (log(ˆut + η), log(ut + η)) ≥SmoothL1(0, log c).
+Hence,
+I {ut + η > c(ˆut + η)}
+≤SmoothL1 (log(ˆut + η), log(ut + η))
+SmoothL1(0, log c)
+.
+Then for an autonomous decision ˆut ≤λ, decompose the
+transition discrepancy according to whether the uncertainty
+substantially underestimates the action error:
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV
+=
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV I {ut + η ≤c(ˆut + η)}
++
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV I {ut + η > c(ˆut + η)} .
+For the first term, we have already shown that
+ut + η ≤c(ˆut + η)
+implies
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV ≤L [cˆut + (c −1)η] .
+Therefore,
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV I {ut + η ≤c(ˆut + η)}
+≤L [cˆut + (c −1)η] .
+For the second term, total variation distance is always
+bounded by one, so
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV I {ut + η > c(ˆut + η)}
+≤I {ut + η > c(ˆut + η)}
+≤SmoothL1 (log(ˆut + η), log(ut + η))
+SmoothL1(0, log c)
+.
+Combining the two cases therefore gives, whenever ˆut ≤λ,
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV
+≤L [cˆut + (c −1)η] + SmoothL1 (log(ˆut + η), log(ut + η))
+SmoothL1(0, log c)
+.
+We now lift the one-step transition bound to the entire tra-
+jectory. Consider a coupling of two trajectories that start
+from the same initial state: one generated by the R2-VLA
+policy and one generated by the expert policy. Let
+A = {the two trajectories differ at some decision step}
+denote the event that the two trajectories ever separate. If
+A does not occur, the two trajectories are identical through-
+out the episode and therefore have the same task outcome.
+Hence, if the R2-VLA policy trajectory fails, then either the
+expert trajectory also fails or the two trajectories must have
+separated. Therefore,
+{R2-VLA policy failure} ⊆{expert-policy failure} ∪A,
+which implies
+R(λ) ≤RE + Pr(A).
+It therefore remains to bound the probability that the two
+trajectories separate. Let At denote the event that the tra-
+jectories agree up to decision step t, but their next deci-
+sion states differ after the action at step t.
+The events
+A1, . . . , AT are disjoint because each trajectory pair has a
+unique first separation time. Thus,
+Pr(A) = E
+" T
+X
+t=1
+I{At}
+#
+.
+Conditioned on the two trajectories having remained iden-
+tical up to decision step t, they are at the same state xt. If
+ˆut > λ, the R2-VLA policy executes the expert action aE
+t ,
+so the two policies induce identical next-state distributions
+and cannot separate at that step. If ˆut ≤λ, the R2-VLA
+policy executes ˆat. Under a maximal coupling of the two
+next-state distributions, the conditional probability that the
+next states differ is bounded by
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV .
+Consequently,
+Pr(A) ≤E
+" T
+X
+t=1
+I{ˆut ≤λ}
+P(· | xt, ˆat) −P(· | xt, aE
+t )
+
+TV
+#
+.
+Using the one-step bound derived above for every au-
+3
+
+
+tonomous decision,
+Pr(A) ≤Lc E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
++ L(c −1)η E
+" T
+X
+t=1
+I{ˆut ≤λ}
+#
++
+E
+hPT
+t=1 I{ˆut ≤λ} SmoothL1 (log(ˆut + η), log(ut + η))
+i
+SmoothL1(0, log c)
+.
+Combining this inequality with
+R(λ) ≤RE + Pr(A)
+gives
+R(λ) ≤RE + Lc E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
++ L(c −1)η E
+" T
+X
+t=1
+I{ˆut ≤λ}
+#
++
+E
+hPT
+t=1 I{ˆut ≤λ} SmoothL1 (log(ˆut + η), log(ut + η))
+i
+SmoothL1(0, log c)
+.
+By the definition of H(λ),
+E
+" T
+X
+t=1
+I{ˆut ≤λ}
+#
+= E[T] (1 −H(λ)) .
+Moreover,
+E
+" T
+X
+t=1
+I{ˆut ≤λ} SmoothL1 (log(ˆut + η), log(ut + η))
+#
+≤E
+" T
+X
+t=1
+SmoothL1 (log(ˆut + η), log(ut + η))
+#
+= E[T]LU(λ).
+Substituting these two relations gives
+R(λ) ≤RE + Lc E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
++ L(c −1)η E[T] (1 −H(λ)) +
+E[T]LU(λ)
+SmoothL1(0, log c).
+This completes the proof.
+Theorem 1 connects the uncertainty-training objective
+directly to the task-level failure risk of the R2-VLA policy.
+The bound contains three sources of task failure beyond the
+expert risk RE. The first term,
+Lc E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
+,
+measures the total uncertainty accumulated over decisions
+that are executed autonomously and it goes to zero when
+the uncertainty goes to zero. The second term,
+L(c −1)η E[T] (1 −H(λ)) ,
+arises from the numerical stabilization constant η used in
+the regression objective of learning the uncertainty head.
+Since η is chosen to be very small, this term is negligible
+in practice and vanishes as c →1. The final term,
+E[T]LU(λ)
+SmoothL1(0, log c),
+captures uncertainty underestimation. A smaller population
+uncertainty-regression loss reduces the probability that the
+R2-VLA reports small uncertainty while making a large ac-
+tion error.
+Thus, the theorem shows that the task risk approaches
+the expert risk when the uncertainty head accurately pre-
+dicts action error and the VLA acts autonomously primarily
+in low-uncertainty states. In particular, suppose RE →0,
+LU(λ) →0, and
+E
+" T
+X
+t=1
+I{ˆut ≤λ}ˆut
+#
+→0,
+i.e., the robot becomes increasingly confident on the states
+where it acts autonomously, while E[T] remains bounded.
+Then, by choosing c →1 sufficiently slowly, the remaining
+terms in the bound also vanish, implying
+R(λ) →0.
+7.2. Proof of Theorem 2
+Before proving Theorem 2, we first establish that, within
+each adaptation round, the threshold selected by Algo-
+rithm 1 satisfies the desired task-level success requirement.
+Theorem 3. Consider a fixed retrieval buffer Dret and a
+finite candidate set Λ = {λ1, . . . , λK}. Suppose the Ncal
+calibration episodes are drawn independently from the de-
+ployment distribution. Let bΛsafe be the set of thresholds cer-
+tified by Algorithm 1 and ˆλ be the threshold returned by
+Algorithm 1. Then, with probability at least 1 −δ,
+R(ˆλ) ≤ϵ.
+More strongly,
+Pr
+
+R(λ) ≤ϵ, ∀λ ∈bΛsafe
+
+≥1 −δ.
+Proof. Consider any candidate threshold λ whose popula-
+tion task-failure risk exceeds the prescribed target, i.e.,
+R(λ) > ϵ.
+4
+
+
+The episode-level losses
+L1(λ), . . . , LNcal(λ)
+are independent Bernoulli random variables with failure
+probability R(λ). Hence,
+Fλ ∼Binomial (Ncal, R(λ)) ,
+where Fλ = PNcal
+i=1 Li(λ) is the number of failed episodes.
+We then ask whether the observed failure count Fλ is suf-
+ficiently small to reject the possibility that the task-failure
+risk R(λ) exceeds the prescribed target ϵ. Following [2],
+we formulate this as the hypothesis test
+H0,λ : R(λ) > ϵ.
+To certify λ, we therefore need to show that the observed
+number of calibration failures is unusually small under this
+null hypothesis. Suppose first that the true failure rate were
+exactly equal to the target ϵ. Then the number of failures
+among Ncal independent calibration episodes would follow
+B ∼Binomial(Ncal, ϵ).
+For the observed failure count Fλ, we compute
+pλ = Pr (B ≤Fλ) .
+This is the probability of observing Fλ or fewer failures
+when the failure rate is ϵ. If the threshold actually makes
+R(λ) > ϵ, then failures would occur more frequently than
+under the boundary case R(λ) = ϵ. For example, suppose
+our target failure rate is 10%, so ϵ = 0.1, and we observe
+zero failures in 50 calibration episodes. If the true failure
+rate were exactly 10%,
+Pr(F = 0) = 0.950 ≈0.0052.
+If the threshold were actually worse, say its true failure rate
+were 20%,
+Pr(F = 0) = 0.850 ≈1.4 × 10−5.
+Thus, among all failure rates R(λ) > ϵ, the case closest to
+ϵ makes an unusually favorable calibration outcome, such
+as “zero failures,” most likely. Consequently, observing the
+same small number Fλ of failures would be even less likely
+under a larger failure probability. Therefore,
+Pr
+B∼Binomial(Ncal,R(λ)) (B ≤Fλ) ≤pλ.
+Thus, evaluating the probability at the boundary value ϵ de-
+liberately gives the null hypothesis its most favorable case.
+The resulting pλ may therefore be larger than the exact
+probability under the true failure rate, making it harder to
+certify λ. In this sense, pλ is a conservative p-value for test-
+ing whether
+R(λ) > ϵ.
+Our procedure in Algorithm 1 certifies λ only when
+pλ ≤δ
+K .
+Since pλ is a valid conservative p-value under the null hy-
+pothesis R(λ) > ϵ, it satisfies
+Pr
+
+pλ ≤δ
+K
+ R(λ) > ϵ
+
+≤δ
+K .
+Therefore, if the task-failure risk R(λ) exceeds the pre-
+scribed target ϵ, the probability that λ nevertheless passes
+our certification rule is at most δ/K. Let
+Λunsafe = {λ ∈Λ : R(λ) > ϵ}
+denote the set of candidate thresholds that are actually un-
+safe. The event that at least one threshold whose task-failure
+risk exceeds ϵ is incorrectly certified can then be written as
+A =
+[
+λ∈Λunsafe
+n
+λ ∈bΛsafe
+o
+.
+Therefore,
+Pr(A) = Pr
+
+
+[
+λ∈Λunsafe
+n
+λ ∈bΛsafe
+o
+
+
+≤
+X
+λ∈Λunsafe
+Pr
+
+λ ∈bΛsafe
+
+≤
+X
+λ∈Λunsafe
+δ
+K
+=
+Λunsafe δ
+K
+≤K δ
+K = δ.
+Equivalently, with probability at least 1 −δ, every certified
+threshold satisfies
+R(λ) ≤ϵ.
+Therefore,
+Pr
+
+R(λ) ≤ϵ,
+∀λ ∈bΛsafe
+
+≥1 −δ.
+The deployed threshold
+ˆλ
+is selected from
+bΛsafe.
+5
+
+
+Hence, whenever A does not occur, the deployed threshold
+must also satisfy
+R(ˆλ) ≤ϵ.
+It follows that
+Pr
+
+R(ˆλ) > ϵ
+
+≤δ,
+or equivalently,
+Pr
+
+R(ˆλ) ≤ϵ
+
+≥1 −δ.
+This completes the proof.
+Theorem 3 establishes that, for a fixed retrieval buffer,
+Algorithm 1 selects the threshold that satisfies the user-
+specified task-failure requirement with high probability. We
+next prove Theorem 2.
+Proof. Fix an adaptation round q and let Hq denote the
+complete deployment history before calibration, including
+all previous trajectories, ACT/ASK decisions, expert cor-
+rections, calibrated thresholds, and retrieval buffers. Condi-
+tional on Hq, the retrieval buffer D(q)
+ret, the predefined candi-
+date set Λ, and the corresponding family of R2-VLA poli-
+cies {πλ
+θ,ψ : λ ∈Λ} are fixed. By assumption, the cali-
+bration episodes are drawn independently from the round-q
+deployment distribution conditional on Hq. Therefore, The-
+orem 3 applies conditionally to round q. In particular, using
+confidence parameter δq, we have
+Pr
+
+Rq(ˆλ(q)) > ϵ | Hq
+
+≤δq.
+This conditional application accounts for the fact that the
+retrieval buffer may depend on previous adaptation rounds.
+Once the deployment history is fixed, the updated retrieval
+buffer and the resulting R2-VLA policy family are also
+fixed, allowing fresh calibration episodes to provide the
+same risk-control guarantee as in Theorem 3.
+Taking the expectation over the deployment history and
+applying the law of total probability, we obtain
+Pr
+
+Rq(ˆλ(q)) > ϵ
+
+= EHq
+h
+Pr
+
+Rq(ˆλ(q)) > ϵ | Hq
+i
+≤δq.
+Define the event
+Eq =
+n
+Rq(ˆλ(q)) > ϵ
+o
+,
+which represents a violation of the prescribed task-failure
+risk in round r. Applying the union bound across all adap-
+tation rounds yields
+Pr
+ Q
+[
+q=0
+Eq
+!
+≤
+Q
+X
+q=0
+Pr(Eq) ≤
+Q
+X
+q=0
+δq.
+Taking complements, we obtain
+Pr
+
+Rq(ˆλ(q)) ≤ϵ,
+∀q = 0, . . . , Q
+
+≥1 −
+Q
+X
+q=0
+δq.
+Since we allocate the overall confidence budget equally
+across rounds, setting δq =
+δ
+Q+1 gives
+Q
+X
+q=0
+δq = δ.
+Therefore,
+Pr
+
+Rq(ˆλ(q)) ≤ϵ,
+∀q = 0, . . . , Q
+
+≥1 −δ.
+This completes the proof.
+Theorem 2 establishes that continual growth of the re-
+trieval memory does not invalidate the task-risk control.
+The retrieval buffer D(q)
+ret at round q may depend arbitrarily
+on all previous robot trajectories, uncertainty values, ASK
+decisions, and expert corrections. The key requirement is
+that, once this updated retrieval buffer is fixed, the thresh-
+old is recalibrated using a fresh set of calibration episodes.
+This distinction is important because adding expert correc-
+tions changes the retrieval-augmented policy itself. For the
+same state xt, the updated buffer may produce a different
+retrieved context, action prediction, and uncertainty score.
+Consequently, a threshold calibrated for D(q)
+ret need not re-
+main valid after the memory is updated to D(q+1)
+ret
+. Our
+round-wise recalibration procedure explicitly accounts for
+this change.
+8. Additional Implementation Details
+8.1. Benchmark and Evaluation Protocol
+We evaluate R2-VLA on LIBERO [24], a simulated robotic
+manipulation benchmark based on the Franka Panda arm.
+Each demonstration contains multi-view visual observa-
+tions, including front-view and wrist-view images, together
+with proprioceptive states, natural-language task instruc-
+tions, and expert actions. We consider all four LIBERO
+suites: SPATIAL, OBJECT, GOAL, and LONG, which eval-
+uate different aspects of manipulation generalization. For
+each suite, we partition the available demonstrations into
+disjoint sets for retrieval and policy adaptation, risk cal-
+ibration, and evaluation. Specifically, demonstration IDs
+10–29 are used to construct the retrieval buffer, perform
+suite-specific RICL adaptation, and train the uncertainty
+head, corresponding to 20 demonstrations per task and
+200 demonstrations per suite. Demonstration IDs 30–49
+are reserved for risk calibration, while IDs 0–9 are held
+6
+
+
+out for evaluation and are not used for policy adaptation,
+uncertainty-head training, or risk calibration.
+During deployment, whenever R2-VLA selects ASK, a
+separately trained expert policy provides the corrective ac-
+tion for the current observation. The expert policy is trained
+using demonstration IDs 0–49 for each suite and serves ex-
+clusively as an action oracle without updating the evaluated
+VLA during execution. We report task success and ASK
+rates over 100 evaluation rollouts per task.
+For risk calibration, we construct a predefined candidate
+threshold set Λ = {λ1, . . . , λK} with K = 10. Specifi-
+cally, we first collect uncertainty scores from five prelimi-
+nary rollouts using demonstration IDs 30–34. Let Uref =
+S5
+i=1{ui,t}Ti
+t=1 denote the pooled uncertainty scores across
+these rollouts, where Ti is the number of decision steps in
+rollout i. We compute the reference threshold as
+λref = Quantile0.60 (Uref) .
+We then construct Λ by selecting K = 10 candidate thresh-
+olds evenly spaced over the interval [λref −0.1, λref + 0.1].
+The resulting candidate set is fixed before applying the risk-
+control procedure in Algorithm 1.
+To evaluate continual memory adaptation, we organize
+deployment into successive adaptation rounds following Al-
+gorithm 2. Within each round, the retrieval buffer and cal-
+ibrated threshold remain fixed, and expert corrections are
+collected whenever R2-VLA requests assistance.
+At the
+end of each round, these corrections are incorporated into
+the retrieval memory, followed by threshold recalibration
+using Algorithm 1. Specifically, demonstration IDs 30–49
+remain designated for calibration, while fresh initial states
+are independently sampled from the task initialization dis-
+tribution at each round. We then perform new calibration
+rollouts using the updated retrieval memory to obtain the
+calibrated threshold for the next round.
+We set the overall confidence parameter to δ = 0.05, cor-
+responding to a 95% confidence level. For continual mem-
+ory adaptation with Q + 1 rounds, we allocate the confi-
+dence budget equally across rounds, using δr = δ/(Q + 1)
+for calibration at round q, consistent with Theorem 2. All
+experiments are conducted on a single NVIDIA RTX 4090
+GPU with 24 GB of memory.
+8.2. VLA Backbones
+We follow the model architecture adopted in RICL [36],
+which uses π0-FAST as the VLA backbone.
+To eval-
+uate whether R2-VLA generalizes across different VLA
+architectures and model scales, we additionally consider
+MiniVLA [5] and OpenVLA [22]. Across all three back-
+bones, four retrieved demonstrations are provided as in-
+context examples for each query, i.e., M = 4. Because
+the publicly available backbone from RICL checkpoints are
+not directly trained for LIBERO experiments, we first adapt
+each backbone to support retrieval-conditioned execution.
+MiniVLA.
+For MiniVLA, we initialize from the 150,000-
+step LIBERO checkpoint.1 We first perform 2,000 RICL-
+priming optimizer updates using 68 LIBERO priming tasks
+with 20 demonstrations per task. We use rank-32 LoRA,
+gradient accumulation of 16, AdamW, and a peak learning
+rate of 2.5 × 10−5. During priming, the vision encoder and
+base language-model weights are frozen, while the LoRA
+parameters, visual projector, and action-token rows remain
+trainable. Starting from the primed model, we then per-
+form suite-specific adaptation using demonstration IDs 10–
+29. For each of the four LIBERO suites, we perform 600
+additional optimizer updates with a peak learning rate of
+5 × 10−6.
+π0-FAST.
+For π0-FAST, we initialize from Physical Intel-
+ligence’s LIBERO-finetuned π0-FAST checkpoint.2 We di-
+rectly perform suite-specific RICL adaptation using demon-
+stration IDs 10–29. We use rank-16 LoRA, AdamW, a peak
+learning rate of 1 × 10−5, and gradient clipping at 1.0. We
+use 3,000 updates for OBJECT, 5,000 for SPATIAL, 13,000
+for GOAL, and 10,000 for LONG.
+OpenVLA.
+For OpenVLA, we initialize from the official
+OpenVLA-7B checkpoint.3 We first perform 1,500 RICL-
+priming updates using the same 68 priming tasks and 20
+demonstrations per task. We use rank-16 LoRA, gradient
+accumulation of 8, and a peak learning rate of 5×10−6. We
+subsequently perform 300 additional suite-specific adapta-
+tion updates using demonstration IDs 10–29, with rank-16
+LoRA, gradient accumulation of 8, and the same peak learn-
+ing rate of 5 × 10−6.
+8.3. Uncertainty-Head Implementation
+Architecture.
+R2-VLA augments each adapted RICL
+policy with a lightweight uncertainty head.
+After RICL
+adaptation, we freeze the retrieval-conditioned VLA policy
+and train only the uncertainty head. This separation ensures
+that uncertainty-head training does not modify the underly-
+ing action policy. We extract the final-layer hidden repre-
+sentation at the action-start position, corresponding to the
+last conditioning-token representation after the model’s fi-
+nal normalization and immediately before the vocabulary
+projection. A lightweight MLP maps this representation to
+a nonnegative scalar u, which estimates the action predic-
+tion error of the retrieval-conditioned VLA. We train the
+1https://huggingface.co/Stanford-ILIAD/minivla-
+vq-libero90-prismatic/tree/main/checkpoints
+2https : / / github . com / Physical - Intelligence /
+openpi
+3https://huggingface.co/openvla/openvla-7b
+7
+
+
+uncertainty head to minimize
+LU =
+1
+E[T]E
+" T
+X
+t=1
+SmoothL1
+ log(ˆut + η), log(ut + η)
+
+#
+,
+where ˆut is the uncertainty-head output, ut is the normal-
+ized action-chunk RMSE, and η = 10−4 is used for numer-
+ical stability.
+Training Data.
+For all backbones and LIBERO suites,
+uncertainty-head training uses demonstration IDs 10–29,
+i.e., the same demonstrations used for retrieval and suite-
+specific policy adaptation. Training exclusively on clean
+retrieval contexts provides limited supervision for states in
+which retrieval is misleading. We therefore augment the
+training data with deliberately corrupted retrieval contexts.
+These corruptions are designed to expose the uncertainty
+head to situations in which the retrieved examples may ap-
+pear plausible but provide incorrect or uninformative guid-
+ance for the current action. We consider four corruption
+types:
+1. Wrong-task retrieval. The retrieved example is sam-
+pled from a different task, preferentially from a task
+whose instruction shares words with the current task but
+whose scene or intended behavior differs.
+2. Correct task, wrong phase. The retrieval is taken from
+the correct task and demonstration, but the retrieved
+timestep is shifted forward. The retrieved action there-
+fore corresponds to a different stage of task execution.
+3. Visually similar, wrong goal. The retrieved example is
+selected from another task in the same scene, producing
+a visually plausible observation while corresponding to
+a different task goal and intended behavior.
+4. Random retrieval. The retrieved example is sampled
+randomly from a different task, providing context that is
+largely unrelated to the current decision.
+Among corrupted training examples, the four corruption
+types are sampled according to the proportions in Table 3.
+The fraction of uncertainty-head training examples that use
+corrupted retrieval contexts is backbone dependent. We use
+30% corrupted contexts for MiniVLA, 50% for π0-FAST,
+and 30% for OpenVLA. the remaining examples use the
+original clean retrieval context.
+Training Hyperparameters.
+Table 4 summarizes the op-
+timization hyperparameters for uncertainty head training.
+9. Additional Experimental Results
+9.1. Expert Assistance Strategies Baselines on
+MiniVLA and OpenVLA.
+We evaluate the effectiveness of different expert assistance
+strategies on MiniVLA and OpenVLA, with the complete
+Table 3. Composition of corrupted retrieval examples used to train
+the uncertainty head.
+Corruption Type
+Share of Corrupted
+Wrong-task retrieval
+25%
+Correct task, wrong phase
+25%
+Visually similar, wrong goal
+35%
+Random/uninformative retrieval
+15%
+Table 4. Hyperparameters for uncertainty-head training.
+Hyperparameter
+MiniVLA
+π0-FAST
+OpenVLA
+Optimizer
+AdamW
+AdamW
+AdamW
+Learning Rate
+1 × 10−4
+3 × 10−4
+1 × 10−4
+Weight Decay
+1 × 10−4
+1 × 10−4
+1 × 10−4
+Grad. Clip
+5.0
+5.0
+5.0
+Updates
+3,000
+2,500
+1,000
+results reported in Table 5. Consistent with the findings for
+π0-FAST in the main paper, R2-VLA achieves the high-
+est average task success rate while requiring substantially
+fewer expert assistance than alternative uncertainty-based
+strategies.
+Specifically, on MiniVLA, R2-VLA achieves
+an average success rate of 62.8% with an ASK rate of
+only 20.8%, outperforming DINO Distance (58.5% success
+with 34.0% ASK) and Action Entropy (58.8% success with
+34.0% ASK). Similarly, on OpenVLA, R2-VLA achieves
+68.6% success with 33.3% ASK, compared with 66.8% suc-
+cess and 51.4% ASK for DINO Distance, and 67.3% suc-
+cess and 51.6% ASK for Action Entropy.
+These results
+demonstrate that the learned uncertainty identifies more
+informative decision points, allowing R2-VLA to achieve
+higher task success with less expert assistance.
+Furthermore, when compared with Random ASK un-
+der matched ASK budgets, R2-VLA improves average suc-
+cess by 7.9 percentage points on MiniVLA (62.8% versus
+54.9%) and 8.3 percentage points on OpenVLA (68.6% ver-
+sus 60.3%). This indicates that the improvements cannot be
+attributed solely to the additional expert actions, but rather
+to the ability of the learned uncertainty to identify when
+autonomous execution is uncertain. Together with the π0-
+FAST results in the main paper, these findings demonstrate
+that R2-VLA consistently improves task success while re-
+ducing the frequency of expert assistance across different
+VLA architectures and model scales.
+9.2. Ablation Studies
+Effect of Target Risk Level.
+We investigate how differ-
+ent user-specified risk levels ϵ affect the performance of R2-
+VLA. Specifically, we vary the target success rate 1 −ϵ and
+independently calibrate the corresponding threshold ˆλ. Fig-
+ure 3 illustrates the resulting trade-offs between task suc-
+8
+
+
+Table 5. Comparison of expert assistance strategies on LIBERO using MiniVLA and OpenVLA backbones. SR denotes success rate.
+Backbone
+Expert Assistance Strategy
+Spatial
+Object
+Goal
+Long
+Avg. SR ↑Avg. ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+MiniVLA
+RICL (no help)
+58.9%
+–
+0.0%
+59.1%
+–
+0.0%
+60.6%
+–
+0.0%
+28.5%
+–
+0.0%
+51.8%
+0.0%
+Random ASK
+61.3%
+65.0%
+17.0%
+63.3%
+65.0%
+16.9%
+64.9%
+65.0%
+14.4%
+30.1%
+35.0%
+34.9%
+54.9%
+20.8%
+DINO Distance + Risk Control
+66.1%
+65.0%
+30.2%
+67.7%
+65.0%
+29.5%
+65.4%
+65.0%
+28.8%
+34.6%
+35.0%
+47.6%
+58.5%
+34.0%
+Action Entropy + Risk Control
+65.2%
+65.0%
+31.4%
+68.9%
+65.0%
+28.6%
+66.4%
+65.0%
+29.1%
+34.7%
+35.0%
+46.9%
+58.8%
+34.0%
+Learned Uncertainty + Risk Control (ours) 67.1%
+65.0%
+17.0%
+77.4%
+65.0%
+16.9%
+71.0%
+65.0%
+14.4%
+35.7%
+35.0%
+34.9%
+62.8%
+20.8%
+OpenVLA RICL (no help)
+67.3%
+–
+0.0%
+65.8%
+–
+0.0%
+64.7%
+–
+0.0%
+31.6%
+–
+0.0%
+57.4%
+0.0%
+Random ASK
+69.4%
+75.0%
+31.8%
+68.7%
+75.0%
+30.1%
+67.9%
+75.0%
+26.8%
+35.2%
+40.0%
+44.6%
+60.3%
+33.3%
+DINO Distance + Risk Control
+77.2%
+75.0%
+48.9%
+75.1%
+75.0%
+49.7%
+76.4%
+75.0%
+40.2%
+38.6%
+40.0%
+66.9%
+66.8%
+51.4%
+Action Entropy + Risk Control
+77.4%
+75.0%
+49.1%
+75.8%
+75.0%
+48.5%
+76.2%
+75.0%
+41.2%
+39.7%
+40.0%
+67.4%
+67.3%
+51.6%
+Learned Uncertainty + Risk Control (ours) 79.3%
+75.0%
+31.8%
+76.5%
+75.0%
+30.1%
+78.4%
+75.0%
+26.8%
+40.2%
+40.0%
+44.6%
+68.6%
+33.3%
+(a) MiniVLA
+(b) π0-FAST
+(c) OpenVLA
+Figure 3. Effect of different target risk levels on R2-VLA across three VLA backbones and four LIBERO suites. As the target success rate
+increases, R2-VLA generally requests more expert assistance to achieve higher task success, demonstrating the trade-off between task-level
+success and the frequency of expert assistance.
+cess and ASK rate for π0-FAST, MiniVLA, and OpenVLA,
+respectively, across all four LIBERO suites.
+As the tar-
+get success rate increases, R2-VLA generally requests more
+expert assistance, leading to improved task success. Impor-
+tantly, the observed success rates closely track or exceed the
+prescribed targets across different risk levels, demonstrating
+that R2-VLA can adapt its ACT/ASK decisions to varying
+task success requirements. The results also reveal differ-
+ences across task suites: LIBERO-LONG generally requires
+more frequent expert assistance to achieve a given success
+rate, reflecting the greater difficulty of long-horizon manip-
+ulation tasks. These trends are consistent across all three
+VLA backbones, demonstrating that R2-VLA enables flex-
+ible control over task-level success rate by adjusting the cal-
+ibrated threshold according to the desired risk level, without
+relying on a manually specified uncertainty threshold.
+Retrieval Corruption.
+We evaluate the contribution of
+corrupted retrieval contexts during uncertainty-head train-
+ing by comparing R2-VLA against a variant trained ex-
+clusively with clean retrieval demonstrations.
+As shown
+in Table 6, incorporating retrieval corruption consistently
+improves average task success while substantially reducing
+ASK rate across all three VLA backbones. Specifically, for
+MiniVLA, the average success rate increases from 59.5% to
+62.8%, while the ASK rate decreases from 33.9% to 20.8%.
+Similar improvements are observed for π0-FAST, where the
+success rate increases from 70.5% to 72.0% and the ASK
+rate decreases from 61.7% to 49.0%, and for OpenVLA,
+where the success rate increases from 67.2% to 68.6% while
+the ASK rate decreases from 47.4% to 33.3%. These re-
+sults suggest that exposing the uncertainty head to mislead-
+ing retrieval contexts improves its ability to distinguish cer-
+tain from uncertain retrieval-guided actions. Importantly,
+the reduction in ASK rate is accompanied by improved task
+success, indicating that retrieval corruption does not merely
+encourage more conservative uncertainty estimates but in-
+stead enables more selective expert assistance.
+Overall,
+these findings support the importance of explicitly incorpo-
+rating retrieval failure modes into uncertainty-head training
+to improve both task success rate and expert assitance fre-
+quency.
+Effect of Calibration Set Size.
+We investigate the sen-
+sitivity of R2-VLA to the number of calibration episodes
+Ncal.
+Specifically, we vary Ncal ∈{50, 100, 200, 400}
+while keeping the other parameter fixed. As shown in Ta-
+ble 7, increasing the calibration-set size consistently re-
+9
+
+
+Table 6. Ablation of retrieval corruption for uncertainty-head training across VLA backbones. SR denotes success rate.
+Backbone
+Variant
+Spatial
+Object
+Goal
+Long
+Avg. SR ↑Avg. ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+SR ↑
+Target SR ASK ↓
+MiniVLA
+w/o Retrieval Corruption 66.4%
+65.0%
+29.1%
+69.3%
+65.0%
+28.3%
+67.1%
+65.0%
+29.4%
+35.2%
+35.0%
+48.6%
+59.5%
+33.9%
+R2-VLA
+67.1%
+65.0%
+17.0%
+77.4%
+65.0%
+16.9%
+71.0%
+65.0%
+14.4%
+35.7%
+35.0%
+34.9%
+62.8%
+20.8%
+π0-FAST
+w/o Retrieval Corruption 82.3%
+80.0%
+55.1%
+76.7%
+80.0%
+54.7%
+81.8%
+80.0%
+57.6%
+41.2%
+40.0%
+79.3%
+70.5%
+61.7%
+R2-VLA
+83.2%
+80.0%
+44.6%
+78.9%
+80.0%
+43.2%
+83.1%
+80.0%
+41.7%
+42.7%
+40.0%
+66.3%
+72.0%
+49.0%
+OpenVLA w/o Retrieval Corruption 76.7%
+75.0%
+46.4%
+75.3%
+75.0%
+45.3%
+76.5%
+75.0%
+41.2%
+40.3%
+40.0%
+56.8%
+67.2%
+47.4%
+R2-VLA
+79.3%
+75.0%
+31.8%
+76.5%
+75.0%
+30.1%
+78.4%
+75.0%
+26.8%
+40.2%
+40.0%
+44.6%
+68.6%
+33.3%
+Table 7. Effect of calibration-set size on R2-VLA using the π0-FAST backbone across four LIBERO suites. SR denotes task success
+rate, and ASK denotes expert assistance frequency. The highlighted row corresponds to the default calibration-set size used in the main
+experiments.
+Ncal
+Spatial
+Object
+Goal
+Long
+Avg. SR ↑
+Avg. ASK ↓
+SR ↑
+Target SR
+ASK ↓
+SR ↑
+Target SR
+ASK ↓
+SR ↑
+Target SR
+ASK ↓
+SR ↑
+Target SR
+ASK ↓
+50
+84.0%
+80.0%
+51.2%
+79.0%
+80.0%
+49.3%
+83.8%
+80.0%
+49.6%
+42.2%
+40.0%
+70.1%
+72.3%
+55.1%
+100
+83.6%
+80.0%
+50.4%
+78.9%
+80.0%
+48.6%
+83.4%
+80.0%
+47.9%
+42.9%
+40.0%
+69.8%
+72.2%
+54.2%
+200 (Default)
+83.2%
+80.0%
+44.6%
+78.9%
+80.0%
+43.2%
+83.1%
+80.0%
+41.7%
+42.7%
+40.0%
+66.3%
+72.0%
+49.0%
+400
+83.7%
+80.0%
+40.8%
+79.3%
+80.0%
+40.5%
+83.9%
+80.0%
+39.6%
+43.0%
+40.0%
+62.5%
+72.5%
+45.9%
+duces the frequency of expert assistance while maintaining
+relatively stable task success across all four LIBERO suites.
+In particular, increasing Ncal from 50 to 400 reduces the
+average ASK rate from 55.1% to 45.9%, while the aver-
+age success rate remains around 72%. This suggests that
+additional calibration data improves the ability of the risk-
+control procedure to identify thresholds that permit more
+autonomous execution without substantially compromising
+task success. Notably, the default setting of Ncal = 200,
+used in our main experiments, already achieves a favorable
+trade-off between task success and expert assistance, with
+an average success rate of 72.0% and an ASK rate of 49.0%.
+These findings demonstrate that R2-VLA can maintain rel-
+atively stable task performance across different calibration-
+set sizes while reducing unnecessary expert assistance as
+more calibration data becomes available.
+10

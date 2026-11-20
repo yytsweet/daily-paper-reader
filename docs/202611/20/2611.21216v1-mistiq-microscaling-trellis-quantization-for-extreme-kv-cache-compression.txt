@@ -1,0 +1,2999 @@
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Ofir Gordon 1 Lior Dikstein 1 Paul Balanca 2 Idan Achituve 1 Douglas Orr * 2 Hai Victor Habi * 1
+Abstract
+Modern large language models (LLMs) increas-
+ingly support longer contexts and serve more
+concurrent requests, increasing both sequence
+lengths and batch sizes. Both trends increase
+KV-cache size and memory traffic during in-
+ference. KV-cache quantization reduces these
+costs, with recent approaches using codebook-
+based vector quantization to achieve extremely
+low bit widths. However, hardware constraints
+limit codebook size, and most methods recon-
+struct the cache in higher-precision floating-point
+formats for attention, limiting the computational
+benefits of quantization. To address these limi-
+tations, we introduce MiSTiQ, a drop-in replace-
+ment for codebook-based vector quantizers that
+combines trellis-coded storage with microscaling
+(MX) formats for low-precision computation. We
+combine trellis quantization with beam search
+to encode the KV cache over large reconstruc-
+tion spaces without large codebooks. To sup-
+port MX computation, we derive MX-Hash func-
+tions that generate reconstruction values directly
+in the target MX element format. These functions
+use the scale-conditioned marginal distribution of
+block-normalized Gaussian inputs. On Llama3
+and Qwen3, MiSTiQ achieves lower WikiText
+perplexity and higher GSM8K accuracy than the
+evaluated baselines across several block-scale for-
+mats at approximately 1.25 effective bits per ele-
+ment. With NVFP4, it also achieves the highest
+LongBench average on both models.
+1. Introduction
+Large language models (LLMs) have been broadly adopted
+across many applications (Brown et al., 2020; Taylor et al.,
+2022; Yuan et al., 2024). In many cases, these applications
+*Equal last authors.
+1Arm AI Research (AAIR), Arm
+Ltd
+2Graphcore Research.
+Correspondence to:
+Hai Vic-
+tor Habi <haivictor.habi@arm.com>,
+Douglas Orr <dou-
+glaso@graphcore.ai>.
+Preprint. November 17, 2026.
+require long-context inputs, such as long-context reasoning
+(Wei et al., 2022; Guo et al., 2025) and retrieval-augmented
+generation (RAG) (Lewis et al., 2020). However, handling
+long contexts during LLM inference demands substantial
+memory capacity and incurs high memory traffic due to key-
+value cache. Moreover, in certain scenarios—such as when
+using speculative decoding (Ye et al., 2024), with Multi-
+head Latent Attention (MLA) (Yuan et al., 2026), or when
+multiple requests share a common prefix (Juravsky et al.,
+2024) the decode phase can also become highly compute-
+intensive and may even be compute-bound.
+To tackle these challenges, there are two main ways to
+approach the problem. The first is through architectural
+changes, such as Multi-query attention (MQA), Grouped-
+query attention (GQA) (Ainslie et al., 2023), Sliding-
+window attention (SWA) (Team et al., 2025), and hybrid
+local & global attention(Team et al., 2025). The second
+approach is to apply post-training compression techniques,
+including quantization (Liu et al., 2024; Hooper et al., 2024),
+token selection (Zhang et al., 2023; Li et al., 2024), and oth-
+ers. In this work, we focus on quantization for its potential
+to reduce memory, as well as its applicability to pretrained
+models without requiring extensive retraining.
+KV-cache quantization methods exploit the different dis-
+tributions of keys and values to reduce storage while pre-
+serving accuracy. KIVI (Liu et al., 2024) uses different
+quantization granularities for keys and values, while more re-
+cent methods adopt vector quantization to improve accuracy
+at lower storage budgets. These include NSNQuant (Son
+et al., 2026), which uses calibration-free distribution shaping
+through normalization and scaling, and VecInfer (Yao et al.,
+2026), which applies smoothing and Hadamard transforma-
+tions to mitigate key-cache outliers. These methods store the
+quantized cache as integer codes and use floating-point or in-
+teger arithmetic for computation. However, codebook-based
+vector quantization is constrained by the size of the code-
+books that hardware can efficiently support. QTIP (Tseng
+et al., 2024b) addresses this limitation for weight quantiza-
+tion through trellis quantization, enabling large reconstruc-
+tion spaces without explicitly storing large codebooks.
+Recently, the Open Compute Platform introduced the Mi-
+croscaling data format (Rouhani et al., 2023), a collabora-
+tion among Arm, AMD, NVIDIA, Qualcomm, Intel, Meta,
+1
+arXiv:2611.21216v1  [cs.LG]  16 Nov 2026
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+and Microsoft, aimed at standardizing computation for deep
+learning models. Microscaling (MX) formats have attracted
+substantial attention in research on weight and activation
+quantization, including work on GPTQ adaptation (Egiazar-
+ian et al., 2026), feature map rotation (Shao et al., 2026;
+Gordon et al., 2026), block-scale format representation (Fa-
+soli et al., 2026), and other efforts. While prior studies
+have explored MX-based KV-cache quantization at four
+bits or above (Lee et al., 2025a; Zhang et al., 2026), com-
+bining lower storage costs with direct reconstruction into
+MX-compatible formats remains an open challenge.
+Here, we aim to reduce KV-cache storage while enabling
+direct reconstruction into MX-compatible formats for low-
+precision computation. To achieve this, we address the
+codebook-size constraint by adapting trellis quantization
+for KV-cache compression. We then augment trellis quanti-
+zation with a microscaling format to gain further computa-
+tional benefits. The resulting approach is a drop-in quantizer
+that can replace vector quantization and be integrated with
+most methods. Concretely, we introduce Microscaling Trel-
+lis Quantization (MiSTiQ), which replaces QTIP’s Viterbi
+encoder with beam search and uses MX-Hash functions
+based on the distribution of block-normalized Gaussian ele-
+ments. Furthermore, we incorporate joint scale optimization
+into the beam search with the finer-resolution UE5M3 (Fa-
+soli et al., 2026) scale format. To the best of our knowledge,
+MiSTiQ is the first dedicated KV-cache quantizer to com-
+bine sub-2-bit effective storage with direct reconstruction
+into MX-compatible formats. Experiments on WikiText,
+LongBench, and GSM8K demonstrate improved accuracy
+over the evaluated baselines across a range of models and
+quantization settings.
+Contributions: We investigate approaches and tradeoffs
+for using QTIP as a storage format while leveraging MX
+formats for computation. This paper makes the follow-
+ing contributions: (1) we introduce beam search for trellis
+quantization, enabling trellis quantization of the key–value
+cache; (2) we develop QTIP hash variants tailored to match
+the marginal distribution of block-normalized elements; (3)
+we analyze design-parameter tradeoffs and evaluate the ap-
+proach for KV-cache compression; and (4) we report ex-
+perimental results across multiple benchmarks and models
+that demonstrate the benefits of the proposed method. To
+support reproducibility, we will publicly release the code
+implementing our method upon acceptance. The appendix
+is provided separately as supplementary material.
+2. Related Work
+KV-cache compression.
+The growing memory and band-
+width costs of KV caches under long contexts and large
+batches have driven extensive research into cache com-
+pression. Among these approaches, quantization has been
+widely studied as a means of reducing the storage cost per
+cached element while retaining the cached tokens. KIVI
+uses per-channel key and per-token value quantization (Liu
+et al., 2024), while KVQuant combines pre-RoPE key quan-
+tization with sensitivity-weighted nonuniform levels and
+outlier handling (Hooper et al., 2024). Rotation-based ap-
+proaches, including QuaRot, RotateKV, and TurboQuant, re-
+shape the quantization domain to improve low-bit represen-
+tations (Ashkboos et al., 2024; Su et al., 2025; Zandieh et al.,
+2026). Codebook-based vector quantization instead exploits
+dependencies across coordinates, using coupled channels
+or additive representations (Zhang et al., 2024; Li et al.,
+2025a). NSNQuant specifically combines double normaliza-
+tion, channel centering, and Hadamard transforms to support
+a reusable Gaussian codebook without data-dependent cali-
+bration (Son et al., 2026). VecInfer combines smoothing and
+Hadamard transforms to improve codebook utilization, with
+fused dequantization and attention computation (Yao et al.,
+2026). Motivated by differences in quantization sensitivity,
+particularly the greater sensitivity of keys, mixed-precision
+methods allocate bits according to K/V and layer sensitiv-
+ity (Li et al., 2025b; Tao et al., 2025), token saliency (Dong
+et al., 2024; He et al., 2024), or recency and progressive
+quantization schedules (Duanmu et al., 2024; Liu et al.,
+2026). Complementary approaches like AQUA-KV exploit
+reconstruction structure: quantizes residuals from learned
+predictors (Shutova et al., 2025). Other compression mech-
+anisms include token selection and eviction (Zhang et al.,
+2023; Li et al., 2024), head-dependent cache retention (Xiao
+et al., 2025), and low-rank cache representations (Chang
+et al., 2025).
+Trellis quantization.
+Trellis-coded quantization repre-
+sents source sequences through paths in a finite-state trellis,
+with subsequent extensions assigning vector reconstructions
+to trellis branches (Marcellin & Fischer, 1990; Fischer et al.,
+1991). This structure couples successive reconstruction
+choices while permitting encoding by dynamic program-
+ming, avoiding an explicit enumeration of all possible recon-
+structed sequences. For low-bit LLM weight compression,
+QuIP# combines randomized Hadamard preprocessing with
+E8 lattice codebooks at up to four bits per weight (Tseng
+et al., 2024a), while AQLM uses sums of learned codewords
+with joint optimization within transformer blocks, targeting
+two to three bits per parameter (Egiazarian et al., 2024).
+However, the size of an explicit, unstructured codebook
+grows exponentially with vector dimension at a fixed bi-
+trate. QTIP combines trellis quantization with incoherence
+processing, using a stateful bitshift trellis to decouple the
+effective quantization dimension from the stored codebook
+size (Tseng et al., 2024b). It supports both lookup-based
+and computed, lookup-free reconstruction rules, offering dif-
+ferent tradeoffs between storage and computation. Proteus
+further develops lookup-free trellis quantization through
+2
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+computed reconstruction codes (Yang et al., 2026).
+MX quantization.
+Microscaling (MX) formats combine
+low-precision floating-point or integer elements with a
+shared block scale, extending their representable dynamic
+range (Rouhani et al., 2023). Early work adapted established
+post-training quantization algorithms to MX formats (Shar-
+ify et al., 2024), while subsequent studies examined the ef-
+fects of element format and quantization granularity (Chen
+et al., 2026). Format extensions such as MX+ and AMXFP4
+improve outlier representation through enhanced element
+precision and asymmetric shared scales, respectively (Lee
+et al., 2025a;b). Rotation-based approaches, including MR-
+GPTQ and Block Rotation, use block-local transformations
+tailored to MX scaling constraints (Egiazarian et al., 2026;
+Shao et al., 2026). FPTQuant also reshapes activations and
+improves weight–activation alignment for low-bit integer
+quantization (van Breugel et al., 2026). For MX quanti-
+zation, LATMiX extends distribution shaping beyond rota-
+tions through learned invertible affine transformations that
+account for the activation distribution and MX block struc-
+ture (Gordon et al., 2026). Complementary approaches im-
+prove scaling through pre-scale optimization (Zhang et al.,
+2026), overflow-aware scale selection, and higher-precision
+scales shared across larger blocks (Chhugani et al., 2026).
+3. Background
+3.1. Microscaling Quantization
+Microscaling represents a vector as blocks of low-precision
+elements, each multiplied by a shared scale (Rouhani et al.,
+2023). Let y ∈Rd and assume that d is a multiple of dmx.
+Define NB = d/dmx and Ib = {b dmx, . . . , (b + 1)dmx −
+1} for b ∈{0, . . . , NB −1}. We write yb ∈Rdmx for
+the coordinates indexed by Ib. Let QS and QE denote
+the representable scale and element point sets. The scale
+quantizer is Qα : R →QS, and the element quantizer is
+QE : R →QE. For a positive element-range constant
+CS, a common max-based reference rule and the resulting
+reconstruction are
+s∗
+b = maxi∈Ib |yi|
+CS
+,
+sb = Qα(s∗
+b) ∈QS,
+byi = sbQE
+ yi/sb
+
+,
+i ∈Ib.
+(1)
+Here QE acts elementwise.1
+The scale format determines the available range and preci-
+sion of sb, while the element format determines the values
+available after normalization. Scale quantization therefore
+contributes error separately from element quantization. In
+particular, a limited scale range can make smaller blocks
+1The reconstruction formula assumes sb > 0; if sb = 0, we set
+byi = 0 for all i ∈Ib.
+less accurate when their reference scales become unrepre-
+sentable (Fasoli et al., 2026).
+In this study, we employ two block-scale formats: (1)
+UE8M0, a power-of-two scaling format introduced in the
+microscaling framework (Rouhani et al., 2023); and (2)
+UE5M3, an unsigned floating-point scale format with three
+mantissa bits and five exponent bits, introduced in (Fasoli
+et al., 2026).
+3.2. QTIP
+Vector quantization (VQ) represents a group of V values by
+one index selecting a reconstruction vector from a codebook.
+Jointly chosen reconstruction vectors can provide better
+shaping than independent scalar quantization. At k bits per
+element, however, an unrestricted V -dimensional codebook
+contains 2kV entries, so its storage and nearest-neighbor
+search cost grow exponentially with V .
+Trellis quantization represents long vectors that would be
+intractable with an unrestricted codebook as a walk through
+a trellis. QTIP (Tseng et al., 2024b) uses a (L, k, V ) trellis,
+where L is the state-bit length, k is the coded bit rate per
+scalar, and V is the number of scalars emitted at a trellis
+step. A length-T source is divided into n = T/V groups
+rt ∈RV for t = 1, . . . , n, assuming V | T. The state set is
+U = {0, . . . , 2L−1}. The reconstruction map C : U →RV
+assigns a code value to each state. It may use a stored
+codebook lookup or a computed QTIP code.
+For predecessor u ∈U and successor v ∈U, kV is an
+integer satisfying 1 ≤kV ≤L. The bitshift edge relation
+and successor set are
+(u, v) ∈A
+⇐⇒
+∃c ∈Z, 0 ≤c < 2kV :
+v =
+
+u2kV mod 2L
++ c,
+succ(u) =
+
+u2kV mod 2L
++ c :
+c ∈Z, 0 ≤c < 2kV o
+.
+(2)
+That is, the most significant L −kV bits of v equal the
+least significant L −kV bits of u. Each transition appends
+kV bits, so a state’s output can be recovered from a fixed-
+width window of the packed path bits. This permits parallel
+decoding of output groups.
+A valid state sequence u1:n reconstructs each group as
+C(ut). Under squared error, define the local distortion and
+trellis objective by
+ℓt(u) = ∥C(u) −rt∥2
+2,
+min
+valid u1:n D(u1:n).
+(3)
+where D(u1:n) = Pn
+t=1 ℓt(ut) is the total squared recon-
+struction distortion of the trellis path u1:n. The additive cost
+3
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+(a) MicroScaling Trellis Quantization Encoding
+Selected walk
+Another Walk
+MX block scale s0
+MX block scale s1
+Trellis G
+00
+01
+10
+11
+00
+01
+10
+11
+y0
+x0
+/s0
+00
+01
+10
+11
+y1
+x1
+/s0
+00
+01
+10
+11
+y2
+x2
+/s0
+00
+01
+10
+11
+y3
+x3
+/s1
+00
+01
+10
+11
+y4
+x4
+/s1
+00
+01
+10
+11
+y5
+x5
+/s1
+01
+10
+00
+00
+00
+01
+1
+1
+0
+1
+0
+00
+01
+11
+10
+01
+10
+(b) MicroScaling Trellis Quantization Decoding
+Trellis state bits
+10
+u
+Mixer
+0
+1
+1
+0
+0
+1
+1
+0
+Magnitude Rank
+p
+0
+1
+w
+sign bit
+Inverse CDF
+p
+|x|
+MX block scale sb
+×
+x
+0
+MX-Gaussian PDF
+target distribution
+Figure 1. MicroScaling trellis quantization overview. (a) Inputs are scaled blockwise before beam search on the bitshift trellis. (b)
+Trellis-state bits are mixed and mapped through the scale-dependent inverse CDF to form MX-Gaussian reconstruction values. The
+distribution diagrams are schematic.
+permits Viterbi dynamic programming over trellis states
+rather than enumeration of all reconstruction sequences.
+QTIP applies incoherence processing to model weights be-
+fore trellis quantization, making the transformed source
+approximately Gaussian-like. Its computed codes are de-
+signed to produce approximately Gaussian outputs suited to
+that source model.
+4. Quantization with Beam Search on Trellises
+To enable trellis quantization of the KV cache while limiting
+encoding overhead, we replace the exact Viterbi search used
+by QTIP with approximate beam search.
+Let bstart denote the number of bits used to select the ini-
+tial trellis state. Beam search considers initial states in
+{0, . . . , 2bstart −1} and retains at most B ≥1 path hypothe-
+ses after each expansion. Let Bt be the indexed collection
+of retained hypotheses after step t. Each hypothesis h ∈Bt
+has its own terminal state ut(h) ∈U, accumulated dis-
+tortion Jt(h), and predecessor-hypothesis index. Initialize
+B0 = {0, . . . , 2bstart −1}, with u0(h) = h and J0(h) = 0
+for each h ∈B0. Setting bstart = 0 gives the fixed ini-
+tial state u0 = 0. For each retained hypothesis h ∈Bt−1,
+expand every legal successor v ∈succ(ut−1(h)) with cost
+eJt(h, v) = Jt−1(h) + ℓt(v).
+(4)
+Keep up to B lowest-cost expanded hypotheses across all
+parents and assign them indices in Bt. At termination, select
+a minimum-cost retained hypothesis and trace its predeces-
+sor indices to recover its path. Algorithm 1 includes a
+summary of the encoding procedure.
+The state sequence u1:n is the logical encoder output. Its
+compact stored representation comprises the branch labels
+ct = ut mod 2kV , each occupying kV bits, together with
+the selected initial state u0, represented by bstart bits. The
+initial-state selector contributes bstart/T bits per scalar.
+When bstart = 0, the decoder uses u0 = 0 without stor-
+ing a selector. Decoding consists only of state recovery,
+reconstruction-map lookup, and concatenation, without
+beam search or optimization. The procedure is summarized
+in Algorithm 3.
+QTIP’s optimized Viterbi search considers up to 2L trellis
+states and has complexity O(2LT/V ). Beam search ex-
+pands 2bstart initial hypotheses and at most B hypotheses
+at each subsequent step, scoring their 2kV successors and
+requiring O((2bstart+(T/V −1)B)2kV ) work for direct dis-
+tortion evaluation, plus selection. This reduces the retained
+search space at the cost of losing guaranteed optimality,
+while decoding remains unchanged.
+5. MX Trellis Quantization (MiSTiQ)
+We present a microscaling (MX) trellis quantization tech-
+nique that integrates MX compute formats with a trellis-
+based storage scheme. We find that the ordering of scaling
+and trellis quantization affects reconstruction error. Instead
+of applying MX after trellis quantization, we propose per-
+forming MX scaling first and then encoding the scaled val-
+ues into the trellis. Encoding these scaled values with the
+trellis requires a modified hash function that matches the
+4
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+(a) Vector length V
+(b) Trellis length T
+(c) MX block size
+Figure 2. MiSTiQ parameter analysis with standard Gaussian inputs, consistent with the MX Gaussian hash derivation. (a) Vector
+length: beam search and Viterbi. (b) Trellis length: both methods with bstart = 8 (S8) or bstart = 0 (S0). (c) MX block size with
+fixed UE8M0 scales, T = 1024, V = 8, and beam widths 128 and 1024, at approximately matched effective rates. The ordinate is
+RMSE · 2beff ; beff counts payload, scale, and start-state bits per scalar.
+Figure 3. Comparison between the standard Gaussian distribution
+and the MX-Gaussian marginal distribution for a block size of 32
+with E2M1 scaling.
+Gaussian distribution after it has been scaled by the MX
+block scale; we refer to this scaled distribution as MX-
+Gaussian. In Figure 3 we illustrate the difference between
+Gaussian and MX-Gaussian. In addition, we incorporate
+MX element-wise quantization into the hash function so
+that the trellis beam search is explicitly aware of the ele-
+ment quantization. Finally, when using finer block-scale
+formats such as UE5M3 and NVFP4’s E4M3 in place of
+UE8M0, we introduce a joint trellis and scale search to
+reduce reconstruction error.
+We now formulate MX trellis quantization. Given a target
+vector y ∈Rd, where d = T is the scalar length associated
+with the trellis, the goal is to obtain represented MX block
+scales and a trellis code for its quantized reconstruction. The
+trellis uses n = T/V steps, each emitting V coordinates2.
+MX trellis quantization combines trellis-coded storage with
+2For this block-aligned construction, assume V divides dmx,
+so each V -coordinate emission lies within one MX block.
+microscaling computation (Rouhani et al., 2023). Each MX
+block contains low-precision elements and a shared scale,
+allowing dot products to be accumulated before applying
+the product of the block scales.
+Using the target blocks yb, block size dmx, and quantizers
+defined in Section 3.1, reconstruction takes the form byb =
+sbbxb, where sb ∈QS and bxb ∈Qdmx
+E
+. The normalized
+target is xb = yb/sb for sb > 0. The reconstruction error is
+measured in the original domain:
+∥yb −byb∥2
+2 = ∥yb −sbbxb∥2
+2 = s2
+b∥xb −bxb∥2
+2,
+(5)
+where yb represent the bth block with local block coordinate
+i ∈{1, . . . , dmx} corresponds to global index b dmx +i−1;
+thus (yb)i = ybdmx+i−1. Each scale remains fixed within its
+block, while the trellis state and accumulated cost continue
+across block boundaries.
+5.1. MX-Hash
+To derive the MX hash, we begin with the same assumption
+as QTIP: the data follows a Gaussian distribution, namely
+Y ∼N(0, Idmx). Since the trellis encodes the scaled val-
+ues X = Y /gmxs(Y ), we construct a hash function using
+inverse transform sampling to match the distribution of X,
+which we call the MX-Gaussian distribution. Assuming
+that decoded trellis states are approximately uniformly dis-
+tributed, we map each state to a uniform value and apply the
+inverse cumulative distribution function (CDF) to obtain a
+reconstruction value with the target distribution.
+Given a MX block scale s we derive the inverse CDF of MX-
+Gaussian condition on the scale. Specifically, let P(s; d) ≜
+erf
+
+b(s)/
+√
+2
+d
+−erf
+
+a(s)/
+√
+2
+d
+> 0 be the scale
+probability, a(s), b(s) be lower and upper boundary of
+5
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+the scale s, and p⋆(s)
+=
+erf
+
+a(s)/
+√
+2
+
+P(s; dmx −
+1)/P(s; dmx). Then for 0 < p < 1 the inverse CDF of
+MX-Gaussian condition on the scale is given by:
+F −1(p; s)
+(6)
+=
+√
+2
+s ierf
+
+
+
+
+
+
+
+
+
+
+
+
+P(s; dmx)p
+P(s; dmx −1),
+p ≤p⋆(s),
+P (s;dmx)p+erf(a(s)/
+√
+2)
+dmx
+erf(b(s)/
+√
+2)
+dmx−1
+,
+p > p⋆(s).
+
+
+
+
+,
+where erf denote the standard error function and ierf its
+inverse. The derivation appear in Appendix C. Using (6),
+we can sample from the MX-Gaussian distribution given a
+uniform distribution. In the following paragraph, we first
+introduce bit mixing to improve our ability to generate a
+uniform distribution. Then, in the next paragraph, we com-
+bine this with the inverse CDF to produce the MX-Gaussian
+hash.
+State Mixing.
+Here, we introduce the bit mixing stage that
+takes a trellis state u ∈U = {0, . . . , 2L −1} and mixes it
+before applying the inverse CDF. Each trellis state produces
+a vector with V output coordinates. The mixer therefore
+consists of V distinct mixer functions that share the same
+structure but use different parameterizations. Specifically,
+to produce the vth output coordinate, we first apply a Linear
+Congruential Generator (LCG) with fixed unsigned 32-bit
+coefficients Av and Cv, given by:
+LCGΩ(u) = (Avu + Cv) mod 232.
+(7)
+After the LCG we apply the Mixer function parameterized
+by Ωv = {Av, Cv, rv,1, rv,2, rv,3, mv,1, mv,2} and is given
+by:
+MixerΩv(w) = S
+
+M
+ M(w; rv,1, mv,1); rv,2, mv,2
+
+; rv,3
+
+,
+wv = MixerΩv
+ LCGΩ,v(u)
+
+,
+(8)
+where M(x; r, m) = (m[x ⊕(x ≫r)]) mod 232 combines
+an XOR with logical right shift r and multiplication by m,
+S(x; r) = x ⊕(x ≫r) performs the final XOR shift, ⊕
+denotes bitwise XOR and ≫denotes logical right shift. By
+aggregating all V mixing functions, we obtain the parameter
+set Ω= {Ωv}V
+v=1, with parameters selected using the MX-
+Hash calibration procedure described in Appendix A.
+MX-Gaussian CDF hash.
+Using the mixed word wℓde-
+fined above, extract its sign and magnitude rank:
+γℓ=
+ wℓ
+231
+
+,
+Uℓ= wℓmod 231.
+(9)
+Thus, γℓsupplies the sign bit and Uℓthe magnitude rank.
+The hash converts the magnitude rank to the interior proba-
+bility
+pℓ= Uℓ+ 1
+2
+231
+,
+0 < pℓ< 1.
+(10)
+Let QE round to the finite grid QE of the selected element
+format, using nearest rounding, ties to even, and finite satu-
+ration. At a represented scale s, use the scale-conditioned
+inverse F −1(p; s) from Theorem C.2. Using the sign bit
+and interior probability, the output coordinate mapping and
+quantized vector are
+hΩ,ℓ(u; s) = QE
+
+(−1)γℓF −1(pℓ; s)
+
+,
+hΩ(u; s) =
+ hΩ,1(u; s), . . . , hΩ,V (u; s)
+
+∈Q V
+E .
+(11)
+The floating-point CDF mapping can be implemented using
+precomputed scale coefficients and a shared inverse-CDF
+lookup table, as detailed in Appendix E.
+To compare quantizer parameters at different effective bit
+rates, we report RMSE·2beff, where RMSE is the root mean
+square reconstruction error and beff is the effective number
+of bits per element. This compensates for the 2−b scaling of
+RMSE predicted by high-rate quantization theory (Gray &
+Neuhoff, 1998). Figure 2 reports results for standard Gaus-
+sian inputs across three parameters: subvector length V ,
+trellis length T, and MX block size. The best results occur
+at V = 4, which we hypothesize reflects the relationship
+between the 16-bit state and 4-bit element width. Longer
+trellises improve performance, with marginal gains beyond
+T = 1024. Finally, larger MX blocks offer little benefit
+for Gaussian data. The corresponding bit budget is better
+allocated elsewhere, such as to transition bits. However, this
+does not capture the advantages of MX in terms of hardware
+compatibility and improvements in compute.
+5.2. Relaxed Joint Scale Search
+A straightforward approach to encoding y is to first choose
+the scale sb for each MX block according to a heuristic
+rule, such as scaling the maximum to fit in the element
+quantizer’s range (see Section 3.1). The normalized blocks
+are then quantized via beam search, with each sb held fixed.
+To improve quantization accuracy, we jointly optimize block
+scales and trellis encodings during beam search. Unlike
+NSNQuant’s post-quantization scale adjustment (Son et al.,
+2026), this requires ranking partial paths while scale updates
+change the reconstruction error of previous values.
+We relax the quantized block scale sb to a continuous vari-
+able ab and refit it for each candidate path after every beam-
+search step. To stabilize estimates from short prefixes, we
+add the penalty λ(ab −sref
+b )2 to the prefix reconstruction
+error, where λ ≥0 and sref
+b
+= Qα(s∗
+b) is a heuristic refer-
+ence scale computed from the full block before search. We
+use the scale-independent clipped MX-Hash variant (Ap-
+pendix D), so each path’s quantized outputs remain fixed as
+6
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+ab varies. The regularized objective is therefore quadratic in
+ab, and its minimizer has a closed form using two candidate-
+specific sufficient statistics: the inner product of the target
+and quantized outputs, and the squared norm of those out-
+puts, accumulated over the current block prefix.
+Updating these statistics at each step lets us refit the scale
+without revisiting earlier outputs. We then round the fitted
+scale using Qα and rank candidates by the regularized prefix
+error at that rounded scale plus the accumulated error of
+completed blocks. At block completion, we refit without
+regularization and round to obtain the final block scale.
+Appendix F gives the derivation. Algorithm 2 illustrates the
+candidate scoring procedure.
+5.3. Mixed Precision KV Quantization
+Prior work has shown that keys are more sensitive to quanti-
+zation than values (Li et al., 2025b; Tao et al., 2025). Our
+payload-allocation analysis in Figure 6 supports this ob-
+servation for MiSTiQ, showing that allocating more bits
+to keys can improve accuracy under a fixed total payload
+budget. Following this approach, we extend MiSTiQ to
+support different transition-bit budgets for the key and value
+trellis encoders, assigning more bits per transition to keys
+and fewer to values.
+This allocation becomes more flexible as the vector length
+V increases. Since each trellis step emits V scalar values, a
+one-bit change in the transition budget changes the payload
+by 1/V bits per element. Larger vectors therefore enable
+finer-grained allocation of the available payload between
+keys and values.
+The computed reconstruction mapping of MiSTiQ supports
+this flexibility without requiring an enlarged lookup table.
+For an explicit, unstructured vector codebook, representing
+V values at k bits per element requires 2kV entries. Its
+storage requirements therefore constrain the vector lengths
+and payload allocations that are practical.
+6. Experiments
+We evaluate MiSTiQ on Llama-3.1-8B-Instruct (Grattafiori
+et al., 2024) and Qwen3-8B (Yang et al., 2025) to assess
+its effectiveness for KV-cache quantization at very low bit
+widths. We compare MiSTiQ with existing vector quanti-
+zation methods designed for KV-cache compression, eval-
+uating WikiText-2 perplexity (PPL) (Merity et al., 2017),
+performance across LongBench tasks (Bai et al., 2024), and
+accuracy on GSM8K (Cobbe et al., 2021) under a decode-
+heavy chain-of-thought generation setting. We further con-
+duct ablation studies to isolate the contributions of individ-
+ual components and assess the trade-offs underlying our
+design choices. We present sub-1-bit PPL results in Ap-
+pendix G.1.
+6.1. Experimental Settings
+For the main results, we configure the MiSTiQ quantizer
+with a block size of 32 (16 for NVFP4) at effective bit
+widths above 2 bits per element, and 1283 below 2 bits per
+element. These choices are intended to maintain compati-
+bility with MX-capable hardware while allocating more of
+the storage budget to trellis-coded values. For the UE5M3
+and NVFP4 configurations, we use the relaxed joint scale
+search described in Section 5.2.
+For the main results, we integrate MiSTiQ into the
+NSNQuant (Son et al., 2026) workflow as a drop-in replace-
+ment for its codebook-based vector quantizer, retaining its
+normalization and Hadamard transformations. Normaliza-
+tion is applied before RoPE, and MiSTiQ quantization is
+applied to the KV cache after RoPE. Appendix G.2 demon-
+strates this integration with VecInfer, improving its accuracy
+below 2 effective bits per element.
+Unless otherwise stated, the trellis encoder in MiSTiQ uses
+a state-bit length of L = 16 and a source vector length of
+T = 1024, with V = 4 scalar values emitted per trellis step
+in the higher-bit settings and V = 8 in the lower-bit settings.
+Encoding uses beam search with beam width B = 128. We
+implement the baseline methods following their original
+descriptions and adapt them to MX formats by quantizing
+their codebook elements to the target MX element format.
+All experiments were conducted on NVIDIA H100 GPUs,
+using one GPU per run except for GSM8K evaluations,
+which used four GPUs. Full implementation details, in-
+cluding per-variant transition-bit allocation, are provided in
+Appendix A.
+6.2. Accuracy Evaluation
+Table 1 compares MiSTiQ with the baseline KV-cache vec-
+tor quantization methods across a range of evaluation work-
+loads, from WikiText-2 perplexity evaluation without free-
+form generation to long-context understanding and decode-
+heavy generation, including summarization and GSM8K
+reasoning. For LongBench, we evaluate seven tasks cover-
+ing question answering, summarization, and classification:
+Qasper (Dasigi et al., 2021), TriviaQA (Joshi et al., 2017),
+GovReport (Huang et al., 2021), QMSum!(Zhong et al.,
+2021), MultiNews (Fabbri et al., 2019), SAMSum (Gliwa
+et al., 2019), and TREC (Li & Roth, 2002). We report the
+unweighted average of their scores in the main table, with
+full per-task results provided in Appendix G.3.
+The results show that MiSTiQ achieves strong overall perfor-
+mance, with particularly pronounced gains in the lower-bit
+regime. At approximately 1.25 effective bits per element, it
+achieves the lowest perplexity and highest GSM8K accuracy
+3Note that hardware with a small block size (e.g., 16 or 32) can
+accommodate larger block sizes by replicating the scale.
+7
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Table 1. WikiText-2 perplexity, mean LongBench score, and GSM8K accuracy (%) for MX KV-cache quantization. Effective bits include
+payload and stored quantization metadata. Blue marks the best quantized result, including ties, per model and metric within each rate and
+format group.
+Block-scale
+format
+Variant
+Effective
+Bit
+Llama-3.1-8B-Instruct
+Qwen3-8B
+Perplexity ↓LongBench ↑GSM8K ↑Perplexity ↓LongBench ↑GSM8K ↑
+—
+BF16
+16.00
+7.170
+48.50
+76.95
+9.750
+41.07
+88.63
+UE8M0
+VecInfer (Yao et al., 2026)
+2.25
+10.985
+42.24
+23.12
+10.687
+38.15
+68.76
+NSNQuant (Son et al., 2026)
+2.24
+7.806
+47.19
+64.97
+10.386
+40.39
+80.67
+MiSTiQ (Ours)
+2.25
+7.743
+47.60
+69.60
+10.217
+40.46
+83.62
+UE5M3
+VecInfer (Yao et al., 2026)
+2.50
+8.022
+43.58
+54.13
+10.275
+38.62
+75.74
+NSNQuant (Son et al., 2026)
+2.24
+7.808
+47.62
+67.17
+10.370
+41.16
+81.50
+MiSTiQ (Ours)
+2.25
+7.642
+48.35
+70.13
+10.173
+40.62
+75.97
+NVFP4
+VecInfer (Yao et al., 2026)
+2.25
+10.782
+42.70
+27.00
+10.526
+39.60
+70.58
+NSNQuant (Son et al., 2026)
+2.24
+7.769
+47.89
+64.59
+10.395
+40.00
+80.59
+MiSTiQ (Ours)
+2.25
+7.879
+47.80
+67.70
+10.343
+40.63
+83.02
+UE8M0
+VecInfer (Yao et al., 2026)
+1.25
+258.713
+1.20
+1.97
+35.042
+6.48
+2.20
+NSNQuant (Son et al., 2026)
+1.24
+15.029
+38.23
+22.90
+20.457
+30.96
+27.14
+MiSTiQ (Ours)
+1.25
+11.957
+35.79
+33.06
+15.072
+31.71
+45.94
+UE5M3
+VecInfer (Yao et al., 2026)
+1.25
+232.335
+1.22
+1.90
+30.791
+11.43
+2.50
+NSNQuant (Son et al., 2026)
+1.24
+14.968
+38.15
+23.12
+20.319
+32.16
+29.04
+MiSTiQ (Ours)
+1.25
+11.630
+40.37
+35.48
+14.657
+33.42
+52.46
+NVFP4
+VecInfer (Yao et al., 2026)
+1.25
+234.929
+1.64
+1.59
+30.585
+10.21
+2.65
+NSNQuant (Son et al., 2026)
+1.24
+14.787
+37.92
+23.65
+20.244
+31.34
+29.57
+MiSTiQ (Ours)
+1.25
+11.469
+41.02
+37.23
+14.362
+33.06
+50.11
+Table 2. WikiText-2 perplexity (↓) across quantizer designs at
+approximately 1.30 effective bits per element with a UE5M3 scale
+format, providing a comparison at similar storage budgets. Blue
+cells mark the lowest perplexity for each model.
+Variant
+Llama-3.1-8B-Instruct Qwen3-8B
+NSN VQ MX
+12.966
+16.530
+Naive MX Trellis
+11.530
+15.682
+MX Trellis Hash
+11.195
+15.431
+MX Trellis Hash Joint
+10.699
+14.942
+Figure 4. WikiText-2 perplexity comparison for decreasing bit
+rates between MiSTiQ and NSNQuant (Son et al., 2026).
+among the compared quantized methods on both models
+across all three block-scale configurations. With UE5M3 at
+this rate, it also achieves the highest LongBench average on
+both models.
+We further extend the comparison with NSNQuant to de-
+creasing payload budgets in Figure 4. Here, MiSTiQ uses
+a vector length of V = 4, while NSNQuant varies the key
+and value codebook sizes to obtain different storage budgets.
+MiSTiQ consistently achieves lower perplexity at compa-
+rable effective bit widths, with an increasingly pronounced
+advantage under extreme compression, particularly below
+one effective bit per element.
+8
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Figure 5. WikiText-2 perplexity versus vector length for MiSTiQ
+with UE5M3 scales, dmx = 128, and T = 128 and a trellis
+payload of 1 bit per element.
+Figure 6. WikiText-2 perplexity versus K/V payload allocation
+for Llama-3.1-8B-Instruct, with UE5M3 scales, dmx = 128, and
+T = 1024. Upper and lower x-axis labels show K/V bits per
+transition for V = 4 and V = 8, respectively.
+6.3. Ablation Study
+6.3.1. QUANTIZER DESIGN COMPARISON
+Table 2 evaluates the successive design choices under-
+lying MiSTiQ using WikiText-2 perplexity at approxi-
+mately matched effective storage budgets. Replacing the
+NSNQuant-style codebook quantizer with trellis quantiza-
+tion followed by MX conversion (Naive MX Trellis) sub-
+stantially reduces perplexity on both models. Incorporat-
+ing MX element constraints directly into the reconstruction
+mapping (MX Trellis Hash) yields further improvements
+by making the trellis search aware of the final reconstruc-
+tion values. Jointly optimizing the trellis path and block
+scales (MX Trellis Hash Joint) further reduces perplexity,
+achieving the best results on both models. Together, these
+results show that trellis quantization provides the largest
+initial improvement, while MX-aware reconstruction and
+joint scale search contribute additional gains.
+6.3.2. VECTOR LENGTH AND PAYLOAD ALLOCATION
+We next examine how the number of scalar values emitted
+per trellis step, V (referred to as the “vector length”), af-
+fects quantization accuracy and the flexibility of payload
+allocation between keys and values. We first evaluate vector
+length under uniform payloads in Figure 5, then show how
+the finer-grained allocation enabled by larger vectors can
+further improve accuracy with mixed precision payloads in
+Figure 6.
+Although a vector length of V = 4 yields the lowest per-
+plexity on both models under uniform payloads, V = 8
+enables finer-grained payload allocation. This flexibility
+allows mixed precision configurations to assign a larger pay-
+load to the more sensitive keys, further reducing perplexity.
+This flexibility is particularly valuable for extremely low
+effective bit regimes, where small changes in payload al-
+location can substantially affect accuracy, motivating our
+use of V = 8 in this regime and V = 4 in the higher-bit
+configurations.
+7. Conclusions
+In this work, we presented MiSTiQ, a KV-cache quantizer
+that combines compact trellis-coded storage with microscal-
+ing formats for computation, bringing MX quantization to
+the KV cache. We examined how to preserve accuracy at
+very low storage budgets while reconstructing the cache
+directly in MX-compatible representations. To this end, we
+developed a beam-search trellis encoder that limits the re-
+tained search space, enabling KV-cache quantization with
+large reconstruction spaces without explicitly storing large
+vector codebooks. We further introduced MX-Hash func-
+tions that generate reconstruction values directly in the tar-
+get MX element format. We also developed relaxed joint
+search over trellis encodings and block scales, incorporating
+MX constraints into the encoding process. Experiments
+across language modeling, long-context understanding, and
+reasoning demonstrate strong overall performance, with
+particularly substantial gains at low effective bit widths.
+These results motivate extending the combination of trellis-
+coded storage and MX computation to weight quantiza-
+tion, where offline encoding permits more extensive search.
+Supporting a broader range of weight and KV-cache dis-
+tributions also motivates relaxing the Gaussian assumption
+underlying our hash construction, for example through re-
+construction mappings adapted to empirical distributions.
+9
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+References
+Ainslie, J., Lee-Thorp, J., De Jong, M., Zemlyanskiy, Y.,
+Lebr´on, F., and Sanghai, S. Gqa: Training generalized
+multi-query transformer models from multi-head check-
+points. In Proceedings of the 2023 conference on empir-
+ical methods in natural language processing, pp. 4895–
+4901, 2023.
+Ashkboos, S., Mohtashami, A., Croci, M. L., Li, B.,
+Cameron, P., Jaggi, M., Alistarh, D., Hoefler, T., and
+Hensman, J. Quarot: Outlier-free 4-bit inference in ro-
+tated llms. In Advances in Neural Information Processing
+Systems, pp. 100213–100240. Curran Associates, Inc.,
+2024.
+Bai, Y., Lv, X., Zhang, J., Lyu, H., Tang, J., Huang, Z., Du,
+Z., Liu, X., Zeng, A., Hou, L., Dong, Y., Tang, J., and
+Li, J. LongBench: A bilingual, multitask benchmark for
+long context understanding. In Proceedings of the 62nd
+Annual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers), 2024.
+Brown, T. B., Mann, B., Ryder, N., Subbiah, M., Kaplan,
+J., Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G.,
+Askell, A., Agarwal, S., Herbert-Voss, A., Krueger, G.,
+Henighan, T., Child, R., Ramesh, A., Ziegler, D. M., Wu,
+J., Winter, C., Hesse, C., Chen, M., Sigler, E., Litwin, M.,
+Gray, S., Chess, B., Clark, J., Berner, C., McCandlish,
+S., Radford, A., Sutskever, I., and Amodei, D. Language
+models are few-shot learners. In Proceedings of the 34th
+International Conference on Neural Information Process-
+ing Systems, 2020.
+Chang, C.-C., Lin, W.-C., Lin, C.-Y., Chen, C.-Y., Hu, Y.-F.,
+Wang, P.-S., Huang, N.-C., Ceze, L., Abdelfattah, M.,
+and Wu, K.-C. Palu: Kv-cache compression with low-
+rank projection. In International Conference on Learning
+Representations, pp. 50222–50249, 2025.
+Chen, M., Wu, M., Jin, H., Yuan, Z., Liu, J., Zhang, C.,
+Li, Y., Huang, J., Ma, J., Xue, Z., Liu, Z., Bin, X., and
+Luo, P.
+INT vs. FP: A comprehensive study of fine-
+grained low-bit quantization formats. In Proceedings of
+the 43rd International Conference on Machine Learning,
+pp. 17447–17466, 2026.
+Chen, Z., Luitjens, J., Xu, H., Wang, Y., Povey, D., and Khu-
+danpur, S. A gpu-based wfst decoder with exact lattice
+generation. arXiv preprint arXiv:1804.03243, 2018.
+Chhugani, J., Jeong, G., Su, B.-Y., Pan, Y., Yang, H., Ankit,
+A., Yu, J., Deng, S., Chen, Y., Satish, N., and Kim, C. Un-
+veiling the potential of quantization with MXFP4: Strate-
+gies for quantization error reduction. In Forty-third Inter-
+national Conference on Machine Learning, 2026. URL
+https://openreview.net/forum?id=oWvU
+K1mbYq.
+Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H.,
+Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano,
+R., Hesse, C., and Schulman, J. Training verifiers to solve
+math word problems, 2021.
+Dasigi, P., Lo, K., Beltagy, I., Cohan, A., Smith, N. A., and
+Gardner, M. A dataset of information-seeking questions
+and answers anchored in research papers. In Proceedings
+of the 2021 Conference of the North American Chapter of
+the Association for Computational Linguistics: Human
+Language Technologies, 2021.
+Dong, S., Cheng, W., Qin, J., and Wang, W. Qaq: Quality
+adaptive quantization for llm kv cache, 2024.
+Duanmu, H., Yuan, Z., Li, X., Duan, J., ZHANG, X., and
+Lin, D. SKVQ: Sliding-window key and value cache
+quantization for large language models. In First Confer-
+ence on Language Modeling, 2024.
+Egiazarian, V., Panferov, A., Kuznedelev, D., Frantar, E.,
+Babenko, A., and Alistarh, D. Extreme compression
+of large language models via additive quantization. In
+Forty-first International Conference on Machine Learn-
+ing, 2024. URL https://openreview.net/for
+um?id=5mCaITRTmO.
+Egiazarian, V., Castro, R. L., Kuznedelev, D., Panferov, A.,
+Kurtic, E., Pandit, S., Marques, A. N., Kurtz, M., Ashk-
+boos, S., Hoefler, T., and Alistarh, D. Bridging the gap
+between promise and performance for microscaling FP4
+quantization. In The Fourteenth International Confer-
+ence on Learning Representations, 2026. URL https:
+//openreview.net/forum?id=zCBGe9AqJZ.
+Fabbri, A., Li, I., She, T., Li, S., and Radev, D. Multi-news:
+A large-scale multi-document summarization dataset and
+abstractive hierarchical model. In Proceedings of the 57th
+Annual Meeting of the Association for Computational
+Linguistics, 2019.
+Fasoli, A., Kar, M., Liu, C.-C., Venkataramani, S., Srini-
+vasan, V., Chang, L., and Wang, N. Is finer better? the
+limits of microscaling formats in large language models.
+In International Conference on Learning Representations,
+pp. 94192–94223, 2026.
+Fischer, T. R., Marcellin, M. W., and Wang, M. Trellis-
+coded vector quantization. IEEE Transactions on Infor-
+mation Theory, 37(6):1551–1566, 1991.
+Gliwa, B., Mochol, I., Biesek, M., and Wawer, A. SAMSum
+corpus: A human-annotated dialogue dataset for abstrac-
+tive summarization. In Proceedings of the 2nd Workshop
+on New Frontiers in Summarization, 2019.
+10
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Gordon, O., Dikstein, L., Netzer, A., Achituve, I., and Habi,
+H. V. LATMix: Learnable affine transformations for
+microscaling quantization of LLMs. In Forty-third Inter-
+national Conference on Machine Learning, 2026. URL
+https://openreview.net/forum?id=dayZ
+nm0dgh.
+Grattafiori, A., Dubey, A., Jauhri, A., Pandey, A., Kadian,
+A., Al-Dahle, A., Letman, A., Mathur, A., Schelten, A.,
+Vaughan, A., Yang, A., Fan, A., Goyal, A., Hartshorn,
+A., Yang, A., Mitra, A., Sravankumar, A., Korenev,
+A., Hinsvark, A., Rao, A., Zhang, A., Rodriguez, A.,
+Gregerson, A., Spataru, A., Roziere, B., Biron, B., Tang,
+B., Chern, B., Caucheteux, C., Nayak, C., Bi, C., Marra,
+C., McConnell, C., Keller, C., Touret, C., Wu, C., Wong,
+C., Ferrer, C. C., Nikolaidis, C., Allonsius, D., Song, D.,
+Pintz, D., Livshits, D., Wyatt, D., Esiobu, D., Choudhary,
+D., Mahajan, D., Garcia-Olano, D., Perino, D., Hupkes,
+D., Lakomkin, E., AlBadawy, E., Lobanova, E., Dinan,
+E., Smith, E. M., Radenovic, F., Guzm´an, F., Zhang, F.,
+Synnaeve, G., Lee, G., Anderson, G. L., Thattai, G., Nail,
+G., Mialon, G., Pang, G., Cucurell, G., Nguyen, H., Ko-
+revaar, H., Xu, H., Touvron, H., Zarov, I., Ibarra, I. A.,
+Kloumann, I., Misra, I., Evtimov, I., Zhang, J., Copet, J.,
+Lee, J., Geffert, J., Vranes, J., Park, J., Mahadeokar, J.,
+Shah, J., van der Linde, J., Billock, J., Hong, J., Lee, J.,
+Fu, J., Chi, J., Huang, J., Liu, J., Wang, J., Yu, J., Bitton,
+J., Spisak, J., Park, J., Rocca, J., Johnstun, J., Saxe, J., Jia,
+J., Alwala, K. V., Prasad, K., Upasani, K., Plawiak, K., Li,
+K., Heafield, K., Stone, K., El-Arini, K., Iyer, K., Malik,
+K., Chiu, K., Bhalla, K., Lakhotia, K., Rantala-Yeary,
+L., van der Maaten, L., Chen, L., Tan, L., Jenkins, L.,
+Martin, L., Madaan, L., Malo, L., Blecher, L., Landzaat,
+L., de Oliveira, L., Muzzi, M., Pasupuleti, M., Singh,
+M., Paluri, M., Kardas, M., Tsimpoukelli, M., Oldham,
+M., Rita, M., Pavlova, M., Kambadur, M., Lewis, M.,
+Si, M., Singh, M. K., Hassan, M., Goyal, N., Torabi, N.,
+Bashlykov, N., Bogoychev, N., Chatterji, N., Zhang, N.,
+Duchenne, O., C¸ elebi, O., Alrassy, P., Zhang, P., Li, P.,
+Vasic, P., Weng, P., Bhargava, P., Dubal, P., Krishnan,
+P., Koura, P. S., Xu, P., He, Q., Dong, Q., Srinivasan,
+R., Ganapathy, R., Calderer, R., Cabral, R. S., Stojnic,
+R., Raileanu, R., Maheswari, R., Girdhar, R., Patel, R.,
+Sauvestre, R., Polidoro, R., Sumbaly, R., Taylor, R., Silva,
+R., Hou, R., Wang, R., Hosseini, S., Chennabasappa, S.,
+Singh, S., Bell, S., Kim, S. S., Edunov, S., Nie, S., Narang,
+S., Raparthy, S., Shen, S., Wan, S., Bhosale, S., Zhang,
+S., Vandenhende, S., Batra, S., Whitman, S., Sootla, S.,
+Collot, S., Gururangan, S., Borodinsky, S., Herman, T.,
+Fowler, T., Sheasha, T., Georgiou, T., Scialom, T., Speck-
+bacher, T., Mihaylov, T., Xiao, T., Karn, U., Goswami, V.,
+Gupta, V., Ramanathan, V., Kerkez, V., Gonguet, V., Do,
+V., Vogeti, V., Albiero, V., Petrovic, V., Chu, W., Xiong,
+W., Fu, W., Meers, W., Martinet, X., Wang, X., Wang,
+X., Tan, X. E., Xia, X., Xie, X., Jia, X., Wang, X., Gold-
+schlag, Y., Gaur, Y., Babaei, Y., Wen, Y., Song, Y., Zhang,
+Y., Li, Y., Mao, Y., Coudert, Z. D., Yan, Z., Chen, Z.,
+Papakipos, Z., Singh, A., Srivastava, A., Jain, A., Kelsey,
+A., Shajnfeld, A., Gangidi, A., Victoria, A., Goldstand,
+A., Menon, A., Sharma, A., Boesenberg, A., Baevski, A.,
+Feinstein, A., Kallet, A., Sangani, A., Teo, A., Yunus, A.,
+Lupu, A., Alvarado, A., Caples, A., Gu, A., Ho, A., Poul-
+ton, A., Ryan, A., Ramchandani, A., Dong, A., Franco,
+A., Goyal, A., Saraf, A., Chowdhury, A., Gabriel, A.,
+Bharambe, A., Eisenman, A., Yazdan, A., James, B.,
+Maurer, B., Leonhardi, B., Huang, B., Loyd, B., Paola,
+B. D., Paranjape, B., Liu, B., Wu, B., Ni, B., Hancock,
+B., Wasti, B., Spence, B., Stojkovic, B., Gamido, B.,
+Montalvo, B., Parker, C., Burton, C., Mejia, C., Liu, C.,
+Wang, C., Kim, C., Zhou, C., Hu, C., Chu, C.-H., Cai, C.,
+Tindal, C., Feichtenhofer, C., Gao, C., Civin, D., Beaty,
+D., Kreymer, D., Li, D., Adkins, D., Xu, D., Testuggine,
+D., David, D., Parikh, D., Liskovich, D., Foss, D., Wang,
+D., Le, D., Holland, D., Dowling, E., Jamil, E., Mont-
+gomery, E., Presani, E., Hahn, E., Wood, E., Le, E.-T.,
+Brinkman, E., Arcaute, E., Dunbar, E., Smothers, E., Sun,
+F., Kreuk, F., Tian, F., Kokkinos, F., Ozgenel, F., Cag-
+gioni, F., Kanayet, F., Seide, F., Florez, G. M., Schwarz,
+G., Badeer, G., Swee, G., Halpern, G., Herman, G., Sizov,
+G., Guangyi, Zhang, Lakshminarayanan, G., Inan, H.,
+Shojanazeri, H., Zou, H., Wang, H., Zha, H., Habeeb, H.,
+Rudolph, H., Suk, H., Aspegren, H., Goldman, H., Zhan,
+H., Damlaj, I., Molybog, I., Tufanov, I., Leontiadis, I.,
+Veliche, I.-E., Gat, I., Weissman, J., Geboski, J., Kohli,
+J., Lam, J., Asher, J., Gaya, J.-B., Marcus, J., Tang, J.,
+Chan, J., Zhen, J., Reizenstein, J., Teboul, J., Zhong, J.,
+Jin, J., Yang, J., Cummings, J., Carvill, J., Shepard, J.,
+McPhie, J., Torres, J., Ginsburg, J., Wang, J., Wu, K., U,
+K. H., Saxena, K., Khandelwal, K., Zand, K., Matosich,
+K., Veeraraghavan, K., Michelena, K., Li, K., Jagadeesh,
+K., Huang, K., Chawla, K., Huang, K., Chen, L., Garg,
+L., A, L., Silva, L., Bell, L., Zhang, L., Guo, L., Yu, L.,
+Moshkovich, L., Wehrstedt, L., Khabsa, M., Avalani, M.,
+Bhatt, M., Mankus, M., Hasson, M., Lennie, M., Reso,
+M., Groshev, M., Naumov, M., Lathi, M., Keneally, M.,
+Liu, M., Seltzer, M. L., Valko, M., Restrepo, M., Patel,
+M., Vyatskov, M., Samvelyan, M., Clark, M., Macey,
+M., Wang, M., Hermoso, M. J., Metanat, M., Rastegari,
+M., Bansal, M., Santhanam, N., Parks, N., White, N.,
+Bawa, N., Singhal, N., Egebo, N., Usunier, N., Mehta,
+N., Laptev, N. P., Dong, N., Cheng, N., Chernoguz, O.,
+Hart, O., Salpekar, O., Kalinli, O., Kent, P., Parekh, P.,
+Saab, P., Balaji, P., Rittner, P., Bontrager, P., Roux, P.,
+Dollar, P., Zvyagina, P., Ratanchandani, P., Yuvraj, P.,
+Liang, Q., Alao, R., Rodriguez, R., Ayub, R., Murthy, R.,
+Nayani, R., Mitra, R., Parthasarathy, R., Li, R., Hogan,
+R., Battey, R., Wang, R., Howes, R., Rinott, R., Mehta,
+S., Siby, S., Bondu, S. J., Datta, S., Chugh, S., Hunt, S.,
+11
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Dhillon, S., Sidorov, S., Pan, S., Mahajan, S., Verma,
+S., Yamamoto, S., Ramaswamy, S., Lindsay, S., Lindsay,
+S., Feng, S., Lin, S., Zha, S. C., Patil, S., Shankar, S.,
+Zhang, S., Zhang, S., Wang, S., Agarwal, S., Sajuyigbe,
+S., Chintala, S., Max, S., Chen, S., Kehoe, S., Satter-
+field, S., Govindaprasad, S., Gupta, S., Deng, S., Cho,
+S., Virk, S., Subramanian, S., Choudhury, S., Goldman,
+S., Remez, T., Glaser, T., Best, T., Koehler, T., Robinson,
+T., Li, T., Zhang, T., Matthews, T., Chou, T., Shaked,
+T., Vontimitta, V., Ajayi, V., Montanez, V., Mohan, V.,
+Kumar, V. S., Mangla, V., Ionescu, V., Poenaru, V., Mi-
+hailescu, V. T., Ivanov, V., Li, W., Wang, W., Jiang, W.,
+Bouaziz, W., Constable, W., Tang, X., Wu, X., Wang, X.,
+Wu, X., Gao, X., Kleinman, Y., Chen, Y., Hu, Y., Jia, Y.,
+Qi, Y., Li, Y., Zhang, Y., Zhang, Y., Adi, Y., Nam, Y., Yu,
+Wang, Zhao, Y., Hao, Y., Qian, Y., Li, Y., He, Y., Rait,
+Z., DeVito, Z., Rosnbrick, Z., Wen, Z., Yang, Z., Zhao,
+Z., and Ma, Z. The llama 3 herd of models, 2024. URL
+https://arxiv.org/abs/2407.21783.
+Gray, R. M. and Neuhoff, D. L. Quantization. IEEE Trans-
+actions on Information Theory, 44(6):2325–2383, 1998.
+doi: 10.1109/18.720541.
+Guo, D., Yang, D., Zhang, H., Song, J., Wang, P., Zhu, Q.,
+Xu, R., Zhang, R., Ma, S., Bi, X., Zhang, X., Yu, X., Wu,
+Y., Wu, Z. F., Gou, Z., Shao, Z., Li, Z., Gao, Z., Liu, A.,
+Xue, B., Wang, B., Wu, B., Feng, B., Lu, C., Zhao, C.,
+Deng, C., Ruan, C., Dai, D., Chen, D., Ji, D., Li, E., Lin,
+F., Dai, F., Luo, F., Hao, G., Chen, G., Li, G., Zhang, H.,
+Xu, H., Ding, H., Gao, H., Qu, H., Li, H., Guo, J., Li,
+J., Chen, J., Yuan, J., Tu, J., Qiu, J., Li, J., Cai, J. L., Ni,
+J., Liang, J., Chen, J., Dong, K., Hu, K., You, K., Gao,
+K., Guan, K., Huang, K., Yu, K., Wang, L., Zhang, L.,
+Zhao, L., Wang, L., Zhang, L., Xu, L., Xia, L., Zhang,
+M., Zhang, M., Tang, M., Zhou, M., Li, M., Wang, M.,
+Li, M., Tian, N., Huang, P., Zhang, P., Wang, Q., Chen,
+Q., Du, Q., Ge, R., Zhang, R., Pan, R., Wang, R., Chen,
+R. J., Jin, R. L., Chen, R., Lu, S., Zhou, S., Chen, S., Ye,
+S., Wang, S., Yu, S., Zhou, S., Pan, S., Li, S. S., Zhou, S.,
+Wu, S., Yun, T., Pei, T., Sun, T., Wang, T., Zeng, W., Liu,
+W., Liang, W., Gao, W., Yu, W., Zhang, W., Xiao, W. L.,
+An, W., Liu, X., Wang, X., Chen, X., Nie, X., Cheng,
+X., Liu, X., Xie, X., Liu, X., Yang, X., Li, X., Su, X.,
+Lin, X., Li, X. Q., Jin, X., Shen, X., Chen, X., Sun, X.,
+Wang, X., Song, X., Zhou, X., Wang, X., Shan, X., Li,
+Y. K., Wang, Y. Q., Wei, Y. X., Zhang, Y., Xu, Y., Li, Y.,
+Zhao, Y., Sun, Y., Wang, Y., Yu, Y., Zhang, Y., Shi, Y.,
+Xiong, Y., He, Y., Piao, Y., Wang, Y., Tan, Y., Ma, Y., Liu,
+Y., Guo, Y., Ou, Y., Wang, Y., Gong, Y., Zou, Y., He, Y.,
+Xiong, Y., Luo, Y., You, Y., Liu, Y., Zhou, Y., Zhu, Y. X.,
+Huang, Y., Li, Y., Zheng, Y., Zhu, Y., Ma, Y., Tang, Y.,
+Zha, Y., Yan, Y., Ren, Z. Z., Ren, Z., Sha, Z., Fu, Z., Xu,
+Z., Xie, Z., Zhang, Z., Hao, Z., Ma, Z., Yan, Z., Wu, Z.,
+Gu, Z., Zhu, Z., Liu, Z., Li, Z., Xie, Z., Song, Z., Pan, Z.,
+Huang, Z., Xu, Z., Zhang, Z., and Zhang, Z. Deepseek-
+r1 incentivizes reasoning in llms through reinforcement
+learning. Nature, 645(8081):633–638, 2025. ISSN 1476-
+4687. doi: 10.1038/s41586-025-09422-z. URL http:
+//dx.doi.org/10.1038/s41586-025-09422
+-z.
+He, Y., Zhang, L., Wu, W., Liu, J., Zhou, H., and Zhuang, B.
+Zipcache: Accurate and efficient kv cache quantization
+with salient token identification. Advances in Neural
+Information Processing Systems, pp. 68287–68307, 2024.
+Hooper, C., Kim, S., Mohammadzadeh, H., Mahoney,
+M. W., Shao, Y. S., Keutzer, K., and Gholami, A.
+Kvquant: Towards 10 million context length llm infer-
+ence with kv cache quantization. Advances in Neural
+Information Processing Systems, 37:1270–1303, 2024.
+Huang, L., Cao, S., Parulian, N., Ji, H., and Wang, L. Effi-
+cient attentions for long document summarization. In Pro-
+ceedings of the 2021 Conference of the North American
+Chapter of the Association for Computational Linguistics:
+Human Language Technologies, 2021.
+Joshi, M., Choi, E., Weld, D., and Zettlemoyer, L. Trivi-
+aQA: A large scale distantly supervised challenge dataset
+for reading comprehension. In Proceedings of the 55th
+Annual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers), 2017.
+Juravsky, J., Brown, B., Ehrlich, R., Fu, D. Y., R´e, C., and
+Mirhoseini, A. Hydragen: High-throughput llm inference
+with shared prefixes. arXiv preprint arXiv:2402.05099,
+2024.
+Lee, J., Park, J., Cha, S., Cho, J., and Sim, J. Mx+: Push-
+ing the limits of microscaling formats for efficient large
+language model serving.
+In Proceedings of the 58th
+IEEE/ACM International Symposium on Microarchitec-
+ture, pp. 869–883, 2025a.
+Lee, J., Park, J., Kim, J., Kim, Y., Oh, J., Oh, J., and Choi,
+J. Amxfp4: Taming activation outliers with asymmetric
+microscaling floating-point for 4-bit llm inference. In
+Findings of the Association for Computational Linguis-
+tics: ACL 2025, pp. 14993–15013, 2025b.
+Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V.,
+Goyal, N., K¨uttler, H., Lewis, M., Yih, W.-t., Rockt¨aschel,
+T., Riedel, S., and Kiela, D. Retrieval-augmented gener-
+ation for knowledge-intensive nlp tasks. In Advances in
+Neural Information Processing Systems, pp. 9459–9474,
+2020.
+Li, J., Zhang, Y., Hassan, M. Y., Chafekar, T., Cai, T., Ren,
+Z., Guo, P., Karimzadeh, F., Reed, C., Wang, C., and
+Gan, C. CommVQ: Commutative vector quantization for
+12
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+KV cache compression. In Forty-second International
+Conference on Machine Learning, 2025a. URL https:
+//openreview.net/forum?id=sbbyCB39HN.
+Li, X. and Roth, D. Learning question classifiers. In COL-
+ING 2002: The 19th International Conference on Com-
+putational Linguistics, 2002.
+Li, X., Xing, Z., Li, Y., Qu, L., Zhen, H.-L., Yao, Y., Liu,
+W., Pan, S. J., and Yuan, M. KVTuner: Sensitivity-aware
+layer-wise mixed-precision KV cache quantization for
+efficient and nearly lossless LLM inference. In Proceed-
+ings of the 42nd International Conference on Machine
+Learning, pp. 36451–36485, 2025b.
+Li, Y., Huang, Y., Yang, B., Venkitesh, B., Locatelli, A., Ye,
+H., Cai, T., Lewis, P., and Chen, D. Snapkv: Llm knows
+what you are looking for before generation. Advances
+in Neural Information Processing Systems, 37:22947–
+22970, 2024.
+Liu, T., Li, S., Yang, J., Zhao, T., Zhou, F., Song, X., Dai,
+G., Yan, S., Yang, H., and Wang, Y. Pm-kvq: Progressive
+mixed-precision kv cache quantization for long-cot llms.
+In International Conference on Learning Representations,
+pp. 107881–107900, 2026.
+Liu, Z., Yuan, J., Jin, H., Zhong, S., Xu, Z., Braverman,
+V., Chen, B., and Hu, X. Kivi: A tuning-free asym-
+metric 2bit quantization for kv cache. arXiv preprint
+arXiv:2402.02750, 2024.
+Marcellin, M. W. and Fischer, T. R. Trellis coded quanti-
+zation of memoryless and gauss-markov sources. IEEE
+transactions on communications, 38(1):82–93, 1990.
+Merity, S., Xiong, C., Bradbury, J., and Socher, R. Pointer
+sentinel mixture models. In International Conference on
+Learning Representations, 2017. URL https://open
+review.net/forum?id=Byj72udxe.
+Rouhani, B. D., Zhao, R., More, A., Hall, M., Khodamoradi,
+A., Deng, S., Choudhary, D., Cornea, M., Dellinger, E.,
+Denolf, K., Dusan, S., Elango, V., Golub, M., Heinecke,
+A., James-Roxby, P., Jani, D., Kolhe, G., Langhammer,
+M., Li, A., Melnick, L., Mesmakhosroshahi, M., Ro-
+driguez, A., Schulte, M., Shafipour, R., Shao, L., Siu,
+M., Dubey, P., Micikevicius, P., Naumov, M., Verrilli, C.,
+Wittig, R., Burger, D., and Chung, E. Microscaling data
+formats for deep learning, 2023.
+Shao, Y., Wang, P., Chen, Y., Xu, C., Wei, Z., and Cheng,
+J. Block rotation is all you need for MXFP4 quantiza-
+tion. In Forty-third International Conference on Machine
+Learning, 2026. URL https://openreview.net
+/forum?id=cyR2FtZzY1.
+Sharify, S., Saxena, U., Xu, Z., Yazar, W., Soloveychik, I.,
+and Wang, X. Post training quantization of large language
+models with microscaling formats. In Proceedings of
+The 4th NeurIPS Efficient Natural Language and Speech
+Processing Workshop, Proceedings of Machine Learning
+Research, pp. 241–258, 2024.
+Shutova, A., Malinovskii, V., Egiazarian, V., Kuznedelev,
+D., Mazur, D., Nikita, S., Ermakov, I., and Alistarh, D.
+Cache me if you must: Adaptive key-value quantization
+for large language models. In Forty-second International
+Conference on Machine Learning, 2025.
+Son, D., Choi, E., and Yoo, S. Nsnquant: A double nor-
+malization approach for calibration-free low-bit vector
+quantization of kv cache. Advances in Neural Information
+Processing Systems, 38:43124–43159, 2026.
+Su, Z., Wei, H., Chen, Z., Shen, W., Li, L., Yu, H., and Yuan,
+K. RotateKV: Accurate and robust 2-bit KV cache quan-
+tization for LLMs via outlier-aware adaptive rotations.
+In Proceedings of the Thirty-Fourth International Joint
+Conference on Artificial Intelligence, pp. 6200–6208,
+2025. doi: 10.24963/ijcai.2025/690. URL https:
+//www.ijcai.org/proceedings/2025/690.
+Tao, Q., Yu, W., and Zhou, J. AsymKV: Enabling 1-bit
+quantization of KV cache with layer-wise asymmetric
+quantization configurations. In Proceedings of the 31st
+International Conference on Computational Linguistics,
+pp. 2316–2328, 2025.
+Taylor, R., Kardas, M., Cucurull, G., Scialom, T., Hartshorn,
+A., Saravia, E., Poulton, A., Kerkez, V., and Stojnic, R.
+Galactica: A large language model for science. arXiv
+preprint arXiv:2211.09085, 2022.
+Team, G., Kamath, A., Ferret, J., Pathak, S., Vieillard,
+N., Merhej, R., Perrin, S., Matejovicova, T., Ram´e, A.,
+Rivi`ere, M., Rouillard, L., Mesnard, T., Cideron, G.,
+bastien Grill, J., Ramos, S., Yvinec, E., Casbon, M., Pot,
+E., Penchev, I., Liu, G., Visin, F., Kenealy, K., Beyer,
+L., Zhai, X., Tsitsulin, A., Busa-Fekete, R., Feng, A.,
+Sachdeva, N., Coleman, B., Gao, Y., Mustafa, B., Barr, I.,
+Parisotto, E., Tian, D., Eyal, M., Cherry, C., Peter, J.-T.,
+Sinopalnikov, D., Bhupatiraju, S., Agarwal, R., Kazemi,
+M., Malkin, D., Kumar, R., Vilar, D., Brusilovsky, I.,
+Luo, J., Steiner, A., Friesen, A., Sharma, A., Sharma,
+A., Gilady, A. M., Goedeckemeyer, A., Saade, A., Feng,
+A., Kolesnikov, A., Bendebury, A., Abdagic, A., Vadi,
+A., Gy¨orgy, A., Pinto, A. S., Das, A., Bapna, A., Miech,
+A., Yang, A., Paterson, A., Shenoy, A., Chakrabarti, A.,
+Piot, B., Wu, B., Shahriari, B., Petrini, B., Chen, C.,
+Lan, C. L., Choquette-Choo, C. A., Carey, C., Brick,
+C., Deutsch, D., Eisenbud, D., Cattle, D., Cheng, D.,
+Paparas, D., Sreepathihalli, D. S., Reid, D., Tran, D.,
+13
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Zelle, D., Noland, E., Huizenga, E., Kharitonov, E.,
+Liu, F., Amirkhanyan, G., Cameron, G., Hashemi, H.,
+Klimczak-Pluci´nska, H., Singh, H., Mehta, H., Lehri,
+H. T., Hazimeh, H., Ballantyne, I., Szpektor, I., Nardini,
+I., Pouget-Abadie, J., Chan, J., Stanton, J., Wieting, J.,
+Lai, J., Orbay, J., Fernandez, J., Newlan, J., yeong Ji,
+J., Singh, J., Black, K., Yu, K., Hui, K., Vodrahalli, K.,
+Greff, K., Qiu, L., Valentine, M., Coelho, M., Ritter,
+M., Hoffman, M., Watson, M., Chaturvedi, M., Moyni-
+han, M., Ma, M., Babar, N., Noy, N., Byrd, N., Roy, N.,
+Momchev, N., Chauhan, N., Sachdeva, N., Bunyan, O.,
+Botarda, P., Caron, P., Rubenstein, P. K., Culliton, P.,
+Schmid, P., Sessa, P. G., Xu, P., Stanczyk, P., Tafti, P.,
+Shivanna, R., Wu, R., Pan, R., Rokni, R., Willoughby,
+R., Vallu, R., Mullins, R., Jerome, S., Smoot, S., Gir-
+gin, S., Iqbal, S., Reddy, S., Sheth, S., P˜oder, S., Bhat-
+nagar, S., Panyam, S. R., Eiger, S., Zhang, S., Liu, T.,
+Yacovone, T., Liechty, T., Kalra, U., Evci, U., Misra,
+V., Roseberry, V., Feinberg, V., Kolesnikov, V., Han,
+W., Kwon, W., Chen, X., Chow, Y., Zhu, Y., Wei, Z.,
+Egyed, Z., Cotruta, V., Giang, M., Kirk, P., Rao, A.,
+Black, K., Babar, N., Lo, J., Moreira, E., Martins, L. G.,
+Sanseviero, O., Gonzalez, L., Gleicher, Z., Warkentin, T.,
+Mirrokni, V., Senter, E., Collins, E., Barral, J., Ghahra-
+mani, Z., Hadsell, R., Matias, Y., Sculley, D., Petrov,
+S., Fiedel, N., Shazeer, N., Vinyals, O., Dean, J., Hass-
+abis, D., Kavukcuoglu, K., Farabet, C., Buchatskaya, E.,
+Alayrac, J.-B., Anil, R., Dmitry, Lepikhin, Borgeaud, S.,
+Bachem, O., Joulin, A., Andreev, A., Hardin, C., Dadashi,
+R., and Hussenot, L. Gemma 3 technical report, 2025.
+URL https://arxiv.org/abs/2503.19786.
+Tseng, A., Chee, J., Sun, Q., Kuleshov, V., and De Sa, C.
+Quip#: Even better llm quantization with hadamard inco-
+herence and lattice codebooks. Proceedings of machine
+learning research, 235:48630, 2024a.
+Tseng, A., Sun, Q., Hou, D., and De, C. Qtip: Quantiza-
+tion with trellises and incoherence processing. Advances
+in Neural Information Processing Systems, 37:59597–
+59620, 2024b.
+van Breugel, B., Bondarenko, Y., Whatmough, P. N., and
+Nagel, M. FPTQuant: Function-preserving transforms
+for LLM quantization. In Forty-third International Con-
+ference on Machine Learning, 2026.
+Wang, X., Xiong, Y., Wei, Y., Wang, M., and Li, L. Light-
+seq: A high performance inference library for transform-
+ers. In Proceedings of the 2021 Conference of the North
+American Chapter of the Association for Computational
+Linguistics: Human Language Technologies: Industry
+Papers, pp. 113–120, 2021.
+Wei, J., Wang, X., Schuurmans, D., Bosma, M., brian ichter,
+Xia, F., Chi, E. H., Le, Q. V., and Zhou, D. Chain of
+thought prompting elicits reasoning in large language
+models. In Advances in Neural Information Processing
+Systems, 2022.
+Xiao, G., Tang, J., Zuo, J., Guo, J., Yang, S., Tang, H., Fu,
+Y., and Han, S. Duoattention: Efficient long-context llm
+inference with retrieval and streaming heads. In Inter-
+national Conference on Learning Representations, pp.
+37228–37253, 2025.
+Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng,
+B., Yu, B., Gao, C., Huang, C., Lv, C., Zheng, C., Liu,
+D., Zhou, F., Huang, F., Hu, F., Ge, H., Wei, H., Lin,
+H., Tang, J., Yang, J., Tu, J., Zhang, J., Yang, J., Yang,
+J., Zhou, J., Zhou, J., Lin, J., Dang, K., Bao, K., Yang,
+K., Yu, L., Deng, L., Li, M., Xue, M., Li, M., Zhang,
+P., Wang, P., Zhu, Q., Men, R., Gao, R., Liu, S., Luo,
+S., Li, T., Tang, T., Yin, W., Ren, X., Wang, X., Zhang,
+X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Zhang, Y., Wan,
+Y., Liu, Y., Wang, Z., Cui, Z., Zhang, Z., Zhou, Z., and
+Qiu, Z. Qwen3 technical report, 2025. URL https:
+//arxiv.org/abs/2505.09388.
+Yang, Z., Li, X., Cheng, K., Liu, K., Yang, J., Wang, H.,
+Deng, K., Dang, Q., Sha, Y., Ma, Y., and Yu, D. Pro-
+teus: Lookup-free trellis-coded quantization by lattice-
+breaking compute codes for 2-bit LLMs. In Forty-third
+International Conference on Machine Learning, 2026.
+Yao, D., Yang, C., Tong, Z., Lin, Z., Liu, W., Luan, J., and
+Wang, W. VecInfer: Efficient LLM inference with low-bit
+KV cache via outlier-suppressed vector quantization. In
+Proceedings of the 64th Annual Meeting of the Associa-
+tion for Computational Linguistics (Volume 1: Long Pa-
+pers), pp. 31527–31543. Association for Computational
+Linguistics, 2026. doi: 10.18653/v1/2026.acl-long.1454.
+URL https://aclanthology.org/2026.ac
+l-long.1454/.
+Ye, Z., Chen, L., Lai, R., Zhao, Y., Zheng, S., Shao, J., Hou,
+B., Jin, H., Zuo, Y., Yin, L., Chen, T., and Ceze, L. Ac-
+celerating self-attentions for llm serving with flashinfer,
+February 2024. URL https://flashinfer.ai/
+2024/02/02/introduce-flashinfer.html.
+Yuan, J., Tang, R., Jiang, X., and Hu, X. Large language
+models for healthcare data augmentation: An example
+on patient-trial matching. In AMIA Annual Symposium
+Proceedings, volume 2023, pp. 1324, 2024.
+Yuan, J., Shinn, C., Xu, K., Cui, J., Klimiashvili, G., Xiao,
+G., Zheng, P., Li, B., Zhou, Y., Ye, Z., You, W., Zheng,
+T., Brown, D., Wang, P., Hoehnerbach, M., Cai, R., De-
+mouth, J., Owens, J. D., Hu, X., Han, S., Liu, T., and
+Mao, H. Blasst: Dynamic blocked attention sparsity
+via softmax thresholding. In Chowdhery, A. and Jia, Z.
+(eds.), Proceedings of Machine Learning and Systems,
+14
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+volume 8, pp. 843–859. MLSys, 2026. URL https:
+//proceedings.mlsys.org/paper_files/
+paper/2026/file/c6ee784cbe46d854843e
+4c883a3321ef-Paper-Conference.pdf.
+Zandieh, A., Daliri, M., Hadian, M., and Mirrokni, V. Tur-
+boquant: Online vector quantization with near-optimal
+distortion rate. In International Conference on Learning
+Representations, volume 2026, pp. 56418–56439, 2026.
+Zhang, M., Li, J.-F., Sun, Z., Bai, H., Zhen, H.-L., Dong, Z.,
+and Yu, X. Benchmarking post-training quantization of
+large language models under microscaling floating point
+formats. In Proceedings of the 64th Annual Meeting of
+the Association for Computational Linguistics (Volume 1:
+Long Papers), pp. 39907–39923, 2026.
+Zhang, T., Yi, J., Xu, Z., and Shrivastava, A. Kv cache
+is 1 bit per channel: Efficient large language model in-
+ference with coupled quantization. Advances in Neural
+Information Processing Systems, 37:3304–3331, 2024.
+Zhang, Z., Sheng, Y., Zhou, T., Chen, T., Zheng, L., Cai,
+R., Song, Z., Tian, Y., Re, C., Barrett, C., Wang, Z., and
+Chen, B. H2o: Heavy-hitter oracle for efficient generative
+inference of large language models. In Thirty-seventh
+Conference on Neural Information Processing Systems,
+2023. URL https://openreview.net/forum
+?id=RkRrPp7GKO.
+Zhong, M., Yin, D., Yu, T., Zaidi, A., Mutuma, M., Jha, R.,
+Awadallah, A. H., Celikyilmaz, A., Liu, Y., Qiu, X., and
+Radev, D. QMSum: A new benchmark for query-based
+multi-domain meeting summarization. In Proceedings of
+the 2021 Conference of the North American Chapter of
+the Association for Computational Linguistics: Human
+Language Technologies, 2021.
+15
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+A. Implementation Details
+Quantizer implementation.
+MiSTiQ encodes vectors as trellis paths and represented block scales, using Triton kernels
+with FP32 arithmetic during search. The main implementation uses L = 16 state bits, bstart = 8 initial-state selection bits,
+T = 1024, and beam width B = 128, unless otherwise specified. Reconstruction elements lie directly on the E2M1 grid,
+avoiding a second MX conversion after encoding. The quantizer can be integrated with different preprocessing workflows.
+We apply key-channel standardization by subtracting a frozen per-channel mean and dividing by a frozen per-channel
+standard deviation before the Hadamard transform. These statistics are calibrated separately for each layer, KV head, and
+key channel in the corresponding preprocessing domain, with standard deviations floored at 10−6. After reconstruction and
+inverse Hadamard transformation, we restore the original channel scales and means.
+MX-Hash calibration.
+Hash resources are prepared separately for each element format, scale format, vector length,
+and search policy. For the initial-scale variant, integer CDF boundaries are precomputed for each represented scale value,
+allowing a 31-bit hash rank to map directly to an MX element without evaluating an inverse CDF at runtime. The mixer
+parameters for each output coordinate are calibrated jointly over synthetic inputs, rather than independently for every scale
+value. The joint-scale variant instead calibrates the mixers and the spread of a symmetric Gaussian emission distribution on
+the native element grid, producing a scale-independent mapping.
+We select the post-LCG mixing parameters through reproducible offline random search, keeping the LCG coefficients
+Aℓ, Cℓfixed. Each candidate jointly specifies all V output coordinates: three shifts per output coordinate sampled uniformly
+from {1, . . . , 31} and two odd unsigned 32-bit multipliers sampled as 2q + 1, where q is uniform on {0, . . . , 231 −1}.
+All candidates encode the same fixed Gaussian training vectors under identical search settings. We minimize the mean
+reconstruction error in the original domain:
+J(Ω) =
+1
+NT
+N
+X
+n=1
+y(n) −by(n)(Ω)
+
+2
+2 ,
+where N is the number of training vectors, T is their length, and Ωcontains the mixing parameters for all output coordinates.
+Reconstruction includes the represented block scales and element-format rounding. Ties are resolved by candidate order,
+and the selected parameters are frozen for evaluation and decoding.
+The standard calibration evaluates 48 candidates using 32 training vectors of length 128 and 256 held-out vectors. The initial
+E2M1 mixers retain their original scale-node calibration objective, while deployment fixes the scale before search. Joint
+resources use the fitted-and-rounded scale objective with α = 1. The higher-bit NVFP4 resource is calibrated separately
+using eight training and 32 held-out vectors of length 1024, minimizing the mean reconstruction error for its K/V payloads.
+Larger runtime blocks reuse the recorded calibrated mappings without recalibration.
+Block-scale computation and search.
+For each input block, we first compute the reference scale as its maximum absolute
+value divided by the element-format maximum, which is 6 for E2M1, and round it to the selected scale format. In the
+initial-scale option, this represented scale remains fixed throughout encoding, and the hash uses its scale-conditioned
+mapping. In the joint-scale option, each retained path accumulates the target–emission inner product and emission squared
+norm. These statistics support a continuous least-squares scale update at each step, regularized toward the reference scale
+for incomplete blocks. The fitted scale is rounded before candidate scoring; at block completion, the scale is refitted without
+regularization. The joint mapping remains independent of the fitted scale, so decoding requires only one stored output scale
+per block.
+Our experiments use initial-scale search with UE8M0 and joint-scale search with UE5M3 and NVFP4. UE8M0 scales
+round upward; UE5M3 uses nearest rounding with ties toward zero. NVFP4 uses E4M3FN block scales with nearest-even
+rounding and an additional per-tensor global scale. Its lower-bit block-size-128 configuration transfers a block-size-16
+calibrated mapping and is therefore identified as NVFP-style.
+Mixed-bit payload implementation.
+Keys and values are encoded separately with independently specified integer
+transition-bit budgets, while retaining the same vector length and reconstruction format. A budget of c bits gives 2c
+successors per trellis state and a payload of c/V bits per scalar element. Increasing V therefore permits finer payload
+increments without changing the MX element precision. The allocation is fixed for each role across layers; it does not
+introduce token-dependent or layer-dependent bit selection.
+16
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Evaluated payload configurations.
+The higher-bit UE8M0/UE5M3 configurations use V = 4, block size 32, and K/V
+transition budgets of 8/6. Higher-bit NVFP4 uses V = 4, block size 16, and budgets of 7/5. Lower-bit configurations use
+V = 8, block size 128, and budgets of 9/6. The uniform-payload vector-length ablation fixes block size 128, T = 128, and
+one payload bit per element for both roles. The tighter payload-allocation sweep compares V = 4 and 8 at block size 128
+and T = 1024, keeping the sum of the K/V payloads fixed at 1.5 bits per element. These ablations use UE5M3 joint-scale
+search with B = 128 and the WikiText-2 perplexity protocol described in the experimental setup.
+Baseline methods with MX compute formats.
+We adapt NSNQuant and VecInfer by converting their reconstructed VQ
+payloads to the target MX format before inverse transformation and metadata restoration. Their codebook fitting and centroid
+assignment retain FP32 codebooks and do not incorporate the output MX conversion into their objectives. NSNQuant uses a
+signed, 256-entry Gaussian codebook shared across layers and K/V roles, trained with 30 Lloyd iterations. It retains both
+normalization stages, 64-token windows, and full-head runtime Hadamard transformations; its gain is fitted from the raw
+VQ reconstruction before MX conversion. VecInfer uses reciprocal post-RoPE query/key smoothing, full-head query/key
+Hadamard transformations, and unrotated values. Its layer- and role-specific codebooks use 1024/256 K/V entries at vector
+length 4 and 4096/256 entries at vector length 8, with 30 fitting iterations and Triton assignment. Both methods recompute
+output-MX scales during decoding, so these scales add no retained-cache bits. Output conversion uses block size 32 for
+UE8M0/UE5M3 and 16 for the NSNQuant NVFP4 baseline.
+B. Algorithm Pseudo Code
+B.1. Backpointers and traceback
+For each selected expansion (h, v), scored using the relaxed joint scale objective in Section 5.2, the encoder assigns a new
+hypothesis index h′ and stores
+ut(h′) = v,
+Jt(h′) = eJt(h, v),
+πt(h′) = h.
+(12)
+The backpointer identifies the predecessor hypothesis at step t−1, including its own cost and path history, even when several
+hypotheses share a terminal state. Traceback recovers the selected initial state, trellis path, and block scales. Backpointers
+are not stored in the encoded cache. Enumerate predecessor hypotheses and their branches in a fixed order; equal-cost
+candidates retain this enumeration order during top-B selection. Terminal ties use the retained hypothesis order. Hypotheses
+with the same terminal state occupy separate beam slots. Because every QTIP state has nonempty successors and B ≥1,
+Bn is nonempty.
+17
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Algorithm 1 Trellis encoding with joint scale search
+Require: n ≥1, r1:n, QTIP bitshift trellis G = (U, A), scale-independent MX-Hash map CMX, reference block scales
+{sref
+b }, block size dmx, vector length V , regularization weight λ ≥0, integer B ≥1, integer 0 ≤bstart ≤L
+Ensure: Initial state u0, state sequence u1:n, and UE5M3 block scales {sb}
+Tie rule: fixed hypothesis and branch enumeration order.
+1: B0 ←{0, . . . , 2bstart −1}
+2: For each h ∈B0, set u0(h) ←h, J0(h) ←0, and Sh ←(0, 0, 0)
+3: for t = 1, . . . , n do
+4:
+Ct ←empty candidate list
+5:
+for all h ∈Bt−1 do
+6:
+for all v ∈succ(ut−1(h)) do
+7:
+eJt(h, v) ←JointScaleScoret(Sh, v; λ)
+8:
+Append candidate (h, v, eJt(h, v)) to Ct
+9:
+end for
+10:
+end for
+11:
+Retain the min(B, |Ct|) lowest-cost candidates across all parents and index them by Bt
+12:
+for all selected candidates (h, v, eJt(h, v)) with new index h′ do
+13:
+ut(h′) ←v; Jt(h′) ←eJt(h, v); πt(h′) ←h
+14:
+end for
+15: end for
+16: h ←arg minh′∈Bn Jn(h′)
+17: for t = n, n −1, . . . , 1 do
+18:
+ut ←ut(h)
+19:
+if tV mod dmx = 0 then
+20:
+stV/dmx−1 ←σt(h)
+21:
+end if
+22:
+h ←πt(h)
+23: end for
+24: u0 ←u0(h)
+25: return (u0, u1:n, {sb})
+Algorithm 2 details the candidate scoring procedure. The target blocks, reference scales, emission map, and scale quantizer
+are shared with Algorithm 1. Candidates with nonpositive fitted scales are discarded.
+Algorithm 2 JointScaleScoret(Sh, v; λ)
+Require: Parent statistics Sh = (Rh, Wh, Dh), successor v, regularization weight λ ≥0
+Ensure: Candidate score, updated tuple S′, and completed-block scale σt
+1: b ←⌊(t −1)V/dmx⌋; m ←1 + ((t −1) mod (dmx/V ))
+2: λ′ ←λ if tV mod dmx̸ = 0 else 0
+▷Block completion: disable regularization
+3: bx ←CMX(v)
+4: R ←Rh + ∥bx∥2
+2
+5: W ←Wh + ⟨yb,m, bx⟩
+6: a ←(W + λ′sref
+b )/(R + λ′) if R > 0 else sref
+b
+▷Fit block scale
+7: s ←Qα(a)
+8: J ←Dh + s2R −2sW + λ′(s −sref
+b )2
+9: if tV mod dmx = 0 then
+10:
+Attach S′ = (0, 0, J) and block scale σt = s to the candidate
+▷Block completion: reset statistics
+11: else
+12:
+Attach S′ = (R, W, Dh) to the candidate
+13: end if
+14: return J
+18
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Algorithm 3 Compact trellis decoding
+Require: Branch labels c1:n, stored initial state u0, block scales {sb}, L, k, V , dmx, scale-independent MX-Hash map
+CMX
+Each ct ∈{0, . . . , 2kV −1} occupies kV bits.
+The initial state u0 occupies bstart bits; when bstart = 0, it is implicitly zero and is omitted.
+Ensure: Reconstructed sequence br ∈RT
+1: for t = 1, . . . , n do
+2:
+ut ←(ut−12kV mod 2L) + ct
+3:
+b ←⌊(t −1)V/dmx⌋
+4:
+brt ←sb CMX(ut)
+5: end for
+6: br ←concat(br1, . . . ,brn) ∈RT
+7: return br
+Storage and candidate handling.
+Retained costs require O(2L) memory for Viterbi. Beam search requires O(2bstart)
+cost storage at initialization and O(B) after pruning. Stored backpointers require O((T/V )2L) memory for Viterbi and
+O((T/V )B) for beam search. If all candidates are materialized, beam search additionally requires O(2bstart+kV ) temporary
+storage at the first step and O(B2kV ) thereafter, although candidates can instead be scored and selected in a streaming
+fashion.
+Efficient implementation.
+An efficient implementation evaluates candidate transitions in parallel (Chen et al., 2018),
+keeps costs and backpointers on the accelerator, fuses candidate scoring with top-B selection where practical, reuses fixed
+buffers (Wang et al., 2021), avoids host–device synchronization inside the recurrence, and batches independent trellises to
+improve hardware utilization.
+C. MX-Gaussian CDF and Inverse CDF
+In this section, we derive the inverse CDF of the MX-Gaussian distribution. We begin by giving a formal definition of the
+MX-Gaussian distribution. Based on this definition, we then present its basic properties. Finally, we provide the CDF and its
+inverse.
+Definition C.1 (MX-Gaussian). Let Y ∼N(0, Idmx), where dmx ≥2. Define the random block scale S = gmxs(Y ), and
+let s ∈S denote a scale value. Let M = max1≤i≤dmx |Yi|. Assume gmxs takes values in a countable set S and satisfies the
+following conditions: (i) S > 0 almost surely; (ii) Pr(S = s) > 0 for every s ∈S; and (iii) for every s ∈S, there exist
+bounds 0 ≤a(s) < b(s) ≤∞such that
+{gmxs(Y ) = s} = {a(s) ≤M < b(s)}.
+(13)
+Define X = Y /S. We call the distribution of X the MX-Gaussian distribution, denoted by NMX (0, Idmx, dmx), where
+Idmx denotes the covariance of the underlying Gaussian vector.
+As a first step, we derive the block-scale probability lemma.
+Lemma C.1 (Block Scale Probability). Let X ∼NMX (0, Idmx, dmx) be MX Gaussian random vector. Then, the probability
+of the scale s is given by:
+P(s; dmx) = Pr(gmxs(Y ) = s) = erf
+
+b(s)/
+√
+2
+dmx
+−erf
+
+a(s)/
+√
+2
+dmx
+,
+(14)
+where erf is the standard error function. For each positive integer d, define P(s; d) = erf(b(s)/
+√
+2)d −erf(a(s)/
+√
+2)d.
+Proof. By independence of the Gaussian coordinates, Pr(M < c) = erf(c/
+√
+2)dmx for c ≥0.
+Pr(gmxs(Y ) = s) = Pr(M < b(s)) −Pr(M < a(s)) = erf
+
+b(s)/
+√
+2
+dmx
+−erf
+
+a(s)/
+√
+2
+dmx
+.
+(15)
+19
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Using the definition of MX-Gaussian and Lemma C.1, we can derive the CDF and the inverse CDF in the following theorem:
+Theorem C.2 (MX-Gaussian Magnitude). Let F(τ; s) = Pr(|Xi| ≤τ | gmxs(Y ) = s)
+∀i ∈{1, . . . , dmx} be the
+magnitude CDF of MX-Gaussian. Then, for τ > 0 we have:
+F(τ; s) =
+erf
+
+min{sτ, b(s)}/
+√
+2
+
+erf
+
+b(s)/
+√
+2
+dmx−1
+−erf
+
+min{sτ, a(s)}/
+√
+2
+
+erf
+
+a(s)/
+√
+2
+dmx−1
+P(s; dmx)
+,
+(16)
+where erf is the standard error function and ierf its inverse. In particular, F(τ; s) = 1 for τ ≥b(s)/s and F(τ; s) = 0 for
+τ ≤0.
+Define p⋆(s) = erf
+
+a(s)/
+√
+2
+
+P(s; dmx −1)/P(s; dmx). Then for 0 < p < 1 the inverse CDF is given by (6).
+Proof of Theorem C.2. For each coordinate j ∈{1, . . . , dmx}, let Zj = |Yj|. For τ ≥0, set q = sτ. To derive the
+scale-conditioned MX-Gaussian CDF, we first use the rule of conditional probability, which yields
+Pr(Zi ≤q|gmxs(Y ) = s) = Pr(Zi ≤q, gmxs(Y ) = s)
+Pr(gmxs(Y ) = s)
+.
+(17)
+Next, the identity in (13) yields:
+Pr(Zi ≤q, gmxs(Y ) = s) = Pr(Zi ≤q, M < b(s)) −Pr(Zi ≤q, M < a(s)).
+(18)
+Since the magnitudes Zj are independent, for c ≥0 we have
+Pr(Zi ≤q, M < c) = Pr
+
+Zi ≤min{q, c}, max
+j̸=i Zj < c
+
+= Pr
+ Zi ≤min{q, c}
+ Y
+j̸=i
+Pr(Zj < c)
+= erf
+
+min{q, c}/
+√
+2
+
+erf
+
+c/
+√
+2
+dmx−1
+.
+(19)
+In (19), the second step follows from the independence of the variables Zj, and the final step uses that Zj = |Yj| has a
+half-normal distribution, whose CDF for z ≥0 equals erf(z/
+√
+2). Plugging (19) into (18) yields:
+Pr(Zi ≤q, gmxs(Y ) = s) = erf
+
+min{q, b(s)}/
+√
+2
+
+erf
+
+b(s)/
+√
+2
+dmx−1
+−erf
+
+min{q, a(s)}/
+√
+2
+
+erf
+
+a(s)/
+√
+2
+dmx−1
+.
+(20)
+Finally, substituting (20) and (14) into (17) gives, for all τ > 0,
+F(τ; s) = Pr
+ |Xi| ≤τ | gmxs(Y ) = s
+
+= Pr
+ Zi ≤sτ | gmxs(Y ) = s
+
+= Pr(Zi ≤q, gmxs(Y ) = s)
+Pr(gmxs(Y ) = s)
+= Pr(Zi ≤q, gmxs(Y ) = s)
+P(s; dmx)
+=
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+erf
+
+q/
+√
+2
+
+P(s; dmx −1)
+P(s; dmx)
+,
+0 ≤q ≤a(s),
+erf
+
+q/
+√
+2
+
+erf
+
+b(s)/
+√
+2
+dmx−1
+−erf
+
+a(s)/
+√
+2
+dmx
+P(s; dmx)
+,
+a(s) < q < b(s),
+1,
+q ≥b(s).
+(21)
+In equation (21), the first step follows from the definition. The second step uses the relation |Xi| = Zi/s on the event S = s.
+Finally, we apply (20), (14), and (17).
+20
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Inverse CDF.
+The piecewise expression above proves Equation (16). Define the branch crossing in the input domain as
+τ ⋆(s) = a(s)/s, and define its CDF probability by
+p⋆(s) = F(τ ⋆(s); s) = F(a(s)/s; s) =
+erf
+
+a(s)/
+√
+2
+
+P(s; dmx −1)
+P(s; dmx)
+.
+(22)
+The inverse uses the lower CDF branch for 0 < p ≤p⋆(s) and the upper branch for p⋆(s) < p < 1. Set τ = F −1(p; s), so
+that F(τ; s) = p. Solving the lower branch gives
+erf
+
+sτ/
+√
+2
+
+=
+P(s; dmx)p
+P(s; dmx −1).
+(23)
+Solving the upper branch gives
+erf
+
+sτ/
+√
+2
+
+=
+P(s; dmx)p + erf
+
+a(s)/
+√
+2
+dmx
+erf
+
+b(s)/
+√
+2
+dmx−1
+.
+(24)
+Applying ierf and multiplying by
+√
+2/s proves Equation (6). Both inverse branches place erf
+
+a(s)/
+√
+2
+
+inside ierf at
+p = p⋆(s), so the inverse is continuous there.
+D. Clipped MX-Hash
+In this section, we derive the inverse CDF used by the clipped MX-Hash. We begin by giving a formal definition of the
+clipped MX-Gaussian distribution. Based on this definition, we then present its clipping probability. Finally, we derive its
+inverse CDF and define the hash.
+Definition D.1 (Clipped MX-Gaussian). Let Y ∼N(0, Idmx), and fix a positive represented scale s ∈QS. Let R =
+max QE > 0 be the maximum representable element magnitude. Define
+e
+Xi = clip(Yi/s, −R, R),
+i ∈{1, . . . , dmx},
+(25)
+where clip(x, −R, R) = max{−R, min{x, R}}. We call the distribution of the resulting vector the clipped MX-Gaussian
+distribution. Here s is supplied externally; the Gaussian vector is not conditioned on the event gmxs(Y ) = s.
+As a first step, we derive the clipping probability lemma.
+Lemma D.1 (Clipping Probability). For each coordinate of the clipped MX-Gaussian vector, the probability at the maximum
+magnitude is
+Pr(| e
+Xi| = R) = 1 −erf(sR/
+√
+2).
+(26)
+Each signed endpoint, −R and R, has half this probability.
+Proof. By the definition of clipping and the positivity of s, | e
+Xi| = R if and only if |Yi| ≥sR. Since Yi ∼N(0, 1), the
+magnitude |Yi| has a half-normal distribution. Thus,
+Pr(| e
+Xi| = R) = Pr(|Yi| ≥sR) = 1 −erf(sR/
+√
+2).
+Symmetry of the Gaussian distribution gives equal probability to the two signed endpoints.
+Using this definition and Lemma D.1, we derive the inverse CDF in the following theorem:
+Theorem D.2 (Clipped MX-Gaussian Inverse CDF). Let Fclip(τ; s) = Pr(| e
+Xi| ≤τ) be the magnitude CDF of the clipped
+MX-Gaussian distribution. For 0 < p < 1, its generalized inverse is
+F −1
+clip(p; s) = min
+(√
+2
+s ierf(p), R
+)
+,
+(27)
+where erf is the standard error function and ierf its inverse. The generalized inverse is defined by F −1
+clip(p; s) = inf{τ ≥0 :
+Fclip(τ; s) ≥p}.
+21
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Proof of Theorem D.2. For 0 ≤τ < R, clipping preserves the event that the magnitude is at most τ. Therefore,
+Fclip(τ; s) = Pr(| e
+Xi| ≤τ) = Pr(|Yi|/s ≤τ)
+= Pr(|Yi| ≤sτ) = erf(sτ/
+√
+2).
+(28)
+The second step follows from the definition of clipping, the third uses s > 0, and the final step uses the half-normal CDF.
+The magnitude is nonnegative and never exceeds R, so
+Fclip(τ; s) =
+
+
+
+
+
+
+
+0,
+τ < 0,
+erf(sτ/
+√
+2),
+0 ≤τ < R,
+1,
+τ ≥R.
+(29)
+The jump at R equals the clipping probability in (26).
+Inverse CDF.
+Define the probability at the end of the continuous branch as
+p⋆
+clip(s) = lim
+τ↑R Fclip(τ; s) = erf(sR/
+√
+2).
+(30)
+For 0 < p < p⋆
+clip(s), set τ = F −1
+clip(p; s). Solving the continuous branch gives
+erf(sτ/
+√
+2) = p,
+τ =
+√
+2
+s ierf(p).
+(31)
+For p⋆
+clip(s) ≤p < 1, every τ < R has Fclip(τ; s) < p, while Fclip(R; s) = 1. Thus the generalized inverse equals R. At
+p = p⋆
+clip(s), the continuous inverse also equals R. Combining the two branches proves (27).
+E. Efficient Look-up Table Implementation
+In this section, we present an efficient approach for implementing the inverse CDF with lookup tables (LUTs). We describe
+LUT implementations of the MX-Gaussian and clipped MX-Gaussian inverse CDFs. Both implementations use table
+lookups, comparisons, multiplication, and addition, with interpolation factors precomputed where appropriate.
+E.1. MX-Gaussian
+For each supported scale s, we precompute the following coefficients for the MX-Gaussian inverse CDF:
+cLUT
+0
+(s) =
+P(s; dmx)
+P(s; dmx −1),
+cLUT
+1
+(s) =
+P(s; dmx)
+erf
+
+b(s)/
+√
+2
+dmx−1 ,
+dLUT(s) =
+erf
+
+a(s)/
+√
+2
+dmx
+erf
+
+b(s)/
+√
+2
+dmx−1 ,
+p⋆(s) =
+erf
+
+a(s)/
+√
+2
+
+[P(s; dmx −1)]
+P(s; dmx)
+.
+(32)
+We also store the prefactor
+√
+2/s. For an 8-bit scale encoding, we allocate 256 scale slots and store five FP32 values per slot.
+Next, we explain how to calculate the inverse CDF of the MX-Gaussian distribution. Given the midpoint probability pℓfor
+output coordinate ℓin Equation (10), we compute the inverse-error-function argument as follows:
+ηℓ=
+(
+cLUT
+0
+(s)pℓ
+pℓ≤p⋆(s)
+cLUT
+1
+(s)pℓ+ dLUT(s)
+otherwise .
+(33)
+We approximate the inverse error function using tabulated values and linear interpolation. In particular, let zLUT
+0
+, . . . , zLUT
+255
+denote the set of points in the LUT. Because the input to the inverse error function spans 0 to 1, we set zLUT
+0
+= 0 and
+zLUT
+255
+= 1, and linearly distribute the intermediate points between these endpoints. We construct the inverse-error-function
+lookup table as vLUT
+j
+= ierf(zLUT
+j
+). We first approximate ierf(ηℓ) by Λ(ηℓ). The approximate magnitude quantile is
+22
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+(
+√
+2/s)Λ(ηℓ); applying the sign and element quantizer gives the approximate hash output. For zLUT
+j
+≤ηℓ≤zLUT
+j+1 , these
+quantities are evaluated as follows:
+Λ(ηℓ) = vLUT
+j
++
+ηℓ−zLUT
+j
+zLUT
+j+1 −zLUT
+j
+(vLUT
+j+1 −vLUT
+j
+).
+(34)
+bhΩ,ℓ(u; s) = QE
+ 
+(−1)γℓ
+√
+2 Λ(ηℓ)
+s
+!
+.
+(35)
+The two 256-entry FP32 arrays require 2 KiB in total. Five FP32 coefficients per scale slot require another 5 KiB for 256
+slots, giving 7 KiB.
+E.2. Clipped MX-Gaussian
+For each supported scale s, we precompute the prefactor
+√
+2/s. For an 8-bit scale encoding, we allocate 256 scale slots and
+store one FP32 value per slot. We reuse the inverse-error-function LUT and linear interpolation from the MX-Gaussian
+implementation in Equation (34). By Equation (27), the inverse-error-function argument is pℓitself. Applying clipping, the
+sign, and the element quantizer gives
+d
+hclipΩ,ℓ(u; s) = QE
+
+(−1)γℓmin
+(√
+2
+s Λ(pℓ), R
+)
+.
+(36)
+The shared two 256-entry FP32 arrays require 2 KiB in total. One FP32 prefactor per scale slot requires another 1 KiB for
+256 slots, giving 3 KiB for a standalone implementation or 1 KiB additional storage when the LUT is shared.
+E.3. Efficient Hash Implementation Results
+Figure 74 shows sampled relative inverse-CDF errors before element rounding at s = 2 (FP4 E2M1, block size 32). The
+relative error remains below 1% across the sampled probabilities for both distributions, indicating close agreement with the
+full inverse-CDF reference at this scale. Next, we compare perplexity using the reference and efficient implementations.
+Figure 7. Sampled relative inverse-CDF error at s = 2 with linear interpolation; zero errors are omitted.
+Table 3 compares the reference and efficient hash implementations of MiSTiQ at matched effective storage budgets. UE8M0
+uses initial scale selection, while UE5M3 uses joint optimization. Reference results are the reported main results in Section 6.
+4This diagnostic uses 256 finite, nonuniform inverse-erf knots and FP64 arithmetic, rather than the uniform FP32 scheme above;
+arguments outside the table use the full inverse CDF (35 MX-Gaussian samples; none for the clipped distribution).
+23
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+The results show that the efficient hash implementation maintains perplexity close to the original across both scale formats,
+improving results on Qwen3-8B while performing slightly worse on Llama-3.1-8B-Instruct. These results suggest that the
+computational simplification largely preserves quantization quality.
+Table 3. Perplexity of MiSTiQ with and without efficient hashing. Bold marks the best result between the two implementations for each
+model and scale format. BF16 is excluded from this comparison. UE8M0 uses initial scale selection and UE5M3 uses joint optimization.
+Block-scale
+format
+Variant
+Effective
+Bit
+Llama-3.1-8B-Instruct
+Qwen3-8B
+Perplexity ↓
+Perplexity ↓
+—
+BF16
+16
+7.170
+9.750
+UE8M0
+MiSTiQ
+1.25
+11.957
+15.072
+MiSTiQ efficient hash
+1.25
+11.980
+14.831
+UE5M3
+MiSTiQ
+1.25
+11.630
+14.657
+MiSTiQ efficient hash
+1.25
+11.712
+14.537
+F. Relaxed Joint Scale Search
+In this section, we derive the scale search algorithm introduced in Section 5.2. Let yb,j, bxb,j ∈RV denote the jth groups of
+V coordinates in yb and bxb, respectively. With sb fixed, the prefix reconstruction error for a candidate path over the first
+m ∈{1, . . . , dmx/V } emissions of block b is
+Eb,m(sb) =
+m
+X
+j=1
+yb,j −sbbxb,j
+2
+2 .
+(37)
+At m = dmx/V , this recovers the full block reconstruction error of Equation (5). The fixed-scale beam selects the B
+lowest-cost candidates according to the accumulated error of completed blocks plus Eb,m(sb).
+To construct a joint scale search, we first relax the represented block scale sb to a continuous variable ab > 0, with
+sb = Qα(ab). Let sref
+b
+= Qα(s∗
+b) denote the fixed reference scale selected before search. Writing Eb,m(ab) for the same
+prefix error evaluated at the continuous scale, define the regularized squared error
+Ereg
+b,m(ab) = Eb,m(ab) + λ
+
+ab −sref
+b
+2
+,
+(38)
+where λ ≥0 controls the regularization strength. This encourages scales that are suited to the whole block, when
+m < dmx/V . For example, if m = V = 1 and λ = 0, ab can be chosen to reconstruct yb,1 for any nonzero emission bxb,1
+of the same sign. Such paths can receive low prefix costs despite scale choices that lead to large errors later in the block,
+potentially evicting better paths from the finite beam.
+To support this joint search, we use Clipped MX-Hash (Appendix D), whose quantized outputs bxb,j remain fixed as the
+block scale varies. The regularized objective is therefore quadratic in ab. Setting ∂Ereg
+b,m(ab)/∂ab = 0 gives
+a∗
+b,m = ϕm(yb, bxb) + λsref
+b
+ϕm(bxb, bxb) + λ
+,
+(39)
+provided the denominator and fitted scale are positive. Here, the prefix inner product is
+ϕm(v, w) =
+m
+X
+j=1
+⟨vj, wj⟩.
+(40)
+Both prefix inner products accumulate with each emission, so scale refitting takes constant work per candidate. We evaluate
+Ereg
+b,m(sb,m) at the rounded scale sb,m = Qα(a∗
+b,m) and add the accumulated error of completed blocks to rank candidates.
+For the final step of each MX block, we set λ = 0, since the full block reconstruction error is now available. We then refit
+and quantize the scale before calculating the final block error.
+This relaxed joint scale beam search selects the trellis path and block scales in a single beam search. Algorithm 1 details the
+joint-scale encoding procedure.
+24
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+G. Additional Results
+G.1. Below 1-bit PPL Results
+Table 4 extends the WikiText-2 evaluation to storage budgets below one effective bit per element, with VecInfer at one bit
+as a reference. At below 1 effective bits per element, the MX trellis variants achieve lower perplexity than the compared
+baselines on both models under both scale formats. The UE5M3 configuration with joint scale search further reduces
+perplexity and, even at approximately 0.93 effective bits per element, outperforms NSNQuant at a slight higher effective bit
+on both models.
+Table 4. Below-1-bit MX KV-cache quantization perplexity. Effective Bit denotes mean effective bits per element using dynamic
+storage accounting. Within each block-scale format and model, dark blue cells mark the lowest perplexity and light blue cells mark the
+second-lowest perplexity among the displayed quantized methods.
+Block-scale
+format
+Variant
+Effective
+Bit
+Llama-3.1-8B-Instruct Qwen3-8B
+—
+BF16
+16.00
+7.170
+9.750
+UE8M0
+VecInfer
+1.00
+693.850
+409.782
+NSNQuant
+0.99
+52.257
+80.740
+MiSTiQ (Ours)
+0.99
+38.315
+57.616
+MiSTiQ (Ours)
+0.93
+57.510
+79.069
+UE5M3
+VecInfer
+1.00
+694.108
+324.561
+NSNQuant
+0.99
+54.845
+87.735
+MiSTiQ (Ours)
+0.99
+32.136
+42.248
+MiSTiQ (Ours)
+0.93
+45.496
+59.141
+G.2. MiSTiQ Integration with VecInfer
+In Table 5 we evaluate MiSTiQ as a drop-in replacement for VecInfer’s vector quantizer, retaining its preprocessing. At
+matched storage budgets, MiSTiQ achieves lower perplexity and higher LongBench and GSM8K scores on both models
+across both scale formats.
+Table 5. VecInfer with and without MiSTiQ at 1.25 effective bits per element. Blue marks the best result per model, scale format, and
+metric; both UE8M0 Llama GSM8K results tie at the displayed precision.
+Block-scale
+format
+Variant
+Effective
+Bit
+Llama-3.1-8B-Instruct
+Qwen3-8B
+Perplexity ↓LongBench ↑GSM8K ↑Perplexity ↓LongBench ↑GSM8K ↑
+UE8M0
+VecInfer
+1.25
+258.713
+1.20
+1.97
+35.042
+6.48
+2.20
+VecInfer + MiSTiQ (Ours)
+1.25
+188.996
+2.11
+1.97
+18.967
+11.46
+3.41
+UE5M3
+VecInfer
+1.25
+232.335
+1.22
+1.90
+30.791
+11.43
+2.50
+VecInfer + MiSTiQ (Ours)
+1.25
+69.729
+3.96
+1.97
+15.494
+19.32
+9.40
+G.3. Full LongBench Per Task Results
+Tables 6 and 7 provide the individual scores underlying the LongBench averages in the main results, covering question
+answering, summarization, and classification. The results show that the benefits of MiSTiQ extend across multiple task
+types, with broad gains for the lower-bit UE5M3 and NVFP4 configurations on Llama-3.1-8B-Instruct.
+25
+
+
+MiSTiQ: MicroScaling Trellis Quantization for Extreme KV Cache Compression
+Table 6. LongBench task scores for Llama-3.1-8B-Instruct (↑). Bold marks the best per scale and bit section, excluding historical BF16.
+Block-scale
+format
+Variant
+Effective
+Bit
+GovReport Qasper QMSum SAMSum MultiNews TriviaQA TREC
+—
+BF16
+16.00
+34.52
+44.68
+25.20
+43.92
+27.02
+91.65
+72.50
+UE8M0
+VecInfer
+2.25
+29.27
+34.39
+22.03
+39.01
+26.27
+81.72
+63.00
+NSNQuant
+2.24
+33.70
+42.96
+24.86
+43.81
+26.40
+91.12
+67.50
+MiSTiQ (Ours)
+2.25
+34.54
+43.91
+24.95
+43.37
+26.67
+89.23
+70.50
+UE5M3
+VecInfer
+2.25
+30.41
+39.93
+22.42
+38.64
+26.41
+79.27
+68.00
+NSNQuant
+2.24
+33.30
+45.38
+25.33
+43.83
+26.57
+88.93
+70.00
+MiSTiQ (Ours)
+2.25
+34.15
+45.23
+26.11
+43.99
+26.58
+90.38
+72.00
+NVFP4
+VecInfer
+2.25
+29.47
+35.51
+22.29
+38.11
+26.43
+83.56
+63.50
+NSNQuant
+2.24
+33.83
+45.86
+25.09
+43.64
+27.13
+89.70
+70.00
+MiSTiQ (Ours)
+2.25
+34.64
+43.62
+25.57
+42.79
+26.10
+90.90
+71.00
+UE8M0
+VecInfer
+1.25
+1.11
+0.73
+1.94
+1.74
+1.52
+0.34
+1.00
+NSNQuant
+1.24
+27.08
+25.06
+21.98
+37.38
+24.77
+74.83
+56.50
+MiSTiQ (Ours)
+1.25
+27.49
+28.60
+22.21
+34.70
+25.49
+67.57
+44.50
+UE5M3
+VecInfer
+1.25
+1.15
+0.66
+2.05
+2.18
+1.26
+0.23
+1.00
+NSNQuant
+1.24
+28.07
+26.38
+22.67
+36.19
+25.10
+72.13
+56.50
+MiSTiQ (Ours)
+1.25
+29.95
+29.44
+22.46
+40.23
+25.59
+79.40
+55.50
+NVFP4
+VecInfer
+1.25
+1.22
+0.80
+2.17
+2.35
+1.74
+0.72
+2.50
+NSNQuant
+1.24
+27.53
+21.95
+22.30
+38.48
+24.96
+71.19
+59.00
+MiSTiQ (Ours)
+1.25
+30.06
+32.66
+22.79
+39.68
+26.02
+82.43
+53.50
+Table 7. LongBench task scores for Qwen3-8B (↑). Bold marks the best per scale and bit section, excluding historical BF16.
+UE8M0/UE5M3 VecInfer uses MX-unaware quantization; NVFP4 retains the original setup. All MiSTiQ rows use beam 128.
+Block-scale
+format
+Variant
+Effective
+Bit
+GovReport Qasper QMSum SAMSum MultiNews TriviaQA TREC
+—
+BF16
+16.00
+27.86
+12.03
+18.06
+44.54
+22.77
+90.71
+71.50
+UE8M0
+VecInfer
+2.25
+26.08
+12.88
+18.92
+39.30
+21.86
+78.53
+69.50
+NSNQuant
+2.24
+26.62
+11.62
+17.64
+43.24
+22.58
+88.55
+72.50
+MiSTiQ (Ours)
+2.25
+27.41
+11.42
+17.85
+42.35
+22.62
+89.56
+72.00
+UE5M3
+VecInfer
+2.25
+26.34
+12.54
+18.44
+39.09
+21.84
+81.07
+71.00
+NSNQuant
+2.24
+27.10
+11.33
+17.80
+44.36
+22.75
+89.81
+75.00
+MiSTiQ (Ours)
+2.25
+27.76
+11.34
+17.81
+44.45
+22.42
+90.06
+70.50
+NVFP4
+VecInfer
+2.25
+26.29
+13.42
+18.72
+39.92
+22.11
+82.23
+74.50
+NSNQuant
+2.24
+27.05
+11.50
+17.32
+43.39
+22.27
+89.47
+69.00
+MiSTiQ (Ours)
+2.25
+27.69
+11.55
+17.74
+44.41
+22.39
+88.15
+72.50
+UE8M0
+VecInfer
+1.25
+7.96
+2.19
+11.22
+4.63
+10.86
+2.98
+5.50
+NSNQuant
+1.24
+23.10
+8.47
+16.75
+30.63
+18.53
+69.72
+49.50
+MiSTiQ (Ours)
+1.25
+22.89
+8.81
+16.38
+29.22
+20.66
+64.51
+59.50
+UE5M3
+VecInfer
+1.25
+11.26
+4.04
+12.49
+4.12
+14.77
+2.83
+30.50
+NSNQuant
+1.24
+22.79
+9.00
+17.27
+30.62
+18.39
+71.56
+55.50
+MiSTiQ (Ours)
+1.25
+23.23
+9.68
+16.25
+31.12
+20.06
+71.62
+62.00
+NVFP4
+VecInfer
+1.25
+10.41
+3.26
+12.24
+3.89
+14.90
+4.78
+22.00
+NSNQuant
+1.24
+23.39
+8.35
+16.85
+29.12
+18.21
+69.43
+54.00
+MiSTiQ (Ours)
+1.25
+23.40
+8.87
+16.73
+34.36
+20.67
+66.40
+61.00
+26

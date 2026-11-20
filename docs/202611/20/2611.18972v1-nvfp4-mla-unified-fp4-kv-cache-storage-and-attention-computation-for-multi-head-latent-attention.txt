@@ -1,0 +1,1111 @@
+September 2026
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention
+Computation for Multi-Head Latent Attention
+Chao Ni1, Qi Zhang1, Xiao Wang1, Zongfei Jing1, Mingyang Hao1, Binghan Chen1, Kefeng Duan1, Yu-Jung Chen1, Mengdi
+Wang1, Tijmen Blankevoort1 and Jun Yang1
+1NVIDIA
+Long-context reasoning and agentic workloads make key-value (KV) cache capacity and attention computation the dominant
+costs of serving frontier large language models. We present NVFP4-MLA, the first design to push both KV-cache storage
+and attention computation of multi-head latent attention (MLA) to FP4. NVFP4-MLA co-designs the quantization algorithm
+with the attention kernel and the cache system. Selective residual compensation preserves model accuracy by adding NVFP4
+residuals only to the quantization-sensitive channels. Two-dimensional quantization blocks make the shared latent cache
+compatible with the different reduction directions of the two attention batched matrix multiplications (BMMs), removing
+requantization between them. On DeepSeek-R1 and Kimi-K3, NVFP4-MLA matches BF16 MLA average accuracy across
+nine benchmarks while compressing the MLA KV cache by 3.20× and 3.05× relative to BF16 MLA. On NVIDIA Rubin
+GPUs, NVFP4-MLA speeds up the attention kernel over FP8 MLA by up to 2.82× on DeepSeek-R1 and 2.71× on Kimi-K3,
+and lowers p90 time to first token in agentic multi-turn serving by up to 3.5× and 2.1×, respectively. In disaggregated
+DeepSeek-R1 serving, it also raises per-GPU throughput by up to 2.30×.
+1. Introduction
+Multi-head latent attention (MLA) represents keys and values in a shared low-rank latent space and is the common attention
+pattern of several popular open-source large language models, including DeepSeek-V3 (DeepSeek-AI, 2024b), DeepSeek-
+R1 (Guo et al., 2025), Kimi-K2.6, Kimi-K3 (Kimi Team, 2026), and LongCat-Flash (Meituan LongCat Team, 2025), which
+use MLA in all or part of their attention layers. The low-rank latent shrinks the key-value (KV) cache, but the cache still grows
+with sequence length and serving concurrency, and every decoding step reads all of it, which puts pressure on both memory
+capacity and bandwidth. Agentic workloads sustain this pressure across turns and tool calls because they preserve and reuse
+growing contexts, which keeps the KV cache resident for longer. When GPU memory cannot hold these caches, the server
+evicts them and recomputes the prefix in the next turn, which increases time to first token. A smaller cache allows longer
+contexts, keeps more tokens and requests in GPU memory, reduces cache eviction and recomputation, and increases serving
+concurrency.
+Beyond memory, computation can also be under pressure. In grouped-query attention (GQA), each KV head serves only
+the few query heads in its group, whereas all MLA heads share the latent cache during decoding, so MLA performs more
+computation per cached byte (Appendix B). Model-native multi-token prediction (MTP) verifies several queries against the
+same latent cache. Reusing the cache across these queries raises arithmetic intensity further and makes MLA decoding
+compute-bound (Section 4.4.2), so math throughput matters as much as cache bytes. Together, these pressures motivate us
+to apply NVFP4, a 4-bit format that recent NVIDIA Tensor Cores support natively, to both KV-cache storage and attention
+computation in MLA, so that MLA benefits from smaller storage and higher math throughput.
+We introduce NVFP4-MLA, which brings unified NVFP4 storage and attention computation to MLA. Its design addresses the
+challenges of applying FP4 quantization directly to MLA. First, direct FP4 quantization degrades accuracy. Outliers in the
+MLA cache concentrate in the last few channels, so selective residual compensation adds an NVFP4 residual only to these
+channels and keeps all elements in FP4 (Section 4.2.2). Second, MLA shares one latent representation between keys and
+values. Default block-wise quantization groups this latent along channels, which matches the channel reduction of the first
+batched matrix multiplication (BMM1) but not the token reduction of BMM2. NVFP4-MLA introduces two-dimensional
+quantization blocks that are compatible with both reduction dimensions and therefore remove the need to requantize the shared
+latent cache for the second BMM (Section 3.3). Third, the higher arithmetic intensity makes math throughput a bottleneck.
+NVFP4-MLA therefore also quantizes queries and softmax scores online, so both BMMs run on native FP4 Tensor Cores
+and exploit the higher FP4 math throughput. A corresponding cache system and kernel pipeline implement this design, and
+Figure 1 gives an overview.
+© 2026 NVIDIA. All rights reserved.
+arXiv:2611.18972v1  [cs.DC]  13 Nov 2026
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+(a) NVFP4 MLA cache
+RoPE
+residual error
+BMM1: over channels
+BMM2: over tokens
+NoPE: 2D blocks
+one E4M3 scale per block
+(b) NVFP4 MLA kernel
+same values, no requantization̂
+Q
+NVFP4
+BMM1
+S
+FP32
+online softmax +
+score quantization̂
+P
+NVFP4 BMM2
+O
+FP32̂
+K: values + K scaleŝ
+V: values + V scales
+S, FP32
+E2M1
+m
+E4M3
+WG 1
+WG 2
+(c) Dataflow
+Score-operand reusê
+P
+NVFP4
+loaded oncê
+V
+O
+Split KV
+many requests
+few requests, long KV
+reduce
+(d) End-to-end integration, disaggregated serving
+Context worker
+new tokens
+prefix cache hit
+quantize
+scatter
+fused kernel
+prefix cache,
+NVFP4 pages
+last block
+KV cache transfer
+NVFP4 pages
++ scales
+BF16 tail
+(< 16 tokens)
+Generation worker
+new token
+RoPE
+t mod 16
+0
+15
+BF16 ring buffer
+active block
+quantize
+fused pre-attention kernel
+16×16 block
+finalize when full
+immutable
+NVFP4 pages
+read every step
+to (b)
+request slots
+page table
+Speculative decoding
+snapshot
+write
+keep / restore
+t+1, t+2
+t+3, t+4
+2a(Si −mb)
+2a(mb −m)
+mb
+row max
+scores, part 1
+rescale O, part 2
+scores, part 2
+rescale O, part 1
+1
+2
+3
+1
+2
+3
+Figure 1 | Overview of NVFP4-MLA. (a) NVFP4 MLA cache: two-dimensional NoPE blocks shared by both BMMs, and
+RoPE with an NVFP4 residual. (b) NVFP4 MLA kernel: BMM1, online softmax fused with score quantization, and BMM2,
+with score construction and accumulator rescaling split across warp groups (WG). (c) Dataflow: score-operand reuse and split
+KV. (d) End-to-end integration in disaggregated serving: prefill, KV cache transfer, decode, and speculative decoding.
+Our main contributions are:
+1. We design selective residual compensation, which keeps model accuracy by adding NVFP4 residuals to quantization-
+sensitive channels without mixed precision.
+2. We design two-dimensional quantization blocks and a corresponding cache system that let the shared quantized
+representation serve both BMMs without requantization.
+3. We build an efficient kernel pipeline. The pipeline quantizes queries and softmax scores online, so both BMMs benefit
+from the higher throughput of FP4 Tensor Cores.
+We evaluate NVFP4-MLA on two frontier open MLA models, DeepSeek-R1 and Kimi-K3, across nine benchmarks that
+span reasoning, coding, instruction following, long context, and agentic tool use. NVFP4-MLA matches BF16 MLA average
+accuracy on both models while reducing the MLA KV cache by 3.20× and 3.05× relative to BF16 MLA. On NVIDIA
+Rubin GPUs, NVFP4-MLA speeds up the attention kernel over FP8 MLA by up to 2.82× on DeepSeek-R1 and 2.71× on
+Kimi-K3. In the AgentX benchmark, the smaller cache lowers p90 time to first token by up to 3.5× and 2.1×, respectively. In
+disaggregated DeepSeek-R1 serving on the MLPerf and 8K/16K Reasoning workloads, per-GPU throughput reaches up to
+2.30× that of FP8 MLA, and is 26.7% and 39.9% higher on average, respectively.
+Section 2 reviews MLA and the NVFP4 format. Section 3 presents selective residual compensation, two-dimensional
+quantization blocks, and the corresponding cache system and kernel pipeline. Section 4 evaluates the accuracy, memory
+footprint, and performance of NVFP4-MLA on DeepSeek-R1 and Kimi-K3. Section 5 compares NVFP4-MLA with prior
+KV-cache quantization methods and quantized attention kernels. Section 6 summarizes the findings.
+2. Background
+2.1. Multi-head latent attention
+2.1.1. Low-rank compression creates shared KV state: MLA stores one compressed latent vector for each token (DeepSeek-
+AI, 2024a,b). For a hidden state ℎ𝑡, a down-projection produces
+𝑐𝑡= 𝑊DKVℎ𝑡,
+𝑐𝑡∈R𝑑𝑐.
+(1)
+Learned up-projections recover head-specific keys and values from 𝑐𝑡. During inference, matrix absorption folds these
+projections into the query and output projections. The runtime therefore caches 𝑐𝑡instead of materializing a separate key and
+value for every head.
+2
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+The shared latent is involved in both BMMs. The first, BMM1 (QK), reduces over latent channels to generate attention logits,
+and the second, BMM2 (PV), reduces over cached tokens to generate the output. The same cached values are therefore reduced
+along two directions, so their block scales must serve both BMMs.
+As Appendix B shows, MLA performs more computation per cached byte than a grouped-query attention (GQA) reference.
+Matrix absorption reduces cache traffic and reuses the latent cache for every query head. Model-native MTP raises arithmetic
+intensity further when the kernel reuses the cache across several query positions. MLA decoding therefore tends to be
+compute-bound.
+2.1.2. NoPE and RoPE channels serve different roles: Applying rotary position encoding (RoPE) (Su et al., 2024) directly
+to the compressed keys would break matrix absorption, because the rotation depends on each token’s position (DeepSeek-AI,
+2024a). MLA therefore carries RoPE on a decoupled path, with additional per-head queries and a single key shared by all
+heads. Each cached token thus holds a 𝑑𝑐= 512-channel compressed latent, which we call NoPE, and a 𝑑R = 64-channel
+decoupled key, which we call RoPE. In BMM1, each head adds the NoPE and RoPE dot products to form its attention logit,
+whereas BMM2 aggregates only the NoPE latent. Kimi-K3 keeps this decoupled layout but applies no positional encoding to
+either path (Kimi Team, 2026); we still call its decoupled channels RoPE.
+2.2. NVFP4 format and KV-cache quantization
+KV-cache quantization reduces per-token storage by encoding cached values with fewer bits (Liu et al., 2024). To keep
+accuracy, prior methods redistribute large outliers through rotations, preserve selected outliers separately, or assign different
+bit widths across tensors and layers (Hooper et al., 2024; Li et al., 2025; Su et al., 2025; Zandieh et al., 2026). Beyond
+accuracy, using the quantized cache directly in low-precision BMMs requires a compatible hardware format. We therefore use
+block-scaled NVFP4 for both cache storage and attention computation.
+NVFP4 and MXFP4 both encode values in 4-bit E2M1 and attach a shared scale to each block (Rouhani et al., 2023; NVIDIA,
+2025). NVFP4 uses an E4M3 scale per 16 values, whereas MXFP4 uses an E8M0 power-of-two scale per 32 values. NVFP4’s
+smaller blocks and non-power-of-two scales give finer control over local value ranges.
+These formats have mostly been studied for weight and activation quantization (Egiazarian et al., 2026). For KV caches, their
+use also depends on how attention consumes the quantized values. When compute precision differs from storage precision,
+attention needs an extra dequantization step. Computing directly on the stored values avoids this step, but each BMM then
+requires the quantized values and scales in a compatible layout. This requirement links the block layout to the reduction axes of
+the attention BMMs. In GQA, separate key and value caches can adopt independent block layouts. In MLA, by contrast, both
+BMMs reduce the same latent cache along different axes, which couples their block layouts. A shared MLA cache intended for
+native FP4 computation therefore requires quantization blocks that support both reduction directions.
+3. Methodology
+NVFP4-MLA makes the shared latent a direct operand of both FP4 attention BMMs. Selective residual compensation reduces
+quantization error without mixed precision, two-dimensional quantization blocks align quantization with both reduction axes,
+the efficient kernel pipeline handles online quantization, and the corresponding cache system supports end-to-end integration.
+3.1. Quantization of Q, K, P, and V
+During decode in quantized layers, NVFP4-MLA quantizes all four attention operands: queries 𝑄, keys 𝐾, softmax scores 𝑃,
+and values 𝑉. 𝑃holds stable, unnormalized softmax scores, which NVFP4-MLA quantizes online for BMM2.
+𝒬1×16 denotes NVFP4 quantization with contiguous 16-element blocks along the reduction axis of the consuming BMM:
+latent channels for queries and the RoPE cache, and cached tokens for softmax scores. 𝒬16×16 uses 16 × 16 token-by-channel
+blocks, each with a single scale (Appendix A).
+For one query head and 𝑇cached tokens, let 𝐶= [𝐶N, 𝐶R] ∈R𝑇×(𝑑𝑐+𝑑R) and 𝑞= [𝑞N, 𝑞R] ∈R1×(𝑑𝑐+𝑑R). Let 𝑆, ˜𝑝∈R1×𝑇
+denote attention logits and stable, unnormalized softmax scores, respectively; ˜𝑝is the single-head instance of 𝑃. The
+normalized output is 𝑂∈R1×𝑑𝑐, and 𝑑QK is the pre-absorption QK head width. NoPE uses 𝒬16×16 because both BMMs
+consume it, whereas RoPE enters only BMM1 and uses 𝒬1×16 along its channels. The quantized attention dataflow, evaluated
+3
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+Shared latent KV cache
+NoPE · 512 channels
+RoPE · 64
+tokens
+16 tokens
+16 tokens
+(a) 1D blocks (1×16)
+✓BMM1: inside one scale
+BMM2: crosses 16 scales
+needs requantization
+(b) 2D blocks (16×16)
+✓BMM1: inside one scale
+✓BMM2: inside one scale
+one cache serves both BMMs
+Figure 2 | Two-dimensional quantization blocks. Both BMMs consume the same FP4 values and scales without requantization.
+One-dimensional 1 × 16 blocks (a) serve only BMM1, whereas 16 × 16 blocks (b) serve both. NVFP4-MLA uses (b) for
+NoPE and (a) for RoPE, which only BMM1 consumes.
+as online softmax over successive KV tiles 𝒯𝑘, iŝ︀
+𝐶N = 𝒬16×16(𝐶N),̂︀
+𝐶R = 𝒬1×16(𝐶R),̂︀
+𝑞N = 𝒬1×16(𝑞N),̂︀
+𝑞R = 𝒬1×16(𝑞R),
+𝑆=̂︀𝑞N̂︀𝐶T
+N +̂︀𝑞R̂︀𝐶T
+R,
+𝑚(𝑘) = max
+(︀
+𝑚(𝑘−1), max𝑖∈𝒯𝑘𝑆𝑖
+)︀
+,
+˜𝑝𝑖= exp
+(︁
+(𝑆𝑖−𝑚(𝑘))/
+√︀
+𝑑QK
+)︁
+,̂︀
+𝑝= 𝒬1×16(˜𝑝),
+ℓ(𝑘) = 𝛼𝑘ℓ(𝑘−1) +
+∑︁
+𝑖∈𝒯𝑘
+˜𝑝𝑖,̃︀
+𝑂(𝑘) = 𝛼𝑘̃︀𝑂(𝑘−1) +
+∑︁
+𝑖∈𝒯𝑘̂︀
+𝑝𝑖̂︀𝐶N,𝑖,
+𝛼𝑘= exp
+(︁
+(𝑚(𝑘−1) −𝑚(𝑘))/
+√︀
+𝑑QK
+)︁
+,
+𝑂=̃︀𝑂/ℓ.
+(2)
+Here 𝒯𝑘is the 𝑘-th KV tile and 𝑖∈𝒯𝑘, with 𝑚(0) = −∞and ℓ(0) =̃︀𝑂(0) = 0; 𝑚, ℓ, and̃︀𝑂without a superscript are the
+running values, and 𝑂is taken after the last tile. Both BMMs accumulate in FP32, and softmax keeps 𝑆, 𝑚, ℓ, and the final
+division by ℓin FP32.
+3.2. Selective residual compensation
+FP4 quantization error in the MLA cache is disproportionately large in the RoPE partition (Section 4.2.2). NVFP4-MLA
+therefore keeps a single NVFP4 component for NoPE but adds a second NVFP4 component only for the RoPE quantization
+error. Because the RoPE partition holds 64 of the 576 latent channels, the residual adds little storage and computation;
+Section 4.2 evaluates the accuracy of NVFP4-MLA.
+The native kernel packs RoPE and its quantization error separately with independent NVFP4 block scales, logically concatenates
+them along the reduction dimension of BMM1, and duplicates the corresponding channels. The compensated logits, which
+replace 𝑆in Equation 2, therefore take a single BMM1 reduction, without merging base and residual into a high-precision
+tensor.
+3.3. Two-dimensional quantization blocks for shared keys and values
+As Section 2 shows, the shared MLA latent requires scales that work in both reduction directions. A conventional one-
+dimensional layout aligns its blocks with BMM1 but not with native NVFP4 BMM2 (Figure 2a). Converting this layout requires
+dequantizing the cached E2M1 values, transposing them, and requantizing them into BMM2-aligned blocks. Requantization
+introduces additional quantization error. It also adds overhead such as memory traffic, a scale reduction, and synchronization
+before BMM2.
+NVFP4-MLA therefore quantizes the shared NoPE latent in two-dimensional 16 × 16 blocks over tokens and channels
+(Figure 2b). One scale covers every 16-element row and column segment of a block, so the block is valid in either reduction
+direction: both BMMs share the same NVFP4 values and scales without a high-precision intermediate or a requantization pass.
+4
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+3.4. Kernel implementation
+To turn FP4’s higher Tensor Core throughput into a faster attention kernel, NVFP4-MLA quantizes queries and softmax
+scores online (Figure 1b) and applies four optimizations: fusing online softmax with FP4 score quantization, balancing FP4
+score construction and accumulator rescaling, reusing FP4 score operands across BMM2 output tiles, and shape-adaptive
+thread-block scheduling.
+Fusing online softmax with FP4 score quantization. Online FP4 score quantization makes the logit-to-score path heavier
+than in FP8 MLA because the path must also derive block scales and pack the FP4 operand for BMM2. We algebraically
+fuse online softmax, FP4 score quantization, and scale generation. As in online softmax, let 𝑚be the running maximum of
+one row of logits 𝑆, and let 𝑎= log2(𝑒)/
+√︀
+𝑑QK, so that ˜𝑝𝑖= 2𝑎(𝑆𝑖−𝑚) in Equation 2. Let 𝑚𝑏= max𝑗∈𝑏𝑆𝑗≤𝑚; for each
+16-element block 𝑏and 𝑖∈𝑏,
+˜𝑝𝑖= 2𝑎(𝑚𝑏−𝑚) 2𝑎(𝑆𝑖−𝑚𝑏),̂︀
+𝑝𝑖= 𝛾𝑃𝑠𝑏𝑥𝑖,
+𝑥𝑖= 𝒬E2M1
+(︀
+𝑀E2M1 2𝑎(𝑆𝑖−𝑚𝑏))︀
+,
+𝑠𝑏= 𝒬E4M3
+(︀
+𝑀E4M3 2𝑎(𝑚𝑏−𝑚))︀
+,
+(3)
+where 𝒬E2M1 and 𝒬E4M3 round to E2M1 and E4M3, 𝑀E2M1 = 6 and 𝑀E4M3 = 448 are the largest E2M1 and finite E4M3
+magnitudes (Appendix A), 𝛾𝑃= 1/(𝑀E2M1𝑀E4M3) is a constant tensor scale, and 𝑥𝑖is quantized against the unrounded
+block scale. Because 𝑆𝑖≤𝑚𝑏≤𝑚, the two arguments lie in (0, 𝑀E2M1] and (0, 𝑀E4M3], so neither rounding saturates. The
+E2M1 value 𝑥𝑖depends on 𝑆𝑖and 𝑚𝑏but not on 𝑚, so the kernel evaluates the exponent with a fused multiply-add, converts
+the result to E2M1, and packs it before the cross-block reduction produces 𝑚. Once 𝑚is available, only the block scale 𝑠𝑏
+remains (Appendix C).
+Balancing FP4 score construction and accumulator rescaling. Fusion shortens the logit-to-score path, but this stage
+still carries more non-matrix work than its FP8 MLA counterpart. Rather than dedicate separate warp groups to FP4 score
+construction and online-softmax accumulator rescaling, we partition each logit tile across the warp groups. Each group
+constructs the FP4 score operand for its logit partition and also rescales a complementary partition of the resident BMM2
+accumulator when the running maximum changes. This mixed assignment keeps the logit-to-score stage from serializing the
+pipeline.
+Reusing FP4 score operands across BMM2 output tiles. Each packed FP4 score slice contributes to multiple BMM2 output
+tiles. The kernel uses the Tensor Core operand-reuse mechanism to retain thiŝ︀𝑃operand of BMM2 across these tiles instead
+of reloading it for each tile, so more execution bandwidth remains for FP4 score construction.
+Shape-adaptive CTA scheduling. With MTP, each request has more queries, so the kernel can use larger matrix multiply-
+accumulate (MMA) tiles. It gives each cluster of thread blocks (cooperative thread arrays, CTAs) the packed query rows of one
+request; the CTAs of a cluster split the KV tiles, exchange the FP4 scores through distributed shared memory, and use the same
+FP4 operands and softmax. At long KV lengths, the kernel also splits the KV of a request into pieces that run on idle streaming
+multiprocessors (Figure 1c) and merges them with a reduction kernel.
+3.5. End-to-end integration
+For end-to-end integration, we adapt the cache system to be compatible with two-dimensional quantization blocks, the NVFP4
+attention kernel, paged KV caches, and speculative decoding (Figure 1d). During prefill, a fused quantize-and-scatter kernel
+writes completed NVFP4 blocks into paged storage, which decode reads without requantization. Disaggregated serving
+transfers only these pages, namely the E2M1 values and their scales, plus the BF16 tail of the incomplete last block. During
+decode, a fused pre-attention kernel applies RoPE where the model uses it, updates a 16-token BF16 ring, quantizes the
+operands, and writes the cache. Each request owns a stable slot in the ring, and the runtime refreshes the active NVFP4 block
+from BF16 values and finalizes the block once it fills. It therefore never has to dequantize a block, append newly generated
+tokens, and requantize it, which would introduce additional quantization error. For speculative decoding such as MTP, the
+runtime snapshots the BF16 ring before speculative writes, commits accepted candidates, and restores locations overwritten
+by rejected candidates. Completed NVFP4 pages remain unchanged during rollback, so rejected tokens cannot contaminate
+persistent state. NVFP4-MLA has been integrated into TensorRT-LLM (NVIDIA, 2026).
+4. Evaluation
+We evaluate NVFP4-MLA on DeepSeek-R1 and Kimi-K3 in three parts: accuracy (Section 4.2), KV-cache memory reduction
+(Section 4.3), and performance (Section 4.4).
+5
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+Table 1 | Downstream accuracy on DeepSeek-R1 and Kimi-K3. NVFP4-MLA matches BF16 MLA average accuracy and
+greatly reduces the accuracy drop of vanilla NVFP4 MLA. Scores in %; Avg: nine-task mean. Repeats per task: 64 for
+GPQA (Rein et al., 2024), AIME 2025, and AA-LCR; 8 for LiveCodeBench (Jain et al., 2025), SciCode (Tian et al., 2024), and
+𝜏2-Bench (Barres et al., 2026); 5 for IFBench (Pyatkin et al., 2025); 3 for MRCR (Vodrahalli et al., 2024); 1 for RULER (Hsieh
+et al., 2024).
+Configuration
+GPQA
+IFBench
+AIME
+2025
+LiveCode
+Bench v6
+SciCode
+RULER
+MRCR
+AA-LCR
+𝜏2-Bench
+Avg
+DeepSeek-R1
+BF16 MLA
+80.07
+39.53
+87.14
+71.31
+42.60
+92.97
+36.35
+52.52
+35.75
+59.80
+FP8 MLA
+80.16
+37.93
+87.60
+71.75
+42.27
+92.67
+37.21
+52.62
+35.42
+59.74
+Vanilla NVFP4
+MLA
+77.38
+34.87
+73.80
+62.11
+40.64
+90.52
+29.54
+46.06
+31.91
+54.09
+NVFP4-MLA
+79.83
+38.07
+85.94
+71.78
+43.12
+92.77
+36.95
+51.86
+38.05
+59.82
+Kimi-K3
+BF16 MLA
+93.66
+73.96
+96.20
+57.49
+58.48
+97.00
+85.02
+81.75
+78.84
+80.27
+FP8 MLA
+93.50
+73.69
+95.63
+57.32
+58.19
+97.06
+84.38
+82.19
+77.49
+79.94
+Vanilla NVFP4
+MLA
+88.26
+61.79
+87.71
+10.68
+2.27
+95.98
+75.21
+77.31
+74.89
+63.79
+NVFP4-MLA
+93.43
+74.91
+96.20
+57.30
+58.09
+97.11
+84.10
+82.31
+79.06
+80.28
+4.1. Experimental setup
+Accuracy. Both models use the same nine tasks, spanning reasoning, coding, instruction following, long context, and agentic
+tool use (Table 1). RULER and MRCR use a 128K-token context. We compare NVFP4-MLA with BF16 MLA, FP8 MLA,
+and vanilla NVFP4 MLA. BF16 MLA keeps the KV cache and attention BMM computation in BF16. FP8 MLA quantizes
+the KV cache and attention BMM computation to E4M3. Vanilla NVFP4 MLA quantizes them directly to NVFP4 without
+residual compensation.
+Storage. We count the stored MLA cache. DeepSeek-R1 uses NVFP4 in all 61 MLA layers. Kimi-K3 uses NVFP4 in 22 of its
+24 MLA layers and FP8 in the final two; the count excludes the recurrent state of its 69 Kimi Delta Attention (KDA) layers.
+Performance. All performance experiments run on NVIDIA Rubin GPUs, and serving runs use TensorRT-LLM with the same
+runtime and the same set of parallel layouts for both precisions. On DeepSeek-R1 with MTP=3, MLPerf uses the evaluation
+prompts of the MLPerf Inference (Reddi et al., 2020) DeepSeek-R1 benchmark, and 8K/16K Reasoning uses requests of about
+8K input and 16K output tokens. Both workloads use disaggregated serving, with generation under attention data and expert
+parallelism (DEP) or attention tensor and expert parallelism (TEP). AgentX replays 393 recorded multi-turn Claude Code
+sessions from the SemiAnalysis InferenceX benchmark on both models, using distributed weight data parallelism (DWDP) (Li
+et al., 2026) for Kimi-K3. Attention kernel measurements cover 39 shapes per model, at KV lengths of 2K–128K and per-GPU
+batches of 8–1,024, with MTP=3 on DeepSeek-R1 and MTP=7 on Kimi-K3.
+4.2. Accuracy
+NVFP4-MLA matches BF16 MLA average accuracy on both models (Section 4.2.1), and white-box analysis of the cache
+shows that direct FP4 quantization loses precision on significant outliers in the RoPE channels, which the NVFP4 residual
+encodes more accurately than FP8 (Section 4.2.2).
+4.2.1. Downstream accuracy: With NVFP4 attention BMM computation, NVFP4-MLA matches BF16 MLA average
+accuracy on both models (59.82 vs. 59.80 and 80.28 vs. 80.27; Table 1), compared with −0.06 and −0.33 percentage points
+(pp) for FP8 MLA.
+4.2.2. Quantization error analysis: Measurement. To locate FP4 error in the MLA cache, we analyze dumped BF16 cache
+tensors across layers of DeepSeek-R1 and MLA layers of Kimi-K3. We measure reconstruction error as the normalized mean
+squared error NMSE = ‖̂︀𝑋−𝑋‖2
+𝐹/‖𝑋‖2
+𝐹. NoPE stays at NVFP4, and only the RoPE encoding varies: NVFP4, FP8 E4M3,
+or NVFP4 plus residual.
+Error concentrates in RoPE. RoPE holds 64 of the 576 channels, yet compensating it alone lowers mean whole-cache NMSE
+by 60.3% on DeepSeek-R1 and 66.1% on Kimi-K3 (Figure 3a). Figure 4 contrasts the two partitions in the first few MLA
+layers of both models: the RoPE channels peak at 3.9–125× the NoPE maximum and vary sharply across tokens, whereas the
+6
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+DeepSeek-R1
+Kimi-K3
+0
+0.005
+0.010
+−60.3%
+−66.1%
+NoPE base
+RoPE
+DeepSeek-R1
+0.0001
+0.001
+0.01
+Kimi-K3
+(a) Whole-cache NMSE
+NVFP4
+FP8
+NVFP4 + residual
+(b) RoPE NMSE per layer
+NVFP4
+FP8
+NVFP4 + residual
+MLA layer
+Figure 3 | Cache quantization error. A RoPE-only NVFP4 residual lowers whole-cache NMSE and is more accurate than FP8
+RoPE in every layer. NoPE uses NVFP4; RoPE uses NVFP4, FP8 E4M3, or NVFP4 plus residual. (a) Whole-cache NMSE
+averaged over MLA layers. (b) Per-layer NMSE of each RoPE encoding (log scale).
+NoPE latent stays flat.
+0
+512
+Channel
+Token
+0
+15
+30
+0
+5
+10
+0
+5
+10
+0
+5
+10
+0
+4
+8
+0
+4
+8
+0
+512
+Channel
+Token
+0
+4
+8
+0
+6
+12
+0
+5
+10
+0
+6
+12
+0
+4
+8
+0
+5
+10
+DeepSeek-R1
+|value|
+Layer 1
+Layer 2
+Layer 3
+Layer 4
+Layer 5
+Layer 6
+Kimi-K3
+|value|
+Layer 4
+Layer 8
+Layer 12
+Layer 16
+Layer 20
+Layer 24
+NoPE (512 channels)
+RoPE (64 channels)
+Figure 4 | RoPE and NoPE magnitudes. RoPE channels peak at 3.9–125× the NoPE maximum.
+NVFP4 residual versus FP8 RoPE. The NVFP4 residual encodes RoPE more accurately than FP8 E4M3. Relative to plain
+NVFP4, it reduces mean RoPE NMSE by factors of 115.4 on DeepSeek-R1 and 116.1 on Kimi-K3, whereas FP8 RoPE leaves
+9.5× and 9.1× as much error as the residual on average and 7.9–11.2× and 8.7–9.3× as much in every layer (Figure 3b).
+Takeaway: NVFP4-MLA matches BF16 MLA average accuracy on both models while running both attention BMMs in
+NVFP4, whereas vanilla NVFP4 MLA drops by 5.71 and 16.48 pp. White-box analysis shows that this drop stems from
+significant outliers in the RoPE channels. Selective residual compensation therefore mitigates the accuracy drop with a small
+overhead (Section 4.3).
+4.3. KV-cache memory reduction
+Including the residual, NVFP4-MLA compresses the stored MLA cache by 3.20× and 3.05× relative to BF16 MLA and by
+1.60× and 1.52× relative to FP8 MLA on DeepSeek-R1 and Kimi-K3 (Table 2). The RoPE residual accounts for only 10% of
+each NVFP4 layer’s cache.
+On Kimi-K3, the MLA cache shares the KV budget with the recurrent state of the KDA layers; under the same budget,
+NVFP4-MLA holds 47–49% more cached tokens than FP8 MLA, depending on the share taken by KDA state. Section 4.4.1
+shows how this capacity turns into prefix reuse.
+7
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+Table 2 | Stored MLA cache size. NVFP4-MLA compresses the stored MLA cache by 3.20× and 3.05× relative to BF16
+MLA and by 1.60× and 1.52× relative to FP8 MLA. Bytes per cached token, summed over all MLA layers.
+DeepSeek-R1
+Kimi-K3
+Cache representation
+Bytes/token
+Reduction
+Bytes/token
+Reduction
+BF16 MLA
+70,272
+1.00×
+27,648
+1.00×
+FP8 MLA
+35,136
+2.00×
+13,824
+2.00×
+NVFP4-MLA
+21,960
+3.20×
+9,072
+3.05×
+4.4. Performance
+We evaluate performance at three levels. In agentic serving, the smaller cache of NVFP4-MLA keeps more session histories and
+lowers p90 time to first token by up to 3.5× on DeepSeek-R1 and by 2.1× on Kimi-K3 (Section 4.4.1). Kernel measurements
+show an attention kernel that runs up to 2.82× and 2.71× faster than FP8 MLA on DeepSeek-R1 and Kimi-K3 (Section 4.4.2).
+In disaggregated DeepSeek-R1 serving, the faster kernel raises per-GPU throughput by up to 2.30× (Section 4.4.3).
+4.4.1. Prefix-cache reuse: With its smaller cache (Section 4.3), NVFP4-MLA delays cache eviction as the number of
+concurrent sessions grows. Agentic sessions benefit from this capacity because context workers retain earlier turns’ KV state
+and prefill only newly appended tokens.
+DeepSeek-R1. We replay the AgentX sessions of Section 4.1 under an equal KV-cache budget of 43 GiB per context GPU,
+in which NVFP4-MLA holds 60% more cached tokens than FP8 MLA (Section 4.3) and the trace allows a hit rate of about
+94–96%. FP8 MLA starts evicting at 32 sessions (Table 3): from 32 to 64 sessions, its hit rate falls from 87.6% to 54.1% and
+its p90 time to first token (TTFT) rises from 11.9 to 178 s. NVFP4-MLA keeps a higher hit rate and therefore repeats less
+prefill: with 48 sessions, it raises the hit rate from 77.0% to 87.1% and lowers p90 TTFT from 108 to 30.9 s, a 3.5× reduction,
+and the reduction is 1.5–3.5× across all points where FP8 MLA evicts.
+Table 3 | AgentX serving. At equal KV-cache memory, NVFP4-MLA keeps higher cache-hit rates and lower p90 TTFT
+once FP8 MLA starts evicting histories. AgentX replay on Rubin GPUs. Kimi-K3 KV-cache memory also holds KDA state.
+Concurrent sessions: agent sessions kept alive; Cache hit: fraction of input tokens reused from the prefix cache.
+p90 TTFT (s)
+Cache hit (%)
+Model
+Concurrent sessions
+FP8 MLA
+NVFP4-MLA
+FP8 MLA
+NVFP4-MLA
+DeepSeek-R1
+16
+2.98
+1.99
+95.2
+95.1
+24
+2.68
+2.41
+93.6
+94.4
+32
+11.9
+5.36
+87.6
+92.4
+40
+36.6
+23.7
+82.3
+87.9
+48
+108
+30.9
+77.0
+87.1
+64
+178
+79.8
+54.1
+79.6
+Kimi-K3
+128
+11.0
+5.24
+90.8
+94.4
+Kimi-K3. We replay the same sessions on Kimi-K3 under an equal KV-cache budget of 47.4 GiB per context GPU, in which
+NVFP4-MLA holds 47–49% more cached tokens than FP8 MLA (Section 4.3) and the trace allows a hit rate of at most 95.4%.
+FP8 MLA already evicts with 128 sessions (Table 3). NVFP4-MLA keeps a higher hit rate and therefore repeats less prefill: it
+raises the hit rate from 90.8% to 94.4% and lowers p90 TTFT from 11.0 to 5.24 s, a 2.1× reduction.
+4.4.2. Kernel performance: Besides its smaller cache, NVFP4-MLA shortens the attention computation itself, because both
+BMMs run on FP4 Tensor Cores. Its speedup over FP8 MLA grows with KV length, reaching 2.82× on DeepSeek-R1 and
+2.71× on Kimi-K3.
+MTP and the roofline. MTP=3 reuses each cache read across four query positions (Appendix B), which raises the arithmetic
+intensity of FP8 MLA from 484 to 1,934 FLOPs per cache byte, beyond the 911 FLOP/B ridge point of a Rubin GPU; FP8
+MLA decoding with MTP is therefore compute-bound. A storage-only alternative that dequantizes an NVFP4 cache to FP8
+operands performs the same FP8 MMAs and softmax as FP8 MLA and shortens only cache reads that no longer limit the
+kernel, so it cannot finish faster than FP8 MLA. NVFP4-MLA is faster because its FP4 BMMs shorten the computation itself.
+KV-length and batch sweep. Each measurement profiles a single attention kernel under a CUDA graph, with equal KV lengths
+across requests, and includes the split-KV reduction. FP8 MLA uses its faster split-KV strategy per shape; NVFP4-MLA uses
+8
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+8
+32
+64
+128
+256
+512
+1024
+2K
+4K
+8K
+16K
+32K
+64K
+128K
+1.33
+1.31
+1.34
+1.44
+1.45
+1.51
+1.54
+1.61
+1.49
+1.57
+1.67
+1.68
+1.64
+1.74
+1.39
+1.97
+1.95
+1.89
+2.05
+1.80
+1.80
+1.42
+2.37
+2.27
+2.13
+2.24
+1.86
+1.75
+2.65
+2.39
+2.26
+2.34
+1.93
+2.77
+2.39
+2.39
+2.15
+2.82
+2.39
+8
+32
+64
+128
+256
+512
+1024
+1.35
+1.52
+1.37
+1.52
+1.54
+1.52
+1.52
+1.56
+1.63
+1.66
+1.86
+1.80
+1.81
+1.83
+1.71
+2.00
+1.98
+2.31
+1.90
+1.98
+1.99
+1.84
+2.36
+2.51
+2.52
+1.96
+1.99
+1.96
+2.58
+2.65
+2.67
+1.99
+2.16
+2.71
+2.66
+2.69
+2.28
+2.69
+2.66
+1×
+2×
+3×
+(a) DeepSeek-R1
+(b) Kimi-K3
+KV length
+Batch
+Speedup over FP8 MLA
+Figure 5 | Kernel speedup over FP8 MLA on one Rubin GPU. (a) DeepSeek-R1. (b) Kimi-K3.
+50
+100
+150
+200
+250
+300
+0
+2
+4
+6
+8
+NVFP4-MLA
+FP8 MLA
+100
+150
+200
+250
+300
+0
+4
+8
+12
+(a) 8K/16K Reasoning
+Generation rate (tokens/s/user)
+(b) MLPerf
+Generation rate (tokens/s/user)
+Throughput (ktokens/s/GPU)
+Figure 6 | Serving Pareto frontiers. NVFP4-MLA raises per-GPU throughput over most of the range. Pareto frontiers for
+DeepSeek-R1 disaggregated serving on Rubin GPUs with MTP=3: (a) 8K/16K Reasoning; (b) MLPerf.
+its best CTA scheduling per shape. NVFP4-MLA is faster at every measured shape (Figure 5), by 1.31–2.82× with a geometric
+mean of 1.87× on the 39 DeepSeek-R1 shapes and by 1.35–2.71× with a geometric mean of 1.99× on the 39 Kimi-K3 shapes.
+The speedup generally grows with KV length, from 1.3–1.5× at 2K, where fixed per-call cost dominates, to 2.2–2.8× at 128K,
+where per-token attention work dominates.
+4.4.3. End-to-end serving: NVFP4-MLA improves the throughput–latency trade-off of disaggregated DeepSeek-R1 serving,
+with gains that grow with context length.
+Pareto measurement. Closed-loop clients sweep the number of in-flight requests for each generation layout, and each
+precision’s Pareto frontier takes, at every per-user generation rate, the highest per-GPU throughput of any of its layouts.
+Throughput. At the same per-user generation rate, NVFP4-MLA serves more output tokens per GPU over most of the
+measured range (Figure 6): 26.7% more on MLPerf and 39.9% more on 8K/16K Reasoning on average, and up to 2.30× and
+2.25× as many.
+Parallel layouts. Both precisions reach their highest throughput with DEP16 up to about 250 tokens/s/user and with TEP8 at
+higher per-user rates.
+Takeaway: NVFP4-MLA improves performance through two effects. Its smaller cache keeps more session histories, lowering
+p90 TTFT by up to 3.5× on DeepSeek-R1 and 2.1× on Kimi-K3 when GPU memory bounds the prefix cache. Its FP4 BMMs
+shorten attention computation, with speedups that grow with context length, reaching 2.82× and 2.71× at the kernel level and
+up to 2.30× in per-GPU throughput for DeepSeek-R1 serving.
+5. Related work
+KV-cache quantization. Most previous work focuses on quantizing the KV cache to reduce its footprint and memory traffic.
+KIVI (Liu et al., 2024) quantizes keys per channel and values per token, keeping the most recent tokens in full precision.
+KVQuant (Hooper et al., 2024) quantizes keys per channel before RoPE and keeps outliers in a sparse format. KVTuner (Li
+9
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+et al., 2025) searches layer-wise mixed precision for keys and values. RotateKV (Su et al., 2025) and TurboQuant (Zandieh
+et al., 2026) rotate cached vectors to spread outliers before low-bit quantization. Serving systems such as Atom (Zhao et al.,
+2024) and QServe (Lin et al., 2025) also store 4-bit KV caches alongside low-bit weights and activations. These methods
+target separate key and value caches rather than MLA’s shared latent representation. They also execute the attention BMMs at
+higher precision, which adds dequantization overhead for the cached values and limits MLA decoding once MTP makes it
+compute-bound (Section 4.4.2). NVFP4-MLA instead stores a shared MLA cache in NVFP4 whose scale blocks match both
+reduction directions, so both BMMs read it in FP4 without dequantization and run at FP4 Tensor Core throughput.
+Quantized attention kernels. Low-precision attention kernels quantize attention operands to run the attention BMMs on faster
+low-precision Tensor Cores. SageAttention (Zhang et al., 2025b) quantizes queries and keys to INT8 for the 𝑄𝐾⊤BMM and
+keeps the 𝑃𝑉BMM mostly in FP16. SageAttention3 (Zhang et al., 2025a) runs both BMMs in NVFP4, quantizing FP16
+queries, keys, and values inside each attention call, and mainly targets image and video generation. SnapMLA (Zhang et al.,
+2026) pushes MLA computation to FP8 with a per-token FP8 latent cache and keeps the RoPE channels in BF16. NVFP4-MLA
+pushes it further to FP4 and combines low-precision storage and computation: both BMMs consume the persistent NVFP4
+MLA cache without dequantization, and the RoPE channels are quantized to NVFP4 with residual compensation rather than
+kept in high precision.
+Evaluation scope. Prior KV-cache quantization studies evaluate non-MLA models of limited size, mostly with perplexity,
+short-generation tasks, or long-context retrieval (Liu et al., 2024; Hooper et al., 2024; Li et al., 2025). These settings do not
+test long reasoning traces or multi-turn agentic sessions, where quantization error can accumulate over thousands of generated
+tokens. We instead evaluate large MLA reasoning models with a broader set of tests, spanning downstream accuracy on
+reasoning and agentic tasks, cache footprint, and kernel and end-to-end serving performance, to understand how NVFP4-MLA
+affects both model quality and efficiency.
+6. Conclusion
+We have presented NVFP4-MLA, which shows that NVFP4 can serve as both the storage format and the compute format
+of MLA. Selective residual compensation targets quantization outliers and greatly reduces the accuracy drop of direct FP4
+quantization, and two-dimensional quantization blocks let one shared latent cache supply both BMMs. We also design
+a corresponding cache system and an efficient kernel pipeline. NVFP4-MLA matches BF16 MLA average accuracy on
+DeepSeek-R1 and Kimi-K3, speeds up the attention kernel over FP8 MLA by up to 2.82× and 2.71×, lowers p90 time to first
+token in agentic multi-turn serving by up to 3.5× and 2.1×, and raises per-GPU throughput in disaggregated DeepSeek-R1
+serving by 26.7% and 39.9% on average on two workloads and by up to 2.30×. By computing attention in FP4 while preserving
+accuracy, NVFP4-MLA turns KV-cache compression into real inference speedups.
+References
+Victor Barres, Honghua Dong, Soham Ray, Xujie Si, and Karthik Narasimhan. 𝜏2-Bench: Evaluating conversational agents in
+a dual-control environment. In Proceedings of the 43rd International Conference on Machine Learning, 2026.
+DeepSeek-AI. DeepSeek-V2: A strong, economical, and efficient mixture-of-experts language model. arXiv preprint
+arXiv:2405.04434, 2024a.
+DeepSeek-AI. DeepSeek-V3 technical report. arXiv preprint arXiv:2412.19437, 2024b.
+Vage Egiazarian, Roberto L. Castro, Denis Kuznedelev, Andrei Panferov, Eldar Kurtic, Shubhra Pandit, Alexandre Noll
+Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Bridging the gap between promise and
+performance for microscaling FP4 quantization. In International Conference on Learning Representations, 2026.
+Daya Guo et al. DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning. Nature, 645(8081):633–638,
+2025. doi: 10.1038/s41586-025-09422-z.
+Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir
+Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization. In Advances in Neural
+Information Processing Systems, 2024.
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg.
+RULER: What’s the real context size of your long-context language models? In Conference on Language Modeling, 2024.
+Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik
+Sen, and Ion Stoica. LiveCodeBench: Holistic and contamination free evaluation of large language models for code. In
+International Conference on Learning Representations, 2025.
+10
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+Kimi Team. Kimi K3: Open frontier intelligence. arXiv preprint arXiv:2607.24653, 2026.
+Wanqian Li, Jintao Peng, Zongfei Jing, Tianyu Zhang, Ze Long, Xianjie Qiao, Xiaoming Chen, Dongxu Yang, Kefeng Duan,
+and June Yang. DWDP: Distributed weight data parallelism for high-performance LLM inference on NVL72. arXiv preprint
+arXiv:2604.01621, 2026.
+Xing Li, Zeyu Xing, Yiming Li, Linping Qu, Hui-Ling Zhen, Yiwu Yao, Wulong Liu, Sinno Jialin Pan, and Mingxuan Yuan.
+KVTuner: Sensitivity-aware layer-wise mixed-precision KV cache quantization for efficient and nearly lossless LLM
+inference. In Proceedings of the 42nd International Conference on Machine Learning, 2025.
+Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao, Chuang Gan, and Song Han. QServe: W4A8KV4
+quantization and system co-design for efficient LLM serving. In Proceedings of Machine Learning and Systems, 2025.
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. KIVI: A
+tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of the 41st International Conference on Machine
+Learning, 2024.
+Meituan LongCat Team. LongCat-Flash technical report. arXiv preprint arXiv:2509.01322, 2025.
+NVIDIA. Pretraining large language models with NVFP4. arXiv preprint arXiv:2509.25149, 2025.
+NVIDIA. TensorRT-LLM. GitHub repository, 2026. URL https://github.com/NVIDIA/TensorRT-LLM.
+Valentina Pyatkin, Saumya Malik, Victoria Graf, Hamish Ivison, Shengyi Huang, Pradeep Dasigi, Nathan Lambert, and Hanna
+Hajishirzi. Generalizing verifiable instruction following. In Advances in Neural Information Processing Systems, 2025.
+Vijay Janapa Reddi et al. MLPerf inference benchmark. In ACM/IEEE 47th Annual International Symposium on Computer
+Architecture, 2020.
+David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and
+Samuel R. Bowman. GPQA: A graduate-level Google-proof Q&A benchmark. In Conference on Language Modeling, 2024.
+Bita Darvish Rouhani et al. Microscaling data formats for deep learning. arXiv preprint arXiv:2310.10537, 2023.
+Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. RoFormer: Enhanced transformer with rotary
+position embedding. Neurocomputing, 568:127063, 2024. doi: 10.1016/j.neucom.2023.127063.
+Zunhai Su, Hanyu Wei, Zhe Chen, Wang Shen, Linge Li, Huangqi Yu, and Kehong Yuan. RotateKV: Accurate and robust
+2-bit KV cache quantization for LLMs via outlier-aware adaptive rotations. In Proceedings of the 34th International Joint
+Conference on Artificial Intelligence, 2025.
+Minyang Tian et al. SciCode: A research coding benchmark curated by scientists. In Advances in Neural Information
+Processing Systems, 2024.
+Kiran Vodrahalli et al. Michelangelo: Long context evaluations beyond haystacks via latent structure queries. arXiv preprint
+arXiv:2409.12640, 2024.
+Samuel Williams, Andrew Waterman, and David A. Patterson. Roofline: An insightful visual performance model for multicore
+architectures. Communications of the ACM, 52(4):65–76, 2009. doi: 10.1145/1498765.1498785.
+Amir Zandieh, Majid Daliri, Majid Hadian, and Vahab Mirrokni. TurboQuant: Online vector quantization with near-optimal
+distortion rate. In International Conference on Learning Representations, 2026.
+Jintao Zhang, Jia Wei, Haoxu Wang, Pengle Zhang, Xiaoming Xu, Haofeng Huang, Kai Jiang, Jianfei Chen, and Jun Zhu.
+SageAttention3: Microscaling FP4 attention for inference and an exploration of 8-bit training. In Advances in Neural
+Information Processing Systems, 2025a.
+Jintao Zhang, Jia Wei, Pengle Zhang, Jun Zhu, and Jianfei Chen. SageAttention: Accurate 8-bit attention for plug-and-play
+inference acceleration. In International Conference on Learning Representations, 2025b.
+Yifan Zhang, Zunhai Su, Shuhao Hu, Rui Yang, Wei Wu, Yulei Qian, Yuchen Xie, and Xunliang Cai. SnapMLA: Efficient
+long-context MLA decoding via hardware-aware FP8 quantized pipelining. arXiv preprint arXiv:2602.10718, 2026.
+Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis Ceze, Arvind Krishnamurthy, Tianqi Chen,
+and Baris Kasikci. Atom: Low-bit quantization for efficient and accurate LLM serving. In Proceedings of Machine Learning
+and Systems, 2024.
+11
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+A. NVFP4 quantization
+Let FE2M1 be the set of E2M1 values, with largest magnitude 𝑀E2M1 = 6, and let FE4M3 be the set of finite E4M3 values,
+with largest magnitude 𝑀E4M3 = 448. Let 𝒬E2M1 and 𝒬E4M3 round a real number onto FE2M1 and FE4M3, respectively,
+with saturation; 𝒬E2M1 rounds to nearest with ties to even. An NVFP4 tensor stores an FP32 tensor scale 𝛾> 0, one E4M3
+scale 𝑠𝑏for each block 𝑏of 16 elements, and one E2M1 value 𝑥𝑖for each element. For a real tensor 𝑋and a partition ℬof its
+indices into 16-element blocks, NVFP4 quantization 𝒬( · ; ℬ) is
+𝑠𝑏= 𝒬E4M3
+(︂max𝑗∈𝑏|𝑋𝑗|
+𝑀E2M1𝛾
+)︂
+,
+𝑥𝑖= 𝒬E2M1
+(︂𝑋𝑖
+𝛾𝑠𝑏
+)︂
+,
+𝒬(𝑋; ℬ)𝑖= 𝛾𝑠𝑏𝑥𝑖,
+𝑖∈𝑏,
+(4)
+with 𝑥𝑖= 0 whenever 𝑠𝑏= 0. We identify an NVFP4 tensor with the real tensor that it represents, so sums and products of
+hatted (quantized) tensors denote exact real arithmetic. Block-scaled Tensor Core instructions evaluate these products from the
+stored values and scales with FP32 accumulation, without materializing a wider tensor. 𝒬1×16 and 𝒬16×16 apply Equation 4
+with 1 × 16 and 16 × 16 partitions, respectively. The tensor scale 𝛾is a per-layer constant for each operand; for queries and
+the cache in both models, 𝛾= 𝜂𝑋max/(𝑀E2M1𝑀E4M3) is fixed offline from the largest magnitude 𝑋max observed during
+calibration, with margin 𝜂> 1.
+B. Arithmetic intensity of MLA decoding
+MLA’s compact shared cache and wider BMMs after matrix absorption raise arithmetic intensity and make math throughput
+relevant alongside memory bandwidth.
+B.1. A shared cache supports wider BMMs
+Let 𝑇denote the cached-token count, 𝑛ℎthe number of query heads, and 𝑛𝑔the number of GQA KV groups. With key and
+value widths 𝑑𝐾and 𝑑𝑉, one GQA query performs 𝐹FLOPs on 𝑁distinct cache elements:
+𝐹GQA = 2𝑛ℎ𝑇(𝑑𝐾+ 𝑑𝑉),
+𝑁GQA = 𝑛𝑔𝑇(𝑑𝐾+ 𝑑𝑉).
+(5)
+For MLA, BMM1 uses 𝑑𝑐+ 𝑑R channels and BMM2 uses 𝑑𝑐:
+𝐹MLA = 2𝑛ℎ𝑇(2𝑑𝑐+ 𝑑R),
+𝑁MLA = 𝑇(𝑑𝑐+ 𝑑R).
+(6)
+The NoPE latent contributes to both products but occupies storage only once.
+For DeepSeek’s 𝑛ℎ= 128, 𝑑𝑐= 512, and 𝑑R = 64 (DeepSeek-AI, 2024b), we compare a GQA reference with 𝑛𝑔= 8 and
+𝑑𝐾= 𝑑𝑉= 128. At equal payload bytes 𝛽per element, ideal intensity is 𝐼⋆= 𝐹/(𝛽𝑁). Assuming one cold-cache read with
+reuse across heads and, for MLA, across BMM1 and BMM2 gives
+𝐹MLA
+𝐹GQA
+= 4.25,
+𝑁GQA
+𝑁MLA
+≈3.56,
+𝐼⋆
+MLA
+𝐼⋆
+GQA
+= 136
+9
+≈15.1.
+(7)
+B.2. MTP raises intensity through cache reuse
+Let 𝑛𝑞query positions share a long prefix in one invocation, including the ordinary next-token position. Neglecting newly
+appended positions gives 𝐹(𝑛𝑞) ≈𝑛𝑞𝐹(1). With 𝜅(𝑛𝑞) = 𝐷cache(𝑛𝑞)/𝐷cache(1) as cache traffic relative to a single query,
+excluding query-dependent transfers gives
+𝐼(𝑛𝑞) ≈
+𝑛𝑞
+𝜅(𝑛𝑞)𝐼(1).
+(8)
+Full reuse gives 𝜅(𝑛𝑞) = 1 and an approximately 𝑛𝑞-fold increase; MTP=3 evaluates four query positions.
+B.3. FP4 addresses both bandwidth and math throughput
+For matrix-throughput ceiling 𝜋mat, HBM bandwidth 𝜔HBM, and HBM traffic 𝐷HBM, roofline analysis gives the latency lower
+bound (Williams et al., 2009)
+𝑡≥max
+(︂𝐹
+𝜋mat
+, 𝐷HBM
+𝜔HBM
+)︂
+.
+(9)
+FP4 storage reduces the memory term, and native FP4 BMMs reduce the compute term. With MTP, FP8 MLA decoding is
+compute-bound on the evaluated GPU (Section 4.4.2).
+12
+
+
+NVFP4-MLA: Unified FP4 KV-Cache Storage and Attention Computation for Multi-Head Latent Attention
+C. Block-local softmax-score scaling
+Section 3.4 computes the E2M1 score values 𝑥𝑖and the block scales 𝑠𝑏of Equation 3. Once 𝑚is available, the kernel encodes
+the block scale with the tensor scale 𝛾𝑃= 1/(𝑀E2M1𝑀E4M3) of Equation 4:
+𝑠𝑏= 𝒬E4M3
+(︁
+𝑀E4M3 2𝑎(𝑚𝑏−𝑚))︁
+,̂︀
+𝑝𝑖= 𝛾𝑃𝑠𝑏𝑥𝑖,
+𝑖∈𝑏,
+(10)
+where 𝒬E4M3 rounds to nearest with ties to even, as the native E4M3 conversion does. Because the values 𝑥𝑖assume the
+unrounded scale, scale rounding multiplies all scores of a block by the common factor 𝑠𝑏/
+(︀
+𝑀E4M3 2𝑎(𝑚𝑏−𝑚))︀
+. Rather than
+absorbing 1/ℓinto every block scale, the kernel keeps this reciprocal off the BMM2 critical path and divides the BMM2 output
+by ℓafter BMM2, with ℓaccumulated in FP32 from the unquantized scores ˜𝑝𝑖.
+Range and underflow of the softmax-score scale.
+Because 𝑚𝑏≤𝑚, the argument of 𝒬E4M3 in Equation 10 lies in
+(0, 𝑀E4M3]: 𝛾𝑃maps the row maximum to the largest finite E4M3 value, and no block scale saturates. In the normal E4M3
+range, 𝒬E4M3 changes a block’s scores by a common factor within 1 ± 2−4. A block falls into the subnormal range, where the
+scale spacing is 2−9, when 2𝑎(𝑚𝑏−𝑚) < 2−6/𝑀E4M3 ≈3.5 × 10−5. Round-to-nearest flushes the scale to zero when
+2𝑎(𝑚𝑏−𝑚) ≤𝜏=
+2−10
+𝑀E4M3
+≈2.2 × 10−6,
+(11)
+that is, only when every score in the block is at most 𝜏times the row maximum. Let ℱbe the set of tokens in flushed blocks.
+Because ˜𝑝𝑖≤𝜏for 𝑖∈ℱand ℓ≥1, flushing removes at most
+1
+ℓ
+∑︁
+𝑖∈ℱ
+˜𝑝𝑖≤|ℱ| 𝜏
+(12)
+of the normalized softmax mass. Within every retained block, E2M1 rounding already maps arguments of 𝒬E2M1 at or below
+0.25 to zero and thus removes any score at or below 1/24 of its block maximum.
+13

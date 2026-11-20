@@ -1,0 +1,2192 @@
+Hardware Acceleration of Vision-Language-Action Models with
+Weight Precision Rising over the Flow Steps
+Robin Geens, Simon Haepers, Jonas Crols, Chao Fang, Marian Verhelst
+MICAS, KU Leuven, Belgium
+Abstract
+Vision-language-action (VLA) models such as GR00T control robots
+through an action head: a diffusion transformer that turns noise into
+a chunk of actions in a few flow-matching steps. Every step re-reads
+all of the head’s weights from DRAM but applies each weight to
+only about fifty tokens. Inference is therefore memory-bound, and
+its latency and energy are largely determined by the total number
+of transferred weight bits. We show that later flow steps attenuate
+the quantization errors of earlier steps, so the weight precision of
+an action head should rise over the steps. With plain per-channel
+rounding and without calibration or training, widths rising over
+the steps from 2 to 4 bits preserve the closed-loop success of robot
+policies. These widths transfer 25% fewer bits than 4-bit weights at
+every step. However, we show that on Jetson AGX Thor, current
+GPU kernels cannot exploit this per-step precision due to fixed
+overheads. We therefore present a programmable accelerator whose
+latency and energy both scale with the transferred weight bits,
+because it keeps its DRAM link saturated throughout an inference
+at every width. It decodes entropy-coded weights for bit-serial
+sub-arrays at the DRAM rate. Because the width changes per step,
+a run-time allocator divides these sub-arrays between the linear
+layers and the attention to balance their workloads. The same sub-
+arrays are thus capable of running action heads of different families
+and sizes, as well as a vision-language model. On the DRAM side, a
+requantizer and an entropy encoder at each bank let one stored 8-
+bit copy replace the copies of all widths. Simulated with LPDDR5X
+timing, our RTL implementation runs the GR00T N1.6 action head
+in 8.02 ms per inference with 2, 3, 3 and 4 bits in its four flow steps.
+With a copy per width and 50% of Thor’s memory bandwidth, the
+accelerator runs this schedule 1.7× faster than Thor in NVFP4, at
+9.1× less energy and equal closed-loop success.
+1
+Introduction
+Vision-language-action (VLA) models are the state-of-the-art in
+general-purpose robot manipulation [8, 9, 43, 67]. Most VLAs split
+the policy in two, as Figure 2 shows: a vision-language model (VLM),
+System 2, interprets the scene and instruction, encoding them into
+tokens. Conditioned on these tokens and the robot state, a diffusion-
+transformer (DiT) action head, System 1, turns noise into a chunk
+of actions in a limited number of flow-matching steps [54, 57, 69].
+System 1 is the latency-critical part of a dual-system policy,
+since it closes the control loop once per chunk. Even when the
+robot executes one chunk while the next is computed [10, 75], the
+latency of System 1 bounds how often the robot can react to a new
+observation. To react before every action, System 1 must run at the
+control rate, such as 50 Hz [9]. System 2, in contrast, tolerates more
+latency and runs at 10 Hz or less [21, 67]. Like recent accelerators
+for robot policies [58, 103], this work therefore accelerates System 1.
+(a)
+image
+“pick up the cup”
+VLM
+step 1
+step 2
+step 3
+step 4
+actions
+2 bits
+3 bits
+3 bits
+4 bits
+1 Per-step
+precision
+Our contributions
+Our accelerator
+3 Bit-serial compute fabric with a run-time allocator
+2 DRAM-streaming accelerator
+DRAM
+4 Quantization-in-DRAM per flow step
+One 8-bit copy of the weights. 50% of Jetson AGX Thor’s bandwidth.
+0
+10
+20
+30
+(b) ms
+31.5
+19.3
+13.6
+13.3
+28.3
+10.6
+8.02
+1.7×
+vs NVFP4
+DRAM floor
+BF16
+[8,8,8,8]
+NVFP4
+[2,3,3,4]
+[8,8,8,8]
+[4,4,4,4]
+[2,3,3,4]
+0
+500
+1000
+1500
+(c) mJ
+1632
+951
+716
+543
+253
+102
+78
+9.1×
+vs NVFP4
+Jetson AGX Thor, 273 GB/s DRAM
+above idle power
+ours, 137 GB/s DRAM
+a copy per width, 3.3 mm² at 7 nm
+Figure 1: (a) A robot’s policy with per-step weight precision
+in System 1 on our accelerator. (b) Time and (c) energy per
+inference of the GR00T N1.6 action head, without the VLM
+and with a copy of the weights per width.
+The action head is memory-bound: every flow step re-reads all
+of its weights but applies each weight to only the roughly fifty
+tokens of one chunk. As a result, the GR00T N1.6 head streams
+gigabytes of weights per inference in BF16, as Table 1 shows. Today,
+robot policies run on edge GPUs [21, 64, 94] such as NVIDIA’s
+Jetson AGX Thor, which draws up to 130 W [65]. NVIDIA reports
+10.9 Hz for GR00T N1.6 on Thor with TensorRT, and the action head
+takes over half of each inference [64]. One inference per action at
+50 Hz would need more than the GPU’s whole memory bandwidth
+in BF16. Moreover, the GPU of an autonomous mobile robot can
+draw over twice the power of its motors [56]. A lower energy per
+inference thus extends how long the robot runs on one charge.
+Weight quantization reduces the bits per weight. Prior work
+quantizes current policies to uniform 4-bit weights, with the same
+width at every flow step [12, 31]. Below 4 bits, however, uniformly
+rounded weights lose closed-loop success with and without calibra-
+tion.
+We observe that the flow steps do not need equal precision. Be-
+cause an action head refines a wide range of starting noise into
+almost the same action, its later steps also attenuate the quantiza-
+tion error of an early step. An error of the last step, in contrast,
+reaches the robot in full. The weight width should thus rise over the
+1
+arXiv:2611.24234v1  [cs.AR]  18 Nov 2026
+
+
+System 2: VLM
+SigLIP2
+Qwen3-1.7B, 16 layers
+“turn on the stove and put the moka pot on it”
+keys, values,
+once per inference
+System 1: action head
+cross-attn
+MLP
+self-attn
+MLP
+×16
+51 tokens
+state
+noise
+robot
+DRAM: 830M weights, every step
+4 flow steps
+Figure 2: GR00T N1.6 on a LIBERO-Long task.
+flow steps. Plain per-channel rounding of the released model then
+suffices, because the coarsest widths fall on the steps that tolerate
+them. For example, the schedule [2,3,3,4] gives two bits to the first
+step and four to the last. Without calibration data or training, it
+preserves the released model’s success for three VLAs. Schedules
+with falling widths, in contrast, lower the success rate on all three.
+A GPU, however, cannot exploit the reduced DRAM traffic below
+4 bits. Figure 1b shows that fixed overheads dominate the time per
+inference that we measured on Jetson AGX Thor (Section 4). First,
+the attention and the normalization run between the linear layers
+while no weights stream from DRAM. Second, the linear layers
+process narrow weights more slowly than the DRAM delivers them.
+Exploiting per-step precision thus requires hardware that runs
+the attention and the normalization in parallel with the weight
+stream and keeps up with the DRAM at every width. Moreover,
+the hardware must adapt to its dynamic workload, because the
+width changes per step and the attention’s share is model- and
+context-dependent. Our contributions, marked in Figure 1, are:
+1 An analysis showing that later flow steps attenuate early quanti-
+zation errors and that plain rounding to rising widths therefore
+preserves closed-loop success with fewer bits than uniform
+widths (Section 3).
+2 A DRAM-streaming accelerator whose latency and energy scale
+with the transferred weight bits, because it decodes entropy-
+coded weights while keeping its DRAM channels saturated at
+every width (Sections 5.1–5.2).
+3 A bit-serial compute fabric with a run-time allocator that divides
+it between the linear layers and the attention, so that it runs
+different action heads and a VLM (Sections 5.3–5.5).
+4 A Quantization-in-DRAM system that requantizes and encodes
+the weights at every bank, so that a deployment needs only one
+stored 8-bit copy to switch between schedules (Section 5.6).
+Section 7 evaluates the schedules in closed-loop simulations of
+robot tasks. It also evaluates the RTL of the accelerator, whose
+outputs are bit-exact with the action head of these simulations. The
+energy comes from gate-level simulations that replay the value
+change dump (VCD) of an RTL inference on the synthesized netlists
+with an estimated clock tree.
+2
+Background and Motivation
+This section describes VLA action heads such as System 1 in Figure 2
+and shows why their inference is memory-bound.
+Table 1: The action heads that the accelerator runs.
+Tokens
+Per flow step
+Per BF16 inference
+Blocks Chunk Context Weights [M] MACs [G] Steps
+Read [GB]
+GR00T N1.6
+32
+51 121–207
+830
+43
+4
+6.6
+GR00T N1.5
+16
+49
+566
+415
+21
+4
+3.3
+𝜋0.5
+18
+50
+660
+311
+18
+10
+6.2
+2.1
+Flow-Matching Action Heads
+A flow-matching action head learns a velocity field v𝜃(x,𝑡| c) that
+carries Gaussian noise x0 at 𝑡= 0 to an action chunk at 𝑡= 1. The
+field is conditioned on a context c of System 2’s features and the
+robot’s state [9, 54]. Inference integrates the field with 𝑁Euler
+steps of size Δ𝑡= 1/𝑁:
+x𝑘= x𝑘−1 + Δ𝑡v𝜃(x𝑘−1,𝑡𝑘−1 | c),
+𝑘= 1, . . . , 𝑁.
+(1)
+Throughout this paper, an inference is one such integration. In
+GR00T, the velocity network is a diffusion transformer [69] whose
+blocks alternate cross-attention to System 2’s features with self-
+attention over the chunk. Each block receives the time 𝑡𝑘−1 through
+adaptive LayerNorm (AdaLN) and ends in a two-layer MLP [23, 67].
+Since the keys and values of System 2’s features are constant across
+steps, System 2 hands them over once per inference. Table 1 lists
+the action heads of three state-of-the-art open-weight VLAs.
+2.2
+Memory-Bound Inference
+Since a robot serves one observation at a time, every flow step
+applies all weights of the action head to the roughly fifty tokens of
+a single chunk. With about fifty multiply-accumulate operations
+(MACs) per weight and step, the operational intensity lies far below
+the roofline ridge point of GPU tensor cores and accelerator arrays.
+The inference is therefore memory-bound and takes at least the
+DRAM floor, the time to read its bytes once at the peak DRAM
+bandwidth. Its energy is at least that of these reads, which can cost
+79× more energy per bit than an INT8 multiplication in 7 nm [39,
+42, 61].
+We measure the weight traffic of an inference in bit-steps, the bits
+read per weight summed over all 𝑁steps. A schedule [𝑏1, . . . ,𝑏𝑁]
+of per-step widths reads Í
+𝑘𝑏𝑘bit-steps, against 64 for BF16 at four
+steps. For example, the schedule [2,3,3,4] reads 12 bit-steps, 5.3×
+fewer than BF16. Entropy-coded weights (Section 5.2) take even
+fewer bit-steps than the sum of the widths.
+Insight 1. Reading weight bits from DRAM dominates the la-
+tency and energy of an inference, so reducing its bit-steps can
+reduce both proportionally.
+3
+Per-Step Sensitivity of Action Heads
+3.1
+Quantization Method
+For each width of a schedule, we quantize the released BF16 model
+by per-channel round-to-nearest, without calibration data, training
+or tuning for a specific robot or task. Each output channel has one
+scale, and all blocks of a step share one width. At 3 bits and more,
+we scale each row so that its absolute maximum maps to 2𝑏−1 −1
+and round every weight to a two’s-complement integer. At 2 bits, a
+2
+
+
+¼
+½
+¾
+1
+(a) step k/N
+10−2
+10−1
+100
+relative error
+¼
+½
+¾
+1
+(b) step k/N
+10−2
+10−1
+100
+gain gk
+−6
+−5
+−4
+−3
+−2
+−1
+0
+bk −bN
+GR00T N1.6, RoboCasa GR1
+GR00T N1.6, LIBERO-Long
+π0.5, LIBERO-Long
+GR00T N1.5, LIBERO-Long
+SANA-1.6B, images
+state after step k
+Figure 3: (a) Errors of the output and of the state after step
+𝑘when only step 𝑘of 𝑁is quantized to 3 bits, relative to
+quantizing only the last step. (b) Gain 𝑔𝑘, the ratio of the two
+errors, with each step’s width at the minimum of Equation 2.
+mid-rise code without a zero level uses the levels ±𝑑/2 and ±3𝑑/2,
+with 𝑑fitted to the row by least squares.
+The schedule covers all linear layers of the DiT blocks. The small
+layers that embed the noisy actions as input tokens and that decode
+the output tokens into a velocity stay 8-bit. The AdaLN modulation
+depends only on the step index and remains a constant vector per
+step. The inputs of the linear layers are rounded to INT8 with one
+scale per token, which maps the token’s absolute maximum to 127.
+Their width stays constant over the steps because the weights carry
+nearly all of the DRAM traffic at batch size one. For simplicity,
+we also keep the activations of the attention, its queries, keys and
+values, at 8 bits. The softmax, LayerNorm, GELU and the residual
+stream stay in BF16 or FP32.
+3.2
+Attenuation of Early Quantization Errors
+Every flow step reads the same weights, but the steps do not neces-
+sarily need the same precision. An action head’s output depends
+on the observation but barely on the starting noise. Across noise
+draws, the actions of the three policies differ by only a few percent
+of the noise magnitude. The flow thus maps a wide range of start-
+ing points to almost the same action. It must therefore attenuate
+any deviation of the intermediate states, including the quantization
+error of an early step.
+To test this intuition, we quantize the weights of only one step
+at a time to 3 bits and compare the final action with that of the
+unquantized model. We run this comparison open loop on 45 to
+60 model calls per benchmark in Figure 3, recorded in closed-loop
+episodes. The error is the root-mean-square difference between the
+two actions over four noise draws, averaged geometrically over the
+calls. Every action dimension enters this error normalized by its
+range in the training data, so that no single dimension dominates
+it. Figure 3a shows that the error due to quantizing the last step
+exceeds that of the first by one to two orders of magnitude. A
+uniform width thus spends most of its bits on steps whose errors
+barely reach the action.
+Two effects can make the last step more sensitive than the first.
+Quantizing step 𝑘perturbs its velocity and leaves an error 𝑠𝑘in
+the state x𝑘(Equation 1). The later steps carry this state error to
+the action, where it becomes the output error 𝑒𝑘. First, quantizing
+a late step may leave a larger state error. Second, the later steps
+may attenuate the state error of an early step before it reaches
+the action. To separate the two effects, we define the gain of step
+𝑘as 𝑔𝑘= 𝑒𝑘/𝑠𝑘, with both errors taken from the same run. The
+state after the last step is the output action, so 𝑔𝑁= 1. On all three
+policies, the state error resulting from quantizing the last step is
+only two to three times that of the first step, as Figure 3a shows.
+Figure 3b shows that the remaining steps, in contrast, attenuate an
+error of the first step to 23% or less. This attenuation thus accounts
+for most of the difference in sensitivity between the first and the
+last step. The larger state error of the last step accounts for the rest.
+Action heads differ in this respect from image diffusion models,
+whose output depends strongly on the starting noise. The images of
+the flow-matching DiT SANA-1.6B [91], for example, differ across
+noise draws by 54% of the noise magnitude. Figure 3a shows that
+the output error of SANA-1.6B exceeds its state error at every step
+but the last. Its remaining steps thus amplify an early error. Per-step
+quantizers for image diffusion accordingly give the noisiest steps
+the most weight bits, as in TMPDiff [49] and TASQ [28]. An action
+head, in contrast, needs its bits on the last steps.
+Insight 2. Because an action head’s output barely depends on
+the starting noise, its early steps tolerate more quantization than
+its late ones, and bit widths should rise over the steps.
+3.3
+Precision Schedules from the Gains
+The gains also indicate how to distribute a given number of bit-
+steps over the steps. If the errors of the steps propagate linearly to
+the action, are uncorrelated and halve with every additional bit, the
+squared action error of a schedule approximately satisfies
+𝐸(𝑏1, . . . ,𝑏𝑁) ∝
+𝑁
+∑︁
+𝑘=1
+
+𝑔𝑘2−𝑏𝑘
+2
+.
+(2)
+For 𝐵= Í
+𝑘𝑏𝑘bit-steps, Lagrange multipliers give the minimum of
+𝐸at 𝑏𝑘= log2 𝑔𝑘+ (𝐵−Í
+𝑗log2 𝑔𝑗)/𝑁. This yields a rule of thumb:
+a step receives one more bit per doubling of its gain. Figure 3b gives
+the resulting width difference to the last step, 𝑏𝑘−𝑏𝑁, on its right
+axis. With a gain of about 0.1, the first step of GR00T N1.6 receives
+about three bits fewer than the last. The total 𝐵determines the
+traffic and is a choice of the deployment. Section 7.1 applies the
+rule at the same 𝐵as uniform 3-bit weights, 12 bit-steps for both
+GR00T policies and 30 for 𝜋0.5. The rule’s widths preserve or nearly
+preserve success, whereas uniform 3-bit weights lose success on
+GR00T N1.6 and 𝜋0.5.
+Insight 3. An action head’s gains determine its step widths as a
+rule of thumb, so finding a schedule needs no closed-loop search.
+4
+Motivation for Dedicated Hardware
+The schedules of Section 3 reduce the weight bytes that an inference
+reads from DRAM. On an edge GPU such as Thor, the time per
+inference falls in proportion to these bytes only if the DRAM re-
+mains the bottleneck at every width. To run the schedules on Thor,
+we write CUDA kernels for linear layers with 2- to 8-bit weights.
+Our kernels store a copy of every layer per width. We compare
+3
+
+
+0
+10
+20
+30
+(a) time per inference [ms]
+BF16
+[8,8,8,8]
+[4,4,4,4]
+[2,3,3,4]
+31.5
+19.3
+14.7
+13.3
+our kernels
+25
+50
+100
+200
+400
+800
+(b) MACs per weight byte
+3
+10
+30
+100
+TMAC/s
+DRAM, 273 GB/s
+INT8 tensor cores
+BF16
+8-bit
+4-bit
+2-bit
+kernel
+overhead
+our kernels
+1536 × 1536
+4608 × 1536
+6144 × 1536
+1536 × 6144
+DRAM floor
+linear layers
+attention
+LayerNorm
+rounding and elementwise
+NVIDIA's BF16, FP8, NVFP4
+Figure 4: GR00T N1.6 on Jetson AGX Thor: (a) time per infer-
+ence by kernel type and (b) the roofline of its linear layers.
+the action head on our kernels with the released BF16 action head,
+whose linear layers run through NVIDIA’s cuBLAS library.
+Figure 4a shows that on our kernels, [2,3,3,4] takes 13.3 ms per
+GR00T N1.6 inference, against 31.5 ms for the released BF16 action
+head. From [4,4,4,4] to [2,3,3,4], however, the weight bytes fall by
+25% but the time only by 9%. The kernels themselves are not the
+limitation: Figure 4b shows that at equal bytes, they are about as
+fast as NVIDIA’s FP8 and NVFP4 matrix multiplications [66] or
+faster.
+Two factors keep the time far above the DRAM floor. First, the
+attention, the LayerNorm and the rounding of the activations take
+about 3.2 ms per inference at every width, 65% of the DRAM floor
+of [2,3,3,4]. Second, the roofline in Figure 4b shows that the linear
+layers fall further below the DRAM roof as their weights narrow. At
+2 bits, even the largest layers reach at most 48% of this roof and 21%
+of the peak compute of the INT8 tensor cores. Since neither DRAM
+nor tensor cores limit these layers, the gap to the DRAM roof is
+kernel overhead that does not decrease as the weights narrow.
+Insight 4. Below 4 bits, current GPU kernel stacks are bound by
+fixed overheads, so sub-4-bit precision needs hardware whose
+entire latency scales with the bit-steps.
+To remove the first factor, dedicated hardware must apply the
+normalization, rounding, activation functions and residual additions
+as the activations enter or leave the linear layers. It must also run
+the attention in parallel with the weight stream. To remove the
+second factor, it must process the weights faster than the DRAM
+delivers them, at every width from 2 to 8 bits. Moreover, it must
+adapt to a dynamic workload. The operational intensity of the linear
+layers changes with the width of each step, and the share of the
+attention changes between models and contexts. Section 5 presents
+such an accelerator.
+5
+Accelerator Architecture
+Figure 5 shows the accelerator. Every flow step streams all weights
+of the action head from DRAM through a FIFO and a decoder into
+the array. Only the activations of one chunk, the keys and values of
+the current layer and the constants reside on chip. We design the
+accelerator to keep the DRAM channels saturated at every width,
+so that the time of an inference approaches its DRAM floor.
+Because the best schedule differs between policies and bench-
+mark suites, one datapath must run each flow step at any width
+from 2 to 8 bits. An output-stationary bit-serial array [40, 72] meets
+this requirement. Consuming one bit of each weight per cycle, it
+runs a step of any width as the same loop of 𝑏cycles. Since stream-
+ing a step’s weights also takes time proportional to 𝑏, the array
+keeps the DRAM channels saturated at every width.
+5.1
+Memory Interface
+The proposed accelerator has a 128-bit memory interface of eight
+x16 LPDDR5X-8533 channels with 8 GB of capacity and a peak
+bandwidth of 136.5 GB/s, 50% of Thor’s. We target 50 action-head
+inferences per second, one per action at a 50 Hz control rate [9].
+This target suffices for most applications, since policies typically
+execute several actions of each chunk [9, 10, 67]. The weight FIFO
+lets the DRAM continue to stream weights while the accelerator
+processes layers that require no weights, such as LayerNorm and
+the attention. A DMA engine moves the inputs of an inference and
+the keys and values that a layer produces. System 2’s keys and
+values arrive through the K/V FIFO.
+5.2
+Entropy-Coded Weight Streams
+Every linear layer streams from DRAM at the width of its step, as
+one contiguous stream located through an address table per layer
+and width. The DRAM either stores one such stream per width or
+produces it from one stored 8-bit copy, as proposed in Section 5.6.
+Per-channel rounding scales each row by its largest weight, which
+lies far out in the tail of the distribution. Most weights are thus
+small compared with the step between two levels, and 56% of the
+3-bit weights of GR00T N1.6 round to zero. We therefore Huffman-
+code the streams, with code words of at most 12 bits. Each layer
+and width has one canonical code, stored at the start of its stream.
+Since every code word takes at least one bit, a code word covers
+a pair of neighboring weights at 2 and 3 bits. A decoder between
+the weight FIFO and the array decodes the code words in parallel,
+faster than the DRAM delivers them at every width. Because the
+code is lossless, coding does not alter the closed-loop success of the
+quantized policies.
+Figure 6b shows the coded bits per weight, which come within
+2.3% of the rounded weights’ entropy for every policy and width.
+The entropy code thus further reduces the bit-steps of a [2,3,3,4]
+inference of GR00T N1.6 from 12 to 7.98, as Figure 6a shows.
+Microscaling formats such as NVFP4 [66] lower the rounding
+error at 4 bits with an 8-bit scale per block of 16 weights instead
+of one per row. Each block maps its largest weight to the top level,
+so its weights spread over all levels and barely compress. Weights
+rounded per channel to 5 bits, in contrast, concentrate near zero,
+so the entropy code saves more than one bit per weight. Coded
+per-channel rounding at 5 bits therefore reads fewer bits than coded
+NVFP4 with its scales, at a lower output error.
+Insight 5. Microscaling formats lower the output error but are
+less compressible, so entropy-coded weights reach the same
+error in fewer bits with one scale per row.
+4
+
+
+8 × LPDDR5X-8533, 137 GB/s
+Weight FIFO
+128 KB
+Weight decoder
+8 × 64 lanes
+2048 b per cycle
+K/V FIFO
+32 KB
+System 2's K/V
+K/V buffer
+0.56 MB
+16 × 16 block of K or V
+Stream mode
+Attention mode
+256 B
+51 × 16 B
+Tree array: 8 sub-arrays × 16 output channels × 51 tokens
+Drain epilogue
+128 lanes
+INT32 → BF16
+GELU, SiLU, RoPE
+a
+b
+c
+Attention
+Drain channels
+4 × 16 FP32 lanes
+Outputs, 4 × 51 KB
+Scores, 51 KB
+Softmax engine
+128 lanes
+Q/P port
+51 × 16 lanes
+Residual, array input, partial sums, chunk, state
+51 banks × 296 × 256 b, 472 KB
+Q, K, V, attention out, MLP hidden
+51 banks × 416 × 256 b, 663 KB
+DMA
+64 B per cycle
+LayerNorm
+128 lanes
+128 × BF16
+Read port
+51 × 16 lanes
+BF16 → INT8
+Allocator
+Fill
+Control core
+Snitch, RV32IM
+32 KB
+16 KB
+Weight bits
+Activations
+Control
+SRAM
+Registers
+a Tree processing element, × 6528
+wi
+ai
+1 0 1 1 0 0 1 0 1 1 0 1 0 0 1 0 Bit k of 16 weights
+16 × INT8
+a 0 a a 0 0 a 0 a a 0 a 0 0 a 0 ai where wi = 1
+Adder tree
+≪ k
+±
+− for the sign bit
+Bank 0
+Bank 1
+2 × 32 b
+Drain
+b Attention mode of a sub-array
+Block register
+K or V
+Stream mode
+Weight bits
+Read port
+QKT: 16 keys
+PV: 16 columns
+Row register
+Q or P
+51 × 16 B
+Attention
+Drain channel, 16 × INT32
+Softmax engine
+Scores
+max
+m
+−
+exp
+Σ
+l
+1/x
+P rows
+c Drain-epilogue lane, × 128
+INT32 accumulator
+Weight × token scale
+Partial sum
+Bias
+FP32 → BF16
+GELU or SiLU, × gate
+Residual
+RoPE on Q and K
+Statistics, buffer write
+Figure 5: The accelerator with sub-arrays in stream and attention mode. Each sub-array’s inputs of its unused mode are grayed.
+0
+16
+32
+48
+64
+(a) bit-steps
+BF16
+NVFP4
+[4,4,4,4]
+[2,3,3,4]
+[2,3,3,4], coded
+64
+18
+3.6×
+16
+4.0×
+12
+5.3×
+7.98
+8.0×
+2-bit
+3-bit
+4-bit
+5-bit
+(b) width
+0
+2
+4
+6
+bits per weight
+−45%
+nominal
+GR00T N1.6
+GR00T N1.5
+π0.5
+Figure 6: (a) Bit-steps of a GR00T N1.6 inference. (b) Bits read
+per weight at each width with the entropy code.
+5.3
+Flexible Bit-Serial Fabric
+The compute fabric is a bit-serial tree array of processing elements
+(PEs), 128 output channels by 51 tokens, enough for the chunk of
+every action head in Table 1. Per cycle, the array consumes bit 𝑘of
+16 weights of every output channel. As Figure 6b shows, the code
+stores a weight in as little as 55% of its width. At the 1 GHz clock,
+the decoder thus emits up to 1.8× the 1092 bits that the DRAM
+delivers per cycle, about 2000 bits. We therefore size the array to
+consume 2048 weight bits per cycle, so that it keeps up with the
+decoder at every width. Since every weight bit meets 51 tokens, the
+array performs 104448 bit-MACs per cycle, each of which multiplies
+one weight bit with an INT8 activation. With per-step precision,
+the compute that the weight stream requires changes between flow
+steps, because the decoder emits the most bits per cycle at the
+most compressible widths. The compute of the attention varies
+between model families. For example, 𝜋0.5 performs seven to nine
+times as many attention MACs per flow step as GR00T N1.6. To
+maximize flexibility and hardware utilization, the weight stream
+and the attention share the array. We split the array into eight
+sub-arrays of 16 output channels each, which a run-time allocator
+divides between the two.
+Figure 5a shows a PE, which serves one output channel and
+one token. Per cycle, it multiplies bit 𝑘of 16 weights of its output
+channel with the INT8 activations of its token at the same 16 input
+channels. An adder tree sums the 16 products. The PE shifts the sum
+to the significance of bit 𝑘and adds it into a 32-bit accumulator,
+or subtracts it for the two’s-complement sign bit. Because one
+accumulator serves 16 input channels, the PE takes less area and
+energy per bit-MAC than a bit-serial PE that accumulates every
+product separately. The array computes a layer in passes, each over
+one group of output channels. Two accumulator banks let one pass
+drain while the next fills. Since the allocator assigns each sub-array
+to the weight stream or to the attention, a sub-array runs every
+pass in one of two modes, stream mode or attention mode.
+Stream mode. For the projections, a sub-array takes the decoded
+weights of its 16 output channels and the activations from the read
+port, as Figure 5 shows. The read port feeds the activations of all
+51 tokens from the token buffers to every sub-array of the stream,
+16 input channels per token and cycle. It rounds the activations of
+each token to INT8 with a scale from the token’s largest magnitude.
+The drain epilogue (Figure 5c) applies the elementwise operations
+that a GPU runs as separate kernels. It processes one token row per
+cycle while the array computes the next pass, so these operations
+do not stall the weight stream. A LayerNorm unit of the same width
+normalizes the token rows with statistics that the drain gathers, so
+that normalization occupies no sub-array. The output projection is
+pipelined with the attention in four tiles of input channels, so that
+earlier tiles run in parallel with the attention of later heads.
+5
+
+
+Attention mode. For the attention, the keys or values take the
+place of the weights, and the queries or the softmax probabilities
+P take that of the activations. A sub-array takes one bit of each
+key or value per cycle from a 16 × 16 block in its block register, as
+Figure 5b shows. Its row register holds the matching 16 elements of
+the query or of P for each of the 51 tokens. A pass of 𝑄𝐾⊤puts 16
+keys on the output channels, and a pass of 𝑃𝑉puts 16 columns of
+the head dimension there. A Q/P port rounds Q to 8 bits and loads
+Q or the two bytes of P into the row registers. Each tile of a head’s
+keys passes in order through 𝑄𝐾⊤, an online-softmax engine and
+𝑃𝑉. Because the integer accumulators hold both products exactly,
+the attention matches a dedicated attention unit bit for bit.
+Control core. To run action heads of different sizes and ar-
+chitectures, a Snitch RISC-V core [99] runs each inference as a
+program that issues commands to the engines without delaying
+them. Through double-buffered command registers, the core writes
+the next command of an engine while the engine still executes the
+current one. Each command thus starts in the cycle that its engine
+becomes free. A command can even start before the command that
+produces its inputs has finished. Each of its reads then waits at
+a read gate only until the pass that produces the read’s data has
+drained. A dependent GPU kernel, by contrast, reads its inputs only
+after the whole kernel before it has finished. The attention thus
+runs in parallel with the weight stream instead of adding to the
+fixed overheads of Section 4. A new schedule, step count or context
+length changes only the commands that the program issues. A new
+model family is thus a new program, so a single fabricated chip can
+run GR00T N1.6, GR00T N1.5 and 𝜋0.5.
+5.4
+Run-Time Sub-Array Allocation
+To keep the DRAM channels saturated, the attention runs in parallel
+with the weight stream, on the sub-arrays that the projections do
+not need. At each width, a projection needs its sub-array minimum,
+the fewest sub-arrays that keep up with the DRAM. A hardwired
+partition, as in Figure 7a, would be the same for every policy and
+width. Since the needs of the weight stream and the attention vary
+with both, it would leave the sub-arrays of one idle while the other
+lacks sub-arrays. Alternatively, the compiler can allocate the sub-
+arrays statically, as in Figure 7b. Each projection then takes as many
+sub-arrays as its sub-array minimum, starting from the first, and
+the attention takes the others. Whenever the projections halt, the
+DRAM keeps filling the weight FIFO and idles once it is full. For
+example, a tile of the output projection multiplies the outputs of a
+group of attention heads, so it halts until their attention ends. After
+the halt, the FIFO regains room only if the projections consume the
+weights faster than the DRAM delivers them. At their sub-array
+minimum, however, they consume them about as fast. With the
+static allocation, the FIFO thus remains full after the first halt, and
+the DRAM idles during every later halt.
+Our run-time allocator (Figure 7d) instead decides at the start of
+every pass how many sub-arrays the weight stream takes, while
+each attention pass takes the free ones. A weight FIFO at least
+25% full shows that the DRAM runs ahead of the projections. If
+the attention then has no pass ready and no softmax in flight, the
+stream’s pass also takes the free sub-arrays beyond its minimum,
+up to the first busy one. Otherwise, it runs on its minimum.
+0
+5
+10
+30
+35
+40
+45
+50
+0
+7
+(a) fixed in hardware: 52.6 µs
+0
+7
+(b) set by the compiler: 28.0 µs
+0
+5
+10
+15
+20
+25
+µs from the block's first projection
+0
+7
+(c) with the run-time allocator: 26.6 µs
+sub-array
+(d) the allocator
+weight stream
+QKT
+PV
+sub-arrays
+DRAM
+weight FIFO
+fill
+≥
+¼
+attention idle
+free
+Figure 7: The eight sub-arrays in a 𝜋0.5 block at the 2-bit step.
+Figure 7 compares the three options on a 𝜋0.5 block. The hard-
+wired partition with the smallest worst-case slowdown over the
+three action heads gives five sub-arrays to the weight stream and
+three to the attention. Even with this partition, the inferences of
+the three action heads take 17 to 30% longer than with the static
+allocation. The stream’s five sub-arrays are too few at the 3-bit steps
+of GR00T N1.6, and the attention’s three are too few on the other
+two heads. On 𝜋0.5, the stream’s sub-arrays idle for most of the
+block, as Figure 7a shows. With the run-time allocator, the stream
+takes all eight sub-arrays before the attention starts and the free
+ones during the last passes of the output projection. The block thus
+ends earlier than with the static allocation, as Figures 7b and c show.
+Over whole inferences, the accelerator runs the three action heads
+1.1 to 2.3% faster with the allocator than with the static allocation.
+Insight 6. At run time, the fill of the weight FIFO shows which
+fraction of the shared array should be allocated to the weight
+stream.
+5.5
+Running System 2
+The same accelerator can also run the VLM of GR00T N1.6 bit-
+exactly. This System 2 consists of SigLIP2 on each camera’s image
+and the first 16 layers of Qwen3-1.7B. Its 1.33 billion weights apply
+to hundreds of tokens per layer instead of the 51 tokens of the array.
+Run in groups of 51 tokens, System 2 would re-stream every weight
+for every group. It therefore runs weight-stationary: each weight
+tile is loaded once into a buffer per sub-array and replayed for every
+group. The activations stream in from DRAM, whereas the partial
+sums stay on chip. Since every layer writes its outputs to DRAM,
+System 2 can pause at any layer boundary, so that action-head
+inferences can run in between.
+5.6
+Quantization-in-DRAM
+A deployment that switches between step counts and precision
+schedules may use any width from 2 to 8 bits. Our per-channel
+rounding uses a separate scale for every width, so a narrower weight
+is not a truncation of a wider one. Such a deployment therefore
+stores a copy of every width in DRAM, 3.3 GB for the copies of
+GR00T N1.6 against 0.85 GB for one 8-bit copy. The 𝑏-bit weight,
+however, depends only on the 8-bit weight and the 𝑏-bit scale of its
+row. Every width can thus be derived from one stored 8-bit copy
+while the weights are read. The capacity saved can hold the weights
+of a larger model or of System 2.
+6
+
+
+One x16 LPDDR5X channel
+weight bits
+DRAM
+I/O
+cell array
+row buffer
+requantizer
+encoder
+bank group 0 bank group 1
+bank group 2 bank group 3
+32 B / 3.75 ns per bank
+32 B / 1.875 ns
+serializer
+16 pins, 8533 Mb/s
+accelerator PHY
+Figure 8: Quantization-in-DRAM in one LPDDR5X channel.
+Insight 7. Since per-channel rounding needs only a weight and
+its row’s scale, one stored 8-bit copy can generate every width
+without extra DRAM capacity.
+We therefore propose Quantization-in-DRAM: a DRAM system
+that stores one 8-bit copy and requantizes and encodes the weights
+at every bank, as illustrated in Figure 8. At every step, the requan-
+tizer behind each row buffer rounds the stored bytes to the step’s
+width, and the encoder Huffman-codes the result.
+Requantizer and encoder. At the 2-bit step, the banks read at
+least 4× as many bits as leave the DRAM. The banks of a channel,
+however, share one bus to its interface, with the same bandwidth
+as the interface. A requantizer at the interface would thus use at
+most a quarter of its bandwidth. Every bank therefore holds its
+own requantizer and encoder, so that only coded weights cross the
+shared bus.
+Multiplication in the DRAM. Quantization-in-DRAM adds
+only a requantizer and an encoder to each bank. Processing-in-
+memory DRAMs instead add MAC units to the banks, as Sam-
+sung’s HBM-PIM [48] and LPDDR5X-PIM [34] do, so that no weight
+crosses the memory interface. Logic in a DRAM process, however,
+is about 10× less dense than in a logic process [17], so MAC units at
+every bank are large. They also perform one MAC per weight read,
+whereas GR00T N1.6 applies every weight read to 51 tokens, so they
+would take far longer than the accelerator. Quantization-in-DRAM
+therefore leaves the MACs to the accelerator.
+6
+Experimental Methodology
+We evaluated the closed-loop success of the precision schedules in
+simulated environments (roughly 1700 H100 hours) and the time,
+area and energy of the accelerator from its RTL. In closed loop, the
+simulated robot executes a task over many model calls.
+Policies. GR00T N1.6-3B [23] runs its base checkpoint on Robo-
+Casa GR1 and the RoboCasa kitchen. A third-party LIBERO fine-
+tune [1] runs LIBERO and LIBERO-Plus. NVIDIA’s Bridge, Fractal
+and G1 checkpoints run on their benchmarks, and its DROID check-
+point on one scene of the DROID simulation. GR00T N1.5 [7] runs
+NVIDIA’s LIBERO-Long checkpoint on LIBERO-Long and the Robo-
+Casa team’s checkpoint on RoboCasa365. 𝜋0.5 [8] runs LeRobot’s
+LIBERO fine-tune [13] at its ten steps. Every quantized policy runs
+in a released inference harness, simulator and control loop [13, 64].
+Only its action head is replaced by one with the data types and
+roundings of the accelerator.
+Benchmarks. To compare many schedules, we composed two
+screening benchmarks of four tasks each. The first consists of the
+four LIBERO-Long [55] tasks on which the released model suc-
+ceeded least, since such tasks reveal a loss with few episodes. The
+second consists of four RoboCasa GR1 tabletop tasks [63, 67], two
+from each of its two task families. We also evaluated eight full
+suites in which we ran all tasks of RoboCasa GR1, LIBERO, LIBERO-
+Plus [19], the RoboCasa kitchen, SimplerEnv [11, 50, 85] Bridge
+and Fractal, and G1. Of RoboCasa365, we ran the 34 target tasks on
+which its checkpoint was trained. A task runs at least 50 episodes
+per seed. We report the change in success rate against the released
+model as the mean over the tasks, each weighted equally. The 90%
+interval of this change extends 1.645 standard errors to either side.
+Where both policies start each episode from the same state, the
+variance of a task’s change comes from the per-episode differences.
+Otherwise, it comes from the binomial variances of both success
+rates. A schedule preserves success when this interval lies above −3
+points, following the equivalence margin of Sujit et al. [82].
+RTL simulation. The accelerator was written in Chisel [6],
+parameterized in the sizes of its array, token buffers, FIFOs and ports,
+and simulated in Verilator [76]. The cycle-accurate DRAM simulator
+Ramulator 2 [60] models its LPDDR5X-8533 channels under JEDEC
+timing [37]. Each simulated inference replays a model call recorded
+in closed loop. Its outputs are bit-exact with an executable model
+that follows the roundings of the closed-loop simulations.
+Area. Every block of the accelerator was synthesized with Ca-
+dence Genus in TSMC 7 nm at 1 GHz. The SRAM came from the
+foundry’s memory compiler, and each block’s clock tree was esti-
+mated in Cadence Joules. The accelerator area excludes long wires,
+the pads and the physical interfaces (PHYs), whose area we esti-
+mated from a die shot [68].
+Energy. We simulated the same netlists and clock trees at gate
+level with FlashReplay in Cadence Joules. The simulation replays
+the VCDs of a LIBERO inference at [2,3,3,4] and of System 2 from
+the RTL, at the typical corner of 0.75 V and 25 ◦C. We added the
+reads, writes and leakage of the SRAM macros from the foundry’s
+memory-compiler tables. From Micron’s LPDDR5X datasheet [61]
+and Samsung’s breakdown of LPDDR5 energy [42], a bit read from
+the DRAM costs 5.5 pJ. Of these, 3.4 pJ go to the DRAM’s row activa-
+tion, read path and output drivers, and 2.1 pJ to the PHY and mem-
+ory controller of the accelerator. We added the DRAM’s standby
+and refresh power, 0.43 W for the eight channels at the datasheet’s
+maximum currents, over the RTL time of each inference.
+Baselines. On Thor, we measured three implementations of the
+GR00T N1.6 action head as replayed CUDA graphs: the released
+BF16 head, FlashRT’s NVFP4 head [81] and our kernels. Every im-
+plementation runs after a warm-up, with the GPU and memory
+clocks pinned at their maximum. We measured the energy at the
+input of the Thor module, which also feeds its CPU, memory and
+regulators, and subtracted the module’s idle power. For System 2,
+we also measured NVIDIA’s VLM backbone, as the median of 20
+synchronized calls. The open-source cycle model of DiTPA [103]
+runs the GR00T N1.6 action head with its skips disabled. For a fair
+comparison, every action-head time and energy excludes the pro-
+jection of System 2’s keys and values, which we count in System 2.
+7
+Evaluation
+This section evaluates the rising precision
+1 in closed loop, the
+accelerator’s latency, energy and area
+2 , its fabric on other action
+heads and the VLM
+3 , and Quantization-in-DRAM
+4 .
+7
+
+
+3
+6
+9
+−20
+−10
+0
+10
+Δ success (points)
+64
+4
+6
+8
+64
+8
+16
+24
+−20
+−10
+0
+10
+Δ success (points)
+160
+4
+6
+8
+−20
+−10
+0
+10
+Δ success (points)
+64
+6
+8
+64
+3
+6
+9
+12
+64
+6
+8
+64
+4
+6
+8
+64
+4
+8
+12
+64
+28
+3
+6
+9
+12
+−20
+−10
+0
+10
+Δ success (points)
+64
+3
+6
+9
+12
+64
+3
+6
+9
+12
+64
+3
+6
+9
+12
+64
+coded bit-steps
+coded bit-steps
+(b) GR00T N1.5
+LIBERO-Long screening (4 tasks)
+RoboCasa365 (34 tasks)
+coded bit-steps
+(c) π0.5
+LIBERO-Long screening (4 tasks)
+coded bit-steps
+coded bit-steps
+coded bit-steps
+coded bit-steps
+coded bit-steps
+coded bit-steps
+LIBERO-Plus (7 perturbations)
+RoboCasa kitchen (24 tasks)
+SimplerEnv Bridge (7 tasks)
+SimplerEnv Fractal (6 tasks)
+DROID (1 scene)
+G1 (1 task)
+coded bit-steps
+coded bit-steps
+coded bit-steps
+coded bit-steps
+(a) GR00T N1.6
+LIBERO-Long screening (4 tasks)
+RoboCasa GR1 screening (4 tasks)
+RoboCasa GR1 (24 tasks)
+LIBERO (40 tasks)
+released model's success
+90% interval
+rising widths
+uniform width
+falling widths
+predicted
+ablations (uncoded)
+1 step
+2 steps
+4 steps
+10 steps
+Figure 9: Change in closed-loop success relative to the released model over the entropy-coded bit-steps.
+7.1
+Closed-Loop Task Success
+Rising bit order. In Figure 9, the GR00T N1.6 schedules of 12
+nominal bit-steps show that the order of the bits decides whether
+a schedule preserves success. Only the rising [2,3,3,4] preserves
+success on both screening benchmarks. Uniform 3-bit weights and
+the falling [4,3,3,2] lose success on both. On GR00T N1.5 and on
+𝜋0.5 at four steps instead of ten, [2,3,3,4] also preserves success,
+whereas every falling schedule loses success.
+Rule of thumb. From the measured gains, the rule of thumb
+of Section 3.3 predicts [2,2,3,5] for GR00T N1.6, [2,2,2,6] for GR00T
+N1.5 and [2,2,3,3,3,3,3,3,4,4] for 𝜋0.5. The schedules for GR00T N1.5
+and 𝜋0.5 preserve success, and that for GR00T N1.6 narrowly misses
+the margin on RoboCasa GR1. The gains measured on a policy
+thus predict a schedule that preserves or nearly preserves success,
+without a search over schedules in closed loop.
+Full benchmark suites. Figures 9a and b give every full suite
+we evaluated. [2,3,3,4] preserves success on five of the eight suites.
+The rising order thus holds beyond the screening benchmarks.
+Step count. At two steps, the rising [2,4] preserves success on
+both screening benchmarks. The uniform [3,3] and the falling [4,2]
+of equal nominal bit-steps, in contrast, lose success on RoboCasa
+GR1. The order of the bits thus matters at two steps as well as at
+four. Whether fewer steps preserve success, however, depends on
+the suite. [2,5] and [2,4] each preserve success on five of the eight
+suites. The step count is therefore a program input.
+7.2
+Trajectory Quality
+Smoothness of the commands. A success rate alone could hide
+noise that the rounded weights add to the commands, since a sim-
+ulated controller absorbs jitter that a real arm would execute. On
+real robots, abrupt changes of velocity between action chunks also
+cause jerky motion and shift the observed dynamics away from
+the training data [10, 102]. We therefore measured the jerk of the
+commanded arm positions, their third time derivative, and the jump
+of their velocity between consecutive chunks. On RoboCasa GR1,
+LIBERO and the RoboCasa kitchen, [2,3,3,4] lowers the jerk by 6
+to 16% and the jump by 7 to 16% relative to the released model.
+Every 90% interval of these changes lies below zero. On G1, where
+[2,3,3,4] loses success, its jerk is 1.9× that of the released model. On
+these four suites, the success rate thus hides no loss of smoothness.
+Episode length. A quantized policy that preserves its success
+rate may still need more inferences per episode. On the suites where
+[2,3,3,4] preserves success, its successful episodes change in length
+by −1% on average and by at most 2% relative to the released model.
+Per task, [2,3,3,4] thus still reads at least 7.8× fewer weight bits
+than the released model, against 8.0× fewer per inference.
+Insight 8. Quantization can lengthen a policy’s episodes, so its
+time and energy must also be compared per task.
+7.3
+Calibration-Free Quantization
+We compared the plain per-channel rounding of Section 3.1, which
+needs no calibration data or training, with more elaborate quanti-
+zation methods from prior work. None of these methods preserves
+success at fewer bit-steps than plain rounding to a rising precision.
+Nested code. Plain rounding of every width preserves more suc-
+cess than the nested code of TASQ [28]. The nested code reads the
+𝑏most significant bits of one stored 8-bit copy instead of rounding
+to 𝑏bits with a separate scale. Without TASQ’s training, the nested
+code read as [2,3,3,4] succeeds in almost none of the RoboCasa GR1
+8
+
+
+0
+10
+20
+30
+(a) time per inference [ms]
+[8,8,8,8]
+[4,4,4,4]
+[2,3,3,4]
+[2,4]
+[8,8,8,8]
+[2,2,2,4]
+[2,3,3,4]
+8-bit, 10 steps
+[2,5]
+[8,8,8,8]
+[2,3,3,4]
+1.3× faster than Thor
+3.1× faster than Thor
+50 Hz or more
+RTL
+DRAM floor
+array floor
+0
+50
+100
+150
+200
+250
+300
+(b) energy per GR00T N1.6 action-head inference [mJ]
+[8,8,8,8]
+[4,4,4,4]
+[2,3,3,4]
+[2,4]
+253
+102
+78
+45
+DRAM reads
+DRAM standby
+sub-arrays
+decoder
+drain, LayerNorm
+SRAM
+control, other logic
+Figure 10: Evaluation of the accelerator on DiT action heads.
+episodes. The rounded widths, in contrast, preserve the success of
+the released model. Nested codes thus work only when trained for
+the nesting, as in TASQ and Matryoshka Quantization [62].
+Calibration. Neither rotation [5] nor AWQ scaling [52] lets uni-
+form 3-bit weights preserve success on both screening benchmarks.
+Figure 9a shows that rotation preserves it only on RoboCasa GR1
+and AWQ only on LIBERO-Long. The rising [2,3,3,4] reads the same
+nominal bit-steps with plain rounding and preserves success on
+both. GPTQ [22] updates the columns not yet rounded so that a
+layer’s output on calibration data changes least. It still succeeds
+less often than plain rounding of the same schedule.
+Microscaling. NVFP4 [66] stores an 8-bit scale per block of
+16 weights instead of one per row. With this scale and integer
+levels at each step’s width, [2,3] at two steps preserves success on
+LIBERO-Long, as [2,4] does with plain rounding. Uncoded, both
+read 6 bit-steps, since the block scales add half a bit per weight
+at each step. Coded, however, [2,4] reads 4.7 bit-steps, 6% fewer
+than the block-scaled [2,3], whose scales alone take 0.5 bit-steps. A
+coded weight stream thus needs only one scale per row, whereas
+block scales would add a multiplication of every adder-tree sum by
+its block’s scale.
+Vector code. A uniform 2-bit vector code, as in Deltoris [58],
+replaces each group of four input weights by an 8-bit codebook
+index. Each layer has one codebook, built from the weights alone.
+The code reads as many bit-steps as coded [2,3,3,4], but Figure 9a
+shows that it loses success on LIBERO-Long. Its codebook also
+expands every weight back to 8 bits. The code would thus take
+the array time of uniform 8-bit weights, 13.31 ms against 5.20 ms
+for [2,3,3,4]. Rounded weights, in contrast, keep the arithmetic as
+narrow as the bits read.
+7.4
+Latency
+On a GPU, the time per inference moves further above the DRAM
+floor as the weights narrow (Section 4). Figure 10a compares the
+PHY
+PHY
+PHY
+PHY
+PHY
+PHY
+PHY
+PHY
+Bit-serial fabric
+SRAM
+Drain and
+LayerNorm
+Weight decoder
+Control and DMA
+accelerator: 24% of the die
+60% logic density
+6.0 × 3.2 mm
+Figure 11: A proposed die layout at 7 nm.
+RTL time of every inference on the accelerator with its DRAM and
+array floors, the times at the DRAM and compute roofs of a roofline.
+The DRAM floor (defined in Section 2.2) includes the keys and
+values of System 2. The array floor is the time that the array takes
+for the weight stream at 2048 weight bits per cycle. On GR00T N1.6,
+the time stays 14 to 20% above the DRAM floor at every width, and
+[2,3,3,4] takes 8.02 ms per inference, or 125 Hz. The DRAM floor
+ignores refreshes and row switches, which cut the bandwidth to
+88% of the peak.
+Unlike on a GPU, the attention, the LayerNorm and the rounding
+of the activations add little time on the accelerator. In a [2,3,3,4]
+inference of GR00T N1.6, the RTL traces show the attention op-
+erations in flight for 22% of the time, all of it in parallel with the
+weight stream. Linear layers are in flight for 94% of the inference,
+and only LayerNorm and DMA commands take the rest. The linear
+layers also stay DRAM-bound as their weights narrow, because the
+array floor lies below the DRAM floor for every action head and
+schedule. The time per GR00T N1.6 inference thus scales with the
+bit-steps, down to [2,4], the narrowest schedule that we evaluated.
+7.5
+Energy and Area
+Figure 10b breaks down the energy per inference into the DRAM
+reads, the DRAM’s standby and the parts of the chip. [2,3,3,4] costs
+78 mJ per inference, or 3.9 W at 50 Hz. The DRAM reads take 51%
+of this energy. The energy of the chip also scales with the bit-steps,
+from 91 mJ at uniform 8-bit weights to 35 mJ at [2,3,3,4]. Most of
+this reduction comes from the bit-serial sub-arrays, whose cycles
+scale with the width of each step. [2,3,3,4] needs 31% of the energy
+of uniform 8-bit weights, and [2,4] at two steps needs 18%. On
+the accelerator, the per-step precision thus reduces the energy per
+inference as well as the time.
+Figure 11 shows a proposed die layout at 7 nm. We sized the
+PHYs of the eight channels from the die shot of Apple’s M2, a
+TSMC 5 nm processor with a memory interface of the same 128-
+bit width [68]. The PHYs then take 14.4 mm2 and the accelerator
+4.6 mm2 at 60% logic density, so the PHYs occupy 76% of the 19 mm2
+die. The accelerator is therefore small compared with the PHYs of
+its memory interface.
+7.6
+Comparison with the State-of-the-Art
+Figure 12 compares our accelerator with Thor [65], recent accel-
+erators for robot policies and LPDDR5X-PIM [34]. We scaled the
+power of DiTPA [103] to 7 nm with the factors of Stillmaker and
+Baas [80]. We used our DRAM model for the DRAM energy of ev-
+ery design except Thor, whose energy we measured. Deltoris [58]
+9
+
+
+0
+10 20 30 40 50
+time per inference [ms]
+[2,3,3,4]
+Released BF16 head
+FlashRT's NVFP4 head [81]
+[2,3,3,4] on our kernels
+[8,8,8,8]
+Deltoris [58]
+VQVLA [79]
+LPDDR5X-PIM [34]
+8.02
+3.9×
+1.7×
+1.7×
+2.7×
+≥1.2×
+≥1.2×
+≥8.7×
+0
+250
+500
+750
+energy per inference [mJ]
+78
+21×
+9.1×
+6.9×
+2.1×
+no absolute number given
+≥3.3×
+≥6.8×
+Figure 12: State-of-the-art comparison on the GR00T N1.6
+action head.
+and VQVLA [79] publish no simulator. We therefore bounded their
+time from below by the transfer time of their DRAM traffic at the
+peak bandwidth of our memory interface. These bounds favor both
+designs, since they assume an array of any size and a weight format
+that preserves the released model’s success rate.
+Thor [65] is NVIDIA’s commercial GPU module for robots,
+with twice our DRAM bandwidth. Our accelerator nevertheless
+runs [2,3,3,4] 1.7× faster than Thor, and 1.7× faster than FlashRT’s
+NVFP4 head [81] on Thor. Figure 1b shows that Thor is faster only
+at uniform 8-bit weights, where its DRAM floor lies at half of ours.
+Scaled to Thor’s bandwidth, however, our accelerator is 1.3× faster
+than Thor even at uniform 8-bit weights, and 3.1× faster at [2,3,3,4],
+as Figure 10a shows. Our accelerator leads at equal bandwidth
+because its time stays close to its DRAM floor, whereas fixed over-
+heads keep Thor’s time far above its DRAM floor. Figure 1c shows
+that, above its idle power, Thor uses 543 mJ per [2,3,3,4] inference,
+against 78 mJ for our accelerator. As shown in Figure 12, FlashRT’s
+NVFP4 head uses 9.1× the energy of our accelerator.
+DiTPA (ISCA’26 [103]) is an accelerator for DiT-based action
+planners that skips redundant actions, flow steps and tokens. With
+its skips disabled, DiTPA reads 8-bit weights at every flow step and
+runs 1.3× faster than our accelerator with uniform 8-bit weights,
+as Figures 12 and 10a show. Its INT8 array at 500 MHz, however,
+is too slow to keep pace with its DRAM, whose bandwidth is 1.4×
+ours. Narrower weights would therefore not shorten the inference
+on DiTPA, since its array takes the same number of cycles at every
+width. DiTPA’s skips reduce these cycles but leave the bits that
+each flow step reads unchanged. Even with all its skips, DiTPA
+reports 60 Hz on GR00T N1.5 and 84 Hz on 𝜋0.5. Our accelerator
+runs GR00T N1.5 at [2,3,3,4] 1.7× faster than DiTPA without its
+projection of System 2’s keys and values. It runs 𝜋0.5 4.4× faster at
+[2,5], two flow steps instead of ten. On these action heads, reducing
+the bit-steps thus shortens the inference more than DiTPA’s skips
+do.
+Deltoris (MICRO’26 [58]) is an accelerator for diffusion VLAs
+that computes each linear layer from the nonzero bits of its input
+change since the previous call. Its speculation on predicted frames
+does not apply to GR00T N1.6, which predicts no frames. To com-
+pute the input changes, Deltoris keeps the inputs and outputs of
+every linear layer of the previous call in DRAM. On GR00T N1.6,
+this state far exceeds the on-chip SRAM, so reading and writing it
+0
+50
+time per inference [ms]
+RoboCasa GR1, 1 camera
+LIBERO, 2 cameras
+RoboCasa GR1, 1 camera
+LIBERO, 2 cameras
+62.3
+66.1
+46.3
+72.1
+0
+2000
+4000
+energy per inference [mJ]
+2944
+3580
+405
+601
+System 2 (VLM)
+DiT action head
+Figure 13: Time and energy of the whole policy.
+adds DRAM traffic to the weight reads. For the weights of Deltoris,
+our bound assumes the 2-bit vector code of Section 7.3, which reads
+as many bits as coded [2,3,3,4]. Even with an array of any size,
+Deltoris therefore takes longer than our accelerator. Computing on
+input changes thus saves arithmetic but adds DRAM traffic, which
+lengthens the inference of a DRAM-bound action head.
+VQVLA (MICRO’26 [79]) is an accelerator for VLAs that reads
+one of two vector-quantized copies of the weights, chosen per
+inference from the last arm motion. Even its narrower copy reads
+12.5 bit-steps, against 7.98 for coded [2,3,3,4]. On a DRAM-bound
+action head, VQVLA thus remains slower than our accelerator even
+with an array of any size. Its index units and result cache, which
+merge and reuse the multiplications by shared centroids, take 86%
+of its 51.2 mm2 and 88% of its power. This reuse saves arithmetic
+but no DRAM traffic, on which the time of a DRAM-bound action
+head depends.
+LPDDR5X-PIM [34] is Samsung’s fabricated LPDDR5X DRAM
+with MAC units at its banks, which perform only one MAC per
+weight read (Section 5.6). At their peak rate, the 169 GMAC of a
+[2,3,3,4] inference take at least 8.7× the time of our accelerator.
+Because LPDDR5X-PIM reads each weight in its bank once per
+MAC, these reads also take more energy than our whole inference.
+Of the designs compared, only our accelerator thus combines
+the fewest bit-steps with a time close to their transfer time.
+7.7
+Programmability Across Models
+Other action heads. As Figure 10a shows, the same RTL runs
+[2,3,3,4] on GR00T N1.5 in 5.16 ms per inference and [2,5] on 𝜋0.5
+at two flow steps in 2.70 ms. One accelerator thus runs action heads
+of different sizes and architectures, each above 50 Hz.
+Vision-language model. Our accelerator’s fabric is flexible
+enough to also run System 2, the vision-language model of the
+policy. We ran the System 2 of GR00T N1.6 on the RTL with 8-bit
+weights and INT8 inputs, bit-exact against the executable model of
+the accelerator. On the accelerator, a policy inference runs System 2
+followed by the action head at [2,3,3,4]. Figure 13 compares these
+inferences with NVIDIA’s VLM backbone and the released BF16
+head on Thor.
+On a RoboCasa GR1 call with one camera, the accelerator runs
+the action head 3.9× faster than the released BF16 head on Thor.
+System 2, however, takes 1.2× as long as on Thor. System 2 is
+compute-bound, so Thor is faster because it has much higher peak
+compute. On the one-camera call, a policy inference costs 405 mJ
+on the accelerator, against 2944 mJ above idle power on Thor.
+10
+
+
+0 5 10
+(a) ms
+per inference
+Per-width copies
+In-DRAM, uncoded
+In-DRAM, coded
+8.02
+11.43
+8.22
+0
+25
+50
+75
+(b) DRAM mJ
+per inference
+44
+76
+66
+0
+25
+50
+75
+(c) Thousand gates
+per DRAM bank
+none
+19
+63
+HBM-PIM
+0
+2
+4
+(d) GB for
+widths 2–8
+3.3
+0.85
+0.85
+Bank
+Standby
+I/O
+Requantizer
+Encoder
+Other traffic
+Figure 14: Quantization-in-DRAM against per-width copies.
+At an action-head rate of 50 Hz, [2,3,3,4] on the one-camera call
+leaves 12.1 ms of every 20 ms period free. Since System 2 can pause
+at layer boundaries, its inference fits into the free time of four
+action-head inferences. System 2 can thus run at 12.5 Hz, faster
+than the 10 Hz or less of dual-system policies [21, 67, 78, 97].
+Insight 9. By speeding up the action head, the per-step precision
+frees a programmable accelerator to also run System 2 between
+action-head inferences.
+7.8
+Quantization-in-DRAM
+On one [2,3,3,4] inference of GR00T N1.6, Figure 14 compares two
+options of Quantization-in-DRAM with the per-width copies that
+all other experiments read. With requantizers alone, the DRAM
+transfers every width uncoded. With an encoder behind every
+requantizer, it sends the weights in the Huffman code of the per-
+width copies. We verified that the RTL of the requantizer and the
+encoder is bit-exact with these copies and synthesized it in TSMC
+7 nm at the 3.75 ns column cycle of LPDDR5X-8533. We scaled both
+the area of the netlists, placed at 60% density, and their energy by
+the 10× lower density of logic in a DRAM process (Section 5.6).
+Only with the encoders does Quantization-in-DRAM keep the
+time per inference close to that of the per-width copies. Without
+them, every width crosses the interface uncoded, so an inference
+takes 1.4× as long, as Figure 14a shows. With them, an inference
+takes 2.4% longer, since the banks’ tags and padding add 3.6% to the
+DRAM traffic. In a DRAM timing model that we validated against
+Ramulator 2, the reads of the 8-bit copy inside the banks add another
+0.4%. With the encoders, Quantization-in-DRAM raises the DRAM
+energy by 51% (Figure 14b), mainly because every bank reads all 8
+bits of every weight instead of only the coded bits.
+Samsung’s HBM-PIM [48], a fabricated chip, places logic at each
+bank of its 20 nm DRAM. Figure 14c shows that the requantizer and
+encoder of a bank need fewer gates than this logic. Their critical
+paths in 7 nm take at most 0.88 ns of the column cycle, so they meet
+it even with three times slower DRAM transistors [17]. The requan-
+tizers and encoders take 5.0% of a two-channel 16 Gb LPDDR5X die
+of 37 mm2 [16], or 19.4% at the area per gate of HBM-PIM. A DRAM
+die can therefore hold a requantizer and an encoder at every bank.
+With encoders at the banks, Quantization-in-DRAM thus trades
+DRAM energy and die area for capacity, at almost the time per
+inference of the per-width copies.
+8
+Related Work
+Quantized robot policies. Prior work quantizes current VLAs
+to uniform 4-bit weights, with plain rounding and with calibrated
+methods [12, 31, 35, 87, 96]. SACQ [46] preserves success on LIBERO
+at 2 bits per weight with vector codebooks trained for every suite.
+BitVLA [86] trains a ternary backbone and ActQuant [2] rounds
+the backbone to about 3 bits from calibration demonstrations, both
+with a full-precision action head. QbD-VLA [95] selects the widths
+of layer groups by short closed-loop rollouts. QuantWAMs [105]
+and DyQ-VLA [104] vary the activation precision per step and per
+policy query, respectively, and SteerQuant [88] keeps static 4-bit
+weights. None of these works varies the weight width over the flow
+steps of one inference. The methods that hold below 4 bits train or
+calibrate on target data, whereas our schedules need neither.
+Time-aware quantization of diffusion models. Quantizers
+for image diffusion calibrate activation ranges per timestep [51, 71,
+77, 90], mix precision per layer [101] or choose the steps together
+with a per-layer precision [4, 83]. PTQD [30] raises the activation
+width over the steps, and AdaTSQ [100] and MASQ [44] vary it per
+step or per image region. Our rising widths are those of the weights,
+which determine the DRAM traffic at batch size one. TMPDiff [49]
+and TASQ [28] vary the weight precision per step on images (Sec-
+tion 3.2). The analysis of TASQ sets the Jacobian of the denoiser
+to zero and thereby ignores how the remaining steps attenuate an
+early error. Let It Be Simple [15] shows that an action head’s flow
+attenuates differences in its starting noise, whereas the per-step
+gains and the rising widths derived from them are new.
+Step counts. One or a few flow steps often suffice for action
+heads [15, 18, 82], depending on how many actions run per in-
+ference [82, 98]. Several works choose the step count per infer-
+ence [27, 29] or distill the head to one or two steps [59, 89]. We
+treat the step count, like the widths, as a parameter.
+Accelerators for robot policies. SpecVLA [70] verifies long
+chunks with the same network applied to quantized changes of its
+inputs. DaDu-Corki [33] predicts a trajectory per inference, so that
+the VLA runs less often. Both run every full inference of the policy
+on a GPU. SpecVLA’s hardware runs the verifier, and DaDu-Corki’s
+converts the predicted trajectories into joint torques. They reduce
+the number of inferences, which is orthogonal to reducing the time
+and energy of each.
+Bit-serial and precision-scalable arrays. Bit-serial and bit-
+flexible designs scale their cycles with the operand widths [3, 40, 47,
+72–74, 84]. BitMoD [14] serializes the weights of language models at
+3 to 8 bits, and low-bit formats adapt the data type to the values [25,
+26]. Run-time partitioning divides an array between tenants by their
+deadlines [24]. To the best of our knowledge, no design partitions
+an array at run time by what a memory-bound stream needs.
+Logic in memory. Processing-in-memory DRAMs compute
+beside the banks with one MAC per weight read [34, 45, 48, 53] or
+evaluate lookup tables inside the sub-arrays [20]. An extension of
+HBM-PIM [41] and StreamDQ [38] widen quantized weights to 16
+bits, for the MAC units or in the logic base die of an HBM stack.
+JIT-Q [36] quantizes a master copy with the PIM units of HBM
+and writes the result back for the GPU. In a CXL memory device,
+SmartQuant [93] and TRACE [92] read only the top bits of one
+stored copy, which TRACE compresses with a generic codec. The
+closest DRAM system is WIFiV-LPDDR [32], a modeled LPDDR
+that narrows a stored 8-bit copy on read by a clamp and a shift. It
+neither specifies where in the DRAM this narrowing takes place
+nor encodes the weights, whereas we place a requantizer and an
+encoder at every bank.
+11
+
+
+9
+Conclusion and Future Work
+Every flow step of a robot action head re-reads all of its weights but
+applies each to only about fifty tokens, so its inference is memory-
+bound. Because later flow steps attenuate early quantization er-
+rors, the head’s weight precision should rise over the steps. With
+plain per-channel rounding, [2,3,3,4] preserves the closed-loop suc-
+cess of three policies, but current GPU kernels cannot exploit this
+per-step precision due to fixed overheads. We therefore propose a
+programmable accelerator whose time and energy scale with the
+bit-steps, because it keeps its DRAM link saturated throughout an
+inference at every width. It decodes entropy-coded weights at the
+DRAM rate for eight bit-serial sub-arrays, which also run the VLM.
+A run-time allocator divides them between the linear layers and
+the attention, whose compute requirements change with the width
+and the model. Quantization-in-DRAM, with a requantizer and an
+encoder at each bank, lets one stored 8-bit copy serve every width.
+With a copy per width and 50% of Thor’s memory bandwidth, the
+accelerator runs GR00T N1.6 at [2,3,3,4]. An inference then com-
+pletes 1.7× faster than on Thor in NVFP4, at 9.1× less energy and
+equal closed-loop success. On a one-camera call, one inference per
+action at 50 Hz takes 39% of each control period and leaves time to
+run the VLM at 12.5 Hz.
+Future work. A run-time selector such as that of VQVLA [79]
+could set the widths of every inference as the battery, the thermal
+budget or the task demands.
+Limitations. Every closed-loop result comes from simulation,
+and quantized policies that hold in simulation have lost success on
+real robots [95, 96]. Quantization-in-DRAM needs a DRAM mode
+that no commercial part offers. The energy of the chip comes from
+VCD-annotated netlists with a clock tree but before placement and
+routing, and that of the DRAM from a model.
+Acknowledgments
+This project has been partly funded by the European Research
+Council (ERC) under grant agreement No. 101088865, the Flanders
+AI Research Program, Research Foundation Flanders (FWO) under
+grant No. 1S37125N, and long-term structural Methusalem funding
+by the Flemish Government. We acknowledge NVIDIA Corporation
+for awarding GPU hardware through its Academic Grant Program.
+References
+[1] 0xAnkitSingh. 2026. GR00T-N1.6-LIBERO. Hugging Face model repository.
+https://huggingface.co/0xAnkitSingh/GR00T-N1.6-LIBERO
+[2] Arash Akbari, Arman Akbari, Masih Eskandar, Qitao Tan, Yixiao Chen, Jingwu
+Luo, Bertha Pangaribuan, Liyun Zhang, Jennifer Dy, Geng Yuan, Xue Lin,
+Gaowen Liu, Stratis Ioannidis, and Yanzhi Wang. 2026. ActQuant: Sub-4-bit
+Action-Guided Quantization for Vision-Language-Action Models. In Advances
+in Neural Information Processing Systems (NeurIPS).
+[3] Jorge Albericio, Alberto Delmás, Patrick Judd, Sayeh Sharify, Gerard O’Leary,
+Roman Genov, and Andreas Moshovos. 2017. Bit-pragmatic deep neural network
+computing. In Proceedings of the 50th Annual IEEE/ACM International Symposium
+on Microarchitecture (MICRO). ACM, New York, NY, USA, 382–394. doi:10.1145/
+3123939.3123982
+[4] Farhana Amin, Sabiha Afroz, Kanchon Gharami, Mona Moghadampanah, and
+Dimitrios S. Nikolopoulos. 2026. DiffPro: Joint Timestep and Layer-Wise Preci-
+sion Optimization for Efficient Diffusion Inference. In Computer Vision – ECCV
+2026 (Lecture Notes in Computer Science, Vol. 17017). Springer Nature Switzerland,
+Cham, 112–129. doi:10.1007/978-3-032-37252-9_7
+[5] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina
+Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman.
+2024. QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs. In Advances in
+Neural Information Processing Systems (NeurIPS), Vol. 37. Curran Associates, Inc.,
+Red Hook, NY, USA, 100213–100240. doi:10.52202/079017-3180
+[6] Jonathan Bachrach, Huy Vo, Brian Richards, Yunsup Lee, Andrew Waterman,
+Rimas Avižienis, John Wawrzynek, and Krste Asanović. 2012. Chisel: construct-
+ing hardware in a Scala embedded language. In Proceedings of the 49th Annual
+Design Automation Conference (DAC). ACM, New York, NY, USA, 1216–1225.
+doi:10.1145/2228360.2228584
+[7] Johan Bjorck, Valts Blukis, Fernando Castañeda, Nikita Cherniadev, Xingye
+Da, Runyu Ding, Linxi “Jim” Fan, Yu Fang, Dieter Fox, Fengyuan Hu, Spencer
+Huang, Joel Jang, Xiaowei Jiang, Kaushil Kundalia, Jan Kautz, Zhiqi Li, Kevin Lin,
+Zongyu Lin, Loic Magne, Yunze Man, Ajay Mandlekar, Avnish Narayan, Soroush
+Nasiriany, Scott Reed, You Liang Tan, Guanzhi Wang, Jing Wang, Qi Wang,
+Shihao Wang, Jiannan Xiang, Yuqi Xie, Yinzhen Xu, Seonghyeon Ye, Zhiding Yu,
+Yizhou Zhao, Zhe Zhang, Ruijie Zheng, and Yuke Zhu. 2025. GR00T N1.5: An
+Improved Open Foundation Model for Generalist Humanoid Robots. NVIDIA
+GEAR research page. https://research.nvidia.com/labs/gear/gr00t-n1_5/
+[8] Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess,
+Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Manuel Y.
+Galliker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szymon
+Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey Levine, Adrian Li-Bell,
+Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi,
+Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan
+Vuong, Homer Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky.
+2025. 𝜋0.5: a Vision-Language-Action Model with Open-World Generalization.
+In Proceedings of The 9th Conference on Robot Learning (CoRL) (Proceedings of
+Machine Learning Research, Vol. 305). PMLR, Seoul, Korea, 17–40.
+[9] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea
+Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon
+Jakubczak, Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mohith
+Mothukuri, Suraj Nair, Karl Pertsch, Lucy Shi, Laura Smith, James Tanner, Quan
+Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. 2025. 𝜋0: A Vision-
+Language-Action Flow Model for General Robot Control. In Robotics: Science
+and Systems XXI (RSS). Robotics: Science and Systems Foundation, Los Angeles,
+CA, USA. doi:10.15607/rss.2025.xxi.010
+[10] Kevin Black, Manuel Y. Galliker, and Sergey Levine. 2025. Real-Time Execution
+of Action Chunking Flow Policies. In Advances in Neural Information Processing
+Systems (NeurIPS), Vol. 38. Curran Associates, Inc., Red Hook, NY, USA, 37596–
+37620. doi:10.52202/085713-1122
+[11] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Joseph Dabis,
+Chelsea Finn, Keerthana Gopalakrishnan, Karol Hausman, Alexander Herzog,
+Jasmine Hsu, Julian Ibarz, Brian Ichter, Alex Irpan, Tomas Jackson, Sally Jes-
+month, Nikhil Joshi, Ryan Julian, Dmitry Kalashnikov, Yuheng Kuang, Isabel
+Leal, Kuang-Huei Lee, Sergey Levine, Yao Lu, Utsav Malla, Deeksha Manjunath,
+Igor Mordatch, Ofir Nachum, Carolina Parada, Jodilyn Peralta, Emily Perez,
+Karl Pertsch, Jornell Quiambao, Kanishka Rao, Michael Ryoo, Grecia Salazar,
+Pannag Sanketi, Kevin Sayed, Jaspiar Singh, Sumedh Sontakke, Austin Stone,
+Clayton Tan, Huong Tran, Vincent Vanhoucke, Steve Vega, Quan Vuong, Fei Xia,
+Ted Xiao, Peng Xu, Sichun Xu, Tianhe Yu, and Brianna Zitkovich. 2023. RT-1:
+Robotics Transformer for Real-World Control at Scale. In Robotics: Science and
+Systems XIX (RSS). Robotics: Science and Systems Foundation, Daegu, Republic
+of Korea. doi:10.15607/rss.2023.xix.025
+[12] Syed Umer Bukhari, Magnus Almgren, and Ahmed Ali-Eldin. 2026. LoopQ:
+Fair, Closed-Loop Evaluation of Quantized Vision-Language-Action Models.
+arXiv:2611.05093
+[13] Remi Cadene, Simon Alibert, Francesco Capuano, Michel Aractingi, Adil Zoui-
+tine, Pepijn Kooijmans, Jade Choghari, Martino Russi, Caroline Pascal, Steven
+Palma, Dana Aubakirova, Mustafa Shukor, Jess Moss, Alexander Soare, Quentin
+Lhoest, Quentin Gallouédec, and Thomas Wolf. 2026. LeRobot: An Open-Source
+Library for End-to-End Robot Learning. In The Fourteenth International Confer-
+ence on Learning Representations (ICLR). 122398–122417. arXiv:2602.22818
+[14] Yuzong Chen, Ahmed F. AbouElhamayed, Xilai Dai, Yang Wang, Marta An-
+dronic, George A. Constantinides, and Mohamed S. Abdelfattah. 2025. BitMoD:
+Bit-serial Mixture-of-Datatype LLM Acceleration. In Proceedings of the IEEE
+International Symposium on High Performance Computer Architecture (HPCA).
+IEEE, Piscataway, NJ, USA, 1082–1097. doi:10.1109/hpca61900.2025.00084
+[15] Yitong Chen, Shiduo Zhang, Jingjing Gong, and Xipeng Qiu. 2026.
+Let It
+Be Simple: One-Step Action Generation for Vision-Language-Action Models.
+arXiv:2606.05737
+[16] Jeongdong Choe. 2025. Memory Technology Trends and Outlook: DRAM
+and NAND. Presentation at the Future of Memory and Storage conference
+(FMS).
+https://files.futurememorystorage.com/proceedings/2025/20250807_
+DRAM-304-1_Jeongdong-Choe_Short-version.pdf
+[17] Fabrice Devaux. 2019. The True Processing In Memory Accelerator. In Proceed-
+ings of the IEEE Hot Chips 31 Symposium (HCS). IEEE, Piscataway, NJ, USA, 1–24.
+doi:10.1109/HOTCHIPS.2019.8875680
+[18] Jiawei Fan, Sifeng Wang, Yuqing Hou, and Anbang Yao. 2026.
+Kinematic
+MeanFlow: One-Step Action Generation Policy for Robotic Foundation Models.
+arXiv:2610.00864
+12
+
+
+[19] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Pengfang Qian, Li Ji,
+Xinzhe He, Shiduo Zhang, Zhaoye Fei, Jinlan Fu, Jingjing Gong, and Xipeng Qiu.
+2026. LIBERO-Plus: A Progressive Robustness Benchmark for Visual-Language-
+Action Models. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). IEEE, Piscataway, NJ, USA, 38574–38583.
+[20] João Dinis Ferreira, Gabriel Falcao, Juan Gómez-Luna, Mohammed Alser, Lois
+Orosa, Mohammad Sadrosadati, Jeremie S. Kim, Geraldo F. Oliveira, Taha
+Shahroodi, Anant Nori, and Onur Mutlu. 2022. pLUTo: Enabling Massively
+Parallel Computation in DRAM via Lookup Tables. In Proceedings of the 55th
+IEEE/ACM International Symposium on Microarchitecture (MICRO). IEEE, Piscat-
+away, NJ, USA, 900–919. doi:10.1109/MICRO56248.2022.00067
+[21] Figure AI. 2025. Helix: A Vision-Language-Action Model for Generalist Hu-
+manoid Control. Technical report. https://www.figure.ai/news/helix
+[22] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2023. OPTQ:
+Accurate Quantization for Generative Pre-trained Transformers. In The Eleventh
+International Conference on Learning Representations (ICLR). OpenReview.net,
+Kigali, Rwanda.
+[23] GEAR Team, Allison Azzolini, Johan Bjorck, Valts Blukis, Fernando Castañeda,
+Rahul Chand, Yan Chang, Danyi Chen, Nikita Cherniadev, Xingye Da, Runyu
+Ding, Shunjia Ding, Hassan Eslami, Linxi “Jim” Fan, Yu Fang, Max Fu, Shenyuan
+Gao, Yunhao Ge, Fengyuan Hu, Spencer Huang, Joel Jang, Xiaowei Jiang, Yunfan
+Jiang, Ryan Julian, Kaushil Kundalia, Jan Kautz, Zhiqi Li, Kevin Lin, Wei Liu,
+Runyu Lu, Zhengyi Luo, Loic Magne, Yunze Man, Ajay Mandlekar, Abhishek
+Mishra, Avnish Narayan, Connor Pederson, Nadun Ranawaka, Scott Reed, Sunil
+Srinivasa, You Liang Tan, Guanzhi Wang, Jing Wang, Qi Wang, Shihao Wang,
+Jimmy Wu, Yubo Wu, Yuqi Xie, Tianyi Xiong, Mengda Xu, Yinzhen Xu, Fu-En
+Yang, Seonghyeon Ye, Zhiding Yu, K.R. Zentner, Zhe Zhang, Kaiyuan Zheng,
+Ruijie Zheng, and Yuke Zhu. 2025. GR00T N1.6: An Improved Open Foundation
+Model for Generalist Humanoid Robots. NVIDIA GEAR research page. https:
+//research.nvidia.com/labs/gear/gr00t-n1_6/
+[24] Soroush Ghodrati, Byung Hoon Ahn, Joon Kyung Kim, Sean Kinzer, Brahmen-
+dra Reddy Yatham, Navateja Alla, Hardik Sharma, Mohammad Alian, Eiman
+Ebrahimi, Nam Sung Kim, Cliff Young, and Hadi Esmaeilzadeh. 2020. Planaria:
+Dynamic Architecture Fission for Spatial Multi-Tenant Acceleration of Deep
+Neural Networks. In Proceedings of the 53rd Annual IEEE/ACM International
+Symposium on Microarchitecture (MICRO). IEEE, Piscataway, NJ, USA, 681–697.
+doi:10.1109/micro50266.2020.00062
+[25] Cong Guo, Jiaming Tang, Weiming Hu, Jingwen Leng, Chen Zhang, Fan Yang,
+Yunxin Liu, Minyi Guo, and Yuhao Zhu. 2023. OliVe: Accelerating Large Lan-
+guage Models via Hardware-friendly Outlier-Victim Pair Quantization. In Pro-
+ceedings of the 50th Annual International Symposium on Computer Architecture
+(ISCA). ACM, New York, NY, USA, 1–15. doi:10.1145/3579371.3589038
+[26] Cong Guo, Chen Zhang, Jingwen Leng, Zihan Liu, Fan Yang, Yunxin Liu, Minyi
+Guo, and Yuhao Zhu. 2022. ANT: Exploiting Adaptive Numerical Data Type for
+Low-bit Deep Neural Network Quantization. In Proceedings of the 55th IEEE/ACM
+International Symposium on Microarchitecture (MICRO). IEEE, Piscataway, NJ,
+USA, 1414–1433. doi:10.1109/micro56248.2022.00095
+[27] Sunghwan Han, Youngtae Han, and Youngmin Yi. 2026. AdaVLA: Adaptive
+Step Flow Matching for Training-free Acceleration of Vision-Language-Action
+Models. In Proceedings of the IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS). arXiv:2608.29208
+[28] Seokho Han, Dongwei Wang, Jinhee Kim, Yiran Chen, Kang Eun Jeon, Huanrui
+Yang, and Jong Hwan Ko. 2026. TASQ: Temporal-Adaptive Bit Sparsification
+Quantization for Diffusion Models. arXiv:2608.03057
+[29] Sicheng He, Yi Pan, Qiuting Yu, Jiaming Huang, Qi Lu, Shuyan Wu, Hongyan
+Feng, Xuanyu Liu, Jun Zhang, Jie Zhang, Wenqi Zhang, Xuhong Zhang, and
+Jianwei Yin. 2026. VLA-Rolling: Fewer Denoising Steps, Better Control via
+Adaptive Action Reuse. arXiv:2610.25043
+[30] Yefei He, Luping Liu, Jing Liu, Weijia Wu, Hong Zhou, and Bohan Zhuang. 2023.
+PTQD: Accurate Post-Training Quantization for Diffusion Models. In Advances
+in Neural Information Processing Systems (NeurIPS), Vol. 36. Curran Associates,
+Inc., Red Hook, NY, USA, 13237–13249. doi:10.52202/075280-0580
+[31] Hung T. Ho, Khanh D. Nguyen, Quang D. Nguyen, Thanh Q. Duong, Ngan
+Le, Meng Guo, Vien A. Ngo, and An T. Le. 2026. FoldQuantVLA: Native Low-
+Bit Quantization of Vision-Language-Action Models via Consistent Folding.
+arXiv:2609.24433
+[32] Wei-Hsing Huang, Kiseok Lee, Ming-Yen Lee, Weiyu Sun, Cheng-Jhih Shih,
+Gayatri Tanksali, Arpit Khandelwal, Pin-Jun Chen, Yingyan Celine Lin, and
+Shimeng Yu. 2026. Hardware Acceleration of Block-Diffusion LLM for Edge
+Devices. arXiv:2609.01084
+[33] Yiyang Huang, Yuhui Hao, Bo Yu, Feng Yan, Yuxin Yang, Feng Min, Yinhe Han,
+Lin Ma, Shaoshan Liu, Qiang Liu, and Yiming Gan. 2025. DaDu-Corki: Algorithm-
+Architecture Co-Design for Embodied AI-powered Robotic Manipulation. In
+Proceedings of the 52nd Annual International Symposium on Computer Architec-
+ture (ISCA). ACM, New York, NY, USA, 327–343. doi:10.1145/3695053.3731099
+[34] Karam Hwang, Yoonah Paik, Sukhan Lee, Taeyang Jeong, Wontak Han,
+Byeongho Kim, Sanghoon Cha, Hyeonsu Kim, Seyoon Kong, Jihyun Choi, Duk-
+sung Kim, Doohee Hwang, Jangseok Choi, and Kyomin Sohn. 2026. Samsung
+LPDDR5X-PIM: World’s First LPDDR based Processing-In-Memory (PIM) So-
+lution for AI Inference. Presentation at Hot Chips: A Symposium on High
+Performance Chips (HC38). https://hc2026.hotchips.org/
+[35] Jin Hyun, Jung Gyu Min, Gyuhyun Jung, and Youngjoo Lee. 2026. CHASE-VLA:
+Post-Training Quantization Framework for Vision-Language-Action Models
+with Chunk-Aware Scale Estimation. arXiv:2610.02666 Accepted to ACCV 2026.
+[36] Mohamed Assem Ibrahim, Shaizeen Aga, Ada Li, Suchita Pati, and Mahzabeen
+Islam. 2024. JIT-Q: Just-in-time Quantization with Processing-In-Memory for
+Efficient ML Training. In Proceedings of Machine Learning and Systems (MLSys),
+Vol. 6. MLSys, Santa Clara, CA, USA, 46–59.
+[37] JEDEC. 2023. Low Power Double Data Rate (LPDDR) 5/5X. JEDEC Standard
+JESD209-5C. https://www.jedec.org/standards-documents/docs/jesd209-5c
+[38] Minki Jeong, Daegun Yoon, Soohong Ahn, Seungyong Lee, Nameun Kang,
+Hyeonseok Ju, Ieryung Park, Joonseop Sim, Youngpyo Joo, and Hoshik Kim.
+2026. StreamDQ: Near-Memory Weight DeQuantization in Custom HBM for
+Scalable AI Inference Acceleration. arXiv:2607.08993
+[39] Norman P. Jouppi, Doe Hyun Yoon, Matthew Ashcraft, Mark Gottscho,
+Thomas B. Jablin, George Kurian, James Laudon, Sheng Li, Peter Ma, Xiaoyu Ma,
+Thomas Norrie, Nishant Patil, Sushma Prasad, Cliff Young, Zongwei Zhou, and
+David Patterson. 2021. Ten Lessons From Three Generations Shaped Google’s
+TPUv4i: Industrial Product. In Proceedings of the ACM/IEEE 48th Annual Interna-
+tional Symposium on Computer Architecture (ISCA). IEEE, Piscataway, NJ, USA,
+1–14. doi:10.1109/ISCA52012.2021.00010
+[40] Patrick Judd, Jorge Albericio, Tayler Hetherington, Tor M. Aamodt, and Andreas
+Moshovos. 2016. Stripes: Bit-serial deep neural network computing. In Proceed-
+ings of the 49th Annual IEEE/ACM International Symposium on Microarchitecture
+(MICRO). IEEE, Piscataway, NJ, USA, 1–12. doi:10.1109/micro.2016.7783722
+[41] Byeori Kim, Changhun Lee, Gwangsun Kim, and Eunhyeok Park. 2025. Cost-
+Effective Extension of DRAM-PIM for Group-Wise LLM Quantization. IEEE
+Computer Architecture Letters 24, 1 (2025), 53–56. doi:10.1109/LCA.2025.3532682
+[42] Jin Hyun Kim, Yuhwan Ro, Jinin So, Sukhan Lee, Shin-haeng Kang, YeonGon
+Cho, Hyeonsu Kim, Byeongho Kim, Kyungsoo Kim, Sangsoo Park, Jin-Seong
+Kim, Sanghoon Cha, Won-Jo Lee, Jin Jung, Jong-Geon Lee, Jieun Lee, JoonHo
+Song, Seungwon Lee, Jeonghyeon Cho, Jaehoon Yu, and Kyomin Sohn. 2023.
+Samsung PIM/PNM for Transformer Based AI: Energy Efficiency on PIM/PNM
+Cluster. In Proceedings of the IEEE Hot Chips 35 Symposium (HCS). IEEE, Piscat-
+away, NJ, USA, 1–31. doi:10.1109/HCS59251.2023.10254711
+[43] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakr-
+ishna, Suraj Nair, Rafael Rafailov, Ethan P Foster, Pannag R Sanketi, Quan
+Vuong, Thomas Kollar, Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn. 2025. OpenVLA: An Open-Source Vision-
+Language-Action Model. In Proceedings of The 8th Conference on Robot Learning
+(CoRL) (Proceedings of Machine Learning Research, Vol. 270). PMLR, Munich,
+Germany, 2679–2713.
+[44] Seeyeon Kim, Jaehun Lee, Sungyeob Yoo, and Joo-Young Kim. 2026. MASQ:
+Accelerating Masked Diffusion via Stage-Wise Multi-Precision Quantization. In
+Proceedings of the 63rd ACM/IEEE Design Automation Conference (DAC). ACM,
+New York, NY, USA, 1–7. doi:10.1145/3770743.3804133
+[45] Yongkee Kwon, Vladimir Kornijcuk, Nahsung Kim, Woojae Shin, Jongsoon
+Won, Minkyu Lee, Hyunha Joo, Haerang Choi, Guhyun Kim, Byeongju An,
+Jeongbin Kim, Jaewook Lee, Ilkon Kim, Jaehan Park, Chanwook Park, Yosub
+Song, Byeongsu Yang, Hyungdeok Lee, Seho Kim, Daehan Kwon, Seongju Lee,
+Kyuyoung Kim, Sanghoon Oh, Joonhong Park, Gimoon Hong, Dongyoon Ka,
+Kyudong Hwang, Jeongje Park, Kyeongpil Kang, Jungyeon Kim, Junyeol Jeon,
+Myeongjun Lee, Minyoung Shin, Minhwan Shin, Jaekyung Cha, Changson
+Jung, Kijoon Chang, Chunseok Jeong, Euicheol Lim, Il Park, and Junhyun Chun.
+2022. System Architecture and Software Stack for GDDR6-AiM. In Proceedings
+of the IEEE Hot Chips 34 Symposium (HCS). IEEE, Piscataway, NJ, USA, 1–25.
+doi:10.1109/HCS55958.2022.9895629
+[46] Haesung Lee and Insu Han. 2026. SACQ: Structure-Aware Codebook Quantiza-
+tion for Ultra-Low-Bit Vision-Language-Action Models. arXiv:2610.41408
+[47] Jinmook Lee, Changhyeon Kim, Sanghoon Kang, Dongjoo Shin, Sangyeob Kim,
+and Hoi-Jun Yoo. 2019. UNPU: An Energy-Efficient Deep Neural Network
+Accelerator With Fully Variable Weight Bit Precision. IEEE Journal of Solid-State
+Circuits 54, 1 (2019), 173–185. doi:10.1109/jssc.2018.2865489
+[48] Sukhan Lee, Shin-haeng Kang, Jaehoon Lee, Hyeonsu Kim, Eojin Lee, Seungwoo
+Seo, Hosang Yoon, Seungwon Lee, Kyounghwan Lim, Hyunsung Shin, Jinhyun
+Kim, Seongil O, Anand Iyer, David Wang, Kyomin Sohn, and Nam Sung Kim.
+2021. Hardware Architecture and Software Stack for PIM Based on Commer-
+cial DRAM Technology: Industrial Product. In Proceedings of the ACM/IEEE
+48th Annual International Symposium on Computer Architecture (ISCA). IEEE,
+Piscataway, NJ, USA, 43–56. doi:10.1109/ISCA52012.2021.00013
+[49] Basile Lewandowski, Simon Kurz, Aditya Shankar, Robert Birke, Jian-Jia Chen,
+and Lydia Y. Chen. 2026. TMPDiff: Temporal Mixed-Precision for Diffusion
+Models. arXiv:2603.14062
+[50] Xuanlin Li, Kyle Hsu, Jiayuan Gu, Oier Mees, Karl Pertsch, Homer Rich Walke,
+Chuyuan Fu, Ishikaa Lunawat, Isabel Sieh, Sean Kirmani, Sergey Levine, Jiajun
+13
+
+
+Wu, Chelsea Finn, Hao Su, Quan Vuong, and Ted Xiao. 2025. Evaluating Real-
+World Robot Manipulation Policies in Simulation. In Proceedings of The 8th
+Conference on Robot Learning (CoRL) (Proceedings of Machine Learning Research,
+Vol. 270). PMLR, Munich, Germany, 3705–3728.
+[51] Xiuyu Li, Yijiang Liu, Long Lian, Huanrui Yang, Zhen Dong, Daniel Kang,
+Shanghang Zhang, and Kurt Keutzer. 2023. Q-Diffusion: Quantizing Diffusion
+Models. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV). IEEE, Piscataway, NJ, USA, 17489–17499. doi:10.1109/iccv51070.
+2023.01608
+[52] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen
+Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. AWQ:
+Activation-aware Weight Quantization for On-Device LLM Compression and
+Acceleration. In Proceedings of Machine Learning and Systems (MLSys), Vol. 6.
+MLSys, Santa Clara, CA, USA, 87–100.
+[53] Ye Lin, Chao Fang, Xiaoyong Song, Qi Wu, Anying Jiang, Yichuan Bai, and Li
+Du. 2026. CD-PIM: A High-Bandwidth and Compute-Efficient LPDDR5-Based
+PIM for Low-Batch LLM Acceleration on Edge-Device. In Proceedings of the
+Design, Automation and Test in Europe Conference (DATE). IEEE, Piscataway, NJ,
+USA, 1–7. doi:10.23919/DATE69613.2026.11539558
+[54] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and
+Matthew Le. 2023. Flow Matching for Generative Modeling. In The Eleventh
+International Conference on Learning Representations (ICLR). OpenReview.net,
+Kigali, Rwanda.
+[55] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and
+Peter Stone. 2023. LIBERO: Benchmarking Knowledge Transfer for Lifelong
+Robot Learning. In Advances in Neural Information Processing Systems (NeurIPS),
+Datasets and Benchmarks Track, Vol. 36. Curran Associates, Inc., Red Hook, NY,
+USA, 44776–44791. doi:10.52202/075280-1939
+[56] Liangkai Liu, Weisong Shi, and Kang G. Shin. 2025. Power-Efficient Autonomous
+Mobile Robots. arXiv:2511.20467
+[57] Xingchao Liu, Chengyue Gong, and Qiang Liu. 2023. Flow Straight and Fast:
+Learning to Generate and Transfer Data with Rectified Flow. In The Eleventh
+International Conference on Learning Representations (ICLR). OpenReview.net,
+Kigali, Rwanda.
+[58] Zheng Liu, Zeyu Guo, Zihan Liu, Anbang Wu, Han Zhao, Fangxin Liu, Zhezhi
+He, Yinhe Han, Jingwen Leng, Minyi Guo, Yiming Gan, and Yu Feng. 2026.
+Deltoris: Enabling Real-time VLA Inference in Embodied AI via Bit-level Sparsity
+and Speculative Inference. In Proceedings of the 59th IEEE/ACM International
+Symposium on Microarchitecture (MICRO). arXiv:2608.04428
+[59] Wuyang Luan, Junhui Li, Weiguang Zhao, Rui Ma, and Tieru Wu. 2026.
+SnapFlow: One-Step Action Generation for Flow-Matching VLAs via Progressive
+Self-Distillation. arXiv:2604.05656
+[60] Haocong Luo, Yahya Can Tuğrul, F. Nisa Bostancı, Ataberk Olgun, A. Giray
+Yağlıkçı, and Onur Mutlu. 2024. Ramulator 2.0: A Modern, Modular, and Exten-
+sible DRAM Simulator. IEEE Computer Architecture Letters 23, 1 (2024), 112–116.
+doi:10.1109/lca.2023.3333759
+[61] Micron Technology. 2025. 315b, 441b, 561b, x32, x64 LPDDR5X SDRAM (Y52Q).
+Production data sheet, Rev. G.
+https://mm.digikey.com/Volume0/opasdata/
+d220001/medias/docus/8885/315b-441b-561b-y52q-sdp-ddp-lpddr5x.pdf
+[62] Pranav Ajit Nair, Puranjay Datta, Jeff Dean, Prateek Jain, and Aditya Kusupati.
+2025. Matryoshka Quantization. In Proceedings of the 42nd International Con-
+ference on Machine Learning (ICML) (Proceedings of Machine Learning Research,
+Vol. 267). PMLR, 45484–45506.
+[63] Soroush Nasiriany, Abhiram Maddukuri, Lance Zhang, Adeet Parikh, Aaron Lo,
+Abhishek Joshi, Ajay Mandlekar, and Yuke Zhu. 2024. RoboCasa: Large-Scale
+Simulation of Household Tasks for Generalist Robots. In Robotics: Science and
+Systems XX (RSS). Robotics: Science and Systems Foundation, Delft, Netherlands.
+doi:10.15607/rss.2024.xx.050
+[64] NVIDIA. 2026. Isaac GR00T. GitHub repository. https://github.com/NVIDIA/
+Isaac-GR00T/blob/n1d6/scripts/deployment/README.md
+[65] NVIDIA. 2026. NVIDIA Jetson Thor. Product page. https://www.nvidia.com/en-
+us/autonomous-machines/embedded-systems/jetson-thor/
+[66] NVIDIA, Felix Abecassis, Anjulie Agrusa, Dong Ahn, Jonah Alben, Stefania Al-
+borghetti, Michael Andersch, Sivakumar Arayandi, Alexis Bjorlin, Aaron Blake-
+man, Evan Briones, Ian Buck, Bryan Catanzaro, Muya Chang, Jinhang Choi,
+Mike Chrzanowski, Eric Chung, Victor Cui, Steve Dai, Bita Darvish Rouhani,
+Carlo del Mundo, Deena Donia, Burc Eryilmaz, Henry Estela, Abhinav Goel,
+Oleg Goncharov, Yugi Guvvala, Robert Hesse, Russell Hewett, Herbert Hum,
+Ujval Kapasi, Brucek Khailany, Mikail Khona, Nick Knight, Alex Kondratenko,
+Ronny Krashinsky, Ben Lanir, Simon Layton, Michael Lightstone, Daniel Lo,
+Paulius Micikevicius, Asit Mishra, Tim Moon, Deepak Narayanan, Chao Ni,
+Abhijit Paithankar, Satish Pasumarthi, Ankit Patel, Mostofa Patwary, Ashwin
+Poojary, Gargi Prasad, Sweta Priyadarshi, Yigong Qin, Xiaowei Ren, Oleg Ry-
+bakov, Charbel Sakr, Sanjeev Satheesh, Stas Sergienko, Pasha Shamis, Kirthi
+Shankar, Nishant Sharma, Mohammad Shoeybi, Michael Siu, Misha Smelyanskiy,
+Darko Stosic, Dusan Stosic, Bor-Yiing Su, Frank Sun, Nima Tajbakhsh, Shelby
+Thomas, Przemek Tredak, Evgeny Tsykunov, Gandhi Vaithilingam, Aditya Vavre,
+Rangharajan Venkatesan, Roger Waleffe, Qiyu Wan, Hexin Wang, Mengdi Wang,
+Lizzie Wei, Hao Wu, Evan Wu, Keith Wyss, Ning Xu, Jinze Xue, Charlene Yang,
+Yujia Zhai, Ruoxi Zhang, Jingyang Zhu, and Zhongbo Zhu. 2025. Pretraining
+Large Language Models with NVFP4. arXiv:2509.25149
+[67] NVIDIA, Johan Bjorck, Fernando Castañeda, Nikita Cherniadev, Xingye Da,
+Runyu Ding, Linxi “Jim” Fan, Yu Fang, Dieter Fox, Fengyuan Hu, Spencer Huang,
+Joel Jang, Zhenyu Jiang, Jan Kautz, Kaushil Kundalia, Lawrence Lao, Zhiqi Li,
+Zongyu Lin, Kevin Lin, Guilin Liu, Edith Llontop, Loic Magne, Ajay Mandlekar,
+Avnish Narayan, Soroush Nasiriany, Scott Reed, You Liang Tan, Guanzhi Wang,
+Zu Wang, Jing Wang, Qi Wang, Jiannan Xiang, Yuqi Xie, Yinzhen Xu, Zhenjia Xu,
+Seonghyeon Ye, Zhiding Yu, Ao Zhang, Hao Zhang, Yizhou Zhao, Ruijie Zheng,
+and Yuke Zhu. 2025. GR00T N1: An Open Foundation Model for Generalist
+Humanoid Robots. arXiv:2503.14734
+[68] Dylan Patel. 2022. Apple M2 Die Shot and Architecture Analysis – Big Cost
+Increase and A15 Based IP. SemiAnalysis. https://newsletter.semianalysis.com/
+p/apple-m2-die-shot-and-architecture
+[69] William Peebles and Saining Xie. 2023. Scalable Diffusion Models with Trans-
+formers. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV). IEEE, Piscataway, NJ, USA, 4172–4182. doi:10.1109/iccv51070.
+2023.00387
+[70] Chunyu Qi, Zhuoran Song, Jian Weng, Haozhe Jiang, Xueyuan Liu, Naifeng Jing,
+Guanghui He, Xiaoyao Liang, and Haibing Guan. 2026. SpecVLA: Enabling Effi-
+cient Robotic Manipulation via Speculative VLA Inference and Verification. In
+Proceedings of the 59th IEEE/ACM International Symposium on Microarchitecture
+(MICRO). arXiv:2608.15636
+[71] Yuzhang Shang, Zhihang Yuan, Bin Xie, Bingzhe Wu, and Yan Yan. 2023. Post-
+Training Quantization on Diffusion Models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). IEEE, Piscataway,
+NJ, USA, 1972–1981. doi:10.1109/cvpr52729.2023.00196
+[72] Sayeh Sharify, Alberto Delmas Lascorz, Kevin Siu, Patrick Judd, and An-
+dreas Moshovos. 2018. Loom: exploiting weight and activation precisions
+to accelerate convolutional neural networks. In Proceedings of the 55th An-
+nual Design Automation Conference (DAC). ACM, New York, NY, USA, 1–6.
+doi:10.1145/3195970.3196072
+[73] Hardik Sharma, Jongse Park, Naveen Suda, Liangzhen Lai, Benson Chau,
+Joon Kyung Kim, Vikas Chandra, and Hadi Esmaeilzadeh. 2018. Bit Fusion:
+Bit-Level Dynamically Composable Architecture for Accelerating Deep Neural
+Network. In Proceedings of the ACM/IEEE 45th Annual International Sympo-
+sium on Computer Architecture (ISCA). IEEE, Piscataway, NJ, USA, 764–775.
+doi:10.1109/isca.2018.00069
+[74] Man Shi, Vikram Jain, Antony Joseph, Maurice Meijer, and Marian Verhelst.
+2024. BitWave: Exploiting Column-Based Bit-Level Sparsity for Deep Learn-
+ing Acceleration. In Proceedings of the IEEE International Symposium on High-
+Performance Computer Architecture (HPCA). IEEE, Piscataway, NJ, USA, 732–746.
+doi:10.1109/hpca57654.2024.00062
+[75] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn Kooijmans,
+Steven Palma, Adil Zouitine, Michel Aractingi, Caroline Pascal, Martino Russi,
+Andres Marafioti, Simon Alibert, Matthieu Cord, Thomas Wolf, and Remi Ca-
+dene. 2025. SmolVLA: A Vision-Language-Action Model for Affordable and
+Efficient Robotics. arXiv:2506.01844
+[76] Wilson Snyder. 2026. Verilator. Veripool. https://www.veripool.org/verilator/
+[77] Junhyuk So, Jungwon Lee, Daehyun Ahn, Hyungjun Kim, and Eunhyeok Park.
+2023. Temporal Dynamic Quantization for Diffusion Models. In Advances in
+Neural Information Processing Systems (NeurIPS), Vol. 36. Curran Associates, Inc.,
+Red Hook, NY, USA, 48686–48698. doi:10.52202/075280-2113
+[78] Haoming Song, Delin Qu, Yuanqi Yao, Qizhi Chen, Qi Lv, Yiwen Tang, Modi
+Shi, Guanghui Ren, Maoqing Yao, Bin Zhao, Dong Wang, and Xuelong Li.
+2025. Hume: Introducing System-2 Thinking in Visual-Language-Action Model.
+arXiv:2505.21432
+[79] Zhuoran Song, Haozhe Jiang, Chunyu Qi, Minnan Pei, Gang Li, Xiaoyao Liang,
+and Haibing Guan. 2026. VQVLA: Motion-Aware Vector Quantization with
+Computation Fusion for VLA Acceleration. In Proceedings of the 59th IEEE/ACM
+International Symposium on Microarchitecture (MICRO). arXiv:2607.24148
+[80] Aaron Stillmaker and Bevan Baas. 2017. Scaling Equations for the Accurate
+Prediction of CMOS Device Performance from 180 nm to 7 nm. Integration, the
+VLSI Journal 58 (2017), 74–81. doi:10.1016/j.vlsi.2017.02.002
+[81] Liang Su, David Chen, Jason Li, Kevin Guo, and Teresa Lv. 2026. FlashRT-PAI:
+Fast Kernels Are Not Fast Pipelines for Physical AI. arXiv:2610.24349
+[82] Shivakanth Sujit, Luca Nunziante, Rousslan Fernand Julien Dossa, and Kai
+Arulkumaran. 2026. When One Step Is Enough: An Empirical Study of Euler
+Integration in Flow-Matching Policies. In Proceedings of The 10th Conference on
+Robot Learning (CoRL). Austin, TX, USA.
+[83] Haojun Sun, Chen Tang, Zhi Wang, Yuan Meng, Jingyan Jiang, Xinzhu Ma, and
+Wenwu Zhu. 2024. TMPQ-DM: Joint Timestep Reduction and Quantization
+Precision Selection for Efficient Diffusion Models. arXiv:2404.09532
+[84] Yaman Umuroglu, Lahiru Rasnayake, and Magnus Själander. 2018. BISMO: A
+Scalable Bit-Serial Matrix Multiplication Overlay for Reconfigurable Computing.
+In Proceedings of the 28th International Conference on Field Programmable Logic
+and Applications (FPL). IEEE, Piscataway, NJ, USA, 307–314. doi:10.1109/fpl.2018.
+14
+
+
+00059
+[85] Homer Rich Walke, Kevin Black, Tony Z. Zhao, Quan Vuong, Chongyi Zheng,
+Philippe Hansen-Estruch, Andre Wang He, Vivek Myers, Moo Jin Kim, Max Du,
+Abraham Lee, Kuan Fang, Chelsea Finn, and Sergey Levine. 2023. BridgeData
+V2: A Dataset for Robot Learning at Scale. In Proceedings of The 7th Conference
+on Robot Learning (CoRL) (Proceedings of Machine Learning Research, Vol. 229).
+PMLR, Atlanta, USA, 1723–1736.
+[86] Hongyu Wang, Chuyan Xiong, Ruiping Wang, and Xilin Chen. 2026. BitVLA:
+1-bit Vision-Language-Action Models for Robotics Manipulation. In Proceedings
+of The 10th Conference on Robot Learning (CoRL). Austin, TX, USA.
+[87] Xinyu Wang, Mingze Li, Sicheng Lyu, Dongxiu Liu, Kaicheng Yang, Ziyu Zhao,
+Yufei Cui, Xiao-Wen Chang, and Peng Lu. 2026. HoloQ-VLA: Uniform W4A4
+Quantization of Vision-Language-Action Models. arXiv:2605.28803
+[88] Yunhan Wang, Haodong Wang, Zhiming Liu, Zicong Hong, Qianli Liu, Xiaoyi
+Pang, Yangjia Hu, Quanxin Shou, Yikun Miao, and Song Guo. 2026. SteerQuant:
+Steering Quantization Error with Action-Guided Scaling in World-Action Mod-
+els. arXiv:2609.39056
+[89] Di Wu, Rongtian Shen, Ping Liu, Yan Shen, Zhenhan Yin, Shun Zuo, Xuhua Chen,
+He Zheng, Lingfeng Zhang, Jiangning Zhang, and Tao Zhang. 2026. Toward
+Real-Time VLAs: Stage-Aware Two-Step Flow Denoising and System-Level
+Evaluation. arXiv:2609.39822
+[90] Junyi Wu, Haoxuan Wang, Yuzhang Shang, Mubarak Shah, and Yan Yan. 2024.
+PTQ4DiT: Post-training Quantization for Diffusion Transformers. In Advances
+in Neural Information Processing Systems (NeurIPS), Vol. 37. Curran Associates,
+Inc., Red Hook, NY, USA, 62732–62755. doi:10.52202/079017-2006
+[91] Enze Xie, Junsong Chen, Junyu Chen, Han Cai, Haotian Tang, Yujun Lin, Zhekai
+Zhang, Muyang Li, Ligeng Zhu, Yao Lu, and Song Han. 2025. SANA: Efficient
+High-Resolution Text-to-Image Synthesis with Linear Diffusion Transformers.
+In The Thirteenth International Conference on Learning Representations (ICLR).
+OpenReview.net, Singapore, 20383–20407.
+[92] Rui Xie, Asad Ul Haq, Yunhua Fang, Linsen Ma, Zirak Burzin Engineer, Liu
+Liu, and Tong Zhang. 2026. TRACE: Unlocking Effective CXL Bandwidth via
+Lossless Compression and Precision Scaling. IEEE Trans. Comput. 75, 4 (2026),
+1349–1362. doi:10.1109/tc.2026.3666458
+[93] Rui Xie, Asad Ul Haq, Linsen Ma, Krystal Sun, Sanchari Sen, Swagath Venkatara-
+mani, Liu Liu, and Tong Zhang. 2024. SmartQuant: CXL-Based AI Model Store
+in Support of Runtime Configurable Weight Quantization. IEEE Computer
+Architecture Letters 23, 2 (2024), 199–202. doi:10.1109/LCA.2024.3452699
+[94] Borui Xu, Hongshi Tan, Wenqi Jiang, Bingsheng He, Ming Wu, Jason Zeng, and
+Michael Heinrich. 2026. VLA-HWBench: Where the Time Goes When VLA
+Models Run on Edge Hardware. arXiv:2610.34717
+[95] Jiuyi Xu, Xiao Hu, Meida Chen, Song Wang, Yang Ye, and Yangming Shi.
+2026. Quantize by Doing: Task-Guided Mixed-Precision Quantization of Vision-
+Language-Action Models. arXiv:2610.38661
+[96] Jiuyi Xu, Qing Jin, Meida Chen, Song Wang, Yang Sui, and Yangming Shi. 2026.
+VLAQuantBench: Closed-Loop Evaluation of Post-Training Quantization for
+Vision-Language-Action Models. arXiv:2609.25376
+[97] Haoru Xue, Xiaoyu Huang, Dantong Niu, Qiayuan Liao, Thomas Kragerud,
+Jan Tommy Gravdahl, Xue Bin Peng, Guanya Shi, Trevor Darrell, Koushil
+Sreenath, and Shankar Sastry. 2025. LeVERB: Humanoid Whole-Body Con-
+trol with Latent Vision-Language Instruction. arXiv:2506.13751
+[98] Jiabing Yang, Yuan Xu, Yixiang Chen, Qisen Ma, Peiyan Li, Kai Wang, Chenhang
+Cui, Tao Yu, Zichen Wen, Wen Ye, Bowen Fang, Ziheng He, Xiangnan Wu,
+Yingda Li, Yan Huang, and Liang Wang. 2026. Coupling Execution Horizon and
+Sampling Depth in Flow-Matching VLA Policies. arXiv:2610.32102
+[99] Florian Zaruba, Fabian Schuiki, Torsten Hoefler, and Luca Benini. 2021. Snitch:
+A Tiny Pseudo Dual-Issue Processor for Area and Energy Efficient Execution of
+Floating-Point Intensive Workloads. IEEE Trans. Comput. 70, 11 (2021), 1845–
+1860. doi:10.1109/tc.2020.3027900
+[100] Shaoqiu Zhang, Zizhong Ding, Kaicheng Yang, Junyi Wu, Xianglong Yan, Xi Li,
+Bingnan Duan, Jianping Fang, and Yulun Zhang. 2026. AdaTSQ: Pushing the
+Pareto Frontier of Diffusion Transformers via Temporal-Sensitivity Quantiza-
+tion. arXiv:2602.09883
+[101] Tianchen Zhao, Xuefei Ning, Tongcheng Fang, Enshu Liu, Guyue Huang, Zi-
+nan Lin, Shengen Yan, Guohao Dai, and Yu Wang. 2024. MixDQ: Memory-
+Efficient Few-Step Text-to-Image Diffusion Models with Metric-Decoupled
+Mixed Precision Quantization. In Computer Vision – ECCV 2024 (Lecture Notes
+in Computer Science, Vol. 15072). Springer Nature Switzerland, Cham, 285–302.
+doi:10.1007/978-3-031-72630-9_17
+[102] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn. 2023. Learning
+Fine-Grained Bimanual Manipulation with Low-Cost Hardware. In Robotics:
+Science and Systems XIX (RSS). Robotics: Science and Systems Foundation, Daegu,
+Republic of Korea. doi:10.15607/rss.2023.xix.016
+[103] Xin Zhao, Longke Yan, Jiancong Li, Yongkun Wu, and Fengbin Tu. 2026.
+DiTPA: A DiT-based Action Planner Accelerator Exploiting Action-Denoising-
+Multimodality Redundancy for Embodied Artificial Intelligence. In Proceedings
+of the ACM/IEEE 53rd Annual International Symposium on Computer Architecture
+(ISCA). IEEE, Piscataway, NJ, USA, 2709–2723. doi:10.1109/isca66397.2026.00188
+[104] Zihao Zheng, Hangyu Cao, Chibang Tao, Zhihao Mao, Lingyue Zhang, Maoliang
+Li, Jiayu Chen, Hailong Zou, Xuanzhe Liu, Donggang Cao, Hong Mei, and Xiang
+Chen. 2026. DyQ-VLA: Temporal-Dynamic-Aware Quantization for Embodied
+Vision-Language-Action Models. arXiv:2603.07904
+[105] Jiacheng Zhou, Jinfan Lv, Ruixuan Li, Longtai Zhang, Yan Wang, Wenqiang
+Zhang, and Lizhe Qi. 2026. QuantWAMs: Calibrating at the Right Granularity
+for World Action Models. arXiv:2607.28405
+15

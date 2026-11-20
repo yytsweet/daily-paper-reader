@@ -1,0 +1,1402 @@
+1
+MARS: Dynamic Routing of
+Reinforcement-Learned Atomic Skills for
+Multi-Stage Robotic Manipulation
+Zequan Zeng1, Junqin Yang1, Kai Wang1,*
+Abstract—Vision-Language-Action (VLA) models have demon-
+strated strong capabilities in multi-task robotic manipulation.
+However, they still face limitations in control precision and
+execution stability during critical manipulation stages, such as
+object grasping, alignment and insertion. To combine general-
+purpose manipulation capabilities with task-specific fine-grained
+control, while enabling effective coordination between generalist
+and specialized policies throughout multi-stage manipulation
+tasks, this paper proposes MARS (Modular Atomic-skill Rout-
+ing System), a dynamic routing framework for reinforcement
+learning-based atomic skills. MARS integrates a frozen generalist
+VLA policy with multiple independently trained atomic skill
+policies. Using a shared RL Token state representation and
+the reference action of VLA, specialized control policies are
+optimized through reinforcement learning for different cr‘itical
+manipulation stages. For high-level policy selection, we develop
+a dynamic router that integrates temporal context and skill
+semantics. The router employs Mamba-based recurrent encoding
+and a historical feature window to capture state evolution during
+manipulation. Skill descriptions of candidate policies are encoded
+into semantic queries, and attention mechanisms are used to
+establish correspondences between skill semantics and temporal
+state features. Experimental results show that MARS achieves
+an average Macro-F1 score of 90.47% across four LIBERO
+task suites under fixed-trajectory evaluation, outperforming an
+MLP-based router by 7.08 percentage points. In the simulated
+Tube Transport task, the full-task success rate increases from
+20.04% to 85.67%. These results demonstrate that stage-specific
+reinforcement learning and temporal state-aware dynamic policy
+routing can improve multi-policy coordination and overall task
+execution performance in multi-stage robotic manipulation.
+Index Terms—Embodied Intelligence; Vision-Language-Action
+Models; Reinforcement Learning; Atomic Skills; Multi-Stage
+Robotic Manipulation
+I. INTRODUCTION
+Robotic manipulation tasks, such as multi-object pick-and-
+place, object transfer, and laboratory sample handling, typ-
+ically involve a sequence of operations, including grasping,
+transportation, alignment, placement, and insertion. These
+stages impose different requirements on the underlying con-
+trol policy. General-purpose policies are often sufficient for
+relatively simple operations, such as object transportation and
+robot resetting, whereas alignment and insertion require higher
+control precision and execution stability. Consequently, relying
+on a single control policy throughout an entire manipulation
+task may make it difficult to simultaneously achieve general-
+purpose manipulation capabilities and precise control dur-
+1School of Automation, Chongqing University, Chongqing, 400044, China.
+*Corresponding author: Kai Wang.
+ing critical stages. Combining pretrained generalist policies
+with skill-specific control policies optimized for particular
+manipulation requirements provides a promising approach to
+improving multi-stage robotic manipulation. However, differ-
+ent policies have distinct operating conditions and applicable
+ranges. Selecting an appropriate policy according to the robot
+state and task progress, while ensuring smooth transitions
+between policies, remains an important challenge in multi-
+policy coordination [1], [2].
+In recent years, generalist robotic policies, including RT-
+1, RT-2, Octo, OpenVLA, π0, π0.5, and SmolVLA, have
+demonstrated promising multi-task manipulation capabilities
+through large-scale robot data pretraining and joint modeling
+of visual, language and action information [3]–[10]. Neverthe-
+less, the performance of these generalist policies varies across
+manipulation stages, particularly in tasks involving precise
+alignment and contact-constrained operations, where action
+accuracy and execution stability remain challenging [11], [12].
+To further improve robotic manipulation performance, recent
+studies have investigated reinforcement learning (RL)-based
+post-training methods for VLA policies. One line of research
+improves manipulation performance by optimizing the action
+generation process or updating selected model parameters, as
+demonstrated by VLA-RL, SimpleVLA-RL, iRe-VLA, and
+π0.6 [13]–[16]. Another line of research aims to preserve the
+core capabilities of pretrained models while enhancing task-
+specific control through lightweight control modules, residual
+policies, or independently trained RL policies. Representative
+methods include RL Token (RLT), PARTS, Object-Centric
+Residual RL, and VLaRL [12], [17]–[19]. These studies have
+demonstrated the effectiveness of reinforcement learning in
+improving robotic manipulation from different perspectives
+and have provided a foundation for integrating pretrained
+generalist policies with specialized control strategies.
+Although reinforcement learning can improve the control
+performance of VLA models in specific manipulation tasks,
+optimizing a single policy for an entire multi-stage task
+remains challenging. When only a binary terminal reward
+indicating full-task success or failure is available, the policy
+receives no reward feedback for intermediate actions that
+contribute positively to task progress. This makes it difficult
+to accurately estimate the contribution of actions at different
+stages to the final task outcome, thereby complicating state-
+action value estimation and policy optimization. One possible
+solution is to decompose critical stages with clearly defined
+manipulation objectives into independent atomic skills and
+arXiv:2611.19324v1  [cs.RO]  14 Nov 2026
+
+
+2
+Fig. 1. Overview of the MARS framework. MARS consists of three main components: shared state feature extraction, atomic skill policy learning, and
+dynamic skill routing. A shared RL Token adapter extracts compact state representations from the frozen VLA, supporting reinforcement learning-based
+atomic skill optimization with VLA reference actions. The dynamic router then combines historical state information and skill semantics to coordinate policy
+selection and switching during multi-stage manipulation.
+optimize each skill separately through reinforcement learning.
+By assigning local objectives and reward signals to individual
+atomic skills, specialized policies can be trained to address
+specific control requirements while reducing their dependence
+on full-task rewards. However, independently trained atomic
+skills only improve control performance within their respective
+stages. Determining when to activate each skill and how to co-
+ordinate transitions between specialized policies and the gen-
+eralist VLA remains a key challenge for multi-policy coordina-
+tion. Several studies have explored skill organization and dy-
+namic routing mechanisms from different perspectives. Atom-
+icVLA organizes manipulation capabilities through atomic
+skill modeling and an expert-based architecture, SMoDP
+introduces semantically structured policy specialization for
+compositional robotic manipulation, and SWAP enables dy-
+namic selection among multiple VLA policies through policy
+value estimation [20]–[22]. These approaches offer different
+solutions for atomic skill modeling, policy specialization, and
+dynamic selection. Nevertheless, for a system consisting of
+a frozen generalist VLA and multiple independently trained
+RL-based atomic skill policies, determining which policy is
+most appropriate at different stages of task execution remains a
+key challenge. Since individual policies have different control
+objectives and operating ranges, atomic skill selection should
+not rely solely on predefined manipulation stages but should
+also account for state changes throughout the sequential exe-
+cution process. Meanwhile, descriptions of candidate policies
+provide policy-specific semantic information that can help
+the router learn correspondences between candidate skills and
+temporal state contexts. Motivated by these considerations, we
+formulate dynamic policy routing from two complementary
+perspectives: temporal state modeling and candidate policy
+matching. Specifically, temporal encoding is used to extract
+contextual information from sequential robot states, while skill
+descriptions are transformed into conditioned semantic queries
+that interact with temporal state features. This enables the
+router to construct policy-specific matching representations
+and provides a basis for dynamically selecting between the
+generalist VLA and reinforcement-learned atomic skill ex-
+perts.
+To address these challenges, we propose MARS (Modular
+Atomic-skill Routing System), a dynamic routing framework
+for reinforcement learning-based atomic skills in multi-stage
+robotic manipulation. MARS decouples local skill optimiza-
+
+
+3
+tion from high-level policy selection, enabling coordinated
+control between a generalist VLA and multiple specialized
+atomic skill policies. For atomic skill optimization, we first
+construct a shared RL Token adapter based on intermediate
+features extracted from the frozen VLA backbone. The adapter
+produces compact state representations that can be reused
+across different skill policies. Each atomic skill policy then
+takes the shared state representation and reference action
+chunks of the frozen VLA as inputs and is independently
+optimized through reinforcement learning for a specific local
+manipulation objective. For high-level policy selection, we
+develop a dynamic router that integrates temporal context and
+skill semantics. The router employs a Mamba-base recurrent
+encoder [23] to capture temporal information from robot states
+and maintains a fixed-length historical feature window to pre-
+serve recent state changes. Meanwhile, the skill descriptions
+of candidate policies are encoded into semantic queries, which
+are further refined through self-attention to capture inter-skill
+relationships. Cross-attention is then applied to extract skill-
+relevant information from historical state features, providing
+contextual representations for subsequent policy selection. The
+skill-conditioned features are then used to predict routing
+probabilities for the generalist VLA and each atomic skill
+policy.
+The main contributions of this paper are summarized as
+follows:
+1) We propose MARS, a multi-policy coordination frame-
+work that integrates a frozen generalist VLA with
+independently optimized reinforcement learning-based
+atomic skill policies using shared RL Token representa-
+tions and VLA reference actions.
+2) We develop a dynamic policy router that combines
+Mamba-based temporal modeling and skill-conditioned
+attention to select appropriate control policies based on
+temporal state information and candidate skill semantics.
+3) We evaluate MARS through simulation and real-world
+robotic experiments, demonstrating its effectiveness in
+atomic skill execution, dynamic policy routing, and full-
+task manipulation performance.
+II. METHOD
+Multi-stage robotic manipulation involves operations with
+different control requirements, requiring both general-purpose
+manipulation capabilities and specialized control during crit-
+ical stages. To leverage the complementary strengths of gen-
+eralist and specialized policies, we propose MARS, a multi-
+policy coordination framework that decouples local atomic
+skill optimization from high-level policy selection. In this
+framework, a frozen generalist VLA handles basic manipu-
+lation and provides reference actions for atomic skill learning,
+while multiple atomic skill policies undergo independent rein-
+forcement learning optimization for specific manipulation ob-
+jectives. A high-level dynamic router then selects appropriate
+control policies based on robot state information and candidate
+skill semantics, as illustrated in Figure 1.
+A. Framework Overview and Problem Formulation
+MARS separates high-level policy selection from low-level
+action generation. The set of candidate low-level policies is
+defined as:
+Π = {π0, π1, . . . , πK}
+(1)
+where π0 denotes the frozen generalist VLA policy, and πj
+(j = 1, . . . , K) represents an atomic skill policy trained for a
+specific manipulation objective. Each atomic skill policy gen-
+erates actions through its Actor network µj. In the following,
+πj refers to the complete candidate low-level policy, whereas
+µj denotes its corresponding action generation network.
+At time step t, the robot receives an observation ot =
+(It, l, qt), where It is the visual observation, l denotes the
+task instruction, and qt ∈Rdq represents the normalized robot
+proprioceptive state. The visual-language features extracted by
+the frozen VLA are compressed into zRL
+t
+∈Rdz through the
+shared RL Token encoder (see Section II-B). The resulting fea-
+ture is concatenated with the proprioceptive state to construct
+the state representation used by the atomic skill policies:
+st = [zRL
+t
+; qt] ∈Rdz+dq
+(2)
+Let s1:t
+= (s1, . . . , st) denote the state sequence up to
+time step t, and let S = {ℓ0, . . . , ℓK} denote the set of
+skill descriptions associated with the candidate policies. The
+router Rϕ predicts a probability distribution over the candidate
+policies:
+pt = Rϕ(s1:t, S),
+pt ∈[0, 1]K+1,
+K
+X
+j=0
+pt,j = 1
+(3)
+where pt,j represents the predicted probability of selecting
+policy πj, conditioned on the state history and the skill
+descriptions of the candidate policies.
+B. Shared RL Token Feature Extraction
+To avoid redundant learning of visual-language represen-
+tations across different atomic skill policies, we construct a
+shared lightweight RL Token adapter based on the feature
+compression approach introduced in RLT [12]. The adapter
+learns a compact state representation by reconstructing inter-
+mediate VLA features. Once trained, its encoder is frozen and
+shared by the atomic skill policies and the dynamic router.
+Given the visual observation It and task instruction l at time
+step t, the frozen VLA backbone FVLA produces a sequence
+of multimodal features:
+Ht = FVLA(It, l) ∈RNt×dh
+(4)
+where Nt denotes the token sequence length and dh is the
+feature dimension. The valid tokens are first normalized along
+the feature dimension to obtain ¯Ht, and using a binary mask
+mt ∈{0, 1}Nt to indicate valid token positions. Positional
+embeddings and a learnable aggregation token are then in-
+corporated into the feature sequence, which is processed
+by a Transformer encoder gψ to obtain a compact, fixed-
+dimensional representation:
+zRL
+t
+= gψ( ¯Ht, mt) ∈Rdz
+(5)
+
+
+4
+Fig. 2.
+Architecture of the dynamic skill router. The dynamic skill
+router combines Mamba-based temporal encoding with a historical feature
+window to capture temporal context. Candidate skill descriptions form se-
+mantic queries, which interact through self-attention and extract skill-relevant
+historical features via cross-attention. A shared scoring network predicts
+routing probabilities, which guide the subsequent policy switching mechanism.
+To preserve relevant information from the intermediate VLA
+features, a decoder gη reconstructs the feature sequence from
+the compact representation zRL
+t
+, yielding ˆHt = gη(zRL
+t
+). The
+reconstruction loss is then computed as the mean squared error
+between the reconstructed features ˆHt and the normalized
+features ¯Ht over valid token positions:
+Lrec =
+PNt
+n=1 mt,n
+ ˆHt,n −¯Ht,n
+
+2
+2
+dh max
+
+1, PNt
+n=1 mt,n
+
+(6)
+After training, the decoder is discarded and the encoder
+parameters are frozen, allowing the atomic skill policies and
+the dynamic router to share a unified state representation.
+C. Atomic Skill Policy Learning with Shared RL Token Rep-
+resentations and Reference Action Constraints
+To improve control performance during critical manipu-
+lation stages, we train specialized atomic skill policies for
+different local manipulation objectives using reinforcement
+learning. Each policy is independently optimized using the
+Twin Delayed Deep Deterministic Policy Gradient (TD3)
+algorithm [24], with actions predicted by the VLA backbone
+serving as references. This design allows the skill policies
+to refine their control behaviors for specific manipulation
+requirements while leveraging the action prior provided by
+the pretrained VLA.
+During atomic skill training, both the VLA backbone and
+the shared RL Token encoder remain frozen, and only the
+Actor and Critic networks of the corresponding skill policy
+are updated. For the j-th atomic skill policy, let µj denote
+its Actor network and Qj,1 and Qj,2 denote its two Critic
+networks. The corresponding target networks are denoted by
+¯µj, ¯Qj,1, and ¯Qj,2, respectively.
+1) Action Generation and Replay Sample Construction: At
+control time step t, the VLA backbone π0 generates an action
+sequence of length H conditioned on the current observation
+ot. The first C actions are extracted to form the reference
+action chunk:
+AVLA
+t
+∼π0(· | ot),
+(7)
+Aref
+t
+= AVLA
+t
+[0 : C],
+Aref
+t
+∈RC×da
+(8)
+where da denotes the dimension of a single action. Given the
+shared state representation st and the reference action chunk
+Aref
+t , the Actor µj generates an action chunk of length C:
+Aj
+t = µj(st, Aref
+t ) ∈RC×da
+(9)
+The reference action chunk serves as an additional input to the
+Actor and is also used to construct a reference action constraint
+during training. In this way, the atomic skill policy can adjust
+its control actions according to local manipulation objectives
+while retaining the action prior of the VLA backbone.
+We adopt an off-policy reinforcement learning approach
+and maintain a separate replay buffer Dj for each atomic
+skill policy. The replay buffers contain warm-up trajectories
+collected using the VLA backbone, online interaction trajec-
+tories generated by the atomic skill policies, and trajectories
+involving human interventions. To improve data utilization, we
+construct replay samples by extracting overlapping trajectory
+segments through a sliding-window procedure. Specifically,
+segments of length C are sampled from continuous trajectories
+with a stride of two time steps, forming the following training
+samples:
+ st, Aexec
+t
+, rt:t+C−1, st+C,
+Aref
+t , Aref
+t+C, δt+C
+
+(10)
+where Aexec
+t
+denotes the action chunk executed over the
+sampled trajectory segment, rt:t+C−1 is the corresponding
+reward sequence, and st+C represents the state at the end
+of the segment. The binary variable δt+C ∈0, 1 denotes the
+termination flag of the current atomic skill, which is set to 1
+when the local manipulation objective is achieved or the active
+policy is switched to another policy.
+Reference actions are aligned with individual time steps
+within each trajectory segment and may therefore originate
+from VLA predictions generated at different time steps. When
+human intervention occurs, the corresponding intervention
+actions are used as references. By extracting overlapping
+segments from collected trajectories, this sampling strategy in-
+creases the number of available training samples and improves
+data utilization.
+2) TD3-based Atomic Skill Policy Optimization:
+Each
+atomic skill policy is optimized using TD3, which employs
+twin Critic networks for action-value estimation, together with
+delayed policy updates and target policy smoothing to improve
+training stability. For a trajectory segment of length C sampled
+from the replay buffer Dj, the cumulative discounted reward
+is computed as:
+Rt =
+C−1
+X
+i=0
+γirt+i
+(11)
+where γ ∈[0, 1] denotes the discount factor. To construct the
+temporal-difference (TD) target, the target Actor ¯µj generates
+
+
+5
+an action chunk conditioned on the state st+C at the end of the
+segment and its corresponding reference action chunk Aref
+t+C:
+eAt+C = ¯µj(st+C, Aref
+t+C) + ϵ
+(12)
+where ϵ denotes the target policy smoothing noise. To reduce
+overestimation bias, we use the smaller of the two target Critic
+estimates to construct the TD target:
+Yt = clip
+
+Rt + γC(1 −δt+C)
+· min
+i=1,2
+¯Qj,i(st+C, eAt+C), Ymin, Ymax
+
+(13)
+where Ymin and Ymax denote the lower and upper clipping
+bounds of the TD target, respectively. When δt+C = 1, the
+current atomic skill is considered terminated, and the value
+estimate at the next state is excluded from the TD target.
+The two online Critic networks estimate the action values of
+the executed action chunk Aexec
+t
+under the initial state st. Their
+parameters are updated by minimizing the squared temporal-
+difference errors:
+Lcritic = EDj
+" 2
+X
+i=1
+(Qj,i(st, Aexec
+t
+) −Yt)2
+#
+(14)
+The Actor is optimized by combining action-value maxi-
+mization with a reference action constraint. To prevent the
+Actor from relying solely on the VLA reference actions and
+simply reproducing them, we randomly replace the reference
+action chunk provided as input to the Actor with zeros with
+a probability of 50% during training. Let eAref
+t
+denote the
+modified reference input and bAj
+t = µj(st, eAref
+t ) denote the
+corresponding Actor output. The Actor loss is defined as:
+Lactor = EDj
+h
+−λQQj,1(st, bAj
+t) + λref
+ bAj
+t −Aref
+t
+2
+2
+i
+(15)
+where λQ and λref are fixed weighting coefficients for the
+action-value term and the reference action constraint, respec-
+tively. The reference action constraint encourages the Actor
+to generate actions close to the VLA-predicted reference
+actions Aref
+t , thereby reducing excessive deviations from the
+pretrained action prior during the early stages of online rein-
+forcement learning.
+D. Dynamic Policy Routing with Temporal Context and Skill
+Semantics
+Through independent reinforcement learning optimization,
+individual atomic skill policies acquire specialized control
+capabilities for different manipulation objectives. However,
+completing multi-stage manipulation tasks requires effective
+coordination between the VLA backbone and these specialized
+policies. To achieve this, the system must select appropriate
+control policies based on the robot’s current state and historical
+context throughout task execution. Accordingly, we develop a
+dynamic router that integrates temporal state information and
+candidate skill semantics to support adaptive policy selection,
+as illustrated in Figure 2.
+1) Temporal Context Modeling: During sequential robotic
+manipulation, the suitability of a candidate policy depends not
+only on the current observation but also on information from
+preceding states. Therefore, we introduce a causal temporal
+modeling module into the routing network to incorporate
+historical context into policy selection. This module consists of
+a Mamba-based recurrent encoder and a fixed-length historical
+feature window. The former updates the temporal state repre-
+sentation, while the latter provides recent contextual features
+for subsequent skill-conditioned queries.
+At time step t, we encode the shared RL Token feature
+zRL
+t
+and robot proprioceptive state qt using a linear layer
+and an MLP, respectively. We then concatenate the normalized
+features to obtain the state embedding xt:
+xt =
+
+LN(Linear(zRL
+t
+)); LN(MLPq(qt))
+
+,
+xt ∈Rd (16)
+where d denotes the combined feature dimension. We feed
+xt into a causal temporal encoder comprising two Mamba
+blocks [23] to capture temporal dependencies in robot state
+sequences:
+(ht, ξt) = ΦM(xt, ξt−1),
+ht ∈Rd
+(17)
+where ΦM denotes the Mamba temporal encoder, ht represents
+the temporal feature at time step t, and ξt denotes the re-
+current cache, including the internal state-space variables and
+convolutional cache. Through recurrent updates, the encoder
+incorporates historical state information into the current repre-
+sentation without reprocessing the entire state sequence during
+online inference.
+To retain recent temporal features, we maintain a historical
+feature window with a maximum length of L. Let Lt =
+min(t, L) denote the effective window length at time step t.
+We construct the historical feature window as:
+Mt = [ht−i + ei]Lt−1
+i=0
+∈RLt×d
+(18)
+where ei ∈Rd denotes a learnable relative temporal em-
+bedding that encodes the temporal distance from the current
+time step. The window maintains the most recent L temporal
+features in reverse chronological order and updates during
+task execution, providing historical context for subsequent
+skill-conditioned queries. By combining Mamba-based recur-
+rent encoding with the historical feature window, the router
+captures temporal dependencies and retains recent contextual
+information to support dynamic policy selection.
+2) Skill Semantics-guided Policy Routing: Each candidate
+policy has distinct control capabilities, and its skill descrip-
+tion provides semantic information for policy selection. To
+incorporate this information into dynamic routing, we encode
+candidate skill descriptions into semantic queries and use them
+to extract skill-relevant temporal features from the historical
+state representations.
+Given the candidate policy set Π = {π0, . . . , πK}, let ℓj
+denote the skill description of policy πj, where j = 0, . . . , K.
+We employ a frozen SigLIP 2 text encoder (ViT-B/16) [25] to
+extract semantic features, followed by L2 normalization and a
+shared linear projection to obtain the skill query vector:
+vj = fskill(ℓj) ∈Rd
+(19)
+
+
+6
+where fskill denotes the semantic mapping module comprising
+text encoding, feature normalization, and linear projection.
+Since the skill descriptions remain fixed during task execution,
+we precompute and cache their query vectors to reduce online
+computational overhead.
+To integrate skill semantics with temporal context, we con-
+struct a skill query module consisting of Nq attention layers.
+Each layer first applies self-attention to capture semantic
+relationships among candidate skills. The updated skill queries
+then attend to the historical feature window Mt through
+cross-attention, using the skill queries as Queries and the
+historical features as Keys and Values. This process extracts
+skill-relevant temporal information and produces contextual
+representations for individual candidate policies:
+{ft,j}K
+j=0 = Attn
+ {vj}K
+j=0, Mt
+
+(20)
+Here, Attn denotes the multi-layer feature fusion module
+composed of inter-skill self-attention, cross-attention over
+historical features, and feed-forward networks. The feature
+ft,j ∈Rd represents the contextual representation of the j-
+th candidate policy conditioned on the current state history.
+We then feed these representations into a shared scoring
+network gscore to compute policy matching scores and apply
+Softmax to obtain the routing probabilities:
+ρt,j = gscore(ft,j),
+pt,j =
+exp(ρt,j)
+PK
+i=0 exp(ρt,i)
+(21)
+where ρt,j and pt,j denote the matching score and routing
+probability of the j-th candidate policy, respectively. The
+routing probability distribution pt = [pt,0, . . . , pt,K] provides
+the basis for subsequent policy selection and switching.
+We train the router through supervised learning. Since
+different skills may have varying execution durations, the
+training samples can exhibit class imbalance across candidate
+policies. To account for this imbalance, we adopt a class-
+frequency-weighted cross-entropy loss:
+Lroute = −
+P
+t∈T wyt log pt,yt
+P
+t∈T wyt
+,
+wj =
+N
+(K + 1)nj
+(22)
+where T denotes the set of supervised time steps in the current
+training batch, yt ∈{0, . . . , K} represents the ground-truth
+policy label, N is the total number of supervised samples in the
+training set, and nj denotes the number of samples belonging
+to the j-th policy class. Accordingly, wj represents the class
+weight assigned to policy πj.
+By integrating skill semantics with historical state informa-
+tion, the router learns to predict the suitability of candidate
+policies under different manipulation conditions, supporting
+dynamic policy selection throughout task execution.
+3) Dynamic Policy Switching: The router predicts the rout-
+ing probabilities of candidate policies based on historical
+state information and skill semantics. However, fluctuations in
+routing predictions across consecutive control steps may cause
+frequent policy switching and disrupt execution continuity. To
+address this issue, we introduce a switching mechanism that
+combines a probability threshold with consecutive confirma-
+tion to maintain stable policy execution. At time step t, the
+router first identifies the candidate policy with the highest
+routing probability:
+ˆct = arg
+max
+j∈{0,...,K} pt,j
+(23)
+where ˆct denotes the candidate policy index. The switching
+mechanism activates a new policy only when ˆct differs from
+the current policy, its routing probability satisfies pt,ˆct ≥τ,
+and the same candidate meets these conditions for k consecu-
+tive control steps. Otherwise, the system continues executing
+the current policy. Let ct denote the selected policy index,
+where ct = 0 corresponds to the VLA backbone and ct > 0
+indicates the corresponding atomic skill policy.
+Algorithm 1 presents the closed-loop execution procedure
+of MARS. At the beginning of each task, the system initializes
+the Mamba recurrent cache ξ0, historical feature window
+M0, and policy switching module. At each control step, the
+router updates its temporal state representation and predicts the
+routing probabilities, while the switching module determines
+the active control policy.
+To coordinate step-wise routing decisions with chunk-based
+action generation, we maintain an action queue B that stores
+pending actions and a policy index cB that identifies their
+source. When the selected policy ct differs from cB, the system
+clears the remaining queued actions to prevent interference be-
+tween different policies. Whenever the queue becomes empty,
+the VLA backbone generates a new action chunk. The system
+either executes the VLA actions directly or uses them as
+references for the selected atomic skill policy to generate a
+specialized action chunk. This mechanism coordinates policy
+switching with action execution, enabling continuous closed-
+loop control during multi-stage manipulation.
+Algorithm 1 Closed-loop Execution and Policy Switching in
+MARS
+Require: VLA backbone π0, atomic skill policies {µj}K
+j=1,
+router Rϕ, switching module Sτ,k, maximum control steps
+Tmax
+1: Initialize Z0 = (ξ0, M0) and Sτ,k; set c0 ←0
+2: B ←∅,
+cB ←0
+3: for t = 1, . . . , Tmax while the task is incomplete do
+4:
+Obtain observation ot and compute shared state st
+5:
+(pt, Zt) ←Rϕ.step(st, Zt−1)
+6:
+ct ←Sτ,k.update(pt)
+7:
+if ct̸ = cB then
+8:
+B ←∅
+9:
+end if
+10:
+if B = ∅then
+11:
+AVLA
+t
+∼π0(· | ot)
+12:
+B ←
+(
+AVLA
+t
+,
+ct = 0,
+µct(st, AVLA
+t
+[0 : C]),
+ct > 0
+13:
+cB ←ct
+14:
+end if
+15:
+Pop and execute the first action at from B
+16:
+Obtain the next observation ot+1
+17: end for
+
+
+7
+Fig. 3. Simulation task environments.
+III. EXPERIMENTS
+To evaluate the effectiveness of atomic skill optimization
+and dynamic policy routing in MARS, we conduct experiments
+on the LIBERO benchmark, a custom Tube Transport simu-
+lation environment, and a real robotic platform. These exper-
+iments assess local skill execution, skill routing performance,
+and full-task closed-loop execution, while further examining
+the applicability of MARS to real-world robotic manipulation.
+We organize our evaluation around four research questions:
+Q1: Does reinforcement learning improve the execution
+performance of individual atomic skills? We compare the
+success rates of the frozen VLA and corresponding atomic
+skill policies under identical stage-specific initial conditions to
+assess the benefits of optimizing local manipulation objectives.
+Q2: How do temporal context modeling and skill-semantic
+queries affect routing performance? We compare different
+routing architectures on identical fixed test trajectories and
+conduct component ablations to examine their effects on
+policy-label prediction.
+Q3: Can atomic skill policies and dynamic routing improve
+closed-loop full-task execution? We compare the frozen
+VLA, a monolithic full-task RL policy, and multi-policy
+systems with different routing configurations to evaluate their
+combined contributions.
+Q4: Can MARS achieve reliable closed-loop execution of
+the Tube Transport task on a real robot? We evaluate
+multi-tube sequential transfer on a physical robot using full-
+task success rate and sample completion rate, to assess the
+deployability of the proposed framework.
+A. Experimental Setup
+1) Platforms and Task Configurations: We conduct exper-
+iments on the LIBERO benchmark, a custom Tube Transport
+simulation environment, and a physical robot platform to
+evaluate MARS under different manipulation conditions. We
+use a single NVIDIA RTX 4090 GPU with 24 GB of memory
+for model training and evaluation.
+Simulation tasks. LIBERO [26], built on robosuite [27],
+consists of four task suites: Spatial, Object, Goal, and Long,
+covering diverse manipulation scenarios involving spatial re-
+lationships, objects, task goals, and sequential operations. We
+further develop a Tube Transport simulation environment in
+which the robot sequentially grasps three test tubes, transports
+them to designated slots in a target rack, and completes
+insertion before returning to its initial pose, as shown in Fig. 3.
+Real-robot platform. Our real-world experimental platform
+consists of an AgileX piper robotic arm equipped with a
+parallel gripper and an Intel RealSense D435i camera (RGB,
+640 × 480 at 30 Hz). The real-robot task follows the same
+manipulation sequence as Tube Transport in simulation. With
+fixed source and target racks and camera placement, the robot
+sequentially grasps, transfers, aligns, inserts, and releases three
+test tubes in the specified order before returning to its initial
+pose.
+2) Baselines and Comparison Methods: To evaluate the
+effectiveness of MARS, we consider two groups of comparison
+methods: base policies and routing methods.
+Base policies. Frozen VLA directly executes the entire task
+using the pretrained generalist policy without atomic skill
+policies or dynamic routing. Monolithic RLT adopts the shared
+RL Token representation and VLA reference action constraints
+of RLT [12], but trains a single RL Actor to optimize the entire
+manipulation task.
+Routing methods. We compare MARS with MLP, LSTM, and
+Transformer routers to evaluate the effects of different routing
+architectures. The MLP predicts policy labels from the current
+state, while the LSTM and Transformer incorporate temporal
+context through recurrent hidden states and temporal attention,
+respectively. We further introduce two ablation variants, MARS
+w/o Temporal Memory and MARS w/o Semantic Queries, to
+examine the contributions of temporal context modeling and
+skill-conditioned queries.
+3) Evaluation Metrics: Success rate (SR). SR measures
+the percentage of trials that successfully complete the target
+operation within the specified control budget. We follow the
+official success criteria for LIBERO. For Tube Transport, a
+trial succeeds only when the robot transfers and inserts all
+three tubes in the specified order and returns to its initial
+pose. We also use SR to evaluate individual atomic skills under
+matched initial conditions.
+Sample completion rate (SCR). To measure partial task
+progress in Tube Transport, we calculate the proportion of
+successfully inserted and released tubes across evaluation
+episodes:
+SCR = 1
+|E|
+X
+e∈E
+ndone
+e
+ntotal
+e
+× 100%
+(24)
+where E denotes the evaluation episodes and ndone
+e
+is the
+number of successfully completed tube insertions in episode
+e.
+Skill routing performance. We evaluate routing performance
+on fixed test trajectories using Macro-F1 [28], which averages
+the F1 scores across all candidate policy classes:
+Macro-F1 =
+1
+K + 1
+K
+X
+k=0
+2PkRk
+Pk + Rk
+× 100%
+(25)
+where Pk and Rk denote the precision and recall of class k.
+4) Training and Evaluation Details:
+We use a frozen
+SmolVLA as the generalist backbone and train separate TD3
+atomic skill policies with shared RL Token representations.
+The router combines Mamba-based temporal modeling with
+skill-semantic queries. During router training, we freeze the
+
+
+8
+TABLE I
+MAIN HYPERPARAMETERS OF THE DYNAMIC ROUTER.
+Hyperparameter
+Value
+Feature dimension d / attention heads
+128 / 4
+RL Token / proprioceptive input dimensions
+960 / 8
+Mamba blocks Nb / convolution width dc
+2 / 4
+State-space dimension ds
+16
+History window L / query layers Nq
+8 / 2
+Text encoder
+SigLIP 2 ViT-B/16
+Optimizer / learning rate
+AdamW / 10−3
+Training epochs / batch size
+30 / 8
+Switching threshold τ / confirmations k
+0.6 / 2
+TABLE II
+MAIN TRAINING HYPERPARAMETERS FOR RL TOKEN AND TD3.
+Hyperparameter
+Value
+VLA backbone
+SmolVLA
+RL Token / proprioceptive dimensions
+960 / 8
+Adapter training objective
+Intermediate-feature
+reconstruction
+RL algorithm / number of Critics
+TD3 / 2
+Actor / Critic hidden layers
+[256, 256] / [256, 256]
+Action chunk length C / sampling stride
+5 / 2
+Actor / Critic learning rate
+3 × 10−4
+Reward type / reference-input dropout
+Sparse / 0.5
+VLA backbone, feature adapter, and atomic skill policies, and
+update only the routing network. Tables I and II summarize
+the main hyperparameters.
+For a consistent comparison, all methods use the same eval-
+uation initial states. We conduct three independent evaluations
+with different random seeds and report the mean and standard
+deviation. For local skill evaluation, we use matched stage-
+specific initial conditions, while full-task experiments evaluate
+each method independently from identical initial states. We
+compare routing architectures and ablation variants on the
+same fixed test trajectories and select the routing models based
+on validation Macro-F1.
+B. Main Result
+1) Effectiveness of Atomic Skill Policies (Q1): MARS pre-
+serves the generalist VLA’s capabilities in routine manipu-
+lation while employing specialized atomic skill policies for
+precision-sensitive operations. To evaluate the effectiveness of
+these policies before examining their contributions to full-
+task performance, we compare their local execution success
+rates against those of the frozen VLA. Specifically, we select
+representative manipulation stages from LIBERO-Spatial and
+Tube Transport and evaluate both policies under identical
+stage-specific initial conditions. Table IV presents the results.
+As shown in Table IV, the reinforcement learning-based
+atomic skill policies consistently outperform the frozen VLA
+across all four local operations. The improvement is particu-
+larly evident in precision tasks, with insertion success on Tube
+Transport increasing from 69.57% to 96.85%. These results
+demonstrate the benefits of targeted reinforcement learning
+optimization for local manipulation skills. However, these
+evaluations focus on individual skills under predefined initial
+conditions, without accounting for policy selection, switching,
+or error accumulation during full-task execution. Therefore,
+improved local skill performance does not necessarily guaran-
+tee higher full-task success rates.
+2) Routing Performance and Ablation Studies (Q2): While
+reinforcement learning-based atomic skill policies improve lo-
+cal manipulation performance, effective multi-policy execution
+also requires accurate policy selection. To evaluate the rout-
+ing mechanism independently of low-level policy execution,
+we compare different routing architectures and component
+ablations on fixed LIBERO test trajectories with identical
+ground-truth policy labels. We use Macro-F1 to assess routing
+performance across the four LIBERO task suites.
+As shown in Table V, MARS achieves the highest Macro-
+F1 across all four LIBERO task suites, with an average score
+of 90.47%, exceeding the MLP baseline by 7.08 percentage
+points. The improvement is particularly notable on LIBERO-
+Long, where MARS achieves 89.85% Macro-F1. Ablation
+results further show that removing temporal memory and skill-
+semantic queries reduces the average Macro-F1 to 84.97% and
+86.38%, respectively. These results suggest that Mamba-based
+temporal encoding and the historical feature window help
+capture temporal context, while skill-semantic queries extract
+candidate-specific information to support more accurate policy
+routing. Together, these components contribute to improved
+routing performance, particularly in long-horizon manipulation
+tasks.
+Figure 4 presents the training loss curves for different
+routing configurations. As shown in Fig. 4(a), all methods
+exhibit decreasing losses during training, while MARS main-
+tains a comparatively low loss in later epochs. Similarly,
+Fig. 4(b) shows higher training losses when either temporal
+memory or semantic queries are removed. These observations
+are consistent with the Macro-F1 results and provide addi-
+tional evidence that both components improve the fit to the
+supervised routing objective. Overall, the results demonstrate
+that combining temporal context modeling with skill-semantic
+queries improves policy label prediction across diverse manip-
+ulation tasks, providing a basis for the closed-loop multi-policy
+evaluation in Q3.
+3) Multi-Policy Coordination and Full-Task Performance
+(Q3): The preceding experiments demonstrate the effective-
+ness of atomic skill policies in local manipulation and the
+router’s ability to predict policy labels on fixed trajectories.
+However, these results do not directly reflect closed-loop per-
+formance, where policy decisions influence subsequent robot
+states. To evaluate multi-policy coordination during complete
+task execution, we integrate the dynamic router with the frozen
+VLA backbone and atomic skill policies, and conduct closed-
+loop experiments on LIBERO and Tube Transport.
+Table III presents the full-task results. MARS achieves an
+average success rate of 89.25% across the four LIBERO task
+suites, exceeding Frozen VLA and Monolithic RLT by 25.11
+and 10.52 percentage points, respectively. On Tube Transport,
+MARS achieves 85.67% SR and 91.11% SCR, substantially
+outperforming both base policies. These improvements sug-
+gest that combining specialized atomic skills with dynamic
+
+
+9
+TABLE III
+CLOSED-LOOP PERFORMANCE IN SIMULATION. SR AND SCR ARE REPORTED IN % (MEAN ± STANDARD DEVIATION); STEP DENOTES THE REPORTED
+EXECUTION-STEP METRIC.
+LIBERO SR ↑
+Tube Transport
+Method
+Spatial
+Object
+Goal
+Long
+SR ↑
+SCR ↑
+Step
+Base policies
+Frozen VLA
+69.13 ± 4.58
+73.68 ± 4.87
+66.22 ± 3.72
+47.54 ± 5.20
+20.04 ± 4.06
+40.33 ± 5.87
+912
+Monolithic RLT
+84.12 ± 3.61
+87.21 ± 4.04
+81.24 ± 2.13
+62.35 ± 4.83
+43.97 ± 5.07
+64.33 ± 5.42
+821
+Routing baselines and oracle
+MARS w/o Temporal Memory
+86.89 ± 3.20
+89.91 ± 6.46
+83.73 ± 2.89
+73.91 ± 4.16
+74.52 ± 5.56
+84.23 ± 4.79
+725
+MARS w/o Semantic Queries
+88.24 ± 2.95
+90.83 ± 1.95
+85.28 ± 2.03
+76.66 ± 3.80
+78.56 ± 5.01
+86.89 ± 4.34
+732
+Rule-based Oracle Router
+93.33 ± 3.06
+92.15 ± 3.31
+91.84 ± 2.65
+84.11 ± 3.57
+84.33 ± 8.50
+87.44 ± 3.60
+712
+MARS (full)
+91.33 ± 1.78
+94.78 ± 3.84
+89.36 ± 3.84
+81.54 ± 3.22
+85.67 ± 4.73
+91.11 ± 3.97
+719
+TABLE IV
+LOCAL ATOMIC SKILL PERFORMANCE COMPARED WITH THE FROZEN
+VLA. SR IS REPORTED IN %; ∆SR IN PERCENTAGE POINTS. BEST SR
+VALUES APPEAR IN BOLD.
+Task
+Skill
+Frozen VLA
+Atomic skill
+∆SR ↑
+LIBERO-Spatial Grasp 74.47 ± 2.47 94.61 ± 2.13 +20.14
+Place
+90.91 ± 3.96 99.12 ± 0.35
++8.21
+Tube Transport
+Grasp 84.13 ± 0.98 99.33 ± 0.58 +15.20
+Insert
+69.57 ± 2.15 96.85 ± 1.09 +27.28
+TABLE V
+SKILL ROUTING PERFORMANCE ON LIBERO (MACRO-F1, %).
+Method
+Spatial
+Object
+Goal
+Long
+Avg.
+Routing architectures
+MLP
+85.43
+87.52
+83.41
+77.21
+83.39
+LSTM
+87.26
+89.46
+91.72
+83.52
+87.99
+Transformer
+92.89
+88.13
+86.78
+84.91
+88.18
+Component ablations
+MARS w/o Temporal Memory
+85.85
+88.05
+83.79
+82.19
+84.97
+MARS w/o Semantic Queries
+87.35
+89.53
+85.31
+83.32
+86.38
+MARS (full)
+91.63
+92.12
+88.27
+89.85
+90.47
+TABLE VI
+REAL-ROBOT TUBE TRANSPORT PERFORMANCE. GRASP AND INSERT
+REPORT SUCCESSFUL ATTEMPTS/TOTAL ATTEMPTS. TIME DENOTES MEAN
+COMPLETION TIME OVER SUCCESSFUL EPISODES.
+Method
+Grasp
+Insert
+SR (%) ↑
+SCR (%) ↑
+Time (s) ↓
+Frozen VLA
+66/94
+41/66
+12.00
+27.33
+39.53
+MARS (full)
+136/139
+125/136
+74.00
+83.33
+31.96
+routing benefits multi-stage manipulation. Compared with a
+single policy trained for the entire task, optimizing atomic
+skills for local objectives may also alleviate the difficulty of
+long-horizon reinforcement learning by shortening the reward
+propagation horizon. To further examine the contribution of
+dynamic routing, we evaluate different routing configurations
+while keeping the VLA backbone and atomic skill policies
+unchanged. Removing temporal memory and skill-semantic
+queries reduces the average LIBERO success rate by 5.64
+and 4.00 percentage points, respectively. Similar performance
+reductions occur on Tube Transport, where both ablation vari-
+Fig. 4.
+Training loss under different routing architectures and component
+ablations.
+ants achieve lower success rates than full MARS. These find-
+ings are consistent with the routing prediction results in Q2,
+suggesting that temporal context modeling and skill-semantic
+queries contribute to both policy selection and closed-loop task
+execution.
+We additionally compare MARS with a Rule-based Oracle
+Router that switches policies using ground-truth manipulation-
+stage labels from the simulation environment. MARS achieves
+competitive performance without relying on such labels, out-
+performing the oracle on LIBERO-Object and Tube Transport
+while remaining below it on the other three LIBERO task
+suites. This comparison suggests that learned routing can
+coordinate atomic skills effectively without predefined stage-
+based switching decisions.
+Overall, these results indicate that reinforcement learning-
+based atomic skills improve local control, while dynamic
+routing enables their coordination during complete task ex-
+ecution, contributing to stronger performance in multi-stage
+manipulation.
+C. Real-Robot Tube Transport Experiments (Q4)
+The previous experiments evaluate local atomic skills, rout-
+ing prediction, and full-task closed-loop execution in simula-
+tion. Real-robot manipulation introduces additional challenges,
+including visual observation errors, robot control inaccuracies,
+and uncertain physical contacts. We therefore evaluate MARS
+on the AgileX PiPER platform described in Section III-A1
+to examine whether the simulated improvements transfer to
+physical execution.
+
+
+10
+Fig. 5. Examples of closed-loop MARS execution in simulation.
+Table VI summarizes the real-robot results. MARS raises
+full-task SR from 12.00% with Frozen VLA to 74.00%, an
+improvement of 62.00 percentage points, and increases SCR
+from 27.33% to 83.33%, a gain of 56.00 percentage points.
+MARS also achieves higher observed success ratios during
+grasping (136/139 versus 66/94) and insertion (125/136 versus
+41/66). Among successful episodes, its mean completion time
+is 31.96 s, compared with 39.53 s for Frozen VLA.
+These findings indicate that the specialized skills and
+routing mechanism remain effective in this physical Tube
+Transport setup. Together with the simulation results in Q3,
+they provide evidence of the framework’s transferability to
+the tested robot configuration and manipulation task. Further
+evaluation under varying real-world layouts and operating
+conditions would be needed to establish broader deployment
+robustness.
+D. Real-Robot Tube Transport Experiments (Q4)
+Although the preceding experiments demonstrate the ef-
+fectiveness of MARS in simulation, real-world manipulation
+introduces additional challenges, including perception errors,
+control inaccuracies, and contact uncertainties. To evaluate
+its performance under these conditions, we conduct real-
+robot experiments on the AgileX piper platform described
+in Section III-A1, following the same Tube Transport task
+procedure.
+As shown in Table VI, MARS achieves a full-task success
+rate of 74.00%, exceeding Frozen VLA by 62.00 percent-
+age points. The sample completion rate also increases from
+27.33% to 83.33%, with higher success ratios observed in
+both grasping and insertion. These results indicate that the
+integration of specialized atomic skills and dynamic routing
+improves both task completion and execution efficiency in the
+tested physical environment.
+Together with the simulation results in Q3, these findings
+suggest that MARS can maintain its multi-policy coordination
+capabilities when deployed on a real robotic platform, sup-
+porting its applicability to physical multi-stage manipulation.
+IV. CONCLUSION
+In this paper, we presented MARS, a dynamic atomic-
+skill routing framework that coordinates a generalist vision-
+language-action (VLA) policy with task-specific reinforcement
+learning-based policies for multi-stage robotic manipulation.
+MARS separates atomic skill optimization from high-level
+policy selection by training specialized skill policies using
+shared RL Token representations and VLA reference ac-
+tions, while integrating temporal context modeling and skill-
+semantic queries for dynamic policy routing. Experiments on
+LIBERO and Tube Transport demonstrate the effectiveness
+of this approach. MARS achieves an average Macro-F1 of
+90.47% across the four LIBERO task suites and improves
+full-task success rates by 34.00 and 65.63 percentage points
+over the frozen VLA on LIBERO-Long and Tube Transport,
+respectively. Ablation studies further support the contributions
+of temporal modeling and skill-semantic queries, while real-
+robot experiments demonstrate the feasibility of deploying
+MARS for physical multi-stage manipulation. These results
+suggest that combining specialized atomic skills with dynamic
+policy routing provides an effective approach to coordinating
+multiple policies in complex robotic manipulation tasks.
+Nevertheless, MARS relies on supervised policy labels from
+existing trajectories to train the router, which may limit its
+adaptability to new tasks and atomic skills. Future work
+will explore feedback-driven routing optimization to reduce
+dependence on manually annotated task stages and further
+investigate the reliability and generalization of MARS across
+diverse real-world manipulation scenarios.
+REFERENCES
+[1] X. Huang, W. Mao, Y. Li, H. Chen, and J. Zhao, “Long-term memory
+for VLA-based agents in open-world task execution,” 2026. [Online].
+Available: https://arxiv.org/abs/2604.15671
+[2] Y. Pang, B. Zhou, C. Li, X. Wang, S. Xu, D.-B. Wang, P. Cheng,
+S. Di, J. Song, and M.-L. Zhang, “AtomBridge: Agentic VLA
+inference plugin for long-horizon tasks in scientific experiments,”
+2026, version 2; version 1 was titled Sci-VLA. [Online]. Available:
+https://arxiv.org/abs/2602.09430
+[3] A. Brohan, N. Brown, J. Carbajal et al., “RT-1: Robotics transformer
+for real-world control at scale,” 2022. [Online]. Available: https:
+//arxiv.org/abs/2212.06817
+[4] ——, “RT-2: Vision-language-action models transfer web knowledge to
+robotic control,” 2023. [Online]. Available: https://arxiv.org/abs/2307.
+15818
+[5] Octo
+Model
+Team,
+D.
+Ghosh,
+H.
+Walke
+et
+al.,
+“Octo:
+An
+open-source
+generalist
+robot
+policy,”
+2024.
+[Online].
+Available:
+https://arxiv.org/abs/2405.12213
+[6] Open X-Embodiment Collaboration, A. O’Neill, A. Rehman et al.,
+“Open X-Embodiment: Robotic learning datasets and RT-X models,”
+2023. [Online]. Available: https://arxiv.org/abs/2310.08864
+[7] M. J. Kim, K. Pertsch, S. Karamcheti et al., “OpenVLA: An
+open-source vision-language-action model,” 2024. [Online]. Available:
+https://arxiv.org/abs/2406.09246
+[8] K. Black, N. Brown, D. Driess et al., “π0: A vision-language-action
+flow model for general robot control,” in Proceedings of Robotics:
+Science and Systems, 2025, arXiv:2410.24164. [Online]. Available:
+https://arxiv.org/abs/2410.24164
+[9] Physical Intelligence, K. Black, N. Brown et al., “π0.5: A vision-
+language-action model with open-world generalization,” 2025. [Online].
+Available: https://arxiv.org/abs/2504.16054
+[10] M. Shukor, D. Aubakirova, F. Capuano et al., “SmolVLA: A vision-
+language-action model for affordable and efficient robotics,” 2025.
+[Online]. Available: https://arxiv.org/abs/2506.01844
+[11] J. Luo, C. Xu, J. Wu, and S. Levine, “Precise and dexterous robotic
+manipulation via human-in-the-loop reinforcement learning,” 2024.
+[Online]. Available: https://arxiv.org/abs/2410.21845
+[12] C. Xu, J. T. Springenberg, M. Equi, A. Amin, A. Esmail, S. Levine, and
+L. Ke, “RL token: Bootstrapping online RL with vision-language-action
+models,” 2026. [Online]. Available: https://arxiv.org/abs/2604.23073
+[13] G. Lu, W. Guo, C. Zhang et al., “VLA-RL: Towards masterful and
+general robotic manipulation with scalable reinforcement learning,”
+2025. [Online]. Available: https://arxiv.org/abs/2505.18719
+
+
+11
+[14] H.
+Li,
+Y.
+Zuo,
+J.
+Yu
+et
+al.,
+“SimpleVLA-RL:
+Scaling
+VLA
+training
+via
+reinforcement
+learning,”
+2025.
+[Online].
+Available:
+https://arxiv.org/abs/2509.09674
+[15] Y. Guo, J. Zhang, X. Chen et al., “Improving vision-language-action
+model with online reinforcement learning,” in IEEE International
+Conference on Robotics and Automation, 2025, arXiv:2501.16664.
+[Online]. Available: https://arxiv.org/abs/2501.16664
+[16] Physical
+Intelligence,
+A.
+Amin,
+R.
+Aniceto
+et
+al.,
+“π∗
+0.6:
+A
+VLA
+that
+learns
+from
+experience,”
+2025.
+[Online].
+Available:
+https://arxiv.org/abs/2511.14759
+[17] S. Su, B. Yang, Z. Deng, B. Liang, Y. F. Yeung, Z. Wang, and
+L. Sun, “From pretraining to proficiency: Real-world subtask rl for long-
+horizon manipulation with minimal human intervention,” arXiv preprint
+arXiv:2609.21788, 2026.
+[18] K. Kim, N. Saito, H. Kim, K. Ikeuchi, J. Choo, and Y. Matsushita,
+“Object-centric residual rl for zero-shot sim-to-real vla enhancement,”
+arXiv preprint arXiv:2606.18953, 2026.
+[19] N. Saito, K. Kim, H. Kim, K. Ikeuchi, and Y. Matsushita, “Vlarl: Aug-
+menting vision-language-action models with simulation-trained latent-
+conditioned residual rl,” arXiv preprint arXiv:2609.30868, 2026.
+[20] L. Zhang, T. Tang, Z. Zhan et al., “AtomicVLA: Unlocking the potential
+of atomic skill learning in robots,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2026,
+arXiv:2603.07648. [Online]. Available: https://arxiv.org/abs/2603.07648
+[21] C. Deng, G. Chen, Y. Chen, Z. Liu, Z. Ruan, G. Chen, and J. Pan,
+“Semantically structured mixture-of-experts for compositional robotic
+manipulation,” in Proceedings of Robotics: Science and Systems, 2026,
+arXiv:2605.23477. [Online]. Available: https://arxiv.org/abs/2605.23477
+[22] M.
+Das,
+A.
+Prajapati,
+A.
+Anwar,
+and
+J.
+Thomason,
+“SWAP:
+Stepwise action policy routing for vision-language-action models,”
+2026. [Online]. Available: https://arxiv.org/abs/2610.06926
+[23] A. Gu and T. Dao, “Mamba: Linear-time sequence modeling with
+selective state spaces,” 2023. [Online]. Available: https://arxiv.org/abs/
+2312.00752
+[24] S. Fujimoto, H. van Hoof, and D. Meger, “Addressing function
+approximation error in actor-critic methods,” in Proceedings of the 35th
+International Conference on Machine Learning, ser. Proceedings of
+Machine Learning Research, vol. 80, 2018, pp. 1587–1596. [Online].
+Available: https://proceedings.mlr.press/v80/fujimoto18a.html
+[25] M. Tschannen, A. Gritsenko, X. Wang et al., “SigLIP 2: Multilingual
+vision-language
+encoders
+with
+improved
+semantic
+understanding,
+localization, and dense features,” 2025. [Online]. Available: https:
+//arxiv.org/abs/2502.14786
+[26] B. Liu, Y. Zhu, C. Gao, Y. Feng, Q. Liu, Y. Zhu, and P. Stone, “LIBERO:
+Benchmarking knowledge transfer for lifelong robot learning,” 2023.
+[Online]. Available: https://arxiv.org/abs/2306.03310
+[27] Y. Zhu, J. Wong, A. Mandlekar, R. Martín-Martín, A. Joshi, K. Lin,
+A. Maddukuri, S. Nasiriany, and Y. Zhu, “robosuite: A modular
+simulation framework and benchmark for robot learning,” 2020.
+[Online]. Available: https://arxiv.org/abs/2009.12293
+[28] M. Sokolova and G. Lapalme, “A systematic analysis of performance
+measures for classification tasks,” Information processing & manage-
+ment, vol. 45, no. 4, pp. 427–437, 2009.

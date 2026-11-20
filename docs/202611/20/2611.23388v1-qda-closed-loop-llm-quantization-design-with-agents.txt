@@ -1,0 +1,2102 @@
+QDA: CLOSED-LOOP LLM QUANTIZATION DESIGN WITH AGENTS
+Xingyang Li∗
+Tianlang Zhao∗
+Song Han
+Ligeng Zhu
+MIT
+NVIDIA
+ABSTRACT
+Post-training quantization is the standard way to serve large language models at low cost. However, the best
+quantization recipe differs across models and precisions. As a result, experts must redesign it for every new
+model, which is time-consuming and often sub-optimal. Fortunately, an LLM agent can take over this design by
+refining the recipe over rounds of building and evaluating candidates, so that more rounds lead to better recipes.
+However, evaluating one quantized reasoning model takes tens of GPU-hours, and combining methods from
+different codebases means porting each to the new architecture by hand. We present QDA, a system in which
+an agent designs the recipe for each model and precision. To make evaluation fast, QDA scores each candidate
+in minutes by its output KL divergence from the original model on reasoning traces that the agent never sees,
+and checks promising ones with long generations to catch failures such as repetition loops. To make building
+fast, QDA provides a library of public PTQ methods that are compatible with one another and with new model
+architectures. Across four reasoning models, QDA improves accuracy over the strongest public recipe by 0.9, 1.4
+and 2.2 percentage points on average at W4A16, W4A8 and W3A16, using 64 GPU-hours per search. On the
+320B-parameter MoE model GLM-5.3-Flash at NVFP4 W4A4, it recovers 98.3% of the FP8 model’s accuracy,
+against 96.9% for the best vendor checkpoint. Every QDA checkpoint also runs on existing serving kernels with
+no inference overhead. We will release the library, the evaluator and the harness.
+1
+INTRODUCTION
+Large language models (LLMs) excel at mathematics, sci-
+ence and programming, and reasoning models go further by
+thinking for thousands of tokens before they answer (Guo
+et al., 2025; Yang et al., 2025a; Chen et al., 2026). However,
+serving them is costly in both memory and compute. Post-
+training quantization (PTQ) is a standard way to cut both
+costs (Frantar et al., 2023; Lin et al., 2024b). For example,
+with its weights in NVFP4, the 320B-parameter GLM-5.3-
+Flash (Z.ai, 2026) fits on one GB300 GPU instead of the two
+that it needs in FP8. Quantizing the activations as well lets
+matrix multiplications run on low-precision tensor cores,
+which are several times faster than BF16 ones (Xiao et al.,
+2023; Lin et al., 2025; Alvarez et al., 2025).
+Existing PTQ methods fix different sources of quantization
+error (Xiao et al., 2023; Frantar et al., 2023; Lin et al.,
+2024b), so they can be stacked, and a combination often
+works better than any single method (Ashkboos et al., 2024;
+Liu et al., 2025b). A quantized checkpoint is therefore
+produced by a recipe, which consists of the stacked methods,
+their settings and their calibration data (§ 2.2). However, we
+find that the best recipe differs across models and precisions.
+For example, with 4-bit weight-only quantization, the most
+accurate public recipe is ParoQuant (Liang et al., 2026) on
+∗Equal contribution.
+Figure 1. QDA beats the strongest public recipe at low cost.
+Left: average accuracy of four reasoning models at each precision,
+for the strongest public recipe and for QDA. Middle: QDA check-
+points run on existing kernels with no inference overhead. Right:
+the GPU-hours and agent tokens of one search.
+Qwen3.5-9B (Qwen Team, 2026) but GPTQ (Frantar et al.,
+2023) on DeepSeek-R1-Distill-Llama-8B (Figure 2(a)). On
+Qwen3.5-9B alone, AWQ (Lin et al., 2024b) beats GPTQ
+in 4-bit but loses to it in 3-bit weight-only quantization.
+Each method is evaluated on only a few models and preci-
+sions, so the best recipe for a new model can only be found
+by trying candidates on it. Experts therefore still decide by
+hand which methods to combine, with which settings and
+data. For example, NVIDIA’s ModelOpt keeps a separate
+hand-written recipe for each of 28 models, which records
+model-specific decisions such as which modules to leave in
+BF16 (NVIDIA, 2024). Such hand design does not scale,
+arXiv:2611.23388v1  [cs.LG]  17 Nov 2026
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+because every new model needs its own recipes and new
+models arrive quickly. Between October 2025 and Septem-
+ber 2026, more than 90 open-weight models with over 10B
+parameters were released (Epoch AI, 2026), which would
+need over 360 recipes at our four precisions.
+LLM coding agents already write code to improve algo-
+rithms, GPU kernels and computer systems (Novikov et al.,
+2025; Cao et al., 2026; Cheng et al., 2025). Recipe design
+is a natural task for such an agent, because it also proceeds
+by trial and error, building and evaluating one candidate
+after another as an expert would. However, two problems
+stand in the way. First, evaluating a candidate is expensive.
+Because a reasoning model writes thousands of tokens per
+answer and each problem must be sampled many times, a
+full evaluation of one quantized checkpoint takes up to 86
+GPU-hours (§ 3.2). At this cost, a search can try only a
+few candidates, so a wider search needs a much cheaper
+proxy metric for accuracy. Second, building a candidate
+is costly. Most PTQ methods are released as separate re-
+search code, so a recipe that mixes them must be ported
+by hand to each new architecture, such as linear-attention
+hybrids (Yang et al., 2025b; Kimi Team et al., 2025) and
+fine-grained mixtures of experts (DeepSeek-AI et al., 2024;
+OpenAI et al., 2025). Even a method that a toolkit supports
+can be too slow for a search (§ 3.3). An agent that fills these
+gaps itself writes about 3k lines of quantization code per
+search and still ends with a less accurate checkpoint (§ 6.3).
+To this end, we present QDA, a system in which an agent
+designs the quantization recipe for each model and preci-
+sion (Figure 3). To address the first problem, we use the KL
+divergence of the candidate’s next-token distributions from
+the original model’s as the proxy metric, measured on refer-
+ence traces, reasoning traces that the original model wrote.
+Because the original model’s distributions are cached, scor-
+ing a candidate takes minutes, which is 350–990× cheaper
+than a full evaluation. The agent also generates full answers
+for a few promising candidates to reveal rare failures such
+as repetition loops. To address the second problem, we im-
+plement 21 PTQ methods in one library behind a common
+interface. Every method takes a quantized checkpoint as
+input and returns one, so the agent can stack methods in
+any order. Finally, a harness runs the search without human
+supervision and keeps the test benchmarks and the reference
+traces out of the agent’s reach, because a recipe tuned on
+them would score higher without being any better (Kapoor
+et al., 2025; Xu et al., 2024).
+On four reasoning models that span dense Transformers,
+linear-attention hybrids and mixture-of-experts (MoE) mod-
+els, QDA improves the average accuracy over the strongest
+public recipe by 0.9, 1.4 and 2.2 points at W4A16, W4A8
+and W3A16 (Figure 1). Each search uses 64 GPU-hours.
+On the MoE model, QDA also outperforms greedy search
+Table 1. Precisions evaluated. The first three run on GH200 with
+vLLM 0.27.1 for the four main models, and NVFP4 runs on GB300
+with vLLM 0.31 for GLM-5.3-Flash.
+Precision
+Weights
+Activations
+Kernel
+W4A16
+INT4 g128 asym
+BF16
+Marlin
+W3A16
+INT3 g128 sym;
+head + embeddings INT4 g64
+BF16
+Humming
+W4A8
+INT4 g128 sym
+FP8 (E4M3) per-token
+CUTLASS W4A8
+NVFP4 W4A4
+FP4 (E2M1) g16, FP8 scales
+FP4 (E2M1) g16
+NVFP4 GEMM
+and ASHA (Li et al., 2020) by up to 1.2 points at W4A8
+and W3A16 when they search the same library with the
+same budget, and the same agent given ModelOpt and its
+recipe-search skill falls 0.5–1.3 points behind even when
+it selects on the test benchmarks. On the 320B-parameter
+GLM-5.3-Flash at NVFP4, a single 6.5-hour search recov-
+ers 98.3% of the FP8 model’s accuracy, against 96.9% and
+96.3% for the checkpoints released by NVIDIA and Red
+Hat AI (NVIDIA, 2026a; Red Hat AI, 2026). Moreover,
+every QDA checkpoint runs on the existing serving kernel
+of its format and adds no inference overhead.
+2
+BACKGROUND
+2.1
+Quantized LLM Serving
+Quantization lowers both the memory and the compute of
+serving. Smaller weights let a model fit on fewer GPUs and
+speed up decoding, which is bound by weight reads (Lin
+et al., 2025; 2024b). Quantized activations further let matrix
+multiplications use faster tensor cores, which speeds up
+compute-bound prefill and large-batch decoding.
+Quantization. Quantization maps a group x of values to
+b-bit codes with a scale s and a zero point z:
+Q(x) = s
+
+clamp
+  x
+s
+
++ z, 0, 2b −1
+
+−z
+
+.
+(1)
+Symmetric formats use signed codes without z, and
+NVFP4 (Alvarez et al., 2025) rounds to 4-bit floating-point
+values instead of integers. We write WxAy for x-bit weights
+and y-bit activations, and Table 1 lists our four formats.
+Quantized matrix multiplication. A linear layer computes
+Y = XW⊤, and its quantized kernel computes
+Y ≈Q(X) Q(W)⊤,
+(2)
+where Q(W) is stored in the checkpoint and Q(X), if any,
+is computed on the fly. The formats differ in which operands
+the tensor cores multiply. At W4A16 and W3A16, the ker-
+nel dequantizes the weights to BF16 in registers, which
+saves memory traffic but not arithmetic (Frantar et al., 2025;
+Lin et al., 2024b). At W4A8, the activations are also quan-
+tized per token to FP8 (Micikevicius et al., 2022), the only
+type that vLLM’s W4A8 kernel takes. At NVFP4 W4A4,
+both operands are 4-bit floats with one scale per 16 values,
+which Blackwell tensor cores multiply directly (Alvarez
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Figure 2. The best recipe differs across models and precisions, and a full evaluation costs hundreds of times more than a KL score.
+(a) Accuracy change from BF16 of three public recipes and QDA at W4A16 on four models. A star marks the most accurate public recipe.
+On Q3.5-9B at W3A16, AWQ and GPTQ swap order. (b) Accuracy change at W4A8 of FP8-aware GPTQ, which fits GPTQ’s codes to
+the kernel’s FP8 scales instead of BF16 scales. This helps Q3.5-9B but hurts the other three. (c) Left: share of 44 checkpoint pairs that
+each measure ranks in the same order as accuracy. Right: GPU-minutes to compute each measure on one R1-8B checkpoint. Q3.5-9B,
+Q3.6-35B, Q3.8-27B and R1-8B denote Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.8-27B and DeepSeek-R1-Distill-Llama-8B.
+et al., 2025; Rouhani et al., 2023). Each kernel also fixes
+the precision of the scales, such as FP8 at W4A8, and a
+quantizer must match it exactly.
+2.2
+Post-Training Quantization Methods
+Post-training quantization (PTQ) quantizes a trained model
+without retraining it, using only a small set of calibration
+texts. Most methods work one linear layer at a time and
+minimize its output error on the calibration inputs X:
+min
+Q(W)
+XW⊤−X Q(W)⊤2
+F .
+(3)
+A recipe makes four choices: a transformation, a rounding
+method, the scales and their tuning, and the calibration data.
+Transformations.
+Since XW⊤= (XT−1)(WT⊤)⊤
+for any invertible T, a transformation can reshape both
+operands without changing the output, for example to tame
+the outliers in a few activation channels (Xiao et al., 2023).
+A diagonal T rescales channels: SmoothQuant moves out-
+liers from the activations into the weights (Xiao et al., 2023),
+and AWQ scales up the weight channels that meet large ac-
+tivations, protecting them from rounding (Lin et al., 2024b).
+An orthogonal T, such as a Hadamard rotation, mixes all
+channels so that none stands out (Ashkboos et al., 2024; Liu
+et al., 2025b; Xi et al., 2023). ParoQuant combines learned
+pairwise rotations with channel scaling (Liang et al., 2026).
+Rounding.
+Rounding each weight to the nearest code
+ignores how the errors of different weights add up in the
+output. GPTQ (Frantar et al., 2023) solves Equation (3)
+approximately: it rounds one column at a time and up-
+dates the columns not yet rounded to cancel the error, using
+the second-order statistics X⊤X of the calibration inputs.
+Learned rounding, such as AutoRound (Cheng et al., 2024)
+and GSQ (Dadgarnia et al., 2026), instead learns the round-
+ing of each weight by gradient descent, at a higher cost.
+Scales and tuning. A larger scale covers the extreme values
+but rounds the others coarsely, so clipping searches for the
+scale that best balances the two. Since Equation (3) cannot
+see errors that build up across layers, tuning methods train
+the scales so that the quantized model matches the original,
+block by block (Shao et al., 2024; Chen et al., 2025) or by
+distillation (Malinovskii et al., 2024).
+Calibration data. Every statistic above comes from the
+calibration inputs, so their choice alone changes the accu-
+racy of the result (Williams & Aletras, 2024). Generic text
+is the default, and text that the original model generates
+(self-generated data) can work better (Williams et al., 2025).
+Combining the steps.
+Because each choice removes a
+different error, applying them in sequence, for example a
+rotation followed by GPTQ, is often more accurate than any
+single method (Ashkboos et al., 2024; Liu et al., 2025b).
+Yet steps that treat the same error overlap, so the best com-
+bination cannot be predicted from each method alone.
+3
+MOTIVATION
+3.1
+The Best Recipe Differs per Model and Precision
+At W4A16, no public recipe is the most accurate on every
+model (Figure 2(a)). ParoQuant is the best on Qwen3.5-9B,
+AWQ on Qwen3.8-27B and GPTQ on DeepSeek-R1-Distill-
+Llama-8B. On a single model, the ranking also changes with
+the precision. On Qwen3.5-9B, AWQ is 5.1 points more
+accurate than GPTQ at W4A16 but 12.3 points less accurate
+at W3A16. Even a single technique can help one model and
+hurt the others. For example, the W4A8 kernel stores each
+scale in FP8, whereas GPTQ computes with BF16 scales.
+Running GPTQ with the FP8 scales instead (FP8-aware
+GPTQ) raises the accuracy of Qwen3.5-9B by 5.3 points but
+lowers it on the other three models (Figure 2(b)). A recipe
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+found for one model and precision therefore does not carry
+over, and each new pair needs its own search.
+3.2
+Evaluating a Recipe Is Expensive
+Earlier searches over quantization recipes could evaluate
+each candidate in minutes. AutoML for convolutional net-
+works measured accuracy on a small validation set (He et al.,
+2018; Wang et al., 2019), and previous LLM quantization
+methods were judged by short benchmarks that need only a
+few generated tokens per question (Frantar et al., 2023; Lin
+et al., 2024b).
+Reasoning models break this assumption. They are graded
+on the final answer after a long chain of thought, which often
+runs to tens of thousands of tokens, and one different token
+can change the rest of the reasoning and the answer (Yuan
+et al., 2025). A reliable estimate therefore averages many
+samples per problem, especially since AIME holds only tens
+of problems (Hochlehnert et al., 2025), so a full evaluation
+of one quantized checkpoint generates about ten thousand
+long answers and takes 23 GPU-hours on DeepSeek-R1-
+Distill-Llama-8B and 60–86 GPU-hours on our Qwen mod-
+els (Figure 2(c)). Fewer problems or samples make the
+estimate too noisy, and scoring every candidate on the test
+sets would overfit them (Blum & Hardt, 2015). A search
+therefore needs a proxy metric that takes minutes yet reflects
+the whole served model.
+3.3
+Building a Candidate Is Costly
+Building a candidate is costly in two ways. First, a recipe
+can use only methods whose code runs on the model’s ar-
+chitecture. Most PTQ methods are released as research
+code for the model families in their papers. Toolkits such
+as llm-compressor, AutoRound and ModelOpt run only
+the methods that they have reimplemented and extend per-
+architecture tables by hand for each new model (Red Hat
+AI & vLLM Project, 2024; Cheng et al., 2024; NVIDIA,
+2024), so llm-compressor took three weeks after the release
+of Qwen3-Next to support calibration on it (Sikka, 2025).
+Second, a build can be too slow for a search. For example,
+one GPTQ build of the 256-expert Qwen3.6-35B-A3B with
+llm-compressor 0.13 takes about 16 GPU-hours, a quarter
+of the 64 GPU-hours that we give each search. Without
+our library, the agent fills these gaps itself, writing about 3k
+lines of quantization code per search, and still ends with a
+less accurate checkpoint (§ 6.3). Our library fills them once
+for all searches. It derives which layers feed which from the
+model itself, so a new architecture such as GLM-5.3-Flash
+needs no per-method changes, and it builds this GPTQ in
+0.42 GPU-hours (§ 5.1).
+4
+QDA: RECIPE DESIGN BY AN LLM
+AGENT
+As shown in Figure 3(a), the agent designs a recipe in a loop
+of four steps. In each round, (1) the agent proposes a recipe,
+(2) the library builds it into a candidate checkpoint, and
+(3) the evaluator scores the checkpoint by its KL divergence
+from the original model, which takes minutes. For a few
+promising candidates, (4) the agent also generates long
+answers to find failures such as repetition loops. When
+the budget runs out, the agent submits the checkpoint it
+considers best, and only this checkpoint is evaluated on the
+test benchmarks. § 5 describes the system.
+4.1
+Problem Setup
+A recipe is an ordered list of methods from § 2.2, each
+with its settings and calibration data, that turns the original
+model M into a quantized checkpoint.
+Objective. The goal is the checkpoint that best preserves
+the general abilities of the original model. We measure
+them by the mean accuracy A of a full evaluation over
+math, science, code and instruction following, the categories
+that model releases report (Guo et al., 2025; Yang et al.,
+2025a), and average the categories as recent quantization
+work does (Liang et al., 2026). Within a GPU budget B, the
+search looks for
+max
+i
+A
+ x(i)
+s.t.
+P
+i c(i) ≤B,
+(4)
+where x(i) is the i-th candidate and c(i) the GPU time for
+its data, build, score and checks. Measuring A for one
+checkpoint takes 23–86 GPU-hours on our models (§ 3.2),
+so a search that measured A for every candidate could afford
+only a few of them. The search therefore ranks candidates
+by KL (step 3) and generation checks (step 4) and measures
+A only on the final checkpoint.
+Admissible recipes. A checkpoint must keep the public
+baselines’ quantized modules, bit-width and format (Table 1)
+and run on their kernels with no new operator. A public
+checkpoint may be refined but not submitted as is.
+The agent. In step (1), the agent writes a recipe. It works in
+a sandbox with the library, a card per method that says what
+it does and when it fails, and a task statement (App. E), and
+it can write its own code, for example to generate calibration
+data with the original model. Between proposals, it reads the
+log of its scores, the results of its checks and its own notes,
+and from them decides which step or setting to change next.
+4.2
+Scoring Candidates by Their KL
+In step (3), the evaluator scores a checkpoint by how much
+its next-token predictions differ from the original model’s.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+propose a recipe
+build
+score by KL
+every checkpoint, minutes
+generation checks
+a few, hours
+1
+2
+3
+4
+rank by KL
+feedback
+submit
+(a) The search loop
+0
+1
+2
+3
+4
+5
+6
+7 h
+0.6
+0.8
+1.0
+self-generated
+data
+check finds looping
+code answers
+distill on
+long answers
+final checkpoint
+KL / public GPTQ
+(b) One search on Qwen3.6-35B-A3B at W4A16
+Figure 3. The QDA loop. Every candidate gets a KL score within minutes, a few promising ones also get a long-generation check, and
+the agent combines both to decide what to change next. (a) The four steps of one round. The numbers match steps (1)–(4) in § 4. (b) The
+KL of every checkpoint in one search, relative to the public GPTQ checkpoint. The line shows the lowest KL so far. The blue label marks
+a long-generation check, and the black labels mark two changes that the agent made (§ 4.3).
+Why the KL. We start from the signal that most PTQ meth-
+ods already compute, the layer-wise error of Equation (3),
+which GPTQ and AWQ minimize. However, it looks at
+one layer at a time and cannot see the errors that build up
+across layers. For example, on Qwen3.5-9B at W4A16, the
+layer-wise error prefers GPTQ over AWQ, although AWQ’s
+A is 5.1 points higher. We therefore compare the whole
+quantized model with the original one, by the KL diver-
+gence between their next-token distributions. The evaluator
+computes these distributions on the quantized checkpoint
+as vLLM serves it, so the KL also includes errors that only
+the serving kernel introduces, such as the FP8 scales of the
+W4A8 kernel (§ 3.1). To verify this choice, we take 44
+pairs of public baselines and simple recipes at three preci-
+sions (Figure 2(c)). The KL orders 82% of the pairs as their
+accuracy does, against 73% for the layer-wise error.
+The score.
+The evaluator holds a fixed set of reference
+traces, which the original model wrote for prompts in math,
+science, code, and writing and planning that do not overlap
+with the test benchmarks. It feeds each trace to the check-
+point and averages the per-token KL divergence over all
+generated positions T :
+KL(x) =
+1
+|T |
+X
+(s,t)∈T
+DKL
+ pM(·|s<t) ∥px(·|s<t)
+
+,
+(5)
+where s<t is the prefix of trace s before position t. Averag-
+ing within one domain gives the per-domain KL.
+Estimating the KL from top tokens. Storing the origi-
+nal model’s full distribution at every position would take
+0.21–0.56 TB per set of reference traces in BF16, since a
+vocabulary of 128k–248k tokens meets 0.49–1.13 million
+positions. The evaluator therefore keeps, at each position
+t, only the k = 128 most likely tokens Kt of the original
+model and one bucket for the rest, so each position con-
+tributes
+X
+v∈Kt
+pM(v) log pM(v)
+px(v)
++ ¯pM log ¯pM
+¯px
+,
+(6)
+where ¯p = 1 −P
+v∈Kt p(v).
+Proposition 1. The estimate of Equation (6) never exceeds
+the full KL of Equation (5), and the two are equal when
+pM(v)/px(v) is the same for every token v /∈Kt.
+The estimate is the KL between the two distributions after
+all tokens outside Kt are merged into one bucket, and merg-
+ing tokens can only lower the KL by the log-sum inequal-
+ity (Cover & Thomas, 2006). Sparse logit distillation calls
+the same bucket a ghost token (Anshumann et al., 2025).
+In practice the bucket holds on average 0.015–0.048% of
+the original model’s probability, and on nine checkpoints
+that we scored both ways, the estimate is 0–0.4% below
+the full KL. The original model’s top-k distributions on the
+reference traces are computed once and cached, so scoring
+a candidate runs only its quantized checkpoint and takes
+minutes (§ 5.2).
+Marking ties. The evaluator marks two checkpoints as tied
+in the agent’s log when their KLs differ by less than σ, so
+that the agent does not act on chance differences. Here σ is
+the relative standard deviation of the KL when one recipe is
+rebuilt on another random subset of its calibration data, 0.5–
+1.6% on our models (App. C). Scoring the same checkpoint
+again returns exactly the same value, so this variation comes
+from the build and not from the evaluator.
+4.3
+Checking Long Answers
+Only the answer after the thinking is graded, so a model
+that loops or never finishes its reasoning loses the whole
+problem. Quantization can make this more likely, as quan-
+tized reasoning models can think longer than the original
+model (Lotfi et al., 2026). These failures tend to appear late
+in long answers, so they show up only when a checkpoint
+writes complete answers itself. In step (4), the agent there-
+fore picks a candidate and has it write full answers to hard
+problems that the agent chooses itself, none of which come
+from the test benchmarks. It counts the answers that are
+wrong, loop or are cut off, and weighs these counts together
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Transform
+Rounding
+Scales &
+tuning
+served
+checkpoint
+hybrid
+dense
+MoE
+adapters
+s →fp8(s) · q
+FP8-aware GPTQ
+batched GPTQ
+all experts at once
+Composable Library §5.1
+qda
+kl
+qsched
+handin
+Coding agent
+no GPU, no internet
+Agent Sandbox
+frozen copy
++ hash
+KL inside
+vLLM
+reference traces
++ BF16 cache
+sci.
+math
+code plan
+Evaluator §5.2
+Scheduler §5.3
+one queue for all jobs
+8 GPUs
+Final evaluation on the test benchmarks
+recipe
+checkpoint
+checkpoint
+KL
+jobs
+submit
+Figure 4. System architecture of QDA. QDA has three components: the composable library (§ 5.1), the isolated evaluator (§ 5.2) and the
+harness (§ 5.3), which runs the agent in a sandbox and schedules its GPU jobs. From the sandbox, the agent can reach the rest of the
+system only through four commands: (1) qda builds a recipe in the library and returns its checkpoint, (2) kl sends a checkpoint to the
+evaluator and returns its KL, (3) qsched submits other jobs, such as long-generation checks, to the scheduler, and (4) handin submits
+the final checkpoints, which are evaluated on the test benchmarks after the search.
+with the KL to decide what to change.
+For example, on Qwen3.6-35B-A3B at W4A16, calibrat-
+ing GPTQ on self-generated data lowered the KL by 30%
+(Figure 3(b)). In a long-generation check, however, this
+checkpoint cut off 12 of 191 answers at the length limit,
+against 3 for the original model. Most of them were code
+answers that looped on debugging steps. The agent noted
+that “the truncation count is the signal I watch” and, one
+minute after grading the check, began generating 600 hard
+prompts for long answers. It kept the calibration on the
+original model’s traces and added scale distillation on 1,200
+of the quantized model’s own long answers, and its final
+checkpoint beats the best public recipe by 1.3 points.
+5
+THE QDA SYSTEM
+A search must build and score dozens of checkpoints within
+its budget, safely and without human intervention. QDA
+makes this possible with three components, a composable
+library, an evaluator inside the serving engine and a harness
+that runs the search (Figure 4). The agent can write any code
+in its sandbox, but every GPU job, including its own code,
+goes through the harness, so that one scheduler shares the
+GPUs of a search and keeps to its budget (§ 5.3). The agent
+reaches the three components through four commands, qda
+to build a recipe, kl to score a checkpoint, qsched for any
+other GPU job and handin to submit its final checkpoints.
+5.1
+Composable Library
+Our library extends llm-compressor (Red Hat AI & vLLM
+Project, 2024) to 21 methods covering § 2.2 (Table 8).
+Composing methods across architectures. Applying any
+method to a checkpoint that vLLM can load produces a
+new checkpoint that vLLM can also load. Methods there-
+fore stack as the steps of a recipe, and a method can also
+refine a public checkpoint or one that the agent built itself.
+Methods such as AWQ and rotations must know which nor-
+malization layer feeds which linear layers, and research
+code hardcodes these module names for each model family.
+Our library instead derives these relations from the model
+itself and checks each of them numerically, so a method
+written once runs on new architectures. After the library
+was built, supporting GLM-5.3-Flash, a 288-expert model
+unseen by our main searches, took a 72-line adapter and
+an extension for its FP8 release and multi-token-prediction
+layer. Every method then ran on it, and the search needed
+no other development (§ 6.2, App. D).
+Matching the serving kernel. A kernel can store a quantity
+at lower precision than the quantizer assumes. For example,
+vLLM’s W4A8 kernel casts each scale to FP8, whereas llm-
+compressor picks the codes for BF16 scales. The library
+picks the codes for the scales that the kernel stores.
+Fast builds. In llm-compressor 0.13, GPTQ solves each
+linear layer in turn, so one layer of 256 experts runs 768
+small solves one after another. The experts of a layer are in-
+dependent problems of the same shape, so the library stacks
+their second-order statistics and solves all of them with one
+batched factorization. One GPTQ build of Qwen3.6-35B-
+A3B thus takes 0.42 GPU-hours instead of about 16, with a
+KL within 1% of llm-compressor’s.
+5.2
+Evaluator
+Equation (5) needs both models’ full-vocabulary next-token
+distributions at about a million positions. A naive evalu-
+ator would run both models for every score. Moreover, a
+serving engine such as vLLM returns only the few largest
+probabilities at each position. The evaluator thus caches the
+original model’s top-k distributions once (about 1 GB) and
+computes the candidate’s side inside the engine.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Reducing inside the engine. The evaluator hooks vLLM’s
+prompt log-probabilities inside its workers and reduces each
+full-vocabulary distribution to the terms of Equation (6) in
+place, so only running sums leave the engine. A score thus
+runs only the checkpoint, on the final evaluation’s kernels,
+and is 350–990× cheaper than a full evaluation (App. C).
+5.3
+Harness
+A search runs without human intervention, so the harness
+itself must keep the evaluation honest and the GPUs busy.
+Isolating the evaluator. If the agent could read its evalu-
+ator, it could lower the KL without improving the model,
+for example by calibrating on the reference traces them-
+selves (Lin et al., 2024b). The harness therefore keeps the
+reference traces and the test benchmarks out of the agent’s
+reach. The agent works in a sandbox with no GPU and no
+network except the model API, and a supervisor outside it
+checks and logs every tool call (App. E). The evaluator runs
+outside the sandbox from a read-only copy of its code. Each
+scoring job reads a frozen copy of the checkpoint and returns
+nothing but KL values. These are the overall KL, the KL
+per domain and the KL on human-written text. Every file
+the agent can read is scanned for test items beforehand, so
+that no test problem can reach the agent through calibration
+data or prompts (App. C).
+Scheduling. A search runs dozens of GPU jobs, from KL
+scores of a few minutes to builds of several hours, and the
+agent submits them one by one as it works. The agent waits
+for each KL score before its next step, but scores and builds
+run on the same GPUs. Since the agent has no GPU in its
+sandbox, the harness holds these GPUs for the whole budget
+and runs every job from one priority queue. A job states
+how many GPUs it needs, how long it expects to run and
+which jobs it waits for. The harness copies the job’s script
+when the job is submitted, so the agent can keep editing
+its files while the job waits or runs, and it runs the job in
+a container on GPUs that no other job uses. KL scores go
+ahead of queued builds without stopping running ones, and
+no job starts if its expected duration runs past the deadline.
+Over the 12 searches, a KL score starts a median of 5 s after
+the agent asks, and jobs keep the GPUs busy 72% of the
+time.
+6
+EVALUATION
+6.1
+Setup
+Models and precisions. We evaluate four reasoning models
+(Table 6), which we call Qwen3.5, Qwen3.6, Qwen3.8 and
+R1-Llama in figures and Table 5b. Two of them are dense
+Gated DeltaNet hybrids (Qwen3.5-9B, Qwen3.8-27B), one
+is a hybrid MoE with 256 experts (Qwen3.6-35B-A3B),
+and one is the dense DeepSeek-R1-Distill-Llama-8B. We
+quantize the same modules as the public baselines (App. B).
+We use the formats and vLLM kernels of Table 1 on GH200
+GPUs, and we also run one search on GLM-5.3-Flash at
+NVFP4 W4A4, a pair that no main search saw (§ 6.2).
+Benchmarks.
+The test benchmark has four categories,
+and we report their mean. They are math (AIME 2025 and
+HMMT Feb 2026), science (GPQA-Diamond (Rein et al.,
+2024)), code (LiveCodeBench v6 (Jain et al., 2025)) and
+instruction following (IFBench (Pyatkin et al., 2025)), with
+32, 16, 4 and 16 samples per problem (App. B). DeepSeek-
+R1-Distill-Llama-8B uses IFEval (Zhou et al., 2023) instead
+of IFBench, since its accuracy of 20% on IFBench is too low
+to separate recipes. Models generate up to 81,920 tokens
+with the sampling settings of their model cards (App. B). A
+sample that never ends its thinking scores 0.
+Baselines.
+The public recipes are GPTQ (Frantar et al.,
+2023) and AWQ (Lin et al., 2024b) with the defaults of llm-
+compressor, QuaRot’s offline rotations followed by default
+GPTQ (QuaRot+GPTQ) (Ashkboos et al., 2024) at W4A8,
+and two recent methods that report state-of-the-art accuracy,
+ParoQuant (Liang et al., 2026) at W4A16 and GSQ (Dadgar-
+nia et al., 2026) at W3A16. GPTQ is asymmetric at W4A16.
+ParoQuant uses its released checkpoints. GSQ uses its re-
+leased checkpoint on Qwen3.8-27B, and on the other three
+models we run its official code ourselves (App. A). Both
+ParoQuant and GSQ train the quantized model. ParoQuant
+takes about 9 GPU-hours on an 8B model (Liang et al.,
+2026), and GSQ took 30–52 GPU-hours per model on our
+GPUs, close to the 64 GPU-hours of one search.
+Agents and budget. The agent is Claude Code v2.1.303
+with Claude Opus 5.5 at high effort, and one task statement
+serves every model and precision (App. E). Each model–
+precision pair gets one search with 8 GH200 GPUs for 8
+hours (64 GPU-hours) and $19–75 of agent tokens, and
+the final evaluation with vLLM 0.27.1 (Kwon et al., 2023)
+is not charged to it. On Qwen3.6-35B-A3B, which the
+ablations also use, each precision gets three searches, and
+we report their mean (standard deviation 0.1–0.2 points).
+Like a human expert, the agent may start from a public
+checkpoint (§ 4.1).
+6.2
+Accuracy Results
+As Table 2 shows, QDA improves the average accuracy over
+the strongest public recipe of each pair by 0.9, 1.4 and 2.2
+points at W4A16, W4A8 and W3A16.
+Across models. QDA is the most accurate recipe on the
+dense model and the two Gated DeltaNet hybrids at ev-
+ery precision. On Qwen3.8-27B at W4A16, it is even 0.3
+points above BF16, and on DeepSeek-R1-Distill-Llama-8B
+at W3A16, it is 6.1 points above GPTQ. On the MoE model
+Qwen3.6-35B-A3B, QDA leads by 1.3 and 0.1 points at
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Table 2. Main results. QDA improves the average accuracy over the strongest public recipe by 0.9, 1.4 and 2.2 points at W4A16, W4A8
+and W3A16, and by up to 6.1 points (DeepSeek-R1-Distill-Llama-8B at W3A16). Accuracy (%) of four reasoning models on math,
+GPQA-Diamond (GPQA), LiveCodeBench (LCB) and IFBench (IFB; IFEval for R1-Llama), and their average (Avg). Each QDA row is
+the final checkpoint of one 64-GPU-hour search, and the Qwen3.6-35B-A3B rows are means of three searches. In each Avg column, the
+best quantized result is in bold and the second best is underlined. Within each precision, all rows except ParoQuant, which adds an online
+rotation, run on the same kernel (Table 1). QuaRot+GPTQ uses only QuaRot’s offline rotations (R1 on the Qwen models, R1 and R2 on
+R1-Llama). At W3A16, all Qwen searches but one on Qwen3.6-35B-A3B start from the GSQ checkpoint in this table and refine it.
+Prec.
+Method
+Qwen3.5-9B
+Qwen3.6-35B-A3B
+Qwen3.8-27B
+DeepSeek-R1-Distill-Llama-8B
+Math GPQA LCB
+IFB
+Avg
+Math GPQA LCB
+IFB
+Avg
+Math GPQA LCB
+IFB
+Avg
+Math GPQA LCB
+IFB
+Avg
+BF16
+–
+77.0 82.3 70.9 66.7 74.2 86.1 85.4 81.6 66.0 79.8 80.1 82.7 87.2 67.9 79.5 30.5 49.0 38.9 63.8
+45.6
+W4A16
+GPTQ
+62.5 78.6 53.2 66.7 65.3 82.8 83.9 79.8 64.5 77.7 79.2 81.3 81.6 66.8 77.2 28.3 47.5 36.8 60.9
+43.3
+AWQ
+72.8 79.6 63.5 65.5 70.4 80.9 83.5 79.5 63.1 76.8 78.3 82.1 85.2 67.6 78.3 28.1 48.1 36.6 59.8
+43.1
+ParoQuant
+73.9 80.2 68.7 64.2 71.8 82.7 84.0 79.2 65.1 77.7 75.6 80.9 83.5 67.6 76.9 28.3 46.7 34.9 62.4
+43.0
+QDA
+74.5 80.0 68.3 65.7 72.1 84.5 85.0 81.0 65.3 79.0 82.7 81.9 86.3 68.2 79.8 27.6 48.1 37.8 62.7
+44.1
+W4A8
+GPTQ
+52.3 68.7 42.0 65.8 57.2 81.7 83.0 78.7 66.1 77.4 76.7 82.0 83.6 67.6 77.5 28.0 46.9 36.3 60.8
+43.0
+AWQ
+57.0 68.9 36.2 62.8 56.2 77.8 81.0 74.2 64.7 74.4 73.9 80.6 82.8 67.4 76.2 25.7 45.2 33.9 59.2
+41.0
+QuaRot+GPTQ 71.5 73.6 59.7 63.4 67.1 81.4 82.4 79.5 64.6 77.0 80.6 80.6 86.2 68.1 78.9 25.6 43.5 36.5 60.6
+41.6
+QDA
+74.6 81.3 68.5 65.1 72.3 82.2 83.6 79.3 65.0 77.5 81.8 80.3 86.0 68.3 79.1 27.5 46.7 36.5 61.5
+43.1
+W3A16
+GPTQ
+19.3 41.9
+9.2 40.6 27.8 61.2 76.6 65.7 53.0 64.1 75.1 75.3 82.7 66.8 75.0 20.3 35.9 27.8 51.4
+33.9
+AWQ
+2.4
+26.7
+1.7 31.2 15.5 26.1 56.1 14.6 46.5 35.8 67.5 67.5 69.5 64.6 67.3 10.2 27.4 17.2 41.5
+24.1
+GSQ
+67.5 70.5 59.3 63.7 65.2 80.5 82.4 76.4 64.5 75.9 81.9 78.6 83.6 66.7 77.7 14.7 33.0 22.9 38.7
+27.3
+QDA
+70.7 73.5 63.5 59.3 66.8 81.8 82.2 77.0 62.0 75.7 85.9 79.1 84.7 66.8 79.1 25.1 42.5 32.4 60.2
+40.0
+Table 3. GLM-5.3-Flash at NVFP4. QDA recovers 98.3% of the
+FP8 accuracy on average, against 96.9% and 96.3% for the NVFP4
+releases of NVIDIA and Red Hat AI. Parentheses give the number
+of problems and samples per problem. Bold and underline mark
+the best and second-best NVFP4 results.
+Benchmark
+FP8 NVIDIA Red Hat AI QDA
+Math (93, ×16)
+84.8
+80.9
+78.8
+83.3
+GPQA-D (198, ×12)
+86.1
+83.3
+84.0
+83.9
+LCB v6 (454, ×4)
+71.3
+69.3
+69.2
+70.4
+SuperGPQA (9k, ×1) 68.7
+67.8
+67.4
+67.9
+Avg
+77.7
+75.3
+74.8
+76.4
+% of FP8
+100
+96.9
+96.3
+98.3
+Table 4. QDA beats the same agent with ModelOpt’s workflow
+and tools by 0.5–1.3 points on Qwen3.6-35B-A3B, with the same
+64 GPU-hours. Four-category mean accuracy (%).
+Prec.
+Best public
+Agent + ModelOpt
+QDA
+W4A16
+77.7
+78.5
+79.0
+W4A8
+77.4
+76.2
+77.5
+W3A16
+75.9
+74.5
+75.7
+W4A16 and W4A8 and is 0.2 points below GSQ at W3A16.
+Across precisions.
+At W4A8, the gain is largest on
+Qwen3.5-9B, where default GPTQ and AWQ lose 17–18
+points to BF16. QuaRot+GPTQ recovers 9.9 of them with
+a Hadamard rotation, and FP8-aware GPTQ recovers 5.3
+(Figure 2(b)). QDA’s recipe adds self-generated data, an
+FP8 scale search and scale distillation to the rotation, and it
+is 5.2 points more accurate than QuaRot+GPTQ.
+A strong agent alone is not enough.
+We give the
+same agent NVIDIA’s ModelOpt and its recipe-search
+skill (NVIDIA, 2026b) instead of our library, evaluator and
+scheduler (App. E). Although it selects candidates on the
+test benchmarks themselves, it is 0.5–1.3 points less accu-
+rate than QDA and even falls below the best public recipe
+at W4A8 and W3A16 (Table 4). The gain of QDA comes
+from its search flow and infrastructure, not the agent alone.
+Scaling to a 320B model and NVFP4.
+NVIDIA (2026a)
+and Red Hat AI (2026) have each released an NVFP4 check-
+point of GLM-5.3-Flash (Z.ai, 2026). QDA recovers 98.3%
+of the FP8 accuracy on average, against 96.9% and 96.3%
+for the two releases (Table 3), and it is the most accurate
+of the three on every benchmark except GPQA-Diamond,
+where it is 0.1 points below Red Hat AI. It also quantizes
+more modules than either release, so its checkpoint is the
+smallest, at 183.6 GiB against 190.4 and 184.3 GiB. We
+run one search on this 288-expert model from its FP8 re-
+lease, with the same agent, library and evaluator as the main
+searches and no public recipe. It takes about 6.5 hours on
+16 GB300 GPUs and $69 of agent tokens. All three NVFP4
+checkpoints are evaluated with the same engine, GPUs and
+sampling settings (App. B).
+Efficiency.
+QDA adds no inference overhead, since every
+checkpoint keeps the format and vLLM kernel of GPTQ
+and AWQ at its precision, or the standard NVFP4 format
+on GLM-5.3-Flash. In contrast, ParoQuant adds an online
+rotation that needs an adapted kernel for each format and
+engine, so QDA decodes 1.30–1.75× faster at W4A16 (Ta-
+ble 7). Moreover, QDA’s answers are 4% shorter than the
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Figure 5. What the searches found. No published practice helps every model, and the step that lowers the KL most differs from search to
+search. (a) Change in KL at W4A16 when one published practice is added to a recipe, measured between two checkpoints of the same
+search whose recipes differ only in that practice. Lower is better. Each practice lowers the KL on one model but not on another. (b) The
+step with the largest KL drop in each of the 12 final recipes. Bold notes mark problems that the agent diagnosed itself.
+Table 5. Ablation and a fixed recipe. (a) Replacing the agent with a predefined search algorithm (greedy search, ASHA) or replacing the
+library and scheduler with public tools and a plain GPU queue (w/o infra.), on Qwen3.6-35B-A3B with the same 64 GPU-hours, KL score
+and submission rule. QDA and w/o infra. are means of three searches. (b) A fixed recipe that came out of QDA’s searches: the pattern that
+five final recipes follow, applied with fixed settings and no search. It calibrates GPTQ on 640 answers that the original model wrote and
+then runs two rounds of scale distillation. Four-category mean accuracy (%). In each row, the best quantized result is in bold and the
+second best underlined.
+(a) Ablation on Qwen3.6-35B-A3B
+Prec.
+BF16
+Greedy
+ASHA
+w/o infra.
+QDA
+W4A16
+79.8
+78.9
+78.9
+78.8
+79.0
+W4A8
+79.8
+76.5
+76.3
+77.0
+77.5
+W3A16
+79.8
+75.0
+75.5
+75.5
+75.7
+(b) A fixed recipe
+Model
+Prec.
+Best public Fixed recipe QDA
+Qwen3.5
+W4A16
+71.8
+71.8
+72.1
+Qwen3.6
+W4A16
+77.7
+78.6
+79.0
+Qwen3.8
+W4A16
+78.3
+78.4
+79.8
+R1-Llama W4A16
+43.3
+43.7
+44.1
+Qwen3.5
+W4A8
+67.1
+70.1
+72.3
+Qwen3.5
+W3A16
+65.2
+61.8
+66.8
+strongest public recipe’s over the 12 pairs, and 1.7 points
+fewer hit the length limit.
+6.3
+Ablation Study
+Table 5 replaces one component of QDA at a time on
+Qwen3.6-35B-A3B, where builds cost the most.
+Replacing the agent. To test whether the agent matters,
+we replace it with two search algorithms, greedy search
+and ASHA (Li et al., 2020), that search the same library
+(App. E). QDA beats both by 0.2–1.2 points at W4A8 and
+W3A16, and they come within 0.1 points at W4A16.
+Replacing the infrastructure.
+To test our library and
+harness, we give the agent public libraries and a plain GPU
+queue, and it writes the rest of the code itself (App. E). Over
+three searches, QDA is 0.2–0.5 points more accurate on
+average and varies less (standard deviation 0.1–0.2 against
+0.2–0.4 points). Without the library, the agent rebuilds parts
+of it, such as an FP8-aware GPTQ, and writes three times
+as much code (3.1k against 1.1k lines on average). It never
+tries a rotation, the step behind QDA’s largest gap at W4A8.
+It launches 50% more jobs and loses twice the GPU-hours
+to failed or cancelled ones (6.6% against 3.1%).
+A fixed recipe. Five of QDA’s 12 final recipes follow the
+same pattern: GPTQ calibrated on self-generated data, then
+scale distillation. To test this pattern alone, we fix its settings
+and apply it as a fixed recipe without a search (Table 5b,
+App. A). This pattern was found by QDA’s searches, so the
+fixed recipe is not an independent baseline. At W4A16, it
+matches or beats the best public recipe on all four models,
+yet stays below QDA on each. On Qwen3.5-9B, it is 2.2
+and 5.0 points below QDA at W4A8 and W3A16, so even
+this fixed recipe does not carry over.
+6.4
+What the Searches Found
+The 12 final recipes differ in every stage (Figure 6), and the
+search logs show two reasons.
+No published practice helps every model and preci-
+sion. As Figure 5(a) shows, each of four published practices
+that the searches tried lowered the KL on one model and
+not on another. At W4A16, calibrating on self-generated
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+data (Williams et al., 2025) lowers the KL of Qwen3.6-
+35B-A3B by 30% but raises it on R1-Llama, whereas scale
+distillation on the default calibration text helps R1-Llama
+and not Qwen3.6-35B-A3B. AWQ’s scaling cuts the KL
+of Qwen3.5-9B by a third but adds almost nothing after a
+Hadamard rotation, which treats the same outlier channels.
+A plausible reason is that each practice fixes one source of
+error and helps only where that source dominates. Across
+whole recipes, the step that lowered the KL most also differs,
+a rotation in five searches, distillation in four, self-generated
+data in two and an FP8 scale search in one (Figure 5(b)).
+The agent builds its own data and code. Every final recipe
+calibrates or distills on self-generated data for prompts that
+the agent chose. In addition, 10 of the 12 train on answers
+that the quantized model itself wrote. Five also keep code
+that the agent wrote for training or merging. For example,
+with the codes fixed, the agent’s distillation also trains the
+parameters that the format leaves in BF16, such as normal-
+ization gains and the gate and convolution parameters of
+Gated DeltaNet, and none of them adds inference cost. In
+five of the ten, the agent added this training right after a gen-
+eration check found loops or cut-off answers (§ 4.3). It also
+diagnosed problems from its logs (bold notes in Figure 5(b)).
+On Qwen3.5-9B at W4A16, it traced spikes in its distillation
+loss to BF16 scales that crossed a rounding boundary all at
+once, which made Adam’s steps jump, and raised Adam’s ϵ.
+On DeepSeek-R1-Distill-Llama-8B at W3A16, it found that
+its own rounding code gave the scales a zero gradient and
+fixed it. On Qwen3.8-27B at W4A8, it skipped distillation,
+because the kernel stores each scale in FP8 and the smallest
+change to an FP8 scale rescales its whole group of weights
+by at least 6%, too large a step to fine-tune.
+7
+RELATED WORK
+Quantization of LLMs.
+Weight-only methods (Frantar
+et al., 2023; Lin et al., 2024b; Dettmers et al., 2024; Tseng
+et al., 2024a;b; Egiazarian et al., 2024; Liang et al., 2026;
+Dadgarnia et al., 2026) speed up memory-bound decoding.
+Weight-activation methods (Xiao et al., 2023; Ashkboos
+et al., 2024; Liu et al., 2025b; Lin et al., 2024a; Zhao et al.,
+2024; Lin et al., 2025) also run the matrix multiplications in
+low precision, and recent work extends quantization to 4-bit
+microscaling formats (Rouhani et al., 2023; Alvarez et al.,
+2025) and to the recurrent states of linear attention (Pan
+et al., 2026). Benchmarks (Gong et al., 2024) and large-
+scale studies (Kurtic et al., 2025; Liu et al., 2025a; Lian
+et al., 2026) compare fixed recipes to distill best practices.
+The calibration data (Williams & Aletras, 2024; Williams
+et al., 2025) and tuning against the original model (Shao
+et al., 2024; Chen et al., 2025; Malinovskii et al., 2024)
+change the result further, and the KL divergence from the
+original model is a common way to compare quantized
+checkpoints (Dutta et al., 2024; Kawrakow, 2024). QDA
+searches for the combination of these methods, settings and
+data for each model and precision.
+Automated quantization search. AMC (He et al., 2018),
+HAQ (Wang et al., 2019) and APQ (Wang et al., 2020)
+searched per-layer pruning ratios, bit-widths and architec-
+tures of CNNs, with the hardware in the loop. For LLMs,
+AMQ (Lee et al., 2025) and EvoPress (Sieberling et al.,
+2025) search per-layer bit-widths, OptiKIT (Santavas et al.,
+2026) runs a user-chosen recipe on several calibration sam-
+ples and tunes serving parameters, and HAQA (Deng et al.,
+2026) tunes fine-tuning hyperparameters and kernel settings
+with an LLM agent, but none of them searches over combina-
+tions of PTQ methods, their settings and calibration data at
+a fixed precision. ModelOpt’s recipe-search skill (NVIDIA,
+2026b) has a coding agent choose among ModelOpt’s built-
+in formats, calibration algorithms and quantized modules,
+and it writes no new methods or data. EvoPress also scores
+by KL, but on models stitched from precomputed layers, not
+on the served checkpoint.
+LLM agents as optimizers.
+LLM agents optimize
+prompts (Yang et al., 2024), algorithms (Romera-Paredes
+et al., 2024; Novikov et al., 2025), post-training recipes (Liu
+et al., 2026), GPU kernels (Ouyang et al., 2025; Baronio
+et al., 2026; Cao et al., 2026; Xing et al., 2026) and mecha-
+nisms of computer systems (Cheng et al., 2025; Hamadanian
+et al., 2026; Zhao et al., 2026). ML engineering and research
+agents follow a validation score (Chan et al., 2025; Toledo
+et al., 2025) and can overfit or game it (Von Arx et al.,
+2025; Zhong et al., 2026), which AIRA2 (Hambardzumyan
+et al., 2026) counters by hiding its search split from the
+agent. QDA instead scores candidates in minutes with an
+agent-invisible KL evaluator and evaluates only the final
+checkpoint on the test benchmarks.
+8
+CONCLUSION
+We present QDA, a system in which an LLM agent designs
+the quantization recipe for each model and precision, be-
+cause the best recipe differs across them. QDA scores each
+candidate in minutes by its output KL divergence from the
+original model on reference traces that the agent never sees,
+checks a few promising candidates with long generations,
+and builds them with a library of public PTQ methods that
+compose and run on new architectures. On four reasoning
+models, it improves average accuracy over the strongest
+public recipe by 0.9–2.2 points. Given ModelOpt’s work-
+flow and tools instead, the same agent falls 0.5–1.3 points
+behind. On the 320B-parameter GLM-5.3-Flash at NVFP4,
+it recovers 98.3% of the FP8 accuracy, against 96.9% for
+the best vendor checkpoint. Every QDA checkpoint adds no
+inference overhead.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+ACKNOWLEDGEMENTS
+We thank Han Cai, Yi Pan, Haocheng Xi, Yujun Lin and Ziyi
+Xu for their insightful feedback. We thank SK Telecom and
+the MIT Generative AI Impact Consortium (MGAIC) for
+supporting this research. We thank Jenia Jitsev and LAION
+for providing access to computing resources. We gratefully
+acknowledge the Gauss Centre for Supercomputing e.V.
+(GCS) for computing time on the supercomputer JUPITER
+at the J¨ulich Supercomputing Centre (JSC).
+REFERENCES
+Alvarez, E., Almog, O., Chung, E., Layton, S., Stosic, D.,
+Krashinsky, R., and Aubrey, K. Introducing NVFP4 for
+efficient and accurate low-precision inference. NVIDIA
+Technical Blog, https://developer.nvidia.c
+om/blog/introducing-nvfp4-for-efficie
+nt-and-accurate-low-precision-inferen
+ce/, June 2025.
+Anshumann, Zaidi, M. A., Kedia, A., Ahn, J., Kwon, T.,
+Lee, K., Lee, H., and Lee, J. Sparse logit sampling:
+Accelerating knowledge distillation in LLMs. In ACL, pp.
+18085–18108, 2025. doi: 10.18653/v1/2025.acl-long.88
+5.
+Ashkboos, S., Mohtashami, A., Croci, M. L., Li, B.,
+Cameron, P., Jaggi, M., Alistarh, D., Hoefler, T., and
+Hensman, J. QuaRot: Outlier-free 4-bit inference in
+rotated LLMs. In NeurIPS, 2024.
+Baronio, C., Marsella, P., Pan, B., Guo, S., and Alberti, S.
+Kevin: Multi-turn RL for generating CUDA kernels. In
+ICLR, 2026.
+Blum, A. and Hardt, M. The ladder: A reliable leaderboard
+for machine learning competitions. In ICML, 2015.
+Cao, S., Mao, Z., Gonzalez, J. E., and Stoica, I. K-Search:
+LLM kernel generation via co-evolving intrinsic world
+model. arXiv preprint arXiv:2602.19128, 2026.
+Chan, J. S., Chowdhury, N., Jaffe, O., Aung, J., Sherburn, D.,
+Mays, E., Starace, G., Liu, K., Maksin, L., Patwardhan,
+T., Madry, A., and Weng, L. MLE-bench: Evaluating
+machine learning agents on machine learning engineering.
+In ICLR, 2025.
+Chen, M., Shao, W., Xu, P., Wang, J., Gao, P., Zhang, K.,
+and Luo, P. EfficientQAT: Efficient quantization-aware
+training for large language models. In ACL, 2025.
+Chen, Q., Qin, L., Liu, J., Peng, D., Guan, J., Wang, P., Hu,
+M., Zhou, Y., Gao, T., and Che, W. Towards reasoning
+era: A survey of long chain-of-thought for reasoning large
+language models. Science China Information Sciences,
+69(6):161101, 2026. doi: 10.1007/s11432-025-4665-8.
+Cheng, A., Liu, S., Pan, M., Li, Z., Wang, B., Krentsel, A.,
+Xia, T., Cemri, M., Park, J., Yang, S., Chen, J., Agrawal,
+L., Desai, A., Xing, J., Sen, K., Zaharia, M., and Stoica,
+I. Barbarians at the gate: How AI is upending systems
+research. arXiv preprint arXiv:2510.06189, 2025.
+Cheng, W., Zhang, W., Shen, H., Cai, Y., He, X., Lv, K., and
+Liu, Y. Optimize weight rounding via signed gradient
+descent for the quantization of LLMs. In Findings of
+EMNLP, 2024.
+Cover, T. M. and Thomas, J. A. Elements of Information
+Theory. Wiley, 2nd edition, 2006.
+Dadgarnia, A., Tabesh, S., Nikdan, M., Helcig, M., Kur-
+tic, E., Kleinegger, M., and Alistarh, D. GSQ: Highly-
+accurate low-precision scalar quantization for LLMs via
+Gumbel-Softmax sampling. In NeurIPS, 2026.
+DeepSeek-AI, Liu, A., Feng, B., Xue, B., Wang, B., Wu, B.,
+Lu, C., Zhao, C., Deng, C., Zhang, C., Ruan, C., Dai, D.,
+Guo, D., Yang, D., Chen, D., Ji, D., Li, E., Lin, F., Dai,
+F., Luo, F., Hao, G., Chen, G., Li, G., Zhang, H., Bao,
+H., Xu, H., Wang, H., Zhang, H., Ding, H., Xin, H., Gao,
+H., Li, H., Qu, H., Cai, J. L., Liang, J., Guo, J., Ni, J., Li,
+J., Wang, J., Chen, J., Chen, J., Yuan, J., Qiu, J., Li, J.,
+Song, J., Dong, K., Hu, K., Gao, K., Guan, K., Huang,
+K., Yu, K., Wang, L., Zhang, L., Xu, L., Xia, L., Zhao,
+L., Wang, L., Zhang, L., Li, M., Wang, M., Zhang, M.,
+Zhang, M., Tang, M., Li, M., Tian, N., Huang, P., Wang,
+P., Zhang, P., Wang, Q., Zhu, Q., Chen, Q., Du, Q., Chen,
+R. J., Jin, R. L., Ge, R., Zhang, R., Pan, R., Wang, R., Xu,
+R., Zhang, R., Chen, R., Li, S. S., Lu, S., Zhou, S., Chen,
+S., Wu, S., Ye, S., Ye, S., Ma, S., Wang, S., Zhou, S., Yu,
+S., Zhou, S., Pan, S., Wang, T., Yun, T., Pei, T., Sun, T.,
+Xiao, W. L., Zeng, W., Zhao, W., An, W., Liu, W., Liang,
+W., Gao, W., Yu, W., Zhang, W., Li, X. Q., Jin, X., Wang,
+X., Bi, X., Liu, X., Wang, X., Shen, X., Chen, X., Zhang,
+X., Chen, X., Nie, X., Sun, X., Wang, X., Cheng, X., Liu,
+X., Xie, X., Liu, X., Yu, X., Song, X., Shan, X., Zhou,
+X., Yang, X., Li, X., Su, X., Lin, X., Li, Y. K., Wang,
+Y. Q., Wei, Y. X., Zhu, Y. X., Zhang, Y., Xu, Y., Xu, Y.,
+Huang, Y., Li, Y., Zhao, Y., Sun, Y., Li, Y., Wang, Y., Yu,
+Y., Zheng, Y., Zhang, Y., Shi, Y., Xiong, Y., He, Y., Tang,
+Y., Piao, Y., Wang, Y., Tan, Y., Ma, Y., Liu, Y., Guo, Y.,
+Wu, Y., Ou, Y., Zhu, Y., Wang, Y., Gong, Y., Zou, Y., He,
+Y., Zha, Y., Xiong, Y., Ma, Y., Yan, Y., Luo, Y., You, Y.,
+Liu, Y., Zhou, Y., Wu, Z. F., Ren, Z. Z., Ren, Z., Sha, Z.,
+Fu, Z., Xu, Z., Huang, Z., Zhang, Z., Xie, Z., Zhang, Z.,
+Hao, Z., Gou, Z., Ma, Z., Yan, Z., Shao, Z., Xu, Z., Wu,
+Z., Zhang, Z., Li, Z., Gu, Z., Zhu, Z., Liu, Z., Li, Z., Xie,
+Z., Song, Z., Gao, Z., and Pan, Z. DeepSeek-V3 technical
+report. arXiv preprint arXiv:2412.19437, 2024.
+Deng, K., Zheng, H., Qing, M., Zhu, K., Li, G., Xiao,
+Y., Zhang, L. E., Guo, L., Hui, B., Wang, Y., Yuan,
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+G., Agrawal, G., Niu, W., and Ma, X.
+From bits to
+chips: An LLM-based hardware-aware quantization agent
+for streamlined deployment of LLMs. arXiv preprint
+arXiv:2601.03484, 2026.
+Dettmers, T., Svirschevski, R., Egiazarian, V., Kuznedelev,
+D., Frantar, E., Ashkboos, S., Borzunov, A., Hoefler, T.,
+and Alistarh, D. SpQR: A sparse-quantized representation
+for near-lossless LLM weight compression. In ICLR,
+2024.
+Dutta, A., Krishnan, S., Kwatra, N., and Ramjee, R. Accu-
+racy is not all you need. In NeurIPS, 2024.
+Egiazarian, V., Panferov, A., Kuznedelev, D., Frantar, E.,
+Babenko, A., and Alistarh, D. Extreme compression of
+large language models via additive quantization. In ICML,
+2024.
+Epoch AI. Data on AI models. https://epoch.ai/d
+ata/ai-models, 2026. Accessed 2026-10-26.
+Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D.
+OPTQ: Accurate quantization for generative pre-trained
+transformers. In ICLR, 2023. Also known as GPTQ,
+arXiv:2210.17323.
+Frantar, E., Castro, R. L., Chen, J., Hoefler, T., and Alistarh,
+D. MARLIN: Mixed-precision auto-regressive parallel
+inference on large language models. In PPoPP, pp. 239–
+251, 2025. doi: 10.1145/3710848.3710871.
+Gong, R., Yong, Y., Gu, S., Huang, Y., Lv, C., Zhang,
+Y., Tao, D., and Liu, X. LLMC: Benchmarking large
+language model quantization with a versatile compression
+toolkit. In EMNLP Industry Track, 2024.
+Guo, D., Yang, D., Zhang, H., Song, J., Wang, P., Zhu, Q.,
+Xu, R., Zhang, R., Ma, S., Bi, X., Zhang, X., Yu, X., Wu,
+Y., Wu, Z. F., Gou, Z., Shao, Z., Li, Z., Gao, Z., Liu, A.,
+Xue, B., Wang, B., Wu, B., Feng, B., Lu, C., Zhao, C.,
+Deng, C., Ruan, C., Dai, D., Chen, D., Ji, D., Li, E., Lin,
+F., Dai, F., Luo, F., Hao, G., Chen, G., Li, G., Zhang, H.,
+Xu, H., Ding, H., Gao, H., Qu, H., Li, H., Guo, J., Li,
+J., Chen, J., Yuan, J., Tu, J., Qiu, J., Li, J., Cai, J. L., Ni,
+J., Liang, J., Chen, J., Dong, K., Hu, K., You, K., Gao,
+K., Guan, K., Huang, K., Yu, K., Wang, L., Zhang, L.,
+Zhao, L., Wang, L., Zhang, L., Xu, L., Xia, L., Zhang,
+M., Zhang, M., Tang, M., Zhou, M., Li, M., Wang, M.,
+Li, M., Tian, N., Huang, P., Zhang, P., Wang, Q., Chen,
+Q., Du, Q., Ge, R., Zhang, R., Pan, R., Wang, R., Chen,
+R. J., Jin, R. L., Chen, R., Lu, S., Zhou, S., Chen, S., Ye,
+S., Wang, S., Yu, S., Zhou, S., Pan, S., Li, S. S., Zhou, S.,
+Wu, S., Yun, T., Pei, T., Sun, T., Wang, T., Zeng, W., Liu,
+W., Liang, W., Gao, W., Yu, W., Zhang, W., Xiao, W. L.,
+An, W., Liu, X., Wang, X., Chen, X., Nie, X., Cheng,
+X., Liu, X., Xie, X., Liu, X., Yang, X., Li, X., Su, X.,
+Lin, X., Li, X. Q., Jin, X., Shen, X., Chen, X., Sun, X.,
+Wang, X., Song, X., Zhou, X., Wang, X., Shan, X., Li,
+Y. K., Wang, Y. Q., Wei, Y. X., Zhang, Y., Xu, Y., Li, Y.,
+Zhao, Y., Sun, Y., Wang, Y., Yu, Y., Zhang, Y., Shi, Y.,
+Xiong, Y., He, Y., Piao, Y., Wang, Y., Tan, Y., Ma, Y.,
+Liu, Y., Guo, Y., Ou, Y., Wang, Y., Gong, Y., Zou, Y.,
+He, Y., Xiong, Y., Luo, Y., You, Y., Liu, Y., Zhou, Y.,
+Zhu, Y. X., Huang, Y., Li, Y., Zheng, Y., Zhu, Y., Ma, Y.,
+Tang, Y., Zha, Y., Yan, Y., Ren, Z. Z., Ren, Z., Sha, Z.,
+Fu, Z., Xu, Z., Xie, Z., Zhang, Z., Hao, Z., Ma, Z., Yan,
+Z., Wu, Z., Gu, Z., Zhu, Z., Liu, Z., Li, Z., Xie, Z., Song,
+Z., Pan, Z., Huang, Z., Xu, Z., Zhang, Z., and Zhang, Z.
+DeepSeek-R1 incentivizes reasoning in LLMs through
+reinforcement learning. Nature, 645:633–638, 2025. doi:
+10.1038/s41586-025-09422-z.
+Hamadanian, P., Karimi, P., Nasr-Esfahany, A., Noorbakhsh,
+K., Chandler, J., ParandehGheibi, A., Alizadeh, M., and
+Balakrishnan, H. Glia: A human-inspired AI for auto-
+mated systems design and optimization. In CAIS, pp.
+61–84, 2026. doi: 10.1145/3786335.3813125.
+Hambardzumyan, K., Baldwin, N., Toledo, E., Hazra, R.,
+Kuchnik, M., Al Omari, B., Foster, T. S., Protopopov, A.,
+Gagnon-Audet, J.-C., Mediratta, I., Niu, K., Shvartsman,
+M., Lupidi, A., Audran-Reiss, A., Pathak, P., Shavrina,
+T., Magka, D., Momand, H., Dunfield, D., Cancedda, N.,
+Stenetorp, P., Wu, C.-J., Foerster, J. N., Bachrach, Y.,
+and Josifoski, M. AIRA2: Overcoming bottlenecks in AI
+research agents. In NeurIPS, 2026.
+He, Y., Lin, J., Liu, Z., Wang, H., Li, L.-J., and Han, S.
+AMC: AutoML for model compression and acceleration
+on mobile devices. In ECCV, 2018.
+Hochlehnert, A., Bhatnagar, H., Udandarao, V., Albanie, S.,
+Prabhu, A., and Bethge, M. A sober look at progress in
+language model reasoning: Pitfalls and paths to repro-
+ducibility. In COLM, 2025.
+Jain, N., Han, K., Gu, A., Li, W.-D., Yan, F., Zhang, T.,
+Wang, S. I., Solar-Lezama, A., Sen, K., and Stoica, I.
+LiveCodeBench: Holistic and contamination free evalua-
+tion of large language models for code. In International
+Conference on Learning Representations, 2025.
+Kapoor, S., Stroebl, B., Siegel, Z. S., Nadgir, N., and
+Narayanan, A. AI agents that matter. TMLR, 2025.
+Kawrakow, I. llama.cpp perplexity tool: KL divergence to
+the full-precision model (--kl-divergence). http
+s://github.com/ggml-org/llama.cpp/pul
+l/5076, 2024. Merged 2024-01-22; documentation at
+https://github.com/ggml-org/llama.cpp
+/blob/master/tools/perplexity/README
+.md.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Kimi Team, Zhang, Y., Lin, Z., Yao, X., Hu, J., Meng, F.,
+Liu, C., Men, X., Yang, S., Li, Z., Li, W., Lu, E., Liu,
+W., Chen, Y., Xu, W., Yu, L., Wang, Y., Fan, Y., Zhong,
+L., Yuan, E., Zhang, D., Zhang, Y., Liu, T. Y., Wang, H.,
+Fang, S., He, W., Liu, S., Li, Y., Su, J., Qiu, J., Pang, B.,
+Yan, J., Jiang, Z., Huang, W., Yin, B., You, J., Wei, C.,
+Wang, Z., Hong, C., Chen, Y., Chen, G., Wang, Y., Zheng,
+H., Wang, F., Liu, Y., Dong, M., Zhang, Z., Pan, S., Wu,
+W., Wu, Y., Guan, L., Tao, J., Fu, G., Xu, X., Wang, Y.,
+Lai, G., Wu, Y., Zhou, X., Yang, Z., and Du, Y. Kimi
+Linear: An expressive, efficient attention architecture.
+arXiv preprint arXiv:2510.26692, 2025.
+Kurtic, E., Marques, A. N., Pandit, S., Kurtz, M., and Alis-
+tarh, D. “Give me BF16 or give me death”? Accuracy-
+Performance trade-offs in LLM quantization. In ACL, pp.
+26872–26886, 2025. doi: 10.18653/v1/2025.acl-long.13
+04.
+Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu,
+C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient
+memory management for large language model serving
+with PagedAttention. In SOSP, 2023.
+Lee, S., Woo, S.-t., Jin, J.-g., Lee, C., and Park, E. AMQ:
+Enabling AutoML for mixed-precision weight-only quan-
+tization of large language models. In Proceedings of
+the 2025 Conference on Empirical Methods in Natural
+Language Processing, pp. 35532–35550. Association for
+Computational Linguistics, 2025. doi: 10.18653/v1/2025
+.emnlp-main.1799. URL https://aclanthology
+.org/2025.emnlp-main.1799/.
+Li, L., Jamieson, K., Rostamizadeh, A., Gonina, E., Ben-
+tzur, J., Hardt, M., Recht, B., and Talwalkar, A. A system
+for massively parallel hyperparameter tuning. In MLSys,
+2020.
+Lian, X., Krichene, W., Huang, B., Tanaka, M., Ruwase, O.,
+Zhang, L., and Zhang, M. Quantization inflates reasoning:
+Token inflation as a hidden cost of low-bit reasoning
+models. In EMNLP, pp. 46880–46894, 2026. doi: 10.1
+8653/2026.emnlp-main.2059.
+Liang, Y., Chen, H., Han, S., and Liu, Z. ParoQuant: Pair-
+wise rotation quantization for efficient reasoning LLM
+inference. In ICLR, 2026.
+Lin, H., Xu, H., Wu, Y., Cui, J., Zhang, Y., Mou, L., Song,
+L., Sun, Z., and Wei, Y. DuQuant: Distributing outliers
+via dual transformation makes stronger quantized LLMs.
+In NeurIPS, 2024a.
+Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M., Wang,
+W.-C., Xiao, G., Dang, X., Gan, C., and Han, S. AWQ:
+Activation-aware weight quantization for on-device LLM
+compression and acceleration. In MLSys, 2024b.
+Lin, Y., Tang, H., Yang, S., Zhang, Z., Xiao, G., Gan, C.,
+and Han, S. QServe: W4A8KV4 quantization and system
+co-design for efficient LLM serving. In MLSys, 2025.
+Liu, R., Sun, Y., Zhang, M., Bai, H., Yu, X., Yu, T., Yuan, C.,
+and Hou, L. Quantization hurts reasoning? An empirical
+study on quantized reasoning models. In COLM, 2025a.
+Liu, R., Tang, B., Jiang, L., Umenberger, J., and Guo, Y.
+LLM agents for automated post-training via structured
+recipe optimization. arXiv preprint arXiv:2610.18572,
+2026.
+Liu, Z., Zhao, C., Fedorov, I., Soran, B., Choudhary, D., Kr-
+ishnamoorthi, R., Chandra, V., Tian, Y., and Blankevoort,
+T. SpinQuant: LLM quantization with learned rotations.
+In ICLR, 2025b.
+Lotfi, S., Kirichenko, P., Li, S., and Liu, Z. Quantized
+reasoning models think they need to think longer, but
+they do not. In NeurIPS, 2026.
+Malinovskii, V., Mazur, D., Ilin, I., Kuznedelev, D.,
+Burlachenko, K., Yi, K., Alistarh, D., and Richt´arik, P.
+PV-Tuning: Beyond straight-through estimation for ex-
+treme LLM compression. In NeurIPS, 2024.
+Micikevicius, P., Stosic, D., Burgess, N., Cornea, M., Dubey,
+P., Grisenthwaite, R., Ha, S., Heinecke, A., Judd, P.,
+Kamalu, J., Mellempudi, N., Oberman, S., Shoeybi, M.,
+Siu, M., and Wu, H. FP8 formats for deep learning. arXiv
+preprint arXiv:2209.05433, 2022.
+Novikov, A., V˜u, N., Eisenberger, M., Dupont, E., Huang,
+P.-S., Wagner, A. Z., Shirobokov, S., Kozlovskii, B., Ruiz,
+F. J. R., Mehrabian, A., Kumar, M. P., See, A., Chaudhuri,
+S., Holland, G., Davies, A., Nowozin, S., Kohli, P., and
+Balog, M. AlphaEvolve: A coding agent for scientific and
+algorithmic discovery. arXiv preprint arXiv:2506.13131,
+2025.
+NVIDIA. NVIDIA Model Optimizer. https://gith
+ub.com/NVIDIA/Model-Optimizer, 2024.
+NVIDIA. GLM-5.3-Flash-NVFP4. Hugging Face, https:
+//huggingface.co/nvidia/GLM-5.3-Flash
+-NVFP4, 2026a.
+NVIDIA. ModelOpt agent skills: quant-recipe-search. ht
+tps://github.com/NVIDIA/Model-Optimiz
+er/tree/main/plugins/modelopt/skills
+/quant-recipe-search, 2026b.
+OpenAI, Agarwal, S., Ahmad, L., Ai, J., Altman, S., Apple-
+baum, A., Arbus, E., Arora, R. K., Bai, Y., Baker, B., Bao,
+H., Barak, B., Bennett, A., Bertao, T., Brett, N., Brevdo,
+E., Brockman, G., Bubeck, S., Chang, C., Chen, K., Chen,
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+M., Cheung, E., Clark, A., Cook, D., Dukhan, M., Dvo-
+rak, C., Fives, K., Fomenko, V., Garipov, T., Georgiev,
+K., Glaese, M., Gogineni, T., Goucher, A., Gross, L.,
+Guzman, K. G., Hallman, J., Hehir, J., Heidecke, J., Hel-
+yar, A., Hu, H., Huet, R., Huh, J., Jain, S., Johnson, Z.,
+Koch, C., Kofman, I., Kundel, D., Kwon, J., Kyrylov,
+V., Le, E. Y., Leclerc, G., Lennon, J. P., Lessans, S.,
+Lezcano-Casado, M., Li, Y., Li, Z., Lin, J., Liss, J., Liu,
+L. X., Liu, J., Lu, K., Lu, C., Martinovic, Z., McCallum,
+L., McGrath, J., McKinney, S., McLaughlin, A., Mei,
+S., Mostovoy, S., Mu, T., Myles, G., Neitz, A., Nichol,
+A., Pachocki, J., Paino, A., Palmie, D., Pantuliano, A.,
+Parascandolo, G., Park, J., Pathak, L., Paz, C., Peran, L.,
+Pimenov, D., Pokrass, M., Proehl, E., Qiu, H., Raila, G.,
+Raso, F., Ren, H., Richardson, K., Robinson, D., Rotsted,
+B., Salman, H., Sanjeev, S., Schwarzer, M., Sculley, D.,
+Sikchi, H., Simon, K., Singhal, K., Song, Y., Stuckey,
+D., Sun, Z., Tillet, P., Toizer, S., Tsimpourlas, F., Vyas,
+N., Wallace, E., Wang, X., Wang, M., Watkins, O., Weil,
+K., Wendling, A., Whinnery, K., Whitney, C., Wong, H.,
+Yang, L., Yang, Y., Yasunaga, M., Ying, K., Zaremba, W.,
+Zhan, W., Zhang, C., Zhang, B., Zhang, E., and Zhao, S.
+gpt-oss-120b & gpt-oss-20b model card. arXiv preprint
+arXiv:2508.10925, 2025.
+Ouyang, A., Guo, S., Arora, S., Zhang, A. L., Hu, W., R´e,
+C., and Mirhoseini, A. KernelBench: Can LLMs write
+efficient GPU kernels? In ICML, 2025.
+Pan, Y., Xi, H., Zhu, K., Li, X., Wu, Y., Mishra, M., Zhang,
+H., Zheng, W. X., Kasikci, B., Han, S., Keutzer, K., Iyer,
+R., and Stoica, I. LeapQuant: Efficient linear attention
+with accurate recurrent state quantization. arXiv preprint
+arXiv:2609.38166, 2026.
+Pyatkin, V., Malik, S., Graf, V., Ivison, H., Huang, S.,
+Dasigi, P., Lambert, N., and Hajishirzi, H. Generaliz-
+ing verifiable instruction following. In NeurIPS Datasets
+and Benchmarks Track, 2025.
+Qwen Team. Qwen3.5-9B. Hugging Face, https://hu
+ggingface.co/Qwen/Qwen3.5-9B, 2026.
+Red Hat AI. GLM-5.3-Flash-NVFP4. Hugging Face, ht
+tps://huggingface.co/RedHatAI/GLM-5.3
+-Flash-NVFP4, 2026.
+Red Hat AI and vLLM Project. LLM Compressor. https:
+//github.com/vllm-project/llm-compres
+sor, August 2024.
+Rein, D., Hou, B. L., Stickland, A. C., Petty, J., Pang, R. Y.,
+Dirani, J., Michael, J., and Bowman, S. R. GPQA: A
+graduate-level Google-proof Q&A benchmark. In COLM,
+2024.
+Romera-Paredes, B., Barekatain, M., Novikov, A., Balog,
+M., Kumar, M. P., Dupont, E., Ruiz, F. J. R., Ellenberg,
+J. S., Wang, P., Fawzi, O., Kohli, P., and Fawzi, A. Math-
+ematical discoveries from program search with large lan-
+guage models. Nature, 625:468–475, 2024.
+Rouhani, B. D., Zhao, R., More, A., Hall, M., Khodamoradi,
+A., Deng, S., Choudhary, D., Cornea, M., Dellinger, E.,
+Denolf, K., Stosic, D., Elango, V., Golub, M., Heinecke,
+A., James-Roxby, P., Jani, D., Kolhe, G., Langhammer,
+M., Li, A., Melnick, L., Mesmakhosroshahi, M., Ro-
+driguez, A., Schulte, M., Shafipour, R., Shao, L., Siu, M.,
+Dubey, P., Micikevicius, P., Naumov, M., Verrilli, C., Wit-
+tig, R., Burger, D., and Chung, E. Microscaling data for-
+mats for deep learning. arXiv preprint arXiv:2310.10537,
+2023.
+Santavas, N., Eissa, K., Cieplicka, P., Florek, P., Nulli, M.,
+Vasilev, S., Hashemi, S. H., Gasteratos, A., and Khadivi,
+S. Meeting SLOs, slashing hours: Automated enterprise
+LLM optimization with OptiKIT. In MLSys, 2026.
+Shao, W., Chen, M., Zhang, Z., Xu, P., Zhao, L., Li, Z.,
+Zhang, K., Gao, P., Qiao, Y., and Luo, P. OmniQuant:
+Omnidirectionally calibrated quantization for large lan-
+guage models. In ICLR, 2024.
+Sieberling, O., Kuznedelev, D., Kurtic, E., and Alistarh,
+D. EvoPress: Accurate dynamic model compression via
+evolutionary search. In ICML, 2025.
+Sikka, D. [Qwen3Next] Add calibration support and NVFP4
+example, LLM Compressor pull request #1889. https:
+//github.com/vllm-project/llm-compres
+sor/pull/1889, October 2025. Merged 2025-10-01.
+Toledo, E., Hambardzumyan, K., Josifoski, M., Hazra, R.,
+Baldwin, N., Audran-Reiss, A., Kuchnik, M., Magka,
+D., Jiang, M., Lupidi, A. M., Lupu, A., Raileanu, R.,
+Shavrina, T., Niu, K., Gagnon-Audet, J.-C., Shvartsman,
+M., Sodhani, S., Miller, A. H., Charnalia, A., Dunfield,
+D., Wu, C.-J., Stenetorp, P., Cancedda, N., Foerster, J. N.,
+and Bachrach, Y. AI research agents for machine learning:
+Search, exploration, and generalization in MLE-bench.
+In NeurIPS, 2025.
+Tseng, A., Chee, J., Sun, Q., Kuleshov, V., and De Sa, C.
+QuIP#: Even better LLM quantization with Hadamard
+incoherence and lattice codebooks. In ICML, 2024a.
+Tseng, A., Sun, Q., Hou, D., and De Sa, C. QTIP: Quan-
+tization with trellises and incoherence processing. In
+NeurIPS, 2024b.
+Von Arx, S., Chan, L., and Barnes, B. Recent frontier
+models are reward hacking. METR blog, https://
+metr.org/blog/2025-06-05-recent-rewar
+d-hacking/, 2025.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Wang, K., Liu, Z., Lin, Y., Lin, J., and Han, S. HAQ:
+Hardware-aware automated quantization with mixed pre-
+cision. In CVPR, 2019.
+Wang, T., Wang, K., Cai, H., Lin, J., Liu, Z., Wang, H.,
+Lin, Y., and Han, S.
+APQ: Joint search for network
+architecture, pruning and quantization policy. In CVPR,
+2020.
+Williams, M. and Aletras, N. On the impact of calibration
+data in post-training quantization and pruning. In ACL,
+2024.
+Williams, M., Chrysostomou, G., and Aletras, N. Self-
+calibration for language model quantization and pruning.
+In NAACL, 2025.
+Xi, H., Li, C., Chen, J., and Zhu, J. Training transformers
+with 4-bit integers. In NeurIPS, 2023.
+Xiao, G., Lin, J., Seznec, M., Wu, H., Demouth, J., and Han,
+S. SmoothQuant: Accurate and efficient post-training
+quantization for large language models. In ICML, 2023.
+Xing, S., Zhai, Y., Jiang, A., Dong, Y., Wu, Y., Ye, Z., Ruan,
+C., Huang, Y., Zhang, Y., Yin, L., Bayyapu, A., Ceze, L.,
+and Chen, T. FlashInfer-Bench: Building the virtuous
+cycle for AI-driven LLM systems. In MLSys, 2026.
+Xu, C., Guan, S., Greene, D., and Kechadi, M.-T. Bench-
+mark data contamination of large language models: A
+survey. arXiv preprint arXiv:2406.04244, 2024.
+Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B.,
+Yu, B., Gao, C., Huang, C., Lv, C., Zheng, C., Liu, D.,
+Zhou, F., Huang, F., Hu, F., Ge, H., Wei, H., Lin, H., Tang,
+J., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou,
+J., Zhou, J., Lin, J., Dang, K., Bao, K., Yang, K., Yu, L.,
+Deng, L., Li, M., Xue, M., Li, M., Zhang, P., Wang, P.,
+Zhu, Q., Men, R., Gao, R., Liu, S., Luo, S., Li, T., Tang,
+T., Yin, W., Ren, X., Wang, X., Zhang, X., Ren, X., Fan,
+Y., Su, Y., Zhang, Y., Zhang, Y., Wan, Y., Liu, Y., Wang,
+Z., Cui, Z., Zhang, Z., Zhou, Z., and Qiu, Z. Qwen3 tech-
+nical report. arXiv preprint arXiv:2505.09388, 2025a.
+Yang, C., Wang, X., Lu, Y., Liu, H., Le, Q. V., Zhou, D.,
+and Chen, X. Large language models as optimizers. In
+ICLR, 2024.
+Yang, S., Kautz, J., and Hatamizadeh, A. Gated delta net-
+works: Improving Mamba2 with delta rule. In ICLR,
+2025b.
+Yuan, J., Li, H., Ding, X., Xie, W., Li, Y.-J., Zhao, W.,
+Wan, K., Shi, J., Hu, X., and Liu, Z. Understanding and
+mitigating numerical sources of nondeterminism in LLM
+inference. In NeurIPS, 2025.
+Z.ai. GLM-5.3-Flash: Frontier intelligence, flash cost. ht
+tps://z.ai/blog/glm-5.3-flash, 2026.
+Zhao, H., Xi, H., Wang, Y., Yin, S., Lv, Z., Feng, H., Li,
+X., Panda, A., and Li, J. Beyond kernels: Letting agents
+optimize the whole AI job. Blog post, https://open
+perfagent.github.io/who-ate-my-flops/,
+September 2026.
+Zhao, Y., Lin, C.-Y., Zhu, K., Ye, Z., Chen, L., Zheng, S.,
+Ceze, L., Krishnamurthy, A., Chen, T., and Kasikci, B.
+Atom: Low-bit quantization for efficient and accurate
+LLM serving. In MLSys, 2024.
+Zhong, Z., Raghunathan, A., and Carlini, N.
+Impossi-
+bleBench: Measuring LLMs’ propensity of exploiting
+test cases. In ICLR, 2026.
+Zhou, J., Lu, T., Mishra, S., Brahma, S., Basu, S.,
+Luan, Y., Zhou, D., and Hou, L. Instruction-following
+evaluation for large language models. arXiv preprint
+arXiv:2311.07911, 2023.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+A
+BASELINES
+Defaults. GPTQ uses llm-compressor’s GPTQModifier
+with its preset for each precision. The preset is symmetric
+with g = 128, a damping fraction of 0.01, static activation
+order and a min-max observer. At W4A16, Table 2 reports
+the asymmetric variant. AWQ uses AWQModifier with
+its defaults (duo scaling, a grid of 20) followed by round-to-
+nearest, asymmetric at W4A16 and symmetric at W3A16.
+W4A8 uses FP8 (E4M3) activations with dynamic per-token
+scales. Within one model and precision, every row of Ta-
+ble 2 quantizes the same modules at the same bit width.
+At W3A16, the output head and the token embeddings are
+INT4 with g = 64 in every row, as in GSQ’s release.
+ParoQuant and GSQ. ParoQuant uses the checkpoints
+released by its authors, served on vLLM 0.27.1 with its
+official rotation kernel. Its vLLM backend had no MoE sup-
+port, so we added it for Qwen3.6-35B-A3B with 176 lines
+of code. GSQ uses the released checkpoint on Qwen3.8-
+27B and the official code and configuration on Qwen3.5-
+9B, Qwen3.6-35B-A3B and DeepSeek-R1-Distill-Llama-
+8B. On Qwen3.6-35B-A3B, the official code needed six
+patches of about 220 lines in total. Its MoE path skipped
+the attention layers, so we ported the attention stage of its
+dense path to quantize attention as in the other rows. The
+other patches fixed layer names and a compressed-tensors
+call that no longer matched the model and the library. On
+DeepSeek-R1-Distill-Llama-8B, we use the configuration
+that its README gives for Llama models.
+QuaRot+GPTQ.
+We fuse QuaRot’s Hadamard rota-
+tions (Ashkboos et al., 2024) into the BF16 weights offline
+and then run the default GPTQ recipe of the W4A8 row
+unchanged, with the same calibration data. On DeepSeek-
+R1-Distill-Llama-8B, we apply R1 to the residual stream
+and R2 to the value and output projections of each attention
+head. On the Qwen models, we apply R1 only, because the
+gate before each attention output projection and the Gated
+DeltaNet layers make R2 inexact. QuaRot’s online rota-
+tions (R3 and R4) would add inference operators, which the
+formats of Table 1 do not allow, so we leave them out.
+FP8-aware GPTQ and the fixed recipe. FP8-aware GPTQ
+(Figure 2(b), § 3.1) is built from scratch with the default
+calibration data on each model, and its W4A8 averages are
+62.5, 76.4, 76.7 and 42.7 on Qwen3.5-9B, Qwen3.6-35B-
+A3B, Qwen3.8-27B and DeepSeek-R1-Distill-Llama-8B.
+The fixed recipe of Table 5b is the pattern that five QDA
+searches found (§ 6.3). It runs GPTQ on self-generated data,
+a pool of 640 answers that the BF16 model wrote (2,048
+samples of 2,048 tokens). It then runs two rounds of 200
+steps of scale distillation on the same pool, at learning rates
+3 × 10−4 and 10−4, from scratch on every pair.
+B
+EVALUATION PROTOCOL
+Table 6. Models in the main suite. Hybrid models interleave full-
+attention layers with linear-attention (Gated DeltaNet) layers.
+Model
+Attention
+MLP
+Qwen3.5-9B
+hybrid, Gated DeltaNet
+dense
+Qwen3.6-35B-A3B
+hybrid, Gated DeltaNet
+MoE, 8 of 256
+Qwen3.8-27B
+hybrid, Gated DeltaNet
+dense
+DeepSeek-R1-Distill-Llama-8B
+full
+dense
+Quantized modules. We quantize the same modules as the
+public baselines, namely every decoder linear layer except
+the two small gate projections of each DeltaNet layer, which
+most public checkpoints of these models also keep in BF16.
+On Qwen3.6-35B-A3B, we also keep the router, the shared
+expert and its gate in BF16, as in ParoQuant’s release.
+Main suite.
+Math has 63 problems (AIME 2025 and
+HMMT Feb 2026) with 32 samples each, and GPQA-
+Diamond has 198 questions with 16. LiveCodeBench v6
+has 454 problems with 4, IFBench 300 prompts with 16 and
+IFEval 541 prompts with 16. IFEval is scored prompt-level
+strict and IFBench prompt-level loose. Generation stops
+at 81,920 tokens on Qwen3.5-9B and Qwen3.6-35B-A3B.
+On Qwen3.8-27B, it stops at 81,920 for math and code and
+at 32,768 for GPQA and IFBench, which cuts off only 3%
+of its GPQA answers. On DeepSeek-R1-Distill-Llama-8B,
+it stops at 32,768, the limit that its model card sets. Each
+checkpoint is served by vLLM 0.27.1, one engine per GPU
+on four GPUs, and sample j of every problem uses seed
+17 + j. The answer is the text after the first closing thinking
+tag. Math and GPQA answers are read by a strict extractor,
+and by a lenient one only if the strict one finds nothing. Live-
+CodeBench runs every test in a sandbox without network,
+with an 8-second limit per case. On DeepSeek-R1-Distill-
+Llama-8B, GPQA-Diamond uses the simple-evals prompt
+that DeepSeek-R1 reports (Guo et al., 2025), because its an-
+swers to the default prompt fail to parse in 4.9% of samples.
+GLM-5.3-Flash. All four columns of Table 3 are served
+by vLLM 0.31 on four GB300 GPUs with tensor paral-
+lelism 4, temperature 1.0, top-p 0.95 and the same seeds for
+every model. Generations stop at 65,536 tokens for math
+and LiveCodeBench and at 32,768 otherwise. Math pools
+AIME 2026, HMMT Feb 2026 and HMMT Nov 2025 (93
+problems). LiveCodeBench v6 covers 2024-08 to 2025-
+05, and SuperGPQA uses three subsets of 3,000 ques-
+tions. NVIDIA’s checkpoint is its second release (revision
+1d00738). Unlike Red Hat AI’s checkpoint, ours also quan-
+tizes the dense MLPs of layers 0–2. Unlike NVIDIA’s, it
+quantizes the multi-token-prediction head to FP8.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+C
+DATA, CONTAMINATION AND THE
+EVALUATOR
+Calibration data. The baselines are calibrated on 2,048
+texts (0.91–0.96M tokens), 1,536 from llm-compressor’s
+default mix and 512 from UltraChat. No 20-gram of these
+texts occurs in any test benchmark. The agent may build
+its own data only from allow-listed public datasets, from
+which every row that holds a test item is removed by 20-
+gram matching before the search. Every file that the agent’s
+container can read is then scanned against the test items,
+with one positive control per benchmark, and a single hit
+stops the search. Every search in this paper passed with no
+hit.
+The reference traces. The reference traces are two BF16
+continuations for each of 48 prompts from AIME 2000–
+2020, SuperGPQA, OpenThoughts and OpenHermes. They
+are checked against every test benchmark and the calibra-
+tion data by id, normalized-text hash and 13-gram matching,
+with no hit. The noise σ is the pooled within-recipe stan-
+dard deviation of ln KL over two W4A16 recipes, each
+rebuilt on three random subsets of the default calibration
+file. It is 0.0159 on Qwen3.5-9B, 0.0047 on Qwen3.6-35B-
+A3B, 0.0093 on Qwen3.8-27B and 0.0063 on DeepSeek-
+R1-Distill-Llama-8B. Scoring one checkpoint twice gives
+identical values, and two nodes that score the same check-
+point agree within 0.2%.
+Signal comparison.
+The 36 checkpoints of Figure 2(c)
+are 31 public baselines of Table 2, a symmetric GPTQ
+on Qwen3.8-27B at W4A16, and four scripted recipes on
+DeepSeek-R1-Distill-Llama-8B at W4A16. The 31 base-
+lines are all those of Table 2 except the four QuaRot+GPTQ
+rows and GSQ on DeepSeek-R1-Distill-Llama-8B, which
+were evaluated later. The four recipes are RTN, symmetric
+GPTQ, AWQ followed by GPTQ, and GPTQ calibrated on
+the original model’s outputs, and every checkpoint is evalu-
+ated with the protocol of Table 2. Pairs within a model and
+precision whose accuracies differ by less than 0.05 points
+are dropped, which leaves 44. The layer-wise error is the
+median relative output error of the linear layers on BF16
+inputs.
+Cost of a score.
+On one GH200, a KL score takes 3.2–
+4.0 GPU-minutes on DeepSeek-R1-Distill-Llama-8B, 4.7–
+6.1 on Qwen3.5-9B, 5.6–7.6 on Qwen3.6-35B-A3B and
+8.0–11.7 on Qwen3.8-27B. One full evaluation takes 23.3–
+26.0, 74.7–82.1, 59.9–86.2 and 65.1–71.7 GPU-hours on
+the same models. The reference traces of our searches
+cover 0.49–1.13 million positions. Their top-k cache takes
+0.47–1.09 GiB, whereas full BF16 distributions would take
+0.21–0.56 TB, and the bucket of Equation (6) holds on aver-
+age 0.015–0.048% of the original model’s probability. On
+nine checkpoints of Qwen3.8-27B and DeepSeek-R1-Distill-
+Llama-8B that we scored both with the exact KL over the
+full vocabulary and with the top-k estimate, the estimate is
+0–0.4% lower.
+D
+LIBRARY, RECIPES AND EFFICIENCY
+Table 8 lists the methods of the library and the architectures
+that each one handles, and Figure 6 shows the final recipe of
+every search. The library derives the role of every layer from
+the model, and a model-specific adapter covers only what
+it cannot derive. The adapter has no lines for DeepSeek-
+R1-Distill-Llama-8B, Qwen3.5-9B and Qwen3.8-27B, 14
+lines for the fused experts of Qwen3.6-35B-A3B and 72
+lines for GLM-5.3-Flash, whose FP8 release and multi-
+token-prediction layer also required extending the library.
+Table 7 measures decoding on Qwen3.8-27B at W4A16,
+where ParoQuant rotates the input of every linear layer
+online before the same Marlin GEMM as QDA. Each run
+uses CUDA graphs and 1,024 input and 4,096 output tokens
+per request, and we report the median of three runs.
+Table 7. Decode throughput (output tokens/s) of the W4A16
+checkpoints of Qwen3.8-27B, measured together on one GH200
+with vLLM 0.27.1. QDA runs on the same kernel as GPTQ and
+decodes within 0.2% of it, whereas ParoQuant adds an online rota-
+tion. Speedup is QDA over ParoQuant.
+Batch
+ParoQuant
+GPTQ
+QDA
+Speedup
+1
+60
+105
+105
+1.75×
+16
+805
+1,262
+1,263
+1.57×
+64
+1,789
+2,330
+2,333
+1.30×
+E
+AGENT, TASK STATEMENT AND
+ABLATION VARIANTS
+Agent.
+Every search runs Claude Code v2.1.303 with
+claude-opus-5-5 (1M-token context, high effort, ex-
+tended thinking). No search filled the context window, so
+Claude Code never had to summarize an agent’s context.
+Variants. The variant of Table 5 without the infrastructure
+receives the task statement without the lines about the li-
+brary, has none of the library’s development prompts and
+answer checkers, and submits GPU jobs to a plain queue
+with four commands (add, list, log, cancel) instead of the
+full scheduler. It keeps the method cards, the evaluator,
+the submission rule and the default calibration file. The
+ModelOpt variant runs one search per precision with Mod-
+elOpt at commit 1ca8bd1 and its quant-recipe-search and
+ptq skills, and it has no access to our library or evaluator. Its
+task statement gives the three inputs that the skill asks for:
+accuracy at a fixed format, the format itself and the four test
+benchmarks, which a tool runs at fewer samples than the
+final evaluation. ModelOpt’s exporter refuses 3-bit weights
+and the MoE block of Qwen3.6-35B-A3B, so we provide a
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Figure 6. Final recipes of the 12 searches. Each row is one final checkpoint, read left to right. “Self-generated” calibration mixes
+reasoning traces that the BF16 model wrote with public text, scale KD distills the BF16 model into the quantized one by tuning the scales
+(and, where marked, the norms), and ×n marks n rounds of it.
+Figure 7. Where the 64 GPU-hours of each ablation search go
+(Qwen3.6-35B-A3B). “w/o agent” is greedy search of Table 5 and
+“w/o infra.” is the agent without the infrastructure. “Generation
+check” is the agent’s checks of its own checkpoints, “other” is
+mostly calibration and training data that the agent generates, and
+“failed” is every job that errored, ran out of memory or was can-
+celled.
+converter that stores ModelOpt’s integer codes and scales
+unchanged in the format of each precision. Figure 7 splits
+the budget of the searches of Table 5 by the program that
+each job runs.
+Predefined searches. The greedy search and ASHA use no
+LLM. A recipe takes up to two transforms, one solver and up
+to two refinements from the library’s method table (Table 9),
+or one or two refinements of a public checkpoint. It also
+chooses its calibration data, which is the default file, a fixed
+pool of 640 answers that the original model wrote before
+the search, or a mix of the two. Finally, it chooses 512 or
+2,048 samples of 2,048 or 4,096 tokens and the maximum
+length and learning rate of distillation. The greedy search
+starts from the public checkpoint with the lowest KL and
+repeatedly tries, at random, an untried recipe one edit away
+from the best one so far. ASHA samples recipes that start
+from scratch or from the lowest-KL public checkpoint and
+runs successive halving over distillation steps, with rungs
+at 23, 67 and 200 steps and the top third promoted. Both
+submit their three lowest-KL checkpoints, and the GPU
+time to generate the pool counts against their budget. The
+answers in the pool run to at most 12,288 tokens.
+The task statement. Each search starts with one instruc-
+tion, which tells the agent to read the task statement in full,
+follow it and keep the best submitted checkpoint until the
+deadline. Table 10 summarizes the statement for Qwen3.6-
+35B-A3B at W4A16. It names no method to use or to avoid,
+and its full text ships with the artifact. Across models, the
+statement changes in the model name, the default calibration
+file, the clause on the expert kernel and, on DeepSeek-R1-
+Distill-Llama-8B, the length of the long-generation checks
+(32,768 tokens). Across precisions, it also changes in the
+goal sentence, the list of baselines and the format section.
+
+
+QDA: Closed-Loop LLM Quantization Design with Agents
+Table 8. The 21 methods of the library, grouped by the decisions
+of § 2.2 (three clipping searches share a row), and the architectures
+that their code handles: full-attention (DeepSeek-R1-Distill-Llama-
+8B), Gated DeltaNet hybrid (Qwen3.5-9B, Qwen3.8-27B) and
+hybrid MoE (Qwen3.6-35B-A3B).
+Method
+Source
+Full-attn.
+Hybrid
+Hybrid MoE
+Transformations
+Hadamard rotation (residual)
+QuaRot
+✓
+✓
+✓
+Hadamard rotation (value heads)
+QuaRot
+✓
+–
+–
+Channel permutation
+deepcompressor
+✓
+✓
+✓
+Activation-aware scaling
+AWQ
+✓
+✓
+✓
+Rounding
+Round-to-nearest
+–
+✓
+✓
+✓
+GPTQ
+GPTQ
+✓
+✓
+✓
+GPTAQ
+GPTAQ
+✓
+✓
+dense part
+Learned rounding
+GSQ
+✓
+✓
+✓
+Sign gradient rounding
+AutoRound
+✓
+✓
+✓
+Output-gradient token weights
+GuidedQuant
+✓
+✓
+✓
+Fisher-trace token weights
+ours
+✓
+✓
+✓
+Router-weighted expert Hessian
+MoEQuant
+–
+–
+✓
+Scales and end-to-end tuning
+Min-max, MSE, importance-weighted MSE
+llm-compressor
+✓
+✓
+✓
+Hessian-weighted MSE
+ours
+✓
+✓
+✓
+FP8 scale grid (W4A8)
+CUTLASS W4A8
+✓
+✓
+✓
+Scale-only distillation
+KD
+✓
+✓
+✓
+Calibration data
+Calibration mixing and self-generation
+–
+✓
+✓
+✓
+Composition
+Module splicing
+–
+✓
+✓
+✓
+Head and embedding format
+GSQ release
+✓
+✓
+✓
+The value-head rotation needs a value path without an output gate, which the hybrid
+models lack.
+Table 9. Search space of greedy search and ASHA on Qwen3.6-
+35B-A3B at W4A16, taken from the library’s method table. Steps
+whose method does not support this precision or architecture are
+left out.
+Slot
+Steps (grids)
+Start
+BF16 model; public AWQ and GPTQ checkpoints
+Transform
+AWQ scale search writing a new BF16 base; chan-
+nel permutation; Hadamard rotation of the resid-
+ual stream
+Solver
+RTN, two implementations (min-max, MSE,
+importance-weighted MSE); GPTQ (min-max,
+MSE,
+Hessian-weighted
+MSE,
+importance-
+weighted MSE); GPTQ with router-weighted
+expert Hessians (same four); AWQ then RTN
+(min-max, MSE, importance-weighted MSE);
+MSE and importance-weighted clip search with
+RTN; AutoRound (min-max)
+Refinement
+End-to-end scale tuning by distillation from the
+BF16 model (codes and zero points frozen)
+Table 10. The task statement for Qwen3.6-35B-A3B at W4A16,
+abridged. Every variant of Table 5 receives the same text, except
+that the variant without the infrastructure receives it without the
+lines about the library.
+Section
+What it says
+Goal
+The best W4A16 checkpoint by the deadline. It is
+scored later on math, code, science and instruction
+following, which count equally, and nothing mea-
+surable in the workspace is that evaluation.
+Clock
+and
+resources
+Two nodes of four GH200s until the deadline,
+when every task is cancelled. Plan for idle GPUs
+in the last hour. Run long-generation checks (up to
+81,920 tokens) on the top checkpoints in all four
+domains before submitting. Training data may in-
+clude the quantized model’s own answers scored
+by the BF16 model. When the latest checkpoints
+of the current line of recipes tie in KL, try another
+line. Reread the notes and failed logs every couple
+of hours.
+Workspace
+and tools
+The quantization and serving environments, offline
+datasets, a format-compatibility package with no
+quantization method, and the qda library: atomic
+transforms, solvers and refinements to stack, plus
+measurements (proxy, profiler), diagnostics
+(probe) and mix. The method cards, loaded as
+a Claude Code skill. New methods and subagents
+are allowed.
+Prior
+The BF16 model and the public checkpoints with
+their methods. ParoQuant is listed for reference
+only, since it needs extra kernels. A public check-
+point cannot be submitted unchanged.
+Format
+INT4, g = 128, asymmetric, on the Marlin ker-
+nels; the same modules and bits as the public
+checkpoints; nothing added at inference. Forbid-
+den: other bit widths or per-module bits, modules
+from foreign checkpoints, mixed symmetric and
+asymmetric modules.
+Data
+No build data may contain an evaluation item or a
+text of the reference traces.
+KL
+kl DIR checks a checkpoint and returns its KL
+from the BF16 model, in total, per domain and on
+human-written text. kl log lists past KL values,
+and kl sens estimates which module groups
+would close a KL gap. The reference traces are
+hidden.
+Submission
+handin submit takes a ranked list; the evalua-
+tor checks each checkpoint for format and a short
+inference, not for answers. If no submitted check-
+point passes, the public checkpoint closest to the
+BF16 model is evaluated. Submitted checkpoints
+must be written by jobs in the queue.
+Notes
+Keep a report and notes to resume from, and read
+long outputs from files.
+Scope
+Do not look for or rebuild evaluation items, and
+do not edit the evaluation, grading, serving or eval-
+uator code.

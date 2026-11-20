@@ -1,0 +1,3169 @@
+Vision-Language-Action Models:
+A Life-Cycle Survey of Design, Training and Deployment
+Suvarna Kadam
+Witsense AI
+suvarna@witsense.ai
+Soran Parsa
+Department of Computer Science, University of Huddersfield
+s.parsa@hud.ac.uk
+November 2026
+Abstract
+Vision-language-action (VLA) models adapt web-pretrained vision-language models to output
+robot actions, so that web knowledge carries over to physical control. In under four years the field
+has grown from RT-2, the first VLA, to open models that fine-tune on a single consumer GPU
+and proprietary generalists that clean unseen homes. VLA research joins robotics, computer
+vision and language modelling, so this survey is written for researchers and practitioners from
+each of these fields. It reviews 89 works from December 2022 to October 2026, mainly on
+manipulation and navigation, plus humanoid control, world-action models and evaluation. Seven
+design axes follow a VLA’s life cycle: model design (inputs and memory, architecture, action
+output, intermediate predictions), training (pretraining data, post-training) and deployment
+(real-time execution). We compare 22 models on these axes, with their training data, model
+size, inference speed and hardware. Three trends emerge. (i) Training data has broadened
+beyond teleoperated robot data (about 10,000 hours for π0) to community-collected episodes
+and egocentric human video (20,000 hours for GR00T N1.7). (ii) Model sizes have split into
+two groups: most recent models have 3–7 billion parameters; a new group under one billion
+runs on consumer GPUs. (iii) Generalist VLAs handling both manipulation and navigation are
+emerging, such as UniVLA and Qwen-VLA. We also compare VLAs with world-action models,
+which predict future observations as well as actions, and review evidence that some VLAs with
+near-perfect benchmark scores fail after small scene changes. A practitioner’s guide gives a
+default for each design decision, and a glossary supports readers new to the field.
+1
+Introduction
+Large language and vision-language models (VLMs) acquire broad semantic knowledge from internet-
+scale data. Robot learning, by contrast, has historically trained a separate policy for each robot,
+task and environment, using datasets several orders of magnitude smaller. Vision-language-action
+(VLA) models connect the two. A VLA starts from a pretrained VLM and fine-tunes it to emit
+actions alongside, or instead of, text. The term was introduced with RT-2 [1], which expressed
+robot actions as text tokens, co-fine-tuned a VLM on robot trajectories and web data, and showed
+emergent semantic generalisation. Since then the design space has grown at every stage of a VLA’s
+life cycle. In the model, action heads now range from discrete tokens to diffusion and flow matching,
+and pipelines from single networks to dual-system and hierarchical designs. In training, data has
+grown from tens of thousands of teleoperated episodes to tens of thousands of hours of multi-robot
+experience, supplemented by human video, simulation and the robot’s own autonomous attempts.
+In deployment, models that compute at a few hertz must still control robots smoothly at tens of
+hertz.
+1
+arXiv:2611.18372v2  [cs.RO]  19 Nov 2026
+
+
+At a glance. The seven design axes (Section 3, Figure 2) follow a VLA through its life cycle.
+• Model: what it is.
+– Inputs and memory: what the model observes (cameras, language, robot state, extra conditioning)
+and how much of the past it keeps.
+– Architecture: the structure of the whole pipeline, not the backbone network: one network, a dual
+system of a slow VLM and a fast action module, or a hierarchy of separately trained models.
+– Action output: how it turns vision-language features into motor commands, from discrete tokens
+to diffusion, flow matching and regression, usually as a chunk of future actions.
+– Intermediate predictions: what it predicts besides actions, either reasoning in text (chain of
+thought, subtasks) or future observations from a world model, which adds a training signal about
+physical dynamics.
+• Training: how it learns.
+– Pretraining data: what it learns from (robot demonstrations, data pooled across robot bodies,
+web data, human video, simulation and generated trajectories) and how these are combined.
+– Post-training: how it is adapted and improved for a target robot or task, from fine-tuning recipes
+to reinforcement learning from deployment.
+• Deployment: how it runs.
+– Real-time execution: how a model that runs at a few hertz still controls a robot smoothly, through
+action chunking, asynchronous inference and splits between a remote server and the robot.
+Three trends emerge:
+• Broader training data: from about 10k hours of teleoperated robot data (π0), to 23k community-
+collected episodes (SmolVLA), to large-scale egocentric human video (20k hours for GR00T N1.7);
+• Model sizes have split: most recent models have 3–7B parameters, while a new group under one billion
+runs on consumer GPUs;
+• Generalist VLAs: models that handle both manipulation and navigation are emerging (UniVLA, Qwen-
+VLA).
+This survey has five aims:
+• A life-cycle taxonomy. We organise VLA research along seven design axes that follow a
+VLA’s life cycle, from model design through training to deployment (Section 3), so that a new
+model can be placed by the choices it makes on each; Table 3 places 22 main models this way.
+• Manipulation and navigation side by side. Most VLA surveys concentrate on manip-
+ulation. We treat navigation VLAs as a parallel lineage (Section 5), cover locomotion and
+humanoid whole-body control (Section 6), and discuss the recent convergence of manipulation
+and navigation (Section 7).
+• A data-centred quantitative view. For every work we extract the training data each paper
+reports and plot the field’s trajectory in robot episodes and in parameter count (Figure 7,
+Tables 5 and 6).
+• VLAs versus world-action models, and fair evaluation. We compare VLAs with
+world-action models (Section 8) and review standard benchmarks and the recent efforts to
+make VLA evaluation fair and predictive of real-world performance (Section 9).
+• Open problems, including a reporting problem we encountered directly: training data is
+described in incompatible units, or not quantified at all, in a large share of papers (Section 10).
+Figure 1 places the main works on a single timeline.
+2
+
+
+2023
+2024
+2025
+2026
+Manipulation
+RT-1
+RT-2 (“VLA”)
+Open X-
+Embodiment
+Octo
+OpenVLA
+π0
+FAST
+GR00T N1,
+Gemini Robotics
+π0.5
+SmolVLA
+Gemini Rob. 1.5,
+X-VLA, VLA-0
+π∗
+0.6 (RL)
+π0.7
+Qwen-VLA
+Navigation
+ViNT
+NoMaD
+NaVid
+Mobility VLA
+LeLaN
+NaVILA, Uni-NaVid
+StreamVLN
+NavFoM, OmniVLA
+VLingNav
+AsyncVLA
+World-action
+UniPi
+VPP
+UVA
+DreamGen
+WorldVLA
+Genie Envisioner
+Cosmos Policy
+DreamZero
+LeWAM
+UniWAM
+Humanoid
+Humanoid-VLA
+LeVERB
+SONIC, SENTINEL
+WholeBodyVLA
+WOLF-VLA
+HAF
+Figure 1: Milestones in the surveyed literature, by first arXiv release. Manipulation VLAs, navigation
+VLAs, world-action models and humanoid whole-body control developed largely in parallel. All are discussed
+in Sections 4–8.
+Scope and selection.
+We include works that condition a learned policy on vision and language
+and produce robot actions or action-level intermediates. Candidates were found by starting from
+widely used VLAs, following their references and the works that cite them, and searching arXiv;
+this is a structured, not a systematic, review. A work is discussed in the text if it meets at least one
+of three criteria:
+1. it introduces an original idea, such as a new action representation, architecture or training
+signal;
+2. it makes clear progress on a core problem (manipulation, navigation or locomotion), such as a
+large gain in real-robot success or a new capability;
+3. it gives the community a tool, dataset, benchmark or method that others build on.
+Works that mainly add a small performance gain or apply an existing method to a new domain are
+cited but not discussed. We exclude systems announced without method details; version updates
+described in release notes are included when the base model’s method is published (GR00T N1.5–
+N1.7). A small number of non-VLA precursors (RT-1, ACT, Diffusion Policy, PaLM-E, Open
+X-Embodiment) are included because later VLAs build directly on them. The survey covers 89
+3
+
+
+works from December 2022 to October 2026: 5 foundations, 38 manipulation VLAs, 12 navigation
+VLAs, 5 surveys, and 29 works on humanoid control, world-action models and evaluation. Preprints
+are marked with an asterisk (∗) in the tables. Training data is taken from each paper’s experiment
+sections; where a quantity is not reported, we say so.
+Related surveys.
+Ma et al. [2] gave the first taxonomy of VLAs, with three strands: building
+blocks, low-level controllers and high-level planners. Sapkota et al. [3] cover more than 80 models
+with an emphasis on applications. Zhang et al. [4] classify over 300 studies into autoregressive,
+diffusion, reinforcement-based and hybrid paradigms. Kawaharazuka et al. [5] take a full-stack view
+that includes hardware, data collection and evaluation. Cui et al. [6] survey and empirically compare
+dual-system architectures. More recent surveys take narrower or different cuts. Shao et al. [7] divide
+VLM-based manipulation VLAs into monolithic models, with single- or dual-system designs, and
+hierarchical models that plan through interpretable intermediates. Zhong et al. [8] organise VLAs
+by the kind of action token they produce, Yu et al. [9] review efficiency across models, training
+and data, and Xu et al. [10] trace VLAs from their modules through milestones to open challenges.
+On the world-model side, Hou et al. [11] review world models for robot learning, Lu et al. [12]
+survey world-action models, Yao et al. [13] grade world models by the capabilities that improve
+behaviour, Zhang et al. [14] give a concise tutorial, and Mehta et al. [15] connect representation
+learning, VLAs and world models in one taxonomy. Our survey differs in four ways: it organises the
+design space along the life cycle of a VLA and places the main models on it, with a practitioner’s
+guide; it treats navigation and humanoid control as lineages alongside manipulation; it compares
+world-action models with VLAs from the VLA side; and it extracts training data, model size and
+inference speed from each paper’s full text for a quantitative, data-centred comparison.
+How to read this survey.
+Section 2 sets out the problem and the precursors of VLAs. Section 3
+defines the seven life-cycle axes, places the main models on them (Table 3) and collects their
+deployment figures (Table 2). Sections 4–6 trace how manipulation, navigation and humanoid VLAs
+evolved, and Section 7 discusses where these lines meet. Section 8 compares VLAs with world-action
+models, Section 9 reviews benchmarks and fair evaluation, Section 10 sets out open challenges and
+Section 11 summarises the findings. Appendix A is a practitioner’s guide to building a VLA, and
+Appendix B explains the terms used. Readers new to VLAs may start with Appendix B, Figure 1
+and Sections 2, 4 and 5; readers building a model with Section 3 and Appendix A; and readers
+looking for research problems with Sections 9 and 10.
+2
+Background
+2.1
+Problem formulation
+Following common notation [16, 17], a language-conditioned robot policy models
+π(At | ot),
+At = [at, at+1, . . . , at+H−1],
+ot = [It, ℓt, qt],
+(1)
+where It are images from one or more cameras, ℓt is the language instruction, qt is proprioceptive
+state, and At is an action chunk of H future actions. Action chunking, introduced with ACT [18],
+reduces compounding error and is now standard in recent manipulation VLAs, although most
+navigation VLAs still predict one step at a time. A VLA initialises most of π from a pretrained
+VLM. A hierarchical VLA factorises the policy through an intermediate zt:
+π(At | o0:t) = πlow(At | It, qt, zt) πhigh(zt | I0:t, ℓt),
+(2)
+4
+
+
+Model: what it is
+Training: how it learns
+Deployment: how it runs
+(a) Inputs and memory
+What does it observe and
+keep?
+• Cameras, language, state
+all VLAs
+• Extra conditioning
+Hi Robot, π0.7
+• Memory of the past
+MemER, StreamVLN
+(b) Architecture
+How is the pipeline built?
+• Monolithic
+RT-2, OpenVLA, π0
+• Dual system
+GR00T N1, CogACT
+• Hierarchical
+Hi Robot, NaVILA
+(c) Action output
+How does it produce motor
+commands?
+• Discrete tokens
+RT-2, FAST
+• Diffusion or flow matching
+π0, GR00T N1
+• Continuous regression
+OpenVLA-OFT
+(d) Intermediate
+predictions
+What else does it predict?
+• Reasoning in text
+ECoT, π0.5
+• Future observations
+GR-2, VLA-JEPA,
+DreamZero
+(e) Pretraining data
+What does it learn from?
+• Robot teleoperation
+π0
+• Cross-embodiment data
+OXE, X-VLA
+• Web, human video,
+simulation
+GR00T N1, Qwen-VLA
+(f) Post-training
+How is it adapted and
+improved?
+• Fine-tuning recipes
+OpenVLA-OFT
+• Learning from
+deployment
+π∗
+0.6, VLingNav
+(g) Real-time execution
+How does a model running
+at a few hertz keep pace
+with the robot?
+• Action chunks
+π0, ACT
+• Asynchronous inference
+SmolVLA
+• Real-time chunking
+RTC
+• Server–robot split
+AsyncVLA
+autonomous experience and corrections feed back into training
+Figure 2: The life-cycle taxonomy of this survey. Seven design axes follow a VLA from model design through
+training to deployment; each axis poses one question, answered by the main options and example models.
+Section 3 defines the axes and Table 3 places 22 models on them.
+where zt may be a language subtask [16, 19], a 2D path [20], a goal frame [21] or a mid-level motion
+command [22].
+2.2
+Precursors
+RT-1 [23] trained a 35M-parameter transformer on about 130k real episodes from 13 robots of a
+single type. Its ablations showed that data diversity matters more than data volume. PaLM-E [24]
+injected continuous sensor encodings into a 562B-parameter language model as a high-level planner
+and showed positive transfer from mixing tasks. Diffusion Policy [25] cast visuomotor control as
+conditional denoising and handled multimodal action distributions, with an average improvement of
+46.9% over prior methods. ACT [18] introduced action chunking on low-cost bimanual hardware
+and learned fine skills from 50 demonstrations. Open X-Embodiment [26] pooled more than 1M
+trajectories from 22 embodiments and 21 institutions into a standard format. It became a common
+pretraining corpus for academic VLAs; most industrial models train mainly on their own data.
+3
+Design Axes Along the VLA Life Cycle
+We organise the design space by following a VLA through its life cycle. Four axes describe the
+model itself: what it observes (Section 3.1), how its pipeline is structured (Section 3.2), how it
+produces motor commands (Section 3.3) and what else it predicts (Section 3.4). Two describe how
+it learns: the data it is pretrained on (Section 3.5) and how it is adapted afterwards (Section 3.6).
+The last describes how it runs (Section 3.7). Section 3.8 places 22 main models on all seven axes.
+Figure 2 summarises the axes, the question each answers and its main options.
+5
+
+
+images, language,
+proprioception
+VLM backbone
++ action head
+action chunk
+(a) Monolithic
+images, language,
+proprioception
+System 2: VLM
+(slow, semantic)
+System 1: action module
+(fast, trained jointly)
+action chunk
+latent features
+(b) Dual system
+images, history,
+language
+High-level VLM
+Low-level policy
+action chunk
+subtask / path / goal frame
+(c) Hierarchical
+Figure 3: Three architectural patterns. (a) One network maps observations to actions (RT-2, OpenVLA, π0).
+(b) A slow VLM reasoner passes latent features to a fast action module trained jointly with it (GR00T N1,
+CogACT). (c) The high-level model emits an interpretable intermediate that a separately trained low-level
+policy executes (Hi Robot, HAMSTER, MemER, Mobility VLA, NaVILA).
+3.1
+Inputs and memory
+Following Equation (1), most VLAs observe one or more camera images, a language instruction and,
+in manipulation, the robot’s proprioceptive state, at the current time step only. Two extensions
+recur. First, the conditioning has become richer: Hi Robot accepts open-ended prompts and live user
+corrections [19], π0.7 conditions on episode metadata and subgoal images [27], and cross-embodiment
+models add prompts or tokens that identify the robot, dataset or camera view (Section 3.5). Second,
+some models observe the past.
+Memory. Most VLAs are effectively Markovian. Long observation histories are costly to process,
+and policies trained on them can latch onto cues that do not cause the correct action [16, 28].
+MemER [16] has a high-level VLM nominate keyframes that are consolidated by 1D clustering
+into a compact episodic memory, enabling manipulation tasks that need several minutes of recall.
+StreamVLN [29] combines a fast sliding-window context with a slow, 3D-aware pruned memory
+and reuses the transformer’s key–value (KV) cache to bound latency. VLingNav maintains a
+visual-assisted linguistic memory to avoid re-exploring the same places. NaVid [30] uses the video
+history itself as spatio-temporal context.
+3.2
+Architecture
+Figure 3 contrasts three architectural patterns. The split follows Shao et al. [7], except that we
+treat dual-system designs as a pattern of their own rather than as a kind of monolithic model.
+Monolithic models such as RT-2, OpenVLA and π0 map observations directly to actions. We
+count π0 as monolithic even though its action expert has separate weights, because the expert is
+part of the same transformer and attends to the VLM’s tokens at every layer; dual systems instead
+pass a single latent from one network to another. π0.5 [31] keeps a single network but predicts a
+text subtask before its actions, an internal hierarchy.
+Dual-system models couple a slow VLM (“System 2”) with a fast action module (“System 1”)
+through latent features and train them jointly: GR00T N1 [32], CogACT [33]. Gemini Robotics [34]
+also splits a cloud-hosted VLM backbone from an on-robot action decoder, but does not describe
+how the two are connected or trained. OpenHelix [6] provides a systematic empirical comparison of
+6
+
+
+Table 1: Families of action representation in VLAs.
+Family
+Representative works
+Trade-off
+Discrete bin tokens
+RT-2 [1], OpenVLA [36]
+Reuses the language-model head unchanged; per-
+dimension binning struggles with high-frequency dex-
+terous data and decodes slowly.
+Compressed tokens
+FAST [37], SpatialVLA [38]
+Compression with the discrete cosine transform
+(DCT) lets autoregressive VLAs match diffusion
+VLAs with up to 5× faster training; adaptive grids
+re-discretise per robot.
+Plain text numbers
+VLA-0 [39]
+No change to the VLM; reported to outperform sev-
+eral more complex designs on LIBERO [40].
+Latent actions
+LAPA [41], UniVLA [42],
+VLA-JEPA [43]
+Pretrain on action-free human or web video; a small
+decoder maps latents to real actions.
+Diffusion head or
+expert
+Octo [44], CogACT [33],
+RDT-1B [45], DexVLA [46],
+GR00T N1 [32]
+Represents multimodal action distributions; requires
+iterative sampling.
+Flow-matching
+expert
+π0 [17], π0.5 [31],
+SmolVLA [47], X-VLA [48]
+Smooth high-rate chunks; the current default in fron-
+tier systems.
+Continuous
+regression
+OpenVLA-OFT [49],
+VLA-Adapter [50]
+Parallel decoding with an L1 loss; fastest inference,
+well suited to narrow fine-tuning.
+these designs.
+Hierarchical models make the intermediate explicit and interpretable. Hi Robot [19] reasons
+over open-ended prompts and live user corrections to produce language subtasks for a π0 controller.
+HAMSTER [20] predicts a 2D end-effector path that a 3D-aware policy follows; because the path is
+easy to label, cheap off-domain data becomes usable for training. MolmoAct [35] produces depth
+tokens, then an editable trajectory trace, then actions. The hierarchical pattern also lets memory
+and slow reasoning live outside the fast control loop, as in MemER [16].
+3.3
+Action output
+How a VLA turns VLM features into continuous robot actions is the most actively explored axis.
+Table 1 summarises the main families.
+Two refinements cut across these families. First, adding an untrained action expert to a pretrained
+VLM can damage the VLM’s semantic knowledge and slow training. Knowledge insulation [51]
+stops gradients flowing from the expert into the backbone while the backbone learns from discrete
+action tokens. Second, the denoising schedule itself can adapt: AsyncVLA’s asynchronous flow
+matching [52]1 uses a non-uniform, context-aware schedule and refines low-confidence action tokens
+before execution.
+3.4
+Intermediate predictions
+Besides actions, many VLAs predict outputs that make their decisions explicit or anticipate what
+will happen next. These take two forms: reasoning in text, and predictions of future observations.
+In hierarchical systems such outputs are passed from one model to another (Section 3.2); here we
+focus on what is predicted.
+1Two unrelated 2025–2026 works share the name AsyncVLA. We write AsyncVLA (flow matching) for this
+manipulation work [52] and AsyncVLA (navigation) for the remote-VLA navigation system [53].
+7
+
+
+Reasoning before acting. Embodied chain-of-thought (ECoT) [54] trains a VLA to reason
+through plans, subtasks, motions, bounding boxes and gripper positions before acting, improving
+OpenVLA’s absolute success rate by 28% without additional robot data. Gemini Robotics 1.5 [55]
+interleaves natural-language reasoning with actions. In navigation, VLingNav [56] uses adaptive
+chain-of-thought, reasoning explicitly only when needed.
+Predicting the future. A growing set of VLAs predict future observations as well as actions.
+3D-VLA [57] generates goal images and point clouds with aligned diffusion models. GR-2 [58] is
+pretrained as a video generator before learning actions. VLA-JEPA [43], built on the joint-embedding
+predictive architecture (JEPA), predicts embeddings of future frames rather than their pixels, so it
+is not trained to reproduce irrelevant visual detail, and the part of the model that predicts never
+sees the future frames themselves. π0.7 uses a lightweight world model to produce subgoal images.
+These models are a bridge to world-action models, which jointly predict future observations and
+actions; Section 8 compares the two families.
+3.5
+Pretraining data
+Pretraining data has grown from RT-1’s 130k episodes [23], to OpenVLA’s 970k curated Open
+X-Embodiment episodes [36], to about 10k hours for π0 [17], about 20k hours for LingBot-VLA [59],
+and “tens of thousands of hours” for π∗
+0.6 [60]. LingBot-VLA reports steady downstream gains as
+pretraining grows from 3k to 20k hours. Several mechanisms allow heterogeneous action spaces to
+be trained together:
+• a physically interpretable unified action space (RDT-1B [45]);
+• per-source learnable soft prompts, learned embeddings that tell the model which dataset and
+robot each example comes from (X-VLA [48]);
+• embodiment-aware text prompts (Qwen-VLA [61]);
+• a Motion Transfer mechanism, whose design the paper does not describe (Gemini Robotics
+1.5 [55]);
+• camera-view and temporal identifier tokens for navigation (NavFoM [62]).
+Figure 4 shows the robot bodies these models cover.
+Co-training mixes robot actions with other data, most often web visual question answering
+(VQA) and captioning. RT-2 brought it to VLAs [1], and PaLM-E, π0.5, MolmoAct, NaVid and
+NavFoM follow it [24, 30, 31, 35, 62]. Its value depends on the data: in π0.5’s ablations, data from
+other robots and environments was important for performance in unseen homes, whereas web data
+mainly helped with objects outside the robot data; the web data’s effect on overall task success was
+not statistically significant [31].
+Beyond teleoperation. Training data increasingly comes from other sources (Figure 5):
+• human and web video: 38M clips for GR-2 [58], Something-Something v2 [73] for LAPA and
+VLA-JEPA [41, 43], Ego4D [74] for UniVLA [42], and YouTube tours for LeLaN [69];
+• simulation: 780k trajectories for GR00T N1 [32] and 7.2M for Qwen-VLA [61];
+• video-generated “neural trajectories” (GR00T N1);
+• failed and autonomous episodes, made usable by telling the policy how good each episode or
+action was, through metadata or an advantage estimate [27, 60].
+8
+
+
+MANIPULATION
+MOBILITY
+Single arm
+OpenVLA [36], Octo [44],
+SmolVLA (SO-100) [47],
+FAST (DROID) [37],
+MemER [16]
+Bimanual arms
+ACT (ALOHA) [18],
+RDT-1B [45],
+Gemini Robotics
+(ALOHA 2) [34],
+LingBot-VLA (9
+dual-arm setups) [59]
+Mobile manipulator
+RT-1 [23], π0.5 (un-
+seen homes) [31], Hi
+Robot [19], SimVLA
+(Galaxea R1 Lite) [63]
+Humanoid
+GR00T N1 (GR-1) [32],
+Gemini Robotics 1.5
+(Apollo) [55], SEN-
+TINEL (G1) [64],
+WholeBodyVLA
+(AgiBot X2) [65],
+WOLF-VLA (RH5) [66]
+Wheeled robot
+ViNT [67], No-
+MaD [68], LeLaN [69],
+OmniVLA [70],
+AsyncVLA [53]
+Quadruped
+NaVILA (Unitree
+Go2) [22], LeLaN [69],
+NavFoM [62]
+Drone
+NavFoM (Open-
+UAV [71]) [62]
+Car
+NavFoM (driving) [62],
+OmniVLA (BDD-V
+driving data) [70], X-
+VLA (NAVSIM [72]) [48]
+Figure 4: Robot bodies in the surveyed work, with models trained or evaluated on each. Several models span
+more than one body: π0 trains on single-arm, dual-arm and mobile manipulators [17]; Gemini Robotics 1.5
+transfers skills between ALOHA, a bi-arm Franka and the Apollo humanoid [55]; NavFoM covers quadrupeds,
+drones, wheeled robots and cars [62]; and Qwen-VLA unifies manipulation and navigation [61].
+3.6
+Post-training
+Supervised fine-tuning on the target robot is the default. OpenVLA-OFT [49] distils a recipe of
+parallel decoding, action chunking, continuous actions and an L1 loss. It raises OpenVLA’s LIBERO
+average (Section 9) from 76.5% to 97.1% and its throughput by 26×. Reinforcement learning from
+deployment has recently become practical at scale. RECAP [60] trains a value function and a policy
+conditioned on the advantage, that is, on how much better than expected each action turned out,
+using demonstrations, autonomous rollouts and expert interventions together. It was applied to
+laundry folding, espresso making and box assembly; on the hardest of these tasks it more than
+doubles throughput and roughly halves the failure rate. VLingNav adds an online, expert-guided
+RL stage to navigation. π0.7 [27] instead conditions on episode metadata and subgoal images, so
+lower-quality data improves the model rather than degrading it.
+3.7
+Real-time execution
+Large VLAs run at a few hertz, which leads to pauses or jerky transitions at chunk boundaries
+(Figure 6). SmolVLA [47] decouples action prediction from execution with an asynchronous inference
+stack. Real-Time Chunking [82] overlaps the two: while one chunk executes, it plans the next,
+keeping fixed the actions that will run before the new chunk is ready and filling in the rest so the
+two chunks join smoothly. It runs at inference time on existing diffusion and flow-matching policies,
+without retraining. AsyncVLA (navigation) [53] runs a large VLA on a remote workstation and
+a lightweight edge adapter on the robot. It tolerates communication delays of up to 6 seconds;
+among pedestrians it reaches the goal without collision in 85% of trials, which its authors report as
+40% above the strongest baseline. Hierarchical systems often run the two levels at different rates:
+MemER runs its high-level policy at about 1 Hz and its low-level policy at about 2 Hz [16].
+Where VLAs run. Table 2 collects the model size, inference speed and hardware that the
+main works report. Three patterns stand out. Every model that names its hardware is run on a
+9
+
+
+Web vision–language data
+Human and web video
+Simulation and
+generated trajectories
+Cross-embodiment
+robot data
+Target-robot
+teleoperation
+Co-training on VQA and captioning: RT-2 [1], π0.5 [31], Mol-
+moAct (2M samples) [35], NaVid (763k samples) [30].
+GR-2: 38M clips [58]; Something-Something v2 (220k) [73]
+for LAPA and VLA-JEPA [41, 43]; Ego4D [74] for Uni-
+VLA [42]; YouTube tours for LeLaN [69]; 20k h EgoScale [75]
+for GR00T N1.7 [76].
+GR00T N1: 780k simulated and ∼300k video-generated trajec-
+tories [32]; Qwen-VLA: 7.2M simulated [61]; DreamGen [77];
+RoboTwin 2.0 [78].
+Open X-Embodiment: 1M+ trajectories from 22 robots [26];
+X-VLA: 290k episodes from DROID [79], RoboMind [80] and
+AgiBot World [81] [48].
+π0: ∼10k h on 7 robot configurations [17]; LingBot-VLA:
+∼20k h on 9 dual-arm robots [59]; task fine-tuning, e.g. 50
+demos per task [16].
++ autonomous rollouts, failures and corrections
+π∗
+0.6 [60], π0.7 [27]
+abundant, generic
+scarce, robot-specific
+Figure 5: Sources of VLA training data, from abundant but generic (bottom) to scarce but specific to
+the target robot (top), with figures reported in the surveyed papers. Autonomous experience is a growing
+source that feeds back into the top layer. The layering follows the spirit of the data pyramid used to train
+GR00T N1 [32].
+single desktop or data-centre GPU (RTX 4090 or 5090, A6000, A100, L40, H100) or on cloud TPUs;
+embedded robot hardware appears only for the edge part of a split system, such as AsyncVLA’s
+adapter on a Jetson Orin. Navigation VLAs built on 7–8B video VLMs are usually served from a
+remote RTX 4090 or A100 over a network. And speed is reported in incompatible forms (throughput,
+latency per chunk, frames per second, effective control rate) on different GPUs, so the figures in
+the table cannot be ranked directly; VLA-Perf [83] addresses this with an analytical latency model
+(Section 9).
+3.8
+Placing models on the axes
+Table 3 places 22 main models on the seven axes, in life-cycle order. A dash means the work makes
+no distinctive choice on that axis, not that the axis is absent. Read by column, the grid shows where
+effort has gone: action output and pretraining data differ for every model, nine models extend their
+inputs and ten predict something besides actions, but only seven make a distinctive post-training
+choice and only two, VLA-JEPA and π0.7, predict future observations. Navigation models stand out
+on inputs: five of the seven add history or extra views, because navigation depends on where the
+robot has been. Read by row, the grid shows design choices accumulating: π0.7 makes a distinctive
+choice on all seven axes, while RT-2 and OpenVLA do so on four.
+4
+Manipulation VLAs
+Table 5 lists the 43 manipulation works with their training data and key ideas. Figure 7 plots the
+subset that reports comparable quantities. We read the history in four phases.
+2023: emergence. RT-2 [1] established the recipe of actions as tokens inside a large VLM,
+co-fine-tuned with web data. RoboFlamingo [85] showed that an open VLM with a light policy
+head could compete on CALVIN [86].
+10
+
+
+time
+(a) Synchronous
+robot
+model
+infer chunk 1
+pause
+execute chunk 1
+infer chunk 2
+pause
+execute chunk 2
+infer chunk 3
+pause
+(b) Asynchronous
+robot
+model
+infer chunk 1
+infer chunk 2
+infer chunk 3
+infer chunk 4
+execute chunk 1
+execute chunk 2
+execute chunk 3
+execute chunk 4
+(c) Real-time chunking
+model
+model output
+robot
+infer chunk 2
+inpainted
+execute chunk 1
+execute chunk 2
+hatched (fixed): the end of chunk 1, executed
+while chunk 2 is computed, so it cannot change
+Figure 6: Executing action chunks. (a) A synchronous policy stops the robot while the model computes the
+next chunk, so the robot pauses at every chunk boundary. (b) Asynchronous execution computes the next
+chunk while the current one runs, as in SmolVLA’s inference stack [47] and the remote-VLA and edge-adapter
+split of AsyncVLA (navigation) [53]; but if the new chunk plans a different motion, the robot jumps when it
+switches, causing jerky movement. (c) Real-time chunking [82] prevents this. The robot carries on executing
+chunk 1 while the model computes chunk 2; those actions cannot be changed, so the model keeps them
+fixed (hatched) and predicts the rest of chunk 2 (inpainted), guided by the remainder of chunk 1, so that it
+continues smoothly.
+2024: open generalists. Octo [44] and OpenVLA [36] released open models pretrained on
+800k and 970k Open X-Embodiment episodes; OpenVLA outperformed the 55B RT-2-X with 7×
+fewer parameters. ECoT, TinyVLA, RDT-1B, LAPA and CogACT explored reasoning, compactness,
+bimanual diffusion, latent actions and specialised action modules. π0 [17] combined a VLM based on
+PaliGemma [87] with a flow-matching action expert and about 10k hours of dexterous multi-robot
+data.
+2025: efficiency, hierarchy and generalisation. FAST made autoregressive VLAs competi-
+tive. OpenVLA-OFT made fine-tuning efficient. GR00T N1 released open weights for a dual-system
+humanoid model, and Gemini Robotics brought Gemini [88] to robot control. π0.5 [31] demonstrated
+end-to-end long-horizon cleaning in homes never seen during training. At the efficient end, SmolVLA,
+VLA-Adapter and VLA-0 showed strong results at sub-billion scale or without robot pretraining.
+MemER added minutes-long memory, and π∗
+0.6 brought RL from deployment.
+2026: steerability and unification. LingBot-VLA scaled open real-robot data to about 20k
+hours. VLA-JEPA brought latent world-model pretraining, and SimVLA [63] showed that a minimal
+0.5B design with a standardised training recipe matches far larger models, arguing that many
+reported gains are hard to separate from recipe differences. π0.7 [27] made a generalist steerable
+through rich context and reported zero-shot cross-embodiment laundry folding. Qwen-VLA [61]
+trained one model for manipulation, navigation and trajectory prediction.
+Open model lines released without papers. Some of the most widely used open VLAs
+now evolve through code releases rather than papers. NVIDIA’s GR00T line is the clearest case:
+only N1 has a paper [32]. N1.5, N1.6 and N1.7 are documented in the release notes of NVIDIA’s
+open-source repository [76, 89, 90] (Table 4). Across the four releases the line moves from a frozen
+VLM to partial fine-tuning of a reasoning-oriented VLM, from absolute to relative actions, and from
+robot-only data towards large-scale human video. Because these releases have no papers, their data
+11
+
+
+Table 2: Model size, reported inference speed and hardware for the main VLAs, as stated in each paper.
+Speeds are in the paper’s own units and are not directly comparable. n.r.: not reported.
+Model
+Params
+Reported inference speed
+Hardware
+RT-2 [1]
+55B (5B)
+1–3 Hz (5B: ∼5 Hz)
+Multi-TPU cloud service,
+queried over the network
+OpenVLA [36]
+7B
+∼6 Hz; 15 GB in bf16
+One RTX 4090
+TinyVLA [84]
+1B
+14 ms per action prediction (OpenVLA-7B: 292 ms)
+One A6000
+π0 [17]
+3.3B
+73 ms per chunk on board, 86 ms off board; control up to
+50 Hz
+One RTX 4090; off-board
+over Wi-Fi for the mobile
+robot
+OpenVLA-
+OFT [49]
+7B
+71.4 Hz throughput, 0.11 s latency (LIBERO); real biman-
+ual control at 25 Hz
+One A100
+GR00T N1∗[32]
+2.2B
+63.9 ms per 16-action chunk; VLM at 10 Hz, actions at
+120 Hz
+One L40
+Gemini
+Robotics∗[34]
+n.r.
+∼250 ms end to end; 50 Hz effective control
+Cloud backbone
+(<160 ms) plus on-robot
+decoder
+SmolVLA∗[47]
+0.45B
+n.r.; asynchronous inference stack
+Designed for consumer
+GPUs and CPUs
+VLA-
+Adapter [50]
+0.5B
+219.2 Hz throughput, 0.04 s latency (LIBERO)
+H100
+VLA-0∗[39]
+3B
+4 Hz
+Desktop with one
+RTX 5090
+NaVid [30]
+7B LLM
+n.r.; authors note long latency
+Remote A100 server, over
+the internet
+NaVILA [22]
+8B
+∼1 frame per second
+One RTX 4090
+StreamVLN [29]
+n.r.
+n.r.; KV-cache reuse for low latency
+Remote RTX 4090
+workstation
+NavFoM [62]
+n.r.
+n.r.; token budget keeps speed stable
+Remote RTX 4090 server
+OmniVLA [70]
+7B
+8-action chunks at 3 Hz
+Local PC with one
+RTX 4090
+VLingNav [56]
+7B base
+<300 ms per step over 500 frames, plus ∼100 ms network
+Remote RTX 4090 server
+AsyncVLA
+(navi-
+gation)∗[53]
+n.r.
+3 Hz control; tolerates 6 s delay
+VLA on a remote
+RTX 4090; edge adapter
+on a Jetson Orin
+and evaluations cannot be checked to the standard of the works in Table 5.
+Figure 7 shows two patterns. First, data strategies have diverged. Between late 2023 and
+early 2025, several models trained on about one million episodes (Open X-Embodiment, Octo,
+OpenVLA, RDT-1B, SpatialVLA). Since then, frontier systems report 10,000–20,000 hours of robot
+data (about 10,000 for π0 [17] and 20,000 for LingBot-VLA [59]); π∗
+0.6 states only “tens of thousands
+of hours” [60]. At the same time, data has broadened beyond robots: recent releases add large-scale
+human video, such as the 20k hours of egocentric video in GR00T N1.7 (Table 4). Others use far
+less: SmolVLA trains on 22,900 community episodes [47], and TinyVLA, VLA-Adapter and VLA-0
+skip robot pretraining entirely [39, 50, 84]. Their strongest results, however, come from simulation
+benchmarks such as LIBERO, which test much less than real-world use (Section 9). Second, model
+size has not simply fallen. RT-2 (55B) is still the largest robot policy here; PaLM-E (562B) is larger
+but acts as a planner, not a policy. Most 2025–2026 models are 3–7B, and a new group under
+one billion has appeared: SmolVLA (0.45B), VLA-Adapter and SimVLA (0.5B) [63], and X-VLA
+(0.9B) [48]. SmolVLA is designed to run on consumer GPUs or even CPUs, and VLA-Adapter
+trains in 8 hours on a single consumer-grade GPU.
+12
+
+
+Table 3: Main VLAs placed on the seven design axes of Section 3, grouped by life-cycle stage. –: no distinctive choice on this axis. FM: flow matching;
+FT: fine-tuning; OXE: Open X-Embodiment. ∗Preprint.
+Model
+Training
+Deployment
+Model
+Inputs and
+memory
+Architecture
+Action output
+Intermediate
+predictions
+Pretraining data
+Post-training
+Real-time
+execution
+Manipulation
+RT-2
+–
+Monolithic
+Discrete bin
+tokens
+–
+One robot type; web
+VQA co-training
+–
+Cloud TPUs,
+1–3 Hz
+OpenVLA
+–
+Monolithic
+Discrete bin
+tokens
+–
+970k OXE episodes
+LoRA FT,
+quantisation
+–
+ECoT
+–
+Monolithic
+Discrete bin
+tokens
+Chain-of-thought:
+plans, subtasks,
+boxes
+BridgeData V2 +
+synthetic reasoning
+–
+–
+π0
+–
+Monolithic
+FM expert
+–
+∼10k h, 7 robot configs +
+OXE
+Task FT
+Chunks up to
+50 Hz
+OpenVLA-
+OFT
+–
+Monolithic
+Continuous
+regression
+–
+FT only
+Parallel decoding,
+chunking, L1 loss
+Parallel decoding
+GR00T N1∗
+–
+Dual system
+FM diffusion
+transformer
+–
+Real humanoid, human
+video, sim, generated
+trajectories
+–
+VLM 10 Hz,
+actions 120 Hz
+Hi Robot
+Open-ended
+prompts, live
+corrections
+Hierarchical
+FM (π0 low
+level)
+Language subtasks Teleop + synthetic
+prompts
+–
+–
+π0.5
+–
+Monolithic
+FM expert
+Text subtask
+Co-training: homes,
+cross-embodiment, web
+–
+–
+SmolVLA∗
+–
+Monolithic
+FM expert
+–
+22.9k community
+episodes
+–
+Asynchronous
+inference
+MemER
+Keyframe episodic
+memory
+Hierarchical
+FM (π0.5 low
+level)
+Language subtasks 50 demos per task
+–
+High level ∼1 Hz,
+low ∼2 Hz
+X-VLA
+–
+Monolithic
+FM transformer
+–
+290k episodes; per-source
+soft prompts
+–
+–
+π∗
+0.6
+–
+Monolithic
+FM expert +
+FAST tokens
+Text subtask
+Demos, autonomous
+rollouts, corrections
+RECAP offline
+RL
+–
+VLA-JEPA
+–
+Monolithic
+Latent actions
+Future latent
+embeddings
+DROID + human video
+–
+–
+π0.7∗
+Episode metadata,
+subgoal images
+VLA with
+high-level
+policy and
+world model
+FM expert
+Subgoal images
+from a world
+model
+Demos incl. failures,
+human video
+Metadata
+conditioning
+Acts while next
+subgoal is
+generated
+Qwen-VLA∗
+Embodiment-
+aware prompts
+Monolithic
+FM diffusion
+transformer
+–
+Real, human, 7.2M sim,
+VLN
+–
+–
+Navigation
+NaVid
+Monocular video
+history
+Monolithic
+Next-step
+actions as text
+–
+510k VLN-CE + 763k
+web
+–
+Remote A100
+Mobility VLA
+Long-context tour
+video
+Hierarchical
+Topological-
+graph controller
+Goal frame
+No policy training
+–
+–
+NaVILA
+–
+Hierarchical
+RL locomotion
+policy
+Mid-level language
+commands
+R2R-CE, RxR-CE,
+touring video, VQA
+–
+∼1 frame per
+second
+StreamVLN
+Slow-fast memory
+Monolithic
+Next-step
+actions
+–
+MP3D, ScaleVLN, video
+QA
+DAgger
+KV-cache reuse
+NavFoM
+Camera-view and
+time tokens
+Monolithic
+Waypoint
+trajectory
+–
+8.02M samples, 4 body
+types
+–
+Token budget
+VLingNav
+Linguistic memory Monolithic
+Continuous
+regression
+Adaptive
+chain-of-thought
+4.5M samples
+Online RL
+<300 ms per step
+AsyncVLA
+(navigation)∗
+–
+Remote VLA +
+on-robot
+adapter
+VLA tokens
+refined by edge
+adapter
+–
+GNM, SACSoN, LeLaN
+–
+Tolerates 6 s delay
+13
+
+
+Table 4: The GR00T N1 model line. N1 is described in its paper; later versions in NVIDIA’s repository
+release notes. All four are non-peer-reviewed.
+Version
+Vision-language
+backbone
+Main changes
+N1 [32]
+Eagle-2 VLM [91]
+Dual system: VLM plus a flow-matching diffusion-transformer (DiT)
+action head, 2.2B parameters; trained on real humanoid data, human
+video, simulation and generated “neural trajectories”.
+N1.5 [89]
+Eagle 2.5 [92],
+frozen in
+pretraining and
+fine-tuning
+Simplified multilayer-perceptron (MLP) adapter; FLARE future-latent
+alignment objective alongside flow matching, for learning from egocentric
+human video; DreamGen trajectories; language following on Fourier GR-1
+humanoid tasks reported at 93.3% versus 46.6% for N1; new heads for
+single-arm end-effector control and AgiBot Genie-1.
+N1.6 [90]
+Internal
+Cosmos-Reason-2B
+variant [93]a; native
+aspect ratio
+DiT doubled to 32 layers; adapter removed and the top 4 VLM layers
+unfrozen; state-relative action chunks; several thousand added hours of
+teleoperation (YAM bimanual arms, AgiBot Genie-1, simulated Galaxea
+R1 Pro, Unitree G1 loco-manipulation), for 10k+ hours of robot data in
+total.
+N1.7 [76]
+Cosmos-Reason2-
+2B (Qwen3-VL
+architecture [94])
+3B parameters; relative end-effector action space shared by human and
+robot data; 20k hours of EgoScale [75] human video in pretraining; DiT
+reduced to 16 layers; state/action dimensions 29→132 and action horizon
+16→40; dataset-mixture weighting; ONNX/TensorRT export; Apache-2.0
+licence. Reported as comparable to N1.6 with better generalisation and
+language following.
+aThe N1.6 release notes describe an internal Cosmos-Reason-2B variant, while the N1.7 changelog names the N1.6
+backbone nvidia/Eagle-Block2A-2B-v2; these may be the same model under different names.
+Table 5: Manipulation VLAs and precursors. OXE: Open X-Embodiment; FT: fine-tuning. ∗Preprint.
+Model
+Released Training data
+Key idea
+RT-1 [23]
+Dec
+2022
+∼130k episodes, 700+ tasks, 13
+robots of one type
+Transformer over image and
+language tokens; data diversity
+beats volume.
+PaLM-E [24]
+Mar
+2023
+Web VL data +
+task-and-motion-planning
+(TAMP) sim,
+Language-Table [95], mobile
+manipulation
+562B embodied LM as planner;
+positive transfer from task mixtures.
+Diffusion
+Policy [25]
+Mar
+2023
+Per-task demos (90–210 real)
+Policy as conditional denoising over
+action sequences.
+ACT [18]
+Apr
+2023
+50 demos per task on ALOHA
+Action chunking with a conditional
+variational autoencoder (CVAE)
+transformer; low-cost bimanual
+hardware.
+RT-2 [1]
+Jul
+2023
+RT-1 data co-fine-tuned with
+web VQA
+Coined “VLA”; actions as text
+tokens; emergent semantic
+reasoning.
+Open
+X-Embodi-
+ment [26]
+Oct
+2023
+Dataset: 1M+ trajectories, 22
+embodiments
+Standard cross-lab format; RT-X
+shows positive transfer.
+14
+
+
+Model
+Released Training data
+Key idea
+Robo-
+Flamingo [85]
+Nov
+2023
+CALVIN language-annotated
+demos (∼24k)
+Open VLM plus explicit history
+policy head; light fine-tuning.
+3D-VLA [57]
+Mar
+2024
+3D instruction set from robot
+data, RLBench, CALVIN,
+human videos
+3D-LLM with generated goal images
+and point clouds.
+Octo [44]
+May
+2024
+800k episodes, 25 OXE datasets Open 93M diffusion policy; adapts
+to new sensors and action spaces.
+OpenVLA [36]
+Jun
+2024
+970k curated OXE episodes
+Open 7B VLA; beats RT-2-X (55B);
+low-rank (LoRA) fine-tuning and
+quantisation.
+ECoT [54]
+Jul
+2024
+BridgeData V2 [96] (60k) with
+synthetic reasoning
+Embodied chain-of-thought before
+acting; +28 points over OpenVLA.
+TinyVLA [84]
+Sep
+2024
+No robot pretraining; ∼50
+demos per task
+Compact VLM with diffusion
+decoder; data-efficient.
+GR-2∗[58]
+Oct
+2024
+38M web video clips, then ∼40k
+robot trajectories
+Video-generation pretraining, then
+joint video and action prediction.
+RDT-1B [45]
+Oct
+2024
+46 datasets, 1M+ trajectories;
+6k bimanual FT
+1.2B diffusion transformer; unified
+physical action space.
+LAPA [41]
+Oct
+2024
+Action-free video (Bridge, OXE
+or SSv2)
+Latent actions from a
+vector-quantised autoencoder
+(VQ-VAE) enable pretraining
+without action labels.
+π0 [17]
+Oct
+2024
+∼10k h in-house (7 robot
+configs) + OXE
+VLM plus flow-matching action
+expert; dexterous multi-robot skills.
+CogACT∗[33]
+Nov
+2024
+OXE (∼1M trajectories); 400
+real FT demos
+VLM cognition feature conditions a
+diffusion action transformer.
+FAST [37]
+Jan
+2025
+DROID [79] (75k); π 10k h
+mixture
+DCT-compressed action tokens; 5×
+faster autoregressive training.
+SpatialVLA [38] Jan
+2025
+1.1M episodes, OXE subset +
+RH20T [97]
+Ego3D position encoding; adaptive
+action grids.
+HAMSTER [20] Feb
+2025
+Off-domain: 10k Bridge + ∼45k
+DROID paths, RLBench, 770k
+points
+High-level VLM draws 2D paths for
+a 3D low-level policy.
+DexVLA [46]
+Feb
+2025
+∼100 h cross-embodiment demos 1B plug-in diffusion expert;
+embodiment curriculum.
+Hi Robot [19]
+Feb
+2025
+Teleop skills + VLM-generated
+synthetic prompts
+High-level VLM handles open-ended
+prompts and live corrections.
+OpenVLA-
+OFT [49]
+Feb
+2025
+FT on LIBERO, ALOHA,
+BridgeData V2
+Parallel decoding, chunking,
+continuous actions, L1 loss.
+GR00T
+N1∗[32]
+Mar
+2025
+Human video, 780k sim, 300k
+neural trajectories, real
+humanoid
+Open dual-system humanoid model;
+generated training trajectories.
+Gemini
+Robotics∗[34]
+Mar
+2025
+Thousands of hours of ALOHA
+2 teleop + Gemini data
+VLA plus Gemini Robotics-ER for
+embodied reasoning.
+π0.5 [31]
+Apr
+2025
+Co-training: ∼100 homes,
+cross-embodiment, web,
+subtasks
+Co-training enables long-horizon
+cleaning in unseen homes.
+UniVLA [42]
+May
+2025
+OXE subset + GNM [98]
+navigation + Ego4D
+Task-centric latent actions in
+DINOv2 [99] space.
+π0.5-KI [51]
+May
+2025
+π mixture + VLM data
+Knowledge insulation: stop
+gradients from the action expert.
+15
+
+
+Model
+Released Training data
+Key idea
+SmolVLA∗[47]
+Jun
+2025
+22.9k episodes, 481 community
+SO-100 datasets
+∼0.45B model; asynchronous
+inference; trains on one GPU.
+RTC [82]
+Jun
+2025
+Inference method on π0.5
+Freeze committed actions, inpaint
+the rest; no retraining.
+MolmoAct [35]
+Aug
+2025
+OXE subset + 10k MolmoAct
+trajectories + web data
+Depth tokens, editable trajectory
+traces, then actions; fully open.
+VLA-
+Adapter [50]
+Sep
+2025
+No robot pretraining; LIBERO,
+CALVIN demos
+0.5B backbone with Bridge
+Attention; 8 h training on one GPU.
+Gemini
+Robotics
+1.5∗[55]
+Oct
+2025
+ALOHA, bi-arm Franka, Apollo
+humanoid + web data
+Motion Transfer across bodies;
+thinks before acting.
+X-VLA [48]
+Oct
+2025
+290k episodes: DROID,
+RoboMind [80], AgiBot
+World [81]
+Per-source soft prompts; 0.9B
+flow-matching transformer.
+VLA-0∗[39]
+Oct
+2025
+No robot pretraining; LIBERO,
+100 real demos per task
+Actions as plain text with an
+unmodified VLM.
+MemER [16]
+Oct
+2025
+50 demos per task on
+π0.5-DROID and
+Qwen2.5-VL-7B [100]
+High-level VLM selects keyframes as
+episodic memory.
+AsyncVLA
+(flow
+matching)∗[52]
+Nov
+2025
+OXE pretraining; LIBERO,
+Bridge, Fractal FT
+Asynchronous flow matching with
+confidence-based self-correction.
+π∗
+0.6 [60]
+Nov
+2025
+Multi-robot demos +
+autonomous rollouts +
+corrections
+RL via advantage-conditioned
+policies (RECAP).
+LingBot-
+VLA∗[59]
+Jan
+2026
+∼20k h teleop on 9 dual-arm
+embodiments
+Data scaling from 3k to 20k h; 4
+platforms × 100 tasks.
+VLA-JEPA [43]
+Feb
+2026
+DROID (76k) + 220k human
+videos
+JEPA-style latent world-model
+pretraining.
+SimVLA∗[63]
+Feb
+2026
+No robot pretraining; LIBERO,
+Fractal + Bridge; 500 h Galaxea
+data for real robot
+SmolVLM-0.5B [101] encoder +
+small flow-matching head; a
+controlled baseline.
+π0.7∗[27]
+Apr
+2026
+Demos incl. failures,
+autonomous rollouts, human
+video
+Steerable via metadata and subgoal
+images; zero-shot cross-embodiment.
+Qwen-
+VLA∗[61]
+May
+2026
+Real robots, egocentric human,
+7.2M sim, VLN, VL data
+One model for manipulation,
+navigation and trajectories.
+5
+Navigation VLAs
+Most navigation VLAs come from two lineages with different data, outputs and evaluation; a smaller
+third group places a VLM over a separately trained controller (Figure 8, Table 6).
+Visual navigation foundation models. ViNT [67] trained a navigation transformer on
+more than 100 hours of real trajectories from 8 robot platforms and adapted to new goal types
+by replacing its goal encoder. NoMaD [68] used goal masking so that one diffusion policy handles
+both exploration and goal reaching. LeLaN [69] labelled about 130 hours of action-free egocentric
+video, including YouTube tours and human walking footage, using VLMs. OmniVLA [70] trained on
+about 10k hours of navigation data with goals given as 2D poses, images, language, or combinations.
+AsyncVLA (navigation) [53] split a remote VLA from an onboard edge adapter. Models in this line
+16
+
+
+2023
+2024
+2025
+2026
+20k
+50k
+100k
+200k
+500k
+1M
+2M
+Robot training episodes
+RT-1
+RT-2
+Octo
+OpenVLA
+CogACT
+SmolVLA
+X-VLA
+RoboFlamingo
+ECoT
+GR-2
+FAST ( 0-FAST)
+SpatialVLA
+HAMSTER
+VLA-JEPA
+(a) Robot data in the main training stage
+2023
+2024
+2025
+2026
+0.03
+0.1
+0.3
+1
+3
+10
+30
+100
+300
+1k
+Parameters (billions)
+RT-1
+RT-2
+Octo
+OpenVLA
+0
+CogACT
+OpenVLA-OFT
+GR00T N1
+SmolVLA
+X-VLA
+SimVLA
+0.7
+PaLM-E
+ACT
+RoboFlamingo
+ECoT
+TinyVLA
+GR-2
+RDT-1B
+HAMSTER
+*0.6
+(b) Reported model size
+Discrete / text action tokens
+Diffusion / flow-matching head
+Regression, latent, path, undisclosed
+Figure 7: Manipulation VLAs over time. (a) Robot episodes in each model’s main training stage, for the 16
+works that report a single episode count; Open X-Embodiment (unlabelled, late 2023) is the dataset itself.
+Models reporting only hours, such as π0 (∼10k h) and LingBot-VLA (∼20k h), cannot be placed on this axis;
+models with no robot pretraining (Diffusion Policy, ACT, TinyVLA, VLA-Adapter, VLA-0) are omitted, as
+is SimVLA, whose benchmark models use no robot pretraining but whose real-robot model trains on about
+500 hours. (b) Reported parameter count for the 32 works that state one; for hierarchical systems the value
+is the high-level model. Labels are omitted where they would overlap; every point appears in Table 5.
+output waypoints, train mostly on real robot data and target edge deployment.
+Vision-and-language navigation (VLN) with video VLMs. NaVid [30] showed that a
+video VLM can navigate from a single RGB camera’s video stream, with no map, odometry or
+depth sensor. It trained on 510k VLN-CE samples and 763k web samples. Uni-NaVid [102] unified
+instruction following, object search, embodied question answering and person following using 3.6M
+simulated samples. StreamVLN [29] introduced slow-fast context modelling for streaming input.
+NavFoM [62] trained across quadrupeds, drones, wheeled robots and cars on 8.02M navigation
+samples. VLingNav [56] added adaptive reasoning, linguistic memory and online RL. This line
+trains mostly in Habitat simulation [103], outputs next-step actions, and is evaluated on R2R-CE
+and RxR-CE [104].
+Hierarchical systems. A smaller group keeps the VLM out of the control loop. NaVILA [22]
+brought VLN to legged robots by emitting mid-level language commands that an RL locomotion
+policy executes. Mobility VLA [21] needed no policy training: a long-context VLM locates the goal
+frame in a demonstration-tour video, and a topological-graph controller drives to it.
+Table 6: Navigation VLAs. ∗Preprint.
+Model
+Released Training data
+Key idea
+ViNT [67]
+Jun
+2023
+100+ h real trajectories, 8
+platforms
+Navigation foundation transformer;
+swappable goal encoders.
+NoMaD [68]
+Oct
+2023
+GNM + SACSoN [105] (100+ h) Goal masking unifies exploration
+and goal reaching.
+NaVid [30]
+Feb
+2024
+510k VLN-CE samples + 763k
+web data
+Monocular RGB video only; history
+as memory.
+17
+
+
+Model
+Released Training data
+Key idea
+Mobility
+VLA [21]
+Jul
+2024
+No policy training;
+demonstration-tour video
+Long-context VLM finds the goal
+frame; topological graph executes.
+LeLaN [69]
+Oct
+2024
+∼130 h action-free video (robot,
+YouTube, walking)
+VLM labelling of in-the-wild video
+for object navigation.
+NaVILA [22]
+Dec
+2024
+R2R-CE, RxR-CE, touring
+videos, VQA
+Mid-level language commands
+executed by RL locomotion.
+Uni-NaVid [102] Dec
+2024
+3.6M Habitat samples across 4
+tasks
+One video VLA for four navigation
+task types.
+StreamVLN [29]
+Jul
+2025
+450k MP3D [106] + 300k
+ScaleVLN [107] + 240k DAgger
+(expert-corrected rollouts) +
+248k video QA
+Slow-fast context with KV-cache
+reuse.
+NavFoM [62]
+Sep
+2025
+8.02M navigation + 4.76M QA
+samples
+Cross-embodiment, cross-task
+navigation foundation model.
+OmniVLA [70]
+Sep
+2025
+∼10k h: GNM, LeLaN,
+Frodobots-2K [108],
+BDD-V [109]
+Omni-modal goals (pose, image,
+language).
+VLingNav [56]
+Jan
+2026
+4.5M samples incl.
+Nav-AdaCoT-2.9M; online RL
+Adaptive chain-of-thought and
+linguistic memory.
+AsyncVLA
+(navi-
+gation)∗[53]
+Feb
+2026
+GNM + SACSoN + LeLaN
+Remote VLA plus onboard edge
+adapter; robust to 6 s delay.
+6
+Locomotion and Humanoid Whole-Body Control
+Manipulation VLAs usually output end-effector poses, and navigation VLAs output velocities or
+waypoints; in both cases a separate controller executes them. On a humanoid this split is harder,
+because the controller must keep the robot balanced while the legs, waist and arms move together,
+and LeVERB argues that fixed action interfaces of this kind restrict humanoids to slow, quasi-static
+tasks [110]. Suitable data is also scarce: humanoid teleoperation is expensive [65], and dynamically
+consistent demonstrations are rare [66]. Two designs have emerged (Table 7).
+Hierarchical: a vision-language layer over a learned whole-body controller.
+This mirrors
+the hierarchical VLAs of Section 3, and NaVILA’s language commands over an RL locomotion policy
+are a navigation precursor [22]. Humanoid-VLA [111] pre-aligns language with motion using human
+motion datasets paired with text, then adds egocentric video through parameter-efficient fine-tuning,
+on top of a whole-body control architecture. LeVERB [110] trains a vision-language policy to
+emit latent “verbs” that a reinforcement-learned whole-body controller turns into dynamics-level
+commands. It also introduces a closed-loop benchmark of over 150 tasks in 10 categories, where
+it reaches 58.5% overall success, 7.8 times a naive hierarchical baseline. SONIC [112] scales the
+controller itself: a motion-tracking foundation model of up to 42M parameters, trained on 700
+hours of motion capture with 21k GPU hours, whose token space serves both VR teleoperation and
+VLAs. WholeBodyVLA [65] learns latent actions from action-free egocentric human video and pairs
+the VLA with an RL policy specialised for loco-manipulation moves such as advancing, turning
+and squatting. On the AgiBot X2 humanoid it reaches 78.0% average success, 21.3 percentage
+points above the strongest VLA baseline (OpenVLA-OFT, 56.7%) and 14 points above a modular,
+non-VLA baseline (64.0%).
+18
+
+
+2023
+2024
+2025
+2026
+Visual navigation foundation models
+ViNT
+goal-image
+transformer
+NoMaD
+diffusion;
+explore + reach
+LeLaN
+VLM-labelled
+video
+OmniVLA
+pose, image or
+language goals
+AsyncVLA
+remote VLA +
+edge adapter
+real-robot data · waypoint outputs · edge deployment
+Vision-and-language navigation with video VLMs
+NaVid
+monocular
+RGB video
+Uni-NaVid
+4 nav tasks,
+one model
+NavFoM
+quadruped,
+drone, car
+StreamVLN
+slow-fast
+memory
+VLingNav
+adaptive
+reasoning + RL
+Habitat simulation data · next-step actions · R2R-CE / RxR-CE
+Hierarchical systems
+Mobility VLA
+long-context VLM
++ topological graph
+NaVILA
+language commands
++ RL locomotion
+Figure 8: The two main lineages of navigation VLAs, with hierarchical systems in the bottom row. Arrows
+link works from the same group that build directly on the earlier model or its data: ViNT to AsyncVLA from
+the Berkeley visual-navigation line [53, 67–70], and NaVid to NavFoM from the video-VLM line [30, 62, 102].
+StreamVLN [29] and VLingNav [56] are independent works in the second line. The bottom row shows
+hierarchical systems [21, 22]. Within each row, boxes are arranged in order of first arXiv release.
+End-to-end: language to joint actions.
+SENTINEL [64] maps language and proprioception
+directly to low-level actions with flow matching, with no intermediate representation, and refines
+them with a residual RL head on a Unitree G1. Its training data comes from human motion datasets
+tracked in simulation by a pretrained whole-body controller. WOLF-VLA [66] replaces human
+motion with optimal control, synthesising 277 hours of dynamically feasible trajectories across six
+locomotion task families for the RH5 humanoid. Unlike these two, HAF [113] does not train a new
+model. It adapts an existing flow-matching VLA to generate leg, waist and arm actions in turn,
+then improves it with reinforcement learning that adjusts only the noise fed into the denoising
+process, leaving the VLA’s weights unchanged.
+Patterns.
+Three themes from manipulation reappear. Humanoid VLAs lean on non-robot data,
+from human motion capture and egocentric video to simulation and optimal control, because robot
+teleoperation is scarce. Reinforcement learning returns as a refinement stage (SENTINEL’s residual
+head, HAF’s latent RL). And industrial models are moving the same way: GR00T N1.6 added
+Unitree G1 loco-manipulation data, and the N1.7 release documents SONIC-based whole-body
+control [76, 90].
+19
+
+
+Table 7: Humanoid whole-body control with vision and language. ∗Preprint.
+Model
+Released Training data
+Key idea
+Humanoid-
+VLA∗[111]
+Feb
+2025
+Human motion datasets with
+text, egocentric video,
+self-generated question–answer
+pairs from motion
+Language–motion pre-alignment,
+then video-conditioned fine-tuning
+over whole-body control.
+LeVERB∗[110]
+Jun
+2025
+Synthetic: 154 trajectories ×
+100 randomisations, 17.1 h of
+rendered rollouts plus 2.7 h
+language-only
+Latent “verbs” from a
+vision-language policy drive an RL
+whole-body controller; 150-task
+benchmark.
+SONIC [112]
+Nov
+2025
+700 h of motion capture (100M+
+frames), 21k GPU hours
+Motion-tracking controller up to
+42M parameters; one token space for
+VR teleoperation and VLAs.
+SENTINEL [64]
+Nov
+2025
+Human motion tracked in
+simulation by a pretrained
+controller, with text
+End-to-end language and
+proprioception to joint actions by
+flow matching; residual RL head;
+Unitree G1.
+WholeBody-
+VLA [65]
+Dec
+2025
+Action-free egocentric human
+video (latent actions) plus
+AgiBot X2 teleoperation
+Latent VLA plus a
+loco-manipulation RL policy; +21.3
+points over OpenVLA-OFT.
+WOLF-
+VLA∗[66]
+Jun
+2026
+277 h of optimal-control
+trajectories, six locomotion task
+families
+VLA trained on dynamically feasible
+trajectories with egocentric vision
+and language; RH5 humanoid.
+HAF∗[113]
+Aug
+2026
+Demonstrations for seven
+real-world loco-manipulation
+tasks, then online RL
+Three-stage action flow on a
+pretrained flow-matching VLA; RL
+in a compact noise subspace.
+7
+Convergence of Manipulation and Navigation
+The two communities have long used different action spaces (end-effector or joint commands versus
+waypoints), benchmarks (LIBERO, SimplerEnv [114] and CALVIN versus VLN-CE) and model
+families. Two recent models are early signs of unification:
+• UniVLA [42] learns latent actions from manipulation data, navigation data and human video
+together, and reports results on both manipulation benchmarks and R2R.
+• Qwen-VLA [61] treats manipulation, navigation and trajectory prediction as one prediction
+problem. A single model reaches 97.9% on LIBERO and 59.6% success on RxR. Its authors
+find no significant loss from training on several robot types together, in an ablation on two
+benchmarks.
+Two related lines stop short of unification. Mobile manipulators such as π0.5 [31] combine moving and
+manipulating on one robot, but are trained and evaluated as manipulation systems. NavFoM [62]
+covers very different bodies, from quadrupeds to cars, but only for navigation. In our view, the main
+obstacle to a single model for both skills may be shifting from architecture to data and evaluation.
+In terms of the life-cycle axes, both unifying models act at the training stage, through pooled data
+and a shared action interface (latent actions in UniVLA, one prediction problem in Qwen-VLA),
+while their evaluation remains split across separate manipulation and navigation benchmarks.
+20
+
+
+(a) Vision-language-action model
+images + instruction
+VLM backbone
+prior: image–text data
+action head
+action chunk
+action loss
+(b) World-action model
+images + instruction
+video generation backbone
+prior: video data
+future frames
+or latents
+action decoder
+action chunk
+frame loss
+action loss
+optional uses of predicted futures: planning, data generation, evaluation
+Figure 9: Where the two families start. (a) A VLA adapts a vision-language model and is supervised only
+on actions. (b) A world-action model adapts a video model and is supervised on future observations as well
+as actions; predicted futures can inform the action decoder (dashed) and support planning, synthetic data or
+evaluation. Table 8 compares them in detail.
+8
+VLAs and World-Action Models
+A second family of robot foundation models starts from video rather than from language. A world
+model predicts how the environment changes as an agent acts [115, 116]. World-action models
+(WAMs) extend this idea by predicting future observations and robot actions together. The earliest
+robotics use of the term we found is DyWA [117]; most current WAMs start from a model pretrained
+to generate video. Where a VLA learns π(At | ot) from action supervision alone, a WAM learns to
+predict future observations together with actions,
+p
+ Ot+1:t+k, At | ot, ℓt
+,
+(3)
+where Ot+1:t+k are future frames, or latent embeddings of them. World-action models [12] and world
+models for robot learning [11] have dedicated surveys; here we compare WAMs with VLAs. The
+two families start from different pretrained models and fail in different ways (Figure 9, Table 8).
+As the UniWAM authors argue [118], a VLA’s vision-language model has learned language and
+object meaning from image–text data, but its only training signal about physics is robot actions.
+A WAM’s video model has learned how scenes change over time, but not how to follow or reason
+about language.
+From video plans to joint models.
+Two terms recur here: a forward dynamics model predicts
+the next observation from the current one and an action, and an inverse dynamics model infers
+the action that links two observations. UniPi [122] cast decision-making as text-conditioned video
+generation: a model synthesises a video of the planned behaviour, and an inverse dynamics model
+recovers actions from the generated frames. Video Prediction Policy [124] skips full video generation:
+it feeds a video diffusion model’s internal features about what will happen next to an inverse
+dynamics model, giving an 18.6% relative improvement on CALVIN ABC→D. The Unified Video
+Action model [119] learns one shared representation of video and actions, with separate diffusion
+heads for each. Action inference can then skip video generation entirely, and masking different
+inputs lets the same model act as a forward or an inverse dynamics model. WorldVLA [120] merges
+a VLA and a world model in one autoregressive model and reports that each improves the other.
+21
+
+
+Table 8: VLAs and world-action models compared. ∗Preprint.
+Vision-language-action model (VLA)
+World-action model (WAM)
+Pretrained prior
+Vision-language model trained on image–
+text data
+Video generation model trained on video
+Training signal
+Robot actions, often co-trained with VQA
+and web data [1, 31]
+Future frames or latents together with ac-
+tions [119, 120]
+Predicts
+Action chunk (sometimes text subtasks or
+reasoning [31, 54])
+Future observations and an action chunk;
+some also values [121]
+Strengths
+Language following, semantic generalisa-
+tion, reasoning [1]
+Physical dynamics, temporal consistency,
+use of action-free video [77, 122], test-time
+planning [121]
+Weaknesses
+Weak grounding in dynamics [118]; relies
+on action-labelled data
+Weaker semantics and reasoning [118];
+costly video backbones [123]
+Examples
+RT-2 [1], OpenVLA [36], π0 [17], π0.5 [31],
+GR00T N1∗[32]
+UniPi [122],
+VPP [124],
+UVA [119],
+WorldVLA∗[120], Genie Envisioner [125],
+Cosmos Policy [121], DreamZero∗[126],
+LeWAM∗[123]
+Video foundation models as policy backbones.
+Genie Envisioner [125] builds a robotics
+platform around an instruction-conditioned video diffusion model, with a flow-matching action
+decoder, an action-conditioned neural simulator and a benchmark for world-model quality. Cosmos
+Policy [121] turns a pretrained video model into a policy by fine-tuning alone, keeping its architecture:
+actions, future states and value estimates are written into the model’s latent frames. Because it
+predicts future states and values, it can plan at test time; it reports 98.5% on LIBERO and 67.1% on
+RoboCasa [127]. DreamZero [126] builds a 14B world-action model on a pretrained image-to-video
+diffusion model, predicting future video and actions jointly with an autoregressive transformer
+trained by flow matching. After each action chunk it replaces its predicted frames with the real
+observations, so errors do not accumulate, and model and system optimisations give a 38× speed-up
+that allows closed-loop control at about 7 Hz. Trained on about 500 hours of diverse, non-repetitive
+real-robot data, it reports more than twice the average task progress of state-of-the-art VLAs on
+unseen tasks and environments, and it adapts to a new robot from 30 minutes of play data.
+Beyond video diffusion.
+Two 2026 preprints take WAMs in different directions. LeWAM [123]
+makes them cheaper: it replaces the video diffusion backbone with predictive JEPA embeddings
+and reaches 92.3% on RoboTwin 2.0 [78] with 0.4B trainable parameters. UniWAM [118] moves
+them towards VLAs by adding a reasoning module, the “physical reasoner”, alongside its video
+generator and action predictor in one architecture. It reports a log-linear scaling law for co-training
+on human and robot data.
+Three roles for world models.
+World models now serve robot learning in three ways:
+• As the policy backbone, as in the WAMs above.
+• As a data generator. DreamGen [77] turns video world models into a source of synthetic
+“neural trajectories”. With them, a humanoid learned 22 new behaviours from teleoperation
+data for a single task, and DreamGen’s video benchmark correlates with downstream policy
+success. GR00T N1 used about 300k such trajectories [32].
+• As an evaluator. Neural simulators such as Genie Envisioner’s GE-Sim produce closed-loop
+22
+
+
+Table 9: Benchmarks most often used to evaluate VLAs. ∗Preprint.
+Benchmark
+Venue
+What it tests
+LIBERO [40]
+NeurIPS 2023
+(D&B)
+Simulated Franka tasks in suites for spatial layout, objects, goals
+and long horizons; the most widely reported VLA benchmark.
+CALVIN [86]
+RA-L 2022
+Long chains of language-conditioned tasks across four simulated
+environments; generalisation from environments A–C to D.
+SimplerEnv [114]
+CoRL 2024
+Simulated replicas of the Google Robot and WidowX setups, built
+to correlate with real-world results.
+RoboCasa [127]
+RSS 2024
+100 household kitchen tasks in large-scale simulation with generated
+assets.
+VLABench [128]
+ICCV 2025
+100 task categories and over 2,000 objects testing world knowledge,
+implicit instructions and long-horizon reasoning.
+RoboTwin
+2.0 [78]
+ICML 2026
+50 dual-arm tasks on five embodiments with domain randomisation
+over clutter, lighting, background, table height and language.
+R2R-CE /
+RxR-CE [104]
+ECCV 2020
+Vision-and-language navigation in continuous Habitat environments,
+without navigation-graph assumptions.
+rollouts for policy development [125].
+A blurring boundary.
+VLAs increasingly predict the future: 3D-VLA, GR-2, VLA-JEPA and
+π0.7 all generate goal images, video or future latents (Section 3). WAMs, in turn, are adding VLM-
+style reasoning, as UniWAM does. A useful working distinction is that VLAs are understanding-first
+and WAMs are dynamics-first; the strongest systems are likely to need both.
+9
+Benchmarks and Fair Evaluation
+Is there a standard benchmark?
+Not yet. No single benchmark is accepted as the measure of
+a VLA. Instead, a small set of simulation suites has become the de facto standard (Table 9), while
+real-world evaluation remains lab-specific and rarely comparable across papers.
+What goes wrong with current practice.
+• Saturation. LIBERO scores now cluster near the ceiling: OpenVLA-OFT reports 97.1% [49],
+Qwen-VLA 97.9% [61], X-VLA about 98% [48] and SimVLA 98.6% [63]. VLA-0, VLA-Adapter
+and SimVLA reach these scores without any robot pretraining [39, 50], so the benchmark can
+no longer show what large-scale pretraining adds.
+• Memorisation and brittleness. Two independent perturbation suites agree that high
+LIBERO scores overstate robustness. In LIBERO-PRO [129], OpenVLA and π0, both above
+90% on standard LIBERO, drop to 0% once objects are moved slightly from their training
+positions; π0.5 holds up better, keeping 38% on one task suite. LIBERO-Plus [130] tests
+models including OpenVLA-OFT and π0 under seven kinds of perturbation: changing the
+camera viewpoint or the robot’s starting pose cuts success from about 95% to under 30%, and
+many models largely ignore the instruction.
+• Confounded comparisons. Architectural changes usually arrive together with different data,
+backbones and training schedules, so many reported gains are hard to attribute; SimVLA’s
+controlled baseline (Section 4) makes this concrete [63].
+23
+
+
+Standard
+simulation
+LIBERO [40],
+CALVIN [86],
+RoboCasa [127],
+VLABench [128]
+Perturbation tests
+LIBERO-PRO [129],
+LIBERO-Plus [130],
+RoboTwin 2.0 [78]
+Simulation
+checked
+against reality
+SimplerEnv [114]
+Automated
+real-world
+AutoEval [131]:
+queued jobs,
+automatic resets and
+success detection
+Distributed
+real-world
+RoboArena [132];
+lab trials such
+as π0.5 in un-
+seen homes [31]
+near saturation: 97–
+98.6% on LIBERO
+scores above 90%
+can fall to 0.0%
+correlates strongly
+with real results;
+two setups so far
+automatic resets;
+scores match
+human-run trials
+600+ paired episodes
+across 7 institutions
+cheaper, faster, easier to reproduce
+closer to real deployment
+Across all levels: controlled baselines and matched training recipes
+(SimVLA [63]) · inference latency (VLA-Perf [83]) · reported training data
+Figure 10: Levels of VLA evaluation, ordered qualitatively from cheap and reproducible to close to real
+deployment, with the key finding reported at each level. Fair comparison increasingly combines several levels
+rather than relying on a single simulation score.
+Efforts toward fair evaluation.
+Figure 10 arranges these efforts from cheap and reproducible
+to close to real deployment.
+• Robustness-oriented benchmarks. LIBERO-PRO and LIBERO-Plus replace fixed test
+scenes with systematic perturbations; RoboTwin 2.0 builds domain randomisation into the
+benchmark itself.
+• Simulation validated against reality. SimplerEnv [114] builds simulated copies of real
+robot setups, tuned to match their control behaviour and appearance, and finds that policy
+results in these copies correlate strongly with real-world results.
+• Scalable real-world evaluation. AutoEval [131] automates real-robot testing: it detects
+success and resets the scene itself, so evaluations can run day and night, and its scores closely
+match human-run trials; its WidowX scenes are open to the community. RoboArena [132]
+instead spreads evaluation across seven institutions that use the same DROID robot. Evaluators
+compare two policies blind, and from more than 600 such comparisons it ranks policies more
+accurately than a single central evaluation.
+• World models as evaluators. Video-model simulators are a newer option: DreamGen
+Bench [77] reports that its video-model scores correlate with downstream policy success, and
+GE-Sim [125] runs policies in a generated world, but neither has yet been checked against
+real-robot results.
+• Controlled baselines. SimVLA argues for reporting results against a fixed, transparent
+baseline and recipe, so that gains can be attributed to the change being studied.
+• Efficiency as a metric. VLA-Perf [83] provides an analytical model of inference latency
+across model designs and on-device, edge and cloud deployment, making speed comparable
+alongside success rate.
+Together these efforts point to a shared protocol: perturbed rather than fixed test scenes, simulation
+scores validated against real robots, distributed real-world comparison, matched training recipes,
+and reporting of latency and training data alongside success. Appendix A turns this protocol into a
+checklist for evaluating a new model.
+24
+
+
+10
+Open Challenges and Research Directions
+We group the open challenges by life-cycle stage, as in Section 3, and add those that cut across it.
+Each ends with a research question that the evidence in this survey motivates.
+10.1
+Model
+Memory beyond minutes.
+Keyframe and slow-fast memories now support tasks that need
+minutes of recall [16, 29], yet only a minority of the models in Table 3 keep any history, and those are
+mostly navigation models. Open question: can memory scale from minutes to hours, and combine a
+spatial map of where the robot has been with episodic recall of what it did?
+World models inside VLAs.
+Latent and generative world models are entering VLAs [27, 43, 58],
+and WAMs are adding VLM-style reasoning [118] (Section 8). Yet only two of the 22 models in
+Table 3, VLA-JEPA and π0.7, predict future observations, and controlled comparisons with and
+without future prediction remain rare; WorldVLA’s report that the two improve each other is an
+exception [120]. Open question: for which tasks does predicting the future repay its cost in compute
+and latency, and how should world models used to generate data or evaluate policies be validated
+against real robots?
+10.2
+Training
+Data-mixture design.
+Mixture weights are usually set by heuristics, for example per-dataset
+weighting by n0.43 in π0 [17] or by size and diversity in Octo [44], together with ad hoc rules such
+as dropping DROID late in training [38]. The few controlled ablations show that sources differ in
+what they teach: in π0.5, cross-embodiment data mattered most in unseen homes and web data
+mainly for unseen objects [31]. Open question: which data sources build which capabilities, and can
+mixtures be designed from such measurements rather than from total hours?
+Learning from deployment.
+RECAP [60] and online RL in navigation [56] show that VLAs can
+improve from their own experience, but only seven of the 22 models in Table 3 make a distinctive post-
+training choice, and RECAP still relies on expert interventions. Open question: can a VLA improve
+safely from autonomous experience across many tasks and robots, with little human supervision?
+Whole-body data.
+Humanoid VLAs still mostly rely on a separately trained whole-body con-
+troller, and end-to-end models are trained largely on synthetic or human-motion data [64, 66],
+because humanoid teleoperation is expensive (Section 6). Open question: can optimal-control and
+human-motion data be combined with limited real teleoperation to give VLAs agile, contact-rich
+whole-body control on real humanoids?
+10.3
+Deployment
+Latency and edge deployment.
+Asynchronous execution [47, 53, 82] hides latency, and sub-
+billion models run on commodity hardware. But every model in Table 2 that names its hardware
+runs on a desktop or data-centre GPU, and embedded robot computers appear only for the edge
+part of a split system. Open question: can large VLAs be compressed, for example by quantisation,
+which OpenVLA shows preserves real-robot performance [36], or by distillation, which the authors
+of VLA-0 propose [39], to run on robot hardware without losing their generality?
+25
+
+
+10.4
+Across the life cycle
+Unifying skills.
+UniVLA and Qwen-VLA unify manipulation and navigation through pooled
+data and a shared action interface, but their results are still reported on separate benchmarks, and
+mobile manipulators are trained and evaluated as manipulation systems (Section 7). Open question:
+how should a single model that both moves and manipulates be evaluated on tasks that need both
+skills at once?
+Predictive evaluation.
+Simulation is growing as a data source (GR00T N1, Qwen-VLA), yet few
+works measure how well simulated success predicts real-world transfer, and LIBERO scores near
+saturation hide brittleness (Section 9). SimplerEnv [114] validated simulated scores against real
+robots for two setups. Open question: can benchmark scores be validated against real robots across
+many embodiments, so that simulation results predict deployment?
+Reporting standards.
+While building Tables 5 and 6, we found that training data is reported
+inconsistently:
+• only 16 of the 43 manipulation works give a single robot-episode count;
+• several report only hours, or qualitative descriptions such as “thousands of hours” or “tens of
+thousands of hours”;
+• eleven state no parameter count for the deployed policy;
+• inference speed, when reported, is given as throughput, latency per chunk, frames per second
+or effective control rate, on different GPUs (Table 2).
+This makes like-for-like comparison of data efficiency and compute impossible. We suggest that
+VLA papers report, at minimum, the robot episodes and hours used in each training stage, the
+share of non-robot data, the number of embodiments, the total parameter count at inference, and
+the latency per action chunk on named hardware; Appendix A lists these as a checklist.
+Announcements without published methods.
+Three systems announced in 2026 bear on
+these directions but have no published method details, so we do not review them or report their
+results. NVIDIA previewed GR00T N2, a robot foundation model based on DreamZero with a
+world-action-model architecture, in March 2026 [133]. Google introduced Gemini 4 Argon in October
+2026 [134] and Gemini 4 Hydrogen in November 2026 [135], general Gemini models that control
+robot arms by planning the task and writing and running control code, rather than by outputting
+actions as a VLA does.
+11
+Conclusion
+VLA models have advanced from a proof of concept to a diverse ecosystem in under four years.
+Followed through their life cycle, the main shifts are clear. In the model, manipulation VLAs now
+mostly predict action chunks with flow-matching or diffusion heads, navigation VLAs mostly still
+predict one step at a time, and a growing number make their reasoning explicit or predict future
+observations. In training, data has broadened from teleoperated robot data to community-collected
+episodes, human video, simulation and the robot’s own attempts, while some small models skip
+robot pretraining altogether, although their strongest results are on simulation benchmarks. In
+deployment, models have split by size: a new group under one billion parameters runs on consumer
+26
+
+
+GPUs, and asynchronous execution hides the latency of larger ones. Generalist VLAs that handle
+both manipulation and navigation are emerging, and world-action models offer a complementary,
+dynamics-first route. Evaluation is shifting from saturated simulation scores toward robustness tests
+and distributed real-world comparison. The most pressing directions are memory beyond minutes,
+principled data mixtures, evaluation that predicts real-world transfer, safe learning from deployment,
+and consistent reporting of data and latency. We hope the life-cycle taxonomy, the data-centred
+tables and the practitioner’s guide in Appendix A help researchers understand the field, build their
+own models and choose where to contribute.
+Acknowledgements
+We thank arXiv for open access to the surveyed works, and their authors for sharing them there.
+Figure 7 was made with Matplotlib [136] and Figure 3 with TikZ.
+S. Kadam and S. Parsa developed the idea for this survey together. S. Kadam designed the
+method and the organisation of the content, and directed and reviewed every stage of the work.
+S. Parsa reviewed the manuscript and proposed the design-axis grid and the deployment table.
+The authors designed this survey, specified the literature search, the selection criteria and the
+structure of the paper, and directed each step of the work. During the preparation of this work the
+authors used Claude Code (Anthropic), running the Claude Opus 5.5 model, as an assistant for
+tasks they specified: running the literature searches they defined with web search, Semantic Scholar
+and Crossref; extracting reported numbers from the papers; drafting text and LATEX formatting; and
+writing the TikZ and Matplotlib code from which the figures were drawn. Each claim in the paper
+was verified against the full-text PDF of the cited work. After using this tool, the authors reviewed
+and edited the content as needed and take full responsibility for the content of the published article.
+References
+[1] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Xi Chen, Krzysztof
+Choromanski, Tianli Ding, Danny Driess, Avinava Dubey, Chelsea Finn, et al. RT-2: Vision-
+Language-Action Models Transfer Web Knowledge to Robotic Control. In Proceedings of
+the Conference on Robot Learning (CoRL), volume 229 of Proceedings of Machine Learning
+Research, 2023.
+[2] Yueen Ma, Zixing Song, Yuzheng Zhuang, Jianye Hao, and Irwin King. A Survey on Vision-
+Language-Action Models for Embodied AI. IEEE Transactions on Neural Networks and
+Learning Systems, 37(7):3031–3051, 2026. doi: 10.1109/TNNLS.2025.3650584.
+[3] Ranjan Sapkota, Yang Cao, Konstantinos I. Roumeliotis, and Manoj Karkee. Vision-Language-
+Action (VLA) Models: Concepts, Progress, Applications and Challenges. arXiv preprint
+arXiv:2505.04769, 2025. URL https://arxiv.org/abs/2505.04769.
+[4] Dapeng Zhang, Jing Sun, Chenghui Hu, Xiaoyan Wu, Zhenlong Yuan, Rui Zhou, Fei Shen,
+and Qingguo Zhou. Pure Vision Language Action (VLA) Models: A Comprehensive Survey.
+arXiv preprint arXiv:2509.19012, 2025. URL https://arxiv.org/abs/2509.19012.
+[5] Kento Kawaharazuka, Jihoon Oh, Jun Yamada, Ingmar Posner, and Yuke Zhu. Vision-
+Language-Action Models for Robotics: A Review Towards Real-World Applications. IEEE
+Access, 13:162467–162504, 2025. doi: 10.1109/ACCESS.2025.3609980.
+27
+
+
+[6] Can Cui, Pengxiang Ding, Wenxuan Song, Shuanghao Bai, Xinyang Tong, Zirui Ge, Runze
+Suo, Wanqi Zhou, Yang Liu, Bofang Jia, et al. OpenHelix: A Short Survey, Empirical
+Analysis, and Open-Source Dual-System VLA Model for Robotic Manipulation.
+arXiv
+preprint arXiv:2505.03912, 2025. URL https://arxiv.org/abs/2505.03912.
+[7] Rui Shao, Wei Li, Lingsen Zhang, Renshan Zhang, Zhiyang Liu, Ran Chen, and Liqiang
+Nie. Large VLM-based Vision-Language-Action Models for Robotic Manipulation: A Survey.
+arXiv preprint arXiv:2508.13073, 2025. URL https://arxiv.org/abs/2508.13073.
+[8] Yifan Zhong, Fengshuo Bai, Shaofei Cai, Xuchuan Huang, Zhang Chen, Xiaowei Zhang, Yuanfei
+Wang, Shaoyang Guo, Tianrui Guan, Ka Nam Lui, et al. A Survey on Vision-Language-Action
+Models: An Action Tokenization Perspective. arXiv preprint arXiv:2507.01925, 2025. URL
+https://arxiv.org/abs/2507.01925.
+[9] Zhaoshu Yu, Bo Wang, Pengpeng Zeng, Haonan Zhang, Ji Zhang, Zheng Wang, Lianli Gao,
+Jingkuan Song, Nicu Sebe, and Heng Tao Shen. A Survey on Efficient Vision-Language-
+Action Models. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2026. doi:
+10.1109/TPAMI.2026.3734740. Early access.
+[10] Chao Xu, Suyu Zhang, Yang Liu, Baigui Sun, Weihong Chen, Bo Xu, Qi Liu, Juncheng
+Wang, Shujun Wang, Shan Luo, et al. An Anatomy of Vision-Language-Action Models:
+From Modules to Milestones and Challenges. arXiv preprint arXiv:2512.11362, 2025. URL
+https://arxiv.org/abs/2512.11362.
+[11] Bohan Hou, Gen Li, Jindou Jia, Tuo An, Xinying Guo, Sicong Leng, Haoran Geng, Yanjie Ze,
+Tatsuya Harada, Philip Torr, et al. World Model for Robot Learning: A Comprehensive Survey.
+The International Journal of Robotics Research, 2026. doi: 10.1177/02783649261488980. URL
+https://arxiv.org/abs/2605.00080.
+[12] Zuxing Lu, Hongjia Zhai, Guanzhi Wang, Huajian Zeng, Jiaqi Yang, Jingyu Liu, Lei Cheng,
+Yuantai Zhang, Yuheng Qiu, Zezhou Cheng, et al. World-Action Models for Robot Learning
+and Control: A Survey. arXiv preprint arXiv:2609.16074, 2026. URL https://arxiv.org/
+abs/2609.16074.
+[13] Nanjie Yao, Hao Wang, Chong Cheng, Zhikang Chen, Wenzhe Li, Jiafei Lyu, Li Shen,
+Peilin Zhao, Zongqing Lu, Gao Huang, et al.
+World Models for Embodied Intelligence:
+From Plausible to Controllable to Actionable. arXiv preprint arXiv:2609.16697, 2026. URL
+https://arxiv.org/abs/2609.16697.
+[14] Xiaoxiong Zhang, Xiong Zeng, and Wei Zhang. From World Models to World Action Models:
+A Concise Tutorial for Robotics.
+arXiv preprint arXiv:2607.00836, 2026.
+URL https:
+//arxiv.org/abs/2607.00836.
+[15] Shaunak A. Mehta, Ananya Hazarika, Haochen Zhang, Fan Yang, Ryo Moriyama, Wenkai Li,
+Yash Patel, and Kanata Suzuki. Toward Unified Robot Learning: Bridging Representation,
+Vision-Language-Action, and World Models. Transactions on Machine Learning Research,
+2026. URL https://openreview.net/forum?id=AXv7OjfuiT.
+[16] Ajay Sridhar, Jennifer Pan, Satvik Sharma, and Chelsea Finn. Scaling up Memory for Robotic
+Control via Experience Retrieval. In International Conference on Learning Representations
+(ICLR), 2026.
+28
+
+
+[17] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo
+Fusai, Lachy Groom, Karol Hausman, Brian Ichter, et al. π0: A Vision-Language-Action Flow
+Model for General Robot Control. In Proceedings of Robotics: Science and Systems (RSS),
+2025.
+[18] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn. Learning Fine-Grained
+Bimanual Manipulation with Low-Cost Hardware. In Proceedings of Robotics: Science and
+Systems (RSS), 2023. doi: 10.15607/rss.2023.xix.016.
+[19] Lucy Xiaoyang Shi, Brian Ichter, Michael Equi, Liyiming Ke, Karl Pertsch, Quan Vuong,
+James Tanner, Anna Walling, Haohuan Wang, Niccolo Fusai, et al. Hi Robot: Open-Ended
+Instruction Following with Hierarchical Vision-Language-Action Models. In Proceedings of the
+International Conference on Machine Learning (ICML), 2025.
+[20] Yi Li, Yuquan Deng, Jesse Zhang, Joel Jang, Marius Memmel, Raymond Yu, Caelan Reed
+Garrett, Fabio Ramos, Dieter Fox, Anqi Li, et al. HAMSTER: Hierarchical Action Models For
+Open-World Robot Manipulation. In International Conference on Learning Representations
+(ICLR), 2025.
+[21] Hao-Tien Lewis Chiang, Zhuo Xu, Zipeng Fu, Mithun George Jacob, Tingnan Zhang, Tsang-
+Wei Edward Lee, Wenhao Yu, Connor Schenck, David Rendleman, Dhruv Shah, et al. Mobility
+VLA: Multimodal Instruction Navigation with Long-Context VLMs and Topological Graphs.
+In Proceedings of the Conference on Robot Learning (CoRL), volume 270 of Proceedings of
+Machine Learning Research, pages 3866–3887, 2024.
+[22] An-Chieh Cheng, Yandong Ji, Zhaojing Yang, Zaitian Gongye, Xueyan Zou, Jan Kautz,
+Erdem Bıyık, Hongxu Yin, Sifei Liu, and Xiaolong Wang. NaVILA: Legged Robot Vision-
+Language-Action Model for Navigation. In Proceedings of Robotics: Science and Systems
+(RSS), 2025. doi: 10.15607/rss.2025.xxi.018.
+[23] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Joseph Dabis, Chelsea
+Finn, Keerthana Gopalakrishnan, Karol Hausman, Alex Herzog, Jasmine Hsu, et al. RT-1:
+Robotics Transformer for Real-World Control at Scale. In Proceedings of Robotics: Science
+and Systems (RSS), 2023.
+[24] Danny Driess, Fei Xia, Mehdi S. M. Sajjadi, Corey Lynch, Aakanksha Chowdhery, Brian
+Ichter, Ayzaan Wahid, Jonathan Tompson, Quan Vuong, Tianhe Yu, et al. PaLM-E: An
+Embodied Multimodal Language Model. In Proceedings of the International Conference on
+Machine Learning (ICML), volume 202 of Proceedings of Machine Learning Research, pages
+8469–8488, 2023.
+[25] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun Du, Benjamin Burchfiel, Russ
+Tedrake, and Shuran Song. Diffusion Policy: Visuomotor Policy Learning via Action Diffusion.
+In Proceedings of Robotics: Science and Systems (RSS), 2023. doi: 10.15607/rss.2023.xix.026.
+[26] Open X-Embodiment Collaboration. Open X-Embodiment: Robotic Learning Datasets and
+RT-X Models. In IEEE International Conference on Robotics and Automation (ICRA), pages
+6892–6903, 2024. doi: 10.1109/ICRA57147.2024.10611477.
+[27] Physical Intelligence. π0.7: a Steerable Generalist Robotic Foundation Model with Emergent
+Capabilities. arXiv preprint arXiv:2604.15483, 2026. URL https://arxiv.org/abs/2604.
+15483.
+29
+
+
+[28] Pim de Haan, Dinesh Jayaraman, and Sergey Levine. Causal Confusion in Imitation Learning.
+In Advances in Neural Information Processing Systems (NeurIPS), volume 32, pages 11693–
+11704, 2019.
+[29] Meng Wei, Chenyang Wan, Xiqian Yu, Tai Wang, Yuqiang Yang, Xiaohan Mao, Chenming Zhu,
+Wenzhe Cai, Hanqing Wang, Yilun Chen, et al. StreamVLN: Streaming Vision-and-Language
+Navigation via SlowFast Context Modeling. In IEEE International Conference on Robotics
+and Automation (ICRA), pages 22174–22181, 2026. doi: 10.1109/ICRA57385.2026.11696190.
+[30] Jiazhao Zhang, Kunyu Wang, Rongtao Xu, Gengze Zhou, Yicong Hong, Xiaomeng Fang,
+Qi Wu, Zhizheng Zhang, and He Wang. NaVid: Video-based VLM Plans the Next Step for
+Vision-and-Language Navigation. In Proceedings of Robotics: Science and Systems (RSS),
+2024. doi: 10.15607/rss.2024.xx.079.
+[31] Physical Intelligence. π0.5: a Vision-Language-Action Model with Open-World Generalization.
+In Proceedings of the Conference on Robot Learning (CoRL), volume 305 of Proceedings of
+Machine Learning Research, 2025.
+[32] NVIDIA. GR00T N1: An Open Foundation Model for Generalist Humanoid Robots. NVIDIA
+technical report, arXiv preprint arXiv:2503.14734, 2025. URL https://arxiv.org/abs/2503.
+14734.
+[33] Qixiu Li, Yaobo Liang, Zeyu Wang, Lin Luo, Xi Chen, Mozheng Liao, Fangyun Wei, Yu Deng,
+Sicheng Xu, Yizhong Zhang, et al. CogACT: A Foundational Vision-Language-Action Model for
+Synergizing Cognition and Action in Robotic Manipulation. arXiv preprint arXiv:2411.19650,
+2024. URL https://arxiv.org/abs/2411.19650.
+[34] Gemini Robotics Team. Gemini Robotics: Bringing AI into the Physical World. arXiv preprint
+arXiv:2503.20020, 2025. URL https://arxiv.org/abs/2503.20020.
+[35] Jason Lee, Jiafei Duan, Haoquan Fang, Yuquan Deng, Shuo Liu, Boyang Li, Bohan Fang,
+Jieyu Zhang, Yi Ru Wang, Sangho Lee, et al. MolmoAct: Action Reasoning Models that can
+Reason in Space. In IEEE International Conference on Robotics and Automation (ICRA),
+pages 2585–2592, 2026. doi: 10.1109/ICRA57385.2026.11696546.
+[36] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair,
+Rafael Rafailov, Ethan Foster, Grace Lam, Pannag Sanketi, et al. OpenVLA: An Open-Source
+Vision-Language-Action Model. In Proceedings of the Conference on Robot Learning (CoRL),
+volume 270 of Proceedings of Machine Learning Research, 2024.
+[37] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj Nair, Quan Vuong, Oier
+Mees, Chelsea Finn, and Sergey Levine. FAST: Efficient Action Tokenization for Vision-
+Language-Action Models. In Proceedings of Robotics: Science and Systems (RSS), 2025. doi:
+10.15607/rss.2025.xxi.012.
+[38] Delin Qu, Haoming Song, Qizhi Chen, Yuanqi Yao, Xinyi Ye, Yan Ding, Zhigang Wang,
+JiaYuan Gu, Bin Zhao, Dong Wang, et al. SpatialVLA: Exploring Spatial Representations for
+Visual-Language-Action Model. In Proceedings of Robotics: Science and Systems (RSS), 2025.
+[39] Ankit Goyal, Hugo Hadfield, Xuning Yang, Valts Blukis, and Fabio Ramos. VLA-0: Building
+State-of-the-Art VLAs with Zero Modification. arXiv preprint arXiv:2510.13054, 2025. URL
+https://arxiv.org/abs/2510.13054.
+30
+
+
+[40] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone.
+LIBERO: Benchmarking Knowledge Transfer for Lifelong Robot Learning. In Advances in
+Neural Information Processing Systems (NeurIPS) Datasets and Benchmarks Track, pages
+44776–44791, 2023. doi: 10.52202/075280-1939.
+[41] Seonghyeon Ye, Joel Jang, Byeongguk Jeon, Sejune Joo, Jianwei Yang, Baolin Peng, Ajay
+Mandlekar, Reuben Tan, Yu-Wei Chao, Bill Yuchen Lin, et al. Latent Action Pretraining
+from Videos. In International Conference on Learning Representations (ICLR), 2025.
+[42] Qingwen Bu, Yanting Yang, Jisong Cai, Shenyuan Gao, Guanghui Ren, Maoqing Yao, Ping Luo,
+and Hongyang Li. UniVLA: Learning to Act Anywhere with Task-centric Latent Actions. In
+Proceedings of Robotics: Science and Systems (RSS), 2025. doi: 10.15607/RSS.2025.XXI.014.
+[43] Jingwen Sun, Wenyao Zhang, Zekun Qi, Shaojie Ren, Zezhi Liu, Hanxin Zhu, Guangzhong
+Sun, Xin Jin, and Zhibo Chen. VLA-JEPA: Enhancing Vision-Language-Action Model with
+Latent World Model. In European Conference on Computer Vision (ECCV), Lecture Notes in
+Computer Science, pages 478–497, 2026. doi: 10.1007/978-3-032-37196-6_26.
+[44] Octo Model Team. Octo: An Open-Source Generalist Robot Policy. In Proceedings of Robotics:
+Science and Systems (RSS), 2024. doi: 10.15607/rss.2024.xx.090.
+[45] Songming Liu, Lingxuan Wu, Bangguo Li, Hengkai Tan, Huayu Chen, Zhengyi Wang, Ke Xu,
+Hang Su, and Jun Zhu. RDT-1B: a Diffusion Foundation Model for Bimanual Manipulation.
+In International Conference on Learning Representations (ICLR), 2025.
+[46] Junjie Wen, Yichen Zhu, Jinming Li, Zhibin Tang, Chaomin Shen, and Feifei Feng. DexVLA:
+Vision-Language Model with Plug-In Diffusion Expert for General Robot Control. In Pro-
+ceedings of the Conference on Robot Learning (CoRL), volume 305 of Proceedings of Machine
+Learning Research, 2025.
+[47] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn Kooijmans, Steven Palma,
+Adil Zouitine, Michel Aractingi, Caroline Pascal, Martino Russi, Andres Marafioti, et al.
+SmolVLA: A Vision-Language-Action Model for Affordable and Efficient Robotics. arXiv
+preprint arXiv:2506.01844, 2025. URL https://arxiv.org/abs/2506.01844.
+[48] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu, Xirui Kang, Yuchun Feng, Yinan
+Zheng, Jiayin Zou, Yilun Chen, Jia Zeng, et al. X-VLA: Soft-Prompted Transformer as
+Scalable Cross-Embodiment Vision-Language-Action Model. In International Conference on
+Learning Representations (ICLR), 2026.
+[49] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-Tuning Vision-Language-Action Models:
+Optimizing Speed and Success. In Proceedings of Robotics: Science and Systems (RSS), 2025.
+doi: 10.15607/rss.2025.xxi.017.
+[50] Yihao Wang, Pengxiang Ding, Lingxiao Li, Can Cui, Zirui Ge, Xinyang Tong, Wenxuan
+Song, Han Zhao, Wei Zhao, Pengxu Hou, et al. VLA-Adapter: An Effective Paradigm
+for Tiny-Scale Vision-Language-Action Model. In Proceedings of the AAAI Conference on
+Artificial Intelligence, volume 40, pages 18638–18646, 2026. doi: 10.1609/aaai.v40i22.38931.
+[51] Danny Driess, Jost Tobias Springenberg, Brian Ichter, Lili Yu, Adrian Li-Bell, Karl Pertsch,
+Allen Z. Ren, Homer Walke, Quan Vuong, Lucy Xiaoyang Shi, et al. Knowledge Insulating
+Vision-Language-Action Models: Train Fast, Run Fast, Generalize Better.
+In Advances
+31
+
+
+in Neural Information Processing Systems (NeurIPS), pages 113969–113990, 2025.
+doi:
+10.52202/085713-3439.
+[52] Yuhua Jiang, Shuang Cheng, Yan Ding, Feifei Gao, and Biqing Qi. AsyncVLA: Asynchronous
+Flow Matching for Vision-Language-Action Models. arXiv preprint arXiv:2511.14148, 2025.
+URL https://arxiv.org/abs/2511.14148.
+[53] Noriaki Hirose, Catherine Glossop, Dhruv Shah, and Sergey Levine. AsyncVLA: An Asyn-
+chronous VLA for Fast and Robust Navigation on the Edge. arXiv preprint arXiv:2602.13476,
+2026. URL https://arxiv.org/abs/2602.13476.
+[54] Michał Zawalski, William Chen, Karl Pertsch, Oier Mees, Chelsea Finn, and Sergey Levine.
+Robotic Control via Embodied Chain-of-Thought Reasoning. In Proceedings of the Conference
+on Robot Learning (CoRL), volume 270 of Proceedings of Machine Learning Research, pages
+3157–3181, 2024.
+[55] Gemini Robotics Team. Gemini Robotics 1.5: Pushing the Frontier of Generalist Robots
+with Advanced Embodied Reasoning, Thinking, and Motion Transfer.
+arXiv preprint
+arXiv:2510.03342, 2025. URL https://arxiv.org/abs/2510.03342.
+[56] Shaoan Wang, Yuanfei Luo, Xingyu Chen, Aocheng Luo, Dongyue Li, Chang Liu, Sheng
+Chen, Yangang Zhang, and Junzhi Yu. VLingNav: Embodied Navigation with Adaptive
+Reasoning and Visual-Assisted Linguistic Memory. IEEE Transactions on Robotics, 2026. doi:
+10.1109/TRO.2026.3747248. URL https://arxiv.org/abs/2601.08665. Early access.
+[57] Haoyu Zhen, Xiaowen Qiu, Peihao Chen, Jincheng Yang, Xin Yan, Yilun Du, Yining Hong,
+and Chuang Gan. 3D-VLA: A 3D Vision-Language-Action Generative World Model. In
+Proceedings of the International Conference on Machine Learning (ICML), 2024.
+[58] Chi-Lam Cheang, Guangzeng Chen, Ya Jing, Tao Kong, Hang Li, Yifeng Li, Yuxiao Liu,
+Hongtao Wu, Jiafeng Xu, Yichu Yang, et al. GR-2: A Generative Video-Language-Action
+Model with Web-Scale Knowledge for Robot Manipulation. arXiv preprint arXiv:2410.06158,
+2024. URL https://arxiv.org/abs/2410.06158.
+[59] Wei Wu, Fan Lu, Yunnan Wang, Shuai Yang, Shi Liu, Fangjing Wang, Qian Zhu, He Sun,
+Yong Wang, Shuailei Ma, et al.
+A Pragmatic VLA Foundation Model.
+arXiv preprint
+arXiv:2601.18692, 2026. URL https://arxiv.org/abs/2601.18692.
+[60] Physical Intelligence. π∗
+0.6: a VLA That Learns From Experience. In Proceedings of Robotics:
+Science and Systems (RSS), 2026.
+[61] Qiuyue Wang, Mingsheng Li, Jian Guan, Jinhui Ye, Sicheng Xie, Yitao Liu, Junhao Chen, Zhix-
+uan Liang, Jie Zhang, Xintong Hu, et al. Qwen-VLA: Unifying Vision-Language-Action Mod-
+eling across Tasks, Environments, and Robot Embodiments. arXiv preprint arXiv:2605.30280,
+2026. URL https://arxiv.org/abs/2605.30280.
+[62] Jiazhao Zhang, Anqi Li, Yunpeng Qi, Minghan Li, Jiahang Liu, Shaoan Wang, Haoran Liu,
+Gengze Zhou, Yuze Wu, Xingxing Li, et al. Embodied Navigation Foundation Model. In
+International Conference on Learning Representations (ICLR), 2026.
+[63] Yuankai Luo, Woping Chen, Tong Liang, Baiqiao Wang, and Zhenguo Li.
+SimVLA: A
+Simple VLA Baseline for Robotic Manipulation. arXiv preprint arXiv:2602.18224, 2026. URL
+https://arxiv.org/abs/2602.18224.
+32
+
+
+[64] Yuxuan Wang, Haobin Jiang, Shiqing Yao, Ziluo Ding, and Zongqing Lu.
+End-to-End
+Language-Action Model for Humanoid Whole Body Control. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pages 38399–38409, 2026.
+[65] Haoran Jiang, Jin Chen, Qingwen Bu, Li Chen, Modi Shi, Yanjie Zhang, Delong Li, Chuanzhe
+Suo, Chuang Wang, Zhihui Peng, et al. WholeBodyVLA: Towards Unified Latent VLA for
+Whole-Body Loco-Manipulation Control. In International Conference on Learning Represen-
+tations (ICLR), 2026.
+[66] Melya Boukheddimi, Omar Adjali, Daniel Sontag, and Frank Kirchner. WOLF-VLA: Whole-
+Body Humanoid Optimal Locomotion Framework for Vision-Language-Action Learning. arXiv
+preprint arXiv:2606.25591, 2026. URL https://arxiv.org/abs/2606.25591.
+[67] Dhruv Shah, Ajay Sridhar, Nitish Dashora, Kyle Stachowicz, Kevin Black, Noriaki Hirose,
+and Sergey Levine. ViNT: A Foundation Model for Visual Navigation. In Proceedings of
+the Conference on Robot Learning (CoRL), volume 229 of Proceedings of Machine Learning
+Research, pages 711–733, 2023.
+[68] Ajay Sridhar, Dhruv Shah, Catherine Glossop, and Sergey Levine. NoMaD: Goal Masked
+Diffusion Policies for Navigation and Exploration. In IEEE International Conference on
+Robotics and Automation (ICRA), pages 63–70, 2024. doi: 10.1109/ICRA57147.2024.10610665.
+[69] Noriaki Hirose, Catherine Glossop, Ajay Sridhar, Dhruv Shah, Oier Mees, and Sergey Levine.
+LeLaN: Learning A Language-Conditioned Navigation Policy from In-the-Wild Videos. In
+Proceedings of the Conference on Robot Learning (CoRL), volume 270 of Proceedings of
+Machine Learning Research, pages 666–688, 2024.
+[70] Noriaki Hirose, Catherine Glossop, Dhruv Shah, and Sergey Levine. OmniVLA: An Omni-
+Modal Vision-Language-Action Model for Robot Navigation. In IEEE International Conference
+on Robotics and Automation (ICRA), pages 12651–12658, 2026. doi: 10.1109/ICRA57385.
+2026.11697566.
+[71] Xiangyu Wang, Donglin Yang, Ziqin Wang, Hohin Kwan, Jinyu Chen, Wenjun Wu, Hongsheng
+Li, Yue Liao, and Si Liu. Towards Realistic UAV Vision-Language Navigation: Platform,
+Benchmark, and Methodology. In International Conference on Learning Representations
+(ICLR), 2025.
+[72] Daniel Dauner, Marcel Hallgarten, Tianyu Li, Xinshuo Weng, Zhiyu Huang, Zetong Yang,
+Hongyang Li, Igor Gilitschenski, Boris Ivanovic, Marco Pavone, et al.
+NAVSIM: Data-
+Driven Non-Reactive Autonomous Vehicle Simulation and Benchmarking. In Advances in
+Neural Information Processing Systems (NeurIPS) Datasets and Benchmarks Track, pages
+28706–28719, 2024. doi: 10.52202/079017-0902.
+[73] Raghav Goyal, Samira Ebrahimi Kahou, Vincent Michalski, Joanna Materzyńska, Susanne
+Westphal, Heuna Kim, Valentin Haenel, Ingo Fruend, Peter Yianilos, Moritz Mueller-Freitag,
+et al. The “something something” video database for learning and evaluating visual common
+sense. In Proceedings of the IEEE International Conference on Computer Vision (ICCV),
+pages 5843–5851, 2017. doi: 10.1109/ICCV.2017.622.
+[74] Kristen Grauman, Andrew Westbury, Eugene Byrne, Zachary Chavis, Antonino Furnari, Rohit
+Girdhar, Jackson Hamburger, Hao Jiang, Miao Liu, Xingyu Liu, et al. Ego4D: Around the
+33
+
+
+World in 3,000 Hours of Egocentric Video. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 18973–18990, 2022. doi: 10.1109/
+CVPR52688.2022.01842.
+[75] Ruijie Zheng, Dantong Niu, Yuqi Xie, Jing Wang, Mengda Xu, Yunfan Jiang, Fernando
+Castañeda, Fengyuan Hu, You Liang Tan, Letian Fu, et al. EgoScale: Scaling Dexterous
+Manipulation with Diverse Egocentric Human Data. arXiv preprint arXiv:2602.16710, 2026.
+URL https://arxiv.org/abs/2602.16710.
+[76] NVIDIA. Isaac GR00T N1.7 release notes (README, “What’s New in GR00T N1.7”).
+GitHub repository, https://github.com/NVIDIA/Isaac-GR00T, 2026. Accessed 13 October
+2026.
+[77] Joel Jang, Seonghyeon Ye, Zongyu Lin, Jiannan Xiang, Johan Bjorck, Yu Fang, Fengyuan Hu,
+Spencer Huang, Kaushil Kundalia, Yen-Chen Lin, et al. DreamGen: Unlocking Generalization
+in Robot Learning through Video World Models. In Proceedings of the Conference on Robot
+Learning (CoRL), volume 305 of Proceedings of Machine Learning Research, 2025.
+[78] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin Liu, Zixuan Li, Qiwei Liang,
+Xianliang Lin, Yiheng Ge, Zhenyu Gu, et al. RoboTwin 2.0: A Scalable Data Generator and
+Benchmark with Strong Domain Randomization for Robust Bimanual Robotic Manipulation.
+In Proceedings of the International Conference on Machine Learning (ICML), volume 306 of
+PMLR, pages 13673–13699, 2026.
+[79] Alexander Khazatsky, Karl Pertsch, Suraj Nair, Ashwin Balakrishna, Sudeep Dasari, Siddharth
+Karamcheti, Soroush Nasiriany, Mohan Kumar Srirama, Lawrence Yunliang Chen, Kirsty
+Ellis, et al. DROID: A Large-Scale In-The-Wild Robot Manipulation Dataset. In Proceedings
+of Robotics: Science and Systems (RSS), 2024.
+[80] Kun Wu, Chengkai Hou, Jiaming Liu, Zhengping Che, Xiaozhu Ju, Zhuqin Yang, Meng Li,
+Yinuo Zhao, Zhiyuan Xu, Guang Yang, et al. RoboMIND: Benchmark on Multi-embodiment
+Intelligence Normative Data for Robot Manipulation. In Proceedings of Robotics: Science and
+Systems (RSS), 2025. doi: 10.15607/rss.2025.xxi.152.
+[81] AgiBot-World-Contributors, Qingwen Bu, Jisong Cai, Li Chen, Xiuqi Cui, Yan Ding, Siyuan
+Feng, Shenyuan Gao, Xindong He, Xuan Hu, et al. AgiBot World Colosseo: A Large-scale
+Manipulation Platform for Scalable and Intelligent Embodied Systems. In Proceedings of
+the IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), pages
+3549–3556, 2025. doi: 10.1109/IROS60139.2025.11247088.
+[82] Kevin Black, Manuel Y. Galliker, and Sergey Levine. Real-Time Execution of Action Chunking
+Flow Policies. In Advances in Neural Information Processing Systems (NeurIPS), pages 37596–
+37620, 2025. doi: 10.52202/085713-1122.
+[83] Wenqi Jiang, Jason Clemons, Karu Sankaralingam, and Christos Kozyrakis. How Fast Can
+I Run My VLA? Demystifying VLA Inference Performance with VLA-Perf. arXiv preprint
+arXiv:2602.18397, 2026. URL https://arxiv.org/abs/2602.18397.
+[84] Junjie Wen, Yichen Zhu, Jinming Li, Minjie Zhu, Kun Wu, Zhiyuan Xu, Ning Liu, Ran Cheng,
+Chaomin Shen, Yaxin Peng, et al. TinyVLA: Toward Fast, Data-Efficient Vision-Language-
+Action Models for Robotic Manipulation. IEEE Robotics and Automation Letters, 10(4):
+3988–3995, 2025. doi: 10.1109/LRA.2025.3544909.
+34
+
+
+[85] Xinghang Li, Minghuan Liu, Hanbo Zhang, Cunjun Yu, Jie Xu, Hongtao Wu, Chilam Cheang,
+Ya Jing, Weinan Zhang, Huaping Liu, et al. Vision-Language Foundation Models as Effective
+Robot Imitators. In International Conference on Learning Representations (ICLR), 2024.
+[86] Oier Mees, Lukas Hermann, Erick Rosete-Beas, and Wolfram Burgard. CALVIN: A Benchmark
+for Language-Conditioned Policy Learning for Long-Horizon Robot Manipulation Tasks. IEEE
+Robotics and Automation Letters, 7(3):7327–7334, 2022. doi: 10.1109/LRA.2022.3180108.
+[87] Lucas Beyer, Andreas Steiner, André Susano Pinto, Alexander Kolesnikov, Xiao Wang, Daniel
+Salz, Maxim Neumann, Ibrahim Alabdulmohsin, Michael Tschannen, Emanuele Bugliarello,
+et al. PaliGemma: A versatile 3B VLM for transfer. arXiv preprint arXiv:2407.07726, 2024.
+URL https://arxiv.org/abs/2407.07726.
+[88] Gemini Team, Google. Gemini: A Family of Highly Capable Multimodal Models. arXiv
+preprint arXiv:2312.11805, 2023. URL https://arxiv.org/abs/2312.11805.
+[89] NVIDIA. Isaac GR00T N1.5 release notes (README, n1d5 branch). GitHub repository,
+https://github.com/NVIDIA/Isaac-GR00T/tree/n1d5, 2025. Accessed 13 October 2026.
+[90] NVIDIA. Isaac GR00T N1.6 release notes (README, n1d6 branch). GitHub repository,
+https://github.com/NVIDIA/Isaac-GR00T/tree/n1d6, 2025. Accessed 13 October 2026.
+[91] Zhiqi Li, Guo Chen, Shilong Liu, Shihao Wang, Vibashan VS, Yishen Ji, Shiyi Lan, Hao
+Zhang, Yilin Zhao, Subhashree Radhakrishnan, et al. Eagle 2: Building Post-Training Data
+Strategies from Scratch for Frontier Vision-Language Models. arXiv preprint arXiv:2501.14818,
+2025. URL https://arxiv.org/abs/2501.14818.
+[92] Guo Chen, Zhiqi Li, Shihao Wang, Jindong Jiang, Yicheng Liu, Lidong Lu, De-An Huang,
+Wonmin Byeon, Matthieu Le, Tuomas Rintamaki, et al. Eagle 2.5: Boosting Long-Context
+Post-Training for Frontier Vision-Language Models. In Advances in Neural Information
+Processing Systems (NeurIPS), pages 101161–101184, 2025. doi: 10.52202/085713-3047.
+[93] NVIDIA. Cosmos-Reason1: From Physical Common Sense To Embodied Reasoning. arXiv
+preprint arXiv:2503.15558, 2025. URL https://arxiv.org/abs/2503.15558.
+[94] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao
+Deng, Wei Ding, Chang Gao, Chunjiang Ge, et al. Qwen3-VL Technical Report. arXiv
+preprint arXiv:2511.21631, 2025. URL https://arxiv.org/abs/2511.21631.
+[95] Corey Lynch, Ayzaan Wahid, Jonathan Tompson, Tianli Ding, James Betker, Robert Baruch,
+Travis Armstrong, and Pete Florence. Interactive Language: Talking to Robots in Real Time.
+IEEE Robotics and Automation Letters, 2024. doi: 10.1109/LRA.2023.3295255.
+[96] Homer Walke, Kevin Black, Abraham Lee, Moo Jin Kim, Max Du, Chongyi Zheng, Tony
+Zhao, Philippe Hansen-Estruch, Quan Vuong, Andre He, et al. BridgeData V2: A Dataset
+for Robot Learning at Scale. In Proceedings of the Conference on Robot Learning (CoRL),
+volume 229 of Proceedings of Machine Learning Research, pages 1723–1736, 2023.
+[97] Hao-Shu Fang, Hongjie Fang, Zhenyu Tang, Jirong Liu, Chenxi Wang, Junbo Wang, Haoyi
+Zhu, and Cewu Lu. RH20T: A Comprehensive Robotic Dataset for Learning Diverse Skills in
+One-Shot. In Proceedings of the IEEE International Conference on Robotics and Automation
+(ICRA), pages 653–660, 2024. doi: 10.1109/ICRA57147.2024.10611615.
+35
+
+
+[98] Dhruv Shah, Ajay Sridhar, Arjun Bhorkar, Noriaki Hirose, and Sergey Levine. GNM: A
+General Navigation Model to Drive Any Robot. In Proceedings of the IEEE International
+Conference on Robotics and Automation (ICRA), pages 7226–7233, 2023. doi: 10.1109/
+ICRA48891.2023.10161227.
+[99] Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy Vo, Marc Szafraniec, Vasil Khalidov,
+Pierre Fernandez, Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al. DINOv2:
+Learning Robust Visual Features without Supervision. Transactions on Machine Learning
+Research, 2024.
+[100] Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang,
+Peng Wang, Shijie Wang, Jun Tang, et al. Qwen2.5-VL Technical Report. arXiv preprint
+arXiv:2502.13923, 2025. URL https://arxiv.org/abs/2502.13923.
+[101] Andrés Marafioti, Orr Zohar, Miquel Farré, Merve Noyan, Elie Bakouch, Pedro Cuenca, Cyril
+Zakka, Loubna Ben Allal, Anton Lozhkov, Nouamane Tazi, et al. SmolVLM: Redefining small
+and efficient multimodal models. In Conference on Language Modeling (COLM), 2025.
+[102] Jiazhao Zhang, Kunyu Wang, Shaoan Wang, Minghan Li, Haoran Liu, Songlin Wei, Zhongyuan
+Wang, Zhizheng Zhang, and He Wang. Uni-NaVid: A Video-based Vision-Language-Action
+Model for Unifying Embodied Navigation Tasks. In Proceedings of Robotics: Science and
+Systems (RSS), 2025. doi: 10.15607/rss.2025.xxi.013.
+[103] Manolis Savva, Abhishek Kadian, Oleksandr Maksymets, Yili Zhao, Erik Wijmans, Bhavana
+Jain, Julian Straub, Jia Liu, Vladlen Koltun, Jitendra Malik, et al. Habitat: A Platform
+for Embodied AI Research. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 9338–9346, 2019. doi: 10.1109/ICCV.2019.00943.
+[104] Jacob Krantz, Erik Wijmans, Arjun Majumdar, Dhruv Batra, and Stefan Lee. Beyond the
+Nav-Graph: Vision-and-Language Navigation in Continuous Environments. In European
+Conference on Computer Vision (ECCV), Lecture Notes in Computer Science, pages 104–120,
+2020. doi: 10.1007/978-3-030-58604-1_7.
+[105] Noriaki Hirose, Dhruv Shah, Ajay Sridhar, and Sergey Levine. SACSoN: Scalable Autonomous
+Control for Social Navigation. IEEE Robotics and Automation Letters, 9(1):49–56, 2024. doi:
+10.1109/LRA.2023.3329626.
+[106] Angel Chang, Angela Dai, Thomas Funkhouser, Maciej Halber, Matthias Nießner, Manolis
+Savva, Shuran Song, Andy Zeng, and Yinda Zhang. Matterport3D: Learning from RGB-D
+Data in Indoor Environments. In Proceedings of the International Conference on 3D Vision
+(3DV), pages 667–676, 2017. doi: 10.1109/3DV.2017.00081.
+[107] Zun Wang, Jialu Li, Yicong Hong, Yi Wang, Qi Wu, Mohit Bansal, Stephen Gould, Hao Tan,
+and Yu Qiao. Scaling Data Generation in Vision-and-Language Navigation. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision (ICCV), pages 11975–11986,
+2023. doi: 10.1109/ICCV51070.2023.01103.
+[108] FrodoBots.
+FrodoBots-2K Dataset.
+Hugging Face dataset, https://huggingface.co/
+datasets/BitRobot/FrodoBots-2K, 2024. Accessed 21 October 2026.
+[109] Huazhe Xu, Yang Gao, Fisher Yu, and Trevor Darrell. End-to-end Learning of Driving Models
+from Large-scale Video Datasets. In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 3530–3538, 2017. doi: 10.1109/CVPR.2017.376.
+36
+
+
+[110] Haoru Xue, Xiaoyu Huang, Dantong Niu, Qiayuan Liao, Thomas Kragerud, Jan Tommy
+Gravdahl, Xue Bin Peng, Guanya Shi, Trevor Darrell, Koushil Sreenath, et al. LeVERB:
+Humanoid Whole-Body Control with Latent Vision-Language Instruction. arXiv preprint
+arXiv:2506.13751, 2025. URL https://arxiv.org/abs/2506.13751.
+[111] Pengxiang Ding, Jianfei Ma, Xinyang Tong, Binghong Zou, Xinxin Luo, Yiguo Fan, Ting
+Wang, Hongchao Lu, Panzhong Mo, Jinxin Liu, et al. Humanoid-VLA: Towards Universal
+Humanoid Control with Visual Integration. arXiv preprint arXiv:2502.14795, 2025. URL
+https://arxiv.org/abs/2502.14795.
+[112] Zhengyi Luo, Ye Yuan, Tingwu Wang, Chenran Li, Fernando Castañeda, Sirui Chen, Zi-Ang
+Cao, Jiefeng Li, David Minor, Qingwei Ben, et al. SONIC: Supersizing Motion Tracking
+for Natural Humanoid Whole-Body Control. Science Robotics, 11(117):eaed4592, 2026. doi:
+10.1126/scirobotics.aed4592.
+[113] Langzhe Gu, Chengkai Hou, Meng Li, Xinhua Wang, Jiaming Liu, Xinyuan Lv, Bowei Zhang,
+Shuanghao Bai, Guangrun Li, Jingyang He, et al.
+HAF: Adapting Generalist VLAs to
+Humanoid Whole-Body Loco-manipulation via Hierarchical Action Flow and Spectral Latent
+RL. arXiv preprint arXiv:2608.16837, 2026. URL https://arxiv.org/abs/2608.16837.
+[114] Xuanlin Li, Kyle Hsu, Jiayuan Gu, Karl Pertsch, Oier Mees, Homer Rich Walke, Chuyuan Fu,
+Ishikaa Lunawat, Isabel Sieh, Sean Kirmani, et al. Evaluating Real-World Robot Manipulation
+Policies in Simulation. In Proceedings of the Conference on Robot Learning (CoRL), volume
+270 of Proceedings of Machine Learning Research, pages 3705–3728, 2024.
+[115] David Ha and Jürgen Schmidhuber. Recurrent World Models Facilitate Policy Evolution. In
+Advances in Neural Information Processing Systems (NeurIPS), pages 2450–2462, 2018.
+[116] Yann LeCun. A Path Towards Autonomous Machine Intelligence. Position paper, version
+0.9.2, OpenReview, 2022. URL https://openreview.net/forum?id=BZ5a1r-kVsf.
+[117] Jiangran Lyu, Ziming Li, Xuesong Shi, Chaoyi Xu, Yizhou Wang, and He Wang. DyWA:
+Dynamics-adaptive World Action Model for Generalizable Non-prehensile Manipulation. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages
+11058–11068, 2025. doi: 10.1109/ICCV51701.2025.01029.
+[118] Wenxuan Song, Jiayi Chen, Jingbo Wang, Shuai Zhou, Xicheng Gong, Zehua Fan, Ziyang
+Zhou, Junwu E, Haodong Yan, Fuhao Li, et al. UniWAM: Unified World-Action Model. arXiv
+preprint arXiv:2610.02054, 2026. URL https://arxiv.org/abs/2610.02054.
+[119] Shuang Li, Yihuai Gao, Dorsa Sadigh, and Shuran Song. Unified Video Action Model. In
+Proceedings of Robotics: Science and Systems (RSS), 2025. doi: 10.15607/rss.2025.xxi.074.
+[120] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng Huang, Jiayan Guo, Xin Li,
+Yibing Song, Hao Luo, Fan Wang, et al. WorldVLA: Towards Autoregressive Action World
+Model. arXiv preprint arXiv:2506.21539, 2025. URL https://arxiv.org/abs/2506.21539.
+[121] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin, Yunhao Ge, Grace Lam, Percy Liang,
+Shuran Song, Ming-Yu Liu, Chelsea Finn, et al. Cosmos Policy: Fine-Tuning Video Models for
+Visuomotor Control and Planning. In International Conference on Learning Representations
+(ICLR), 2026.
+37
+
+
+[122] Yilun Du, Mengjiao Yang, Bo Dai, Hanjun Dai, Ofir Nachum, Joshua B. Tenenbaum, Dale
+Schuurmans, and Pieter Abbeel. Learning Universal Policies via Text-Guided Video Generation.
+In Advances in Neural Information Processing Systems (NeurIPS), pages 9156–9172, 2023.
+doi: 10.52202/075280-0403.
+[123] Xueji Fang, Boqiang Duan, Hua Wu, Jingdong Wang, and Guo-Jun Qi. Latent evolving World
+Action Model. arXiv preprint arXiv:2609.27455, 2026. URL https://arxiv.org/abs/2609.
+27455.
+[124] Yucheng Hu, Yanjiang Guo, Pengchao Wang, Xiaoyu Chen, Yen-Jen Wang, Jianke Zhang,
+Koushil Sreenath, Chaochao Lu, and Jianyu Chen. Video Prediction Policy: A Generalist
+Robot Policy with Predictive Visual Representations. In Proceedings of the International
+Conference on Machine Learning (ICML), 2025.
+[125] Yue Liao, Pengfei Zhou, Siyuan Huang, Donglin Yang, Shengcong Chen, Yuxin Jiang, Yue
+Hu, Jingbin Cai, Si Liu, Jianlan Luo, et al. Genie Envisioner: A Unified World Foundation
+Platform for Robotic Manipulation. In International Conference on Learning Representations
+(ICLR), 2026.
+[126] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan Gao, Sihyun Yu, George Kurian,
+Suneel Indupuru, You Liang Tan, Chuning Zhu, Jiannan Xiang, Ayaan Malik, Kyungmin Lee,
+William Liang, Nadun Ranawaka, Jiasheng Gu, Yinzhen Xu, Guanzhi Wang, Fengyuan Hu,
+Avnish Narayan, Johan Bjorck, Jing Wang, Gwanghyun Kim, Dantong Niu, Ruijie Zheng,
+Yuqi Xie, Jimmy Wu, Qi Wang, Ryan Julian, Danfei Xu, Yilun Du, Yevgen Chebotar, Scott
+Reed, Jan Kautz, Yuke Zhu, Linxi Fan, and Joel Jang. World Action Models are Zero-shot
+Policies. arXiv preprint arXiv:2602.15922, 2026. URL https://arxiv.org/abs/2602.15922.
+[127] Soroush Nasiriany, Abhiram Maddukuri, Lance Zhang, Adeet Parikh, Aaron Lo, Abhishek
+Joshi, Ajay Mandlekar, and Yuke Zhu. RoboCasa: Large-Scale Simulation of Household Tasks
+for Generalist Robots. In Proceedings of Robotics: Science and Systems (RSS), 2024. doi:
+10.15607/rss.2024.xx.050.
+[128] Shiduo Zhang, Zhe Xu, Peiju Liu, Xiaopeng Yu, Yuan Li, Qinghui Gao, Zhaoye Fei, Zhangyue
+Yin, Zuxuan Wu, Yu-Gang Jiang, et al. VLABench: A Large-Scale Benchmark for Language-
+Conditioned Robotics Manipulation with Long-Horizon Reasoning Tasks. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision (ICCV), pages 11142–11152,
+2025. doi: 10.1109/ICCV51701.2025.01037.
+[129] Xueyang Zhou, Yangming Xu, Guiyao Tie, Yongchao Chen, Guowen Zhang, Duanfeng Chu,
+Pan Zhou, and Lichao Sun. LIBERO-PRO: Towards Robust and Fair Evaluation of Vision-
+Language-Action Models Beyond Memorization. arXiv preprint arXiv:2510.03827, 2025. URL
+https://arxiv.org/abs/2510.03827.
+[130] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Pengfang Qian, Li Ji, Xinzhe He,
+Shiduo Zhang, Zhaoye Fei, et al. LIBERO-Plus: A Progressive Robustness Benchmark for
+Visual-Language-Action Models. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 38574–38583, 2026.
+[131] Zhiyuan Zhou, Pranav Atreya, You Liang Tan, Karl Pertsch, and Sergey Levine. AutoEval:
+Autonomous Evaluation of Generalist Robot Manipulation Policies in the Real World. In
+Proceedings of the Conference on Robot Learning (CoRL), volume 305 of Proceedings of
+Machine Learning Research, 2025.
+38
+
+
+[132] Pranav Atreya, Karl Pertsch, Tony Lee, Moo Jin Kim, Arhan Jain, Artur Kuramshin, Clemens
+Eppner, Cyrus Neary, Edward Hu, Fabio Ramos, et al. RoboArena: Distributed Real-World
+Evaluation of Generalist Robot Policies. In Proceedings of the Conference on Robot Learning
+(CoRL), volume 305 of Proceedings of Machine Learning Research, 2025.
+[133] NVIDIA. NVIDIA and Global Robotics Leaders Take Physical AI to the Real World. NVIDIA
+Newsroom press release, 16 March 2026, 2026. URL https://nvidianews.nvidia.com/news/
+nvidia-and-global-robotics-leaders-take-physical-ai-to-the-real-world.
+Ac-
+cessed 19 November 2026.
+[134] Kanishka Rao. Gemini 4 Argon for Robotics. Google Developers Blog, 13 October 2026, 2026.
+URL https://developers.googleblog.com/gemini-4-argon-for-robotics/. Accessed
+19 November 2026.
+[135] Alex Gruenstein, Gabe Cohen, and Gemini Robotics Team. Gemini 4 Hydrogen: a faster
+model for general purpose robotics.
+Google Developers Blog, 17 November 2026, 2026.
+URL https://developers.googleblog.com/gemini-hydrogen-for-robotics/. Accessed
+19 November 2026.
+[136] John D. Hunter. Matplotlib: A 2D Graphics Environment. Computing in Science & Engi-
+neering, 9(3):90–95, 2007. doi: 10.1109/MCSE.2007.55.
+39
+
+
+A
+Building a VLA: Decisions Along the Life Cycle
+This appendix turns the evidence of Sections 3–9 into practical guidance for researchers who want
+to use or build a VLA. For each axis we state the decision, a default supported by the surveyed
+work, and when to deviate. The defaults reflect results reported up to October 2026 and should be
+re-checked as the field moves.
+A.1
+Choosing a starting point
+Table 10 matches common situations to a starting point among the surveyed works.
+Table 10: Starting points for common situations, with the evidence behind each.
+Situation
+Start from
+Why
+One consumer GPU
+and a low-cost arm
+SmolVLA [47]
+0.45B parameters; trains on one GPU; pretrained on com-
+munity data from low-cost SO-100 arms; asynchronous
+inference (Sections 3.5 and 3.7).
+Fine-tuning an open
+VLA for one robot or
+task set
+OpenVLA-OFT
+recipe [49]
+Parallel decoding, action chunking, continuous actions
+and an L1 loss raised OpenVLA’s LIBERO average from
+76.5% to 97.1% (Section 3.6).
+Dexterous, bimanual or
+high-rate control
+A flow-matching
+action expert, as in
+π0 [17]
+Smooth action chunks at up to 50 Hz; the current default
+in frontier systems (Table 1).
+Simulation benchmark
+with few
+demonstrations
+VLA-Adapter [50]
+or VLA-0 [39]
+Strong LIBERO results with no robot pretraining, but
+LIBERO tests far less than real-world use (Section 9).
+Humanoid
+GR00T N1 line [32],
+or a VLA over a
+learned whole-body
+controller
+Open weights and humanoid training data; most hu-
+manoid VLAs rely on a separately trained whole-body
+controller (Section 6).
+Real-robot navigation
+with on-board compute
+Visual navigation
+foundation models
+(ViNT, NoMaD,
+OmniVLA)
+Trained on real robot data, output waypoints and target
+edge deployment (Section 5).
+Language-instructed
+navigation
+Video VLMs
+(NaVid,
+StreamVLN,
+NavFoM)
+Built for vision-and-language navigation and evaluated
+on R2R-CE and RxR-CE; their 7–8B models usually run
+on a remote GPU (Table 2).
+Tasks that need
+minutes of recall
+A hierarchical
+design with
+memory, as in
+MemER [16]
+Keyframe memory kept outside the fast control loop (Sec-
+tion 3.1).
+A.2
+Model
+• Inputs and memory. Start with current camera images, language and robot state. Add
+history only when the task needs it: long histories cost latency and can teach the policy cues
+that do not cause the correct action. When memory is needed, compress it, as with keyframes
+(MemER) or a slow-fast context (StreamVLN), rather than feeding raw history.
+• Architecture. Start monolithic. Choose a hierarchy when you need interpretable subtasks,
+live user corrections, long memory or cheap off-domain training data for the high level (Hi
+40
+
+
+Robot, MemER, HAMSTER). Choose a dual system when a large VLM must coexist with
+fast control (GR00T N1).
+• Action output. Predict action chunks rather than single steps. Use flow matching or
+diffusion for dexterous, high-rate or multimodal behaviour; continuous regression for the
+fastest inference on narrow tasks; compressed tokens (FAST) to keep a purely autoregressive
+model; and latent actions to learn from action-free video. When adding a new action expert
+to a pretrained VLM, protect the VLM with knowledge insulation.
+• Intermediate predictions. Add reasoning or subtask prediction for long-horizon tasks and
+open-ended instructions; ECoT gained 28 points over OpenVLA without additional robot
+data. Predicting future observations is promising but adds cost; consider it when you have
+plenty of action-free video (VLA-JEPA) or need subgoals for planning (π0.7).
+A.3
+Training
+• Pretraining data. Favour diversity over volume, as RT-1’s ablations first showed. Data from
+other robots and environments mattered more than web data for π0.5 in unseen homes, whereas
+web data mainly helped with unseen objects. When mixing robots, tell the model which robot
+each example comes from (soft prompts, embodiment prompts or identifier tokens). Keep
+every episode, including failures: advantage and metadata conditioning can now turn them
+into useful training data.
+• Post-training. Several works adapt to a new task with about 50 demonstrations (ACT,
+TinyVLA, MemER). Use the OpenVLA-OFT recipe for supervised fine-tuning. Move to
+reinforcement learning from deployment (RECAP, online RL) only when you can run many
+autonomous trials safely.
+A.4
+Deployment
+• Real-time execution. Measure the latency per action chunk on your own hardware first and
+compare it with your control period; a 7B autoregressive VLA runs at only a few hertz on
+one RTX 4090 (Table 2). If inference is slower than control, execute chunks asynchronously
+(SmolVLA), add Real-Time Chunking, which needs no retraining, or split a remote VLA from
+an on-robot adapter when network delays are large (AsyncVLA). Run the levels of a hierarchy
+at different rates.
+A.5
+Evaluation and reporting
+• Do not rely on LIBERO alone: it is near saturation and hides brittleness. Add a perturbation
+suite (LIBERO-PRO or LIBERO-Plus) and, where possible, SimplerEnv, whose scores were
+validated against real robots. For navigation, report R2R-CE and RxR-CE together with
+real-robot trials.
+• Compare against a controlled baseline trained with the same data and recipe, as SimVLA
+advocates, so that a gain can be attributed to the change being studied.
+• Report the robot episodes and hours in each training stage, the share of non-robot data, the
+number of embodiments, the parameter count at inference and the latency per chunk on
+named hardware (Section 10).
+41
+
+
+B
+Glossary
+Table 11 explains terms used in this survey that are recent or that come from outside a reader’s
+own field, such as machine-learning terms for readers from classical robotics, robot-data terms
+for readers from reinforcement learning, and robotics terms for readers from computer vision or
+language modelling. Terms are grouped by life-cycle stage, as in Section 3.
+Table 11: Glossary of terms used in this survey.
+Term
+Meaning
+Section
+Model
+Policy
+The function that maps what the robot observes to the action it
+takes; a VLA is one kind of policy.
+2
+Vision-language
+model (VLM)
+A model pretrained on web images and text that answers questions
+about images. VLAs start from one and add robot actions as an
+output.
+2
+Vision-language-
+action model (VLA)
+A VLM adapted to output robot actions from camera images and a
+language instruction.
+2
+Backbone
+The pretrained network a VLA is built on, usually the VLM.
+3.2
+Proprioception
+The robot’s sensing of its own state, such as joint angles and gripper
+opening.
+2
+Action chunk
+A short sequence of future actions predicted in one pass and executed
+before the model is queried again.
+2
+End-effector vs.
+joint-space actions
+Actions given as the gripper’s target pose, or as targets for each joint.
+4
+Relative (delta)
+actions
+Actions expressed as changes from the current state rather than as
+absolute targets.
+4
+Action token
+An action written as discrete symbols that a language model can
+output, for example by binning each action dimension (RT-2,
+OpenVLA).
+3.3
+Autoregressive
+decoding
+Generating output one token at a time, each conditioned on the
+previous ones.
+3.3
+FAST
+An action tokeniser that compresses a chunk with the discrete cosine
+transform before turning it into tokens.
+3.3
+Action head / action
+expert
+The part of a VLA that turns the backbone’s features into actions.
+An action expert is a separate set of transformer weights that attends
+to the VLM’s tokens (π0).
+3.3
+Diffusion policy
+A policy that generates actions by starting from noise and removing it
+step by step, which lets it represent several valid ways to do a task.
+2
+Flow matching
+A relative of diffusion that learns a velocity field carrying noise to
+actions, usually in fewer steps.
+3.3
+Diffusion transformer
+(DiT)
+A transformer used as the denoising network of a diffusion or
+flow-matching head.
+4
+Monolithic model
+One network that maps observations to actions (RT-2, OpenVLA, π0).
+3.2
+Dual-system model
+A slow VLM (“System 2”) coupled to a fast action module
+(“System 1”) through latent features and trained jointly (GR00T N1).
+3.2
+Hierarchical model
+A high-level model emits an interpretable intermediate, such as a
+subtask or path, that a separately trained low-level policy executes.
+3.2
+Key–value (KV)
+cache
+Stored attention states from earlier inputs that a transformer reuses
+instead of recomputing, which bounds the cost of long histories.
+3.1
+Intermediate predictions
+42
+
+
+Term
+Meaning
+Section
+Embodied
+chain-of-thought
+Reasoning written out before acting, such as plans, subtasks or object
+locations (ECoT).
+3.4
+World model
+A model that predicts how the environment will change as the agent
+acts.
+8
+World-action model
+(WAM)
+A model that predicts future observations and actions together,
+usually built on a video generator.
+8
+Latent actions
+Action-like codes learned from video without action labels, used for
+pretraining and later mapped to real actions by a small decoder.
+3.3
+JEPA
+Joint-embedding predictive architecture: predicts the embedding of a
+future or masked input rather than its pixels.
+8
+Training
+Demonstration
+An example of a task performed by a person, usually through
+teleoperation, from which the policy learns by imitation.
+2
+Teleoperation
+Collecting demonstrations by a person controlling the robot directly,
+the main source of robot training data.
+3.5
+Episode
+One recorded attempt at a task, from start to end.
+3.5
+Trajectory
+The sequence of observations and actions recorded during an episode.
+3.5
+Rollout
+One run of a policy on a robot or in simulation; rollouts can be
+recorded and used for further training.
+3.6
+Embodiment
+A particular robot body, with its own sensors and actuators.
+3.5
+Cross-embodiment
+training
+Training one policy on data from several robot types.
+4
+Open X-Embodiment
+(OXE)
+A pooled dataset of about one million episodes from 22 robot types,
+the common pretraining set for open VLAs.
+3.5
+Egocentric human
+video
+Video recorded from a person’s viewpoint, such as head- or
+wrist-mounted cameras, used as a cheap substitute for robot data.
+4
+Neural trajectories
+Robot training data generated by a video model rather than recorded
+on a robot (GR00T).
+3.5
+Co-training
+Training on robot actions mixed with other data, usually web visual
+question answering, to keep the VLM’s general knowledge.
+3.5
+Post-training
+Any training after pretraining that adapts a VLA to a target robot or
+task: fine-tuning, reinforcement learning or learning from deployment.
+3.6
+LoRA
+Low-rank adaptation: fine-tuning a small set of added weights while
+the original ones stay frozen.
+4
+Knowledge insulation
+Stopping gradients from a new action expert flowing into the VLM, so
+that training the expert does not erode the VLM’s knowledge.
+3.3
+Advantage
+conditioning
+Telling the policy how much better than average each action or
+episode was, so that failed or autonomous episodes can be used for
+training (π∗
+0.6).
+3.5
+Deployment
+Inference vs. control
+frequency
+How often the model is queried, often a few hertz, versus how often
+the robot receives commands, often tens to hundreds of hertz. Action
+chunks bridge the two.
+3.7
+Latency vs.
+throughput
+The delay between an observation and the resulting action, versus the
+number of actions produced per second. Action chunking can raise
+throughput without reducing latency.
+3.7
+Asynchronous
+inference
+Computing the next chunk while the current one executes, so the
+robot does not pause.
+3.7
+Real-time chunking
+Asynchronous inference that keeps fixed the actions about to execute
+and plans the rest of the next chunk to join them smoothly.
+3.7
+43
+
+
+Term
+Meaning
+Section
+Quantisation
+Storing weights at lower numerical precision to cut memory and speed
+up inference.
+4
+Edge deployment
+Running the model on the robot’s own computer rather than on a
+remote server.
+3.7
+Tasks and evaluation
+VLN and VLN-CE
+Vision-and-language navigation: following spoken or written route
+instructions. VLN-CE is the version in continuous environments, with
+low-level moves instead of jumps between graph nodes.
+5
+Bimanual
+manipulation
+Tasks that use two arms together, such as folding laundry.
+4
+Dexterous
+manipulation
+Fine control of multi-fingered hands or precise grippers, as in tool use
+or in-hand rotation.
+4
+Long-horizon task
+A task with many steps, such as cleaning a kitchen, where errors early
+on compound later.
+4
+Closed-loop control
+Control that uses fresh observations at every step to correct course;
+open-loop control executes a plan without looking.
+6
+Topological graph
+A map of places as nodes connected by traversable paths, without
+exact metric geometry; used by some navigation systems to plan
+routes.
+5
+Loco-manipulation
+Tasks that combine moving the body and manipulating objects, such
+as walking to a table and picking up a cup.
+6
+Whole-body control
+Coordinating all of a humanoid’s joints, legs and arms together, while
+keeping balance.
+6
+Zero-shot
+Performing a task, object or setting without any training examples of
+it.
+4
+44

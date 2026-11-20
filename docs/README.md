@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-22 ~ 2026-11-20</span>
+      <span class="dpr-home-dashboard-kicker">2026-11-20</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 0 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 42 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>31</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-11-20 06:40:59 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-11-20 19:37:01 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,7 +69,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日无新推荐，系统未产出可展示论文。</p>
+<p>今日精读31篇、速读11篇，重点攻克大模型量化与具身智能两大方向。最值得关注的是满分论文《JointQ》提出的联合尺度-整数化量化方法，以及《SoScale》的二阶尺度搜索思路。普通读者可优先从这两篇量化工作入手，理解低比特部署的关键权衡。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -78,12 +78,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">31 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="JointQ: Joint Scale-and-Integer Quantization for Large Language Models">JointQ: Joint Scale-and-Integer Quantization for Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="SoScale: Second-Order Scale Search for FP4 Quantization">SoScale: Second-Order Scale Search for FP4 Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="SignRot: LLM Quantization with Massive Outlier-Aware Sign-Adjusted Rotation">SignRot: LLM Quantization with Massive Outlier-Aware Sign-Adjusted Rotation</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>16</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>15</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -91,12 +91,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ESI: An Embodied Self-Improvement Flywheel for LLM-VLA Agents">ESI: An Embodied Self-Improvement Flywheel for LLM-VLA Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Wireless Edge-Assisted Adaptive Latent Reasoning for Vision-Language-Action Models in Physical AI">Wireless Edge-Assisted Adaptive Latent Reasoning for Vision-Language-Action Models in Physical AI</span></li><li><span class="dpr-home-dashboard-paper-title" title="ResWAM: Learning What Changes, Not What Stays, for World-Action Models">ResWAM: Learning What Changes, Not What Stays, for World-Action Models</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>9</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>2</strong></span></div>
 </section>
 </div>
 

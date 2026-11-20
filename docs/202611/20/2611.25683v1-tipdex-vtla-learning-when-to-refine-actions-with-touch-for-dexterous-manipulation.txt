@@ -1,0 +1,1070 @@
+TipDex-VTLA: Learning When to Refine Actions with Touch for Dexterous
+Manipulation
+Xudi Ge1,#
+Yepeng Liu2,#
+Haifeng Liu2,#
+Enze Shi1
+Liangqi Zhang2
+Yongchao Xu1,*
+1School of Computer Science, Wuhan University, Wuhan, China
+2Wuhan Huaweike Intelligent Technology Co., Ltd., Wuhan, China
+Figure 1. Action refinement with visual reliability and tactile feedback. Left: Visual disturbances can cause VLA action drift despite an
+unchanged physical scene. Center: Visual reliability and tactile forecast agreement motivate four complementary regimes for execution-time
+refinement in TipDex-VTLA. Right: Our robotic platform and four dexterous manipulation tasks with TipDex-VTLA.
+Abstract
+Changes in illumination can induce action drift in dexter-
+ous manipulation even when the physical state remains un-
+changed. Although existing vision–tactile–language–action
+(VTLA) policies incorporate tactile feedback, when and how
+touch refines actions under changing visual conditions re-
+mains challenging. We introduce TipDex-VTLA, a VTLA
+#Equal contribution.
+*Corresponding author.
+Xudi Ge’s work was done during an internship at Wuhan Huaweike
+Intelligent Technology Co., Ltd.
+policy that combines estimated visual action reliability and
+tactile forecast verification to regulate execution-time re-
+finement. Specifically, Visual Action Sensitivity Estimation
+(VASE) learns visual reliability from a frozen reference pol-
+icy’s action sensitivity to illumination perturbations. Tactile
+Anticipation and Correction during Execution (TACE) com-
+pares predicted and measured touch at matched times and
+combines the resulting discrepancy with visual reliability
+to gate bounded feature corrections for unexecuted actions.
+This effectively helps to refine actions under challenging un-
+seen visual conditions. We evaluate TipDex-VTLA on four
+1
+arXiv:2611.25683v1  [cs.RO]  19 Nov 2026
+
+
+real-world dexterous manipulation tasks and the UniVTAC
+simulation benchmark. TipDex-VTLA trained on data col-
+lected under normal visual conditions, achieves average
+full-task success rates of 87.5% (resp. 73.8%) under normal
+(resp. challenging unseen) lighting in real-world tasks, sig-
+nificantly outperforming some state-of-the-art methods. We
+will release the collected data and source code.
+1. Introduction
+Vision–Language–Action (VLA) policies generate manipu-
+lation actions from visual observations and language instruc-
+tions [1, 2, 9, 17]. In contact-rich dexterous manipulation,
+however, the hand often occludes the interaction region,
+making the onset and evolution of local contact difficult to
+observe. Besides, visual guidance is also sensitive to illu-
+mination: lighting changes can alter policy predictions even
+when the physical scene remains unchanged [5, 7, 10, 36].
+Their impact depends on action-relevant cues: a dim image
+may preserve grasp geometry, whereas a localized reflection
+may obscure the intended contact region.
+Vision–Tactile–Language–Action (VTLA) policies com-
+plement visual observations with tactile feedback during
+action generation and execution [19, 28, 45]. For example,
+fingertip pressure is expected to increase when grasping an
+egg. An increase beyond the expected level may indicate
+excessive compression. Interpreting such changes requires
+a reference for how contact is expected to evolve under the
+planned actions. Tactile forecasting provides this reference,
+allowing incoming measurements to be compared with ear-
+lier predictions during execution [26]. Such verification
+assesses whether contact follows the current plan, but leaves
+open whether that plan remains reliable under the current
+visual conditions.
+This motivates jointly considering visual reliability and
+tactile forecast agreement (Fig. 1). A plan perturbed by il-
+lumination may still produce the tactile responses predicted
+for it, while unexpected contact can arise even under reliable
+vision. These complementary signals define four refinement
+regimes. When touch agrees with the forecast, low visual
+reliability motivates visual compensation, whereas high re-
+liability favors nominal preservation. When touch deviates
+from the forecast, low visual reliability motivates stronger
+joint correction, while high reliability can still favor con-
+tact correction. Together, these regimes motivate us using
+visual reliability for refinement, with tactile forecast dis-
+crepancies further increasing correction strength as contact
+deviates from expectation. The question is how to learn
+visual reliability and jointly refine actions.
+In this paper, we present TipDex-VTLA, a predictive and
+reactive VTLA framework that uses estimated visual relia-
+bility and tactile forecast verification to gate tactile feature
+corrections. Specifically, we introduce Visual Action Sensi-
+tivity Estimation (VASE), which learns a proxy for visual
+reliability from the action discrepancies of a frozen VTLA
+policy across paired real normal and synthesized perturbed
+observations that differ only in illumination. For tactile-
+guided refinement, we develop Tactile Anticipation and
+Correction during Execution (TACE), which compares
+incoming tactile measurements with temporally aligned fore-
+casts consistent with the intervening executed actions. The
+estimated visual reliability and verified tactile discrepancies
+jointly control the strength of bounded feature corrections
+computed from current tactile feedback and execution con-
+text. By reusing cached flow states, the fast branch refines
+replaceable, unexecuted actions while preserving their origi-
+nal execution times.
+We evaluate TipDex-VTLA on four real-world dexter-
+ous manipulation tasks and the UniVTAC simulation bench-
+mark [4]. Across the four real-world tasks, our TipDex-
+VTLA achieves average full-task success rates of 87.5%
+under standard lighting and 73.8% under challenging un-
+seen lighting. These results demonstrate the effectiveness
+of reliability-aware tactile refinement under illumination
+changes. The main contributions are as follows:
+• We develop TipDex-VTLA, a predictive and reactive
+VTLA framework that effectively refines actions under
+practical yet challenging unseen illumination variations.
+• We introduce the concept of action-grounded visual reli-
+ability via VASE and jointly regulate tactile refinement
+using verified tactile forecast discrepancies via TACE.
+• Experiments on UniVTAC benchmark [4] and four real-
+world dexterous manipulation tasks demonstrate TipDex-
+VTLA’s effectiveness and significantly improved perfor-
+mance under unseen illumination.
+2. Related Work
+2.1. Vision-Language-Action Models
+Vision–language–action (VLA) models map visual observa-
+tions and language instructions to robot actions. RT-1 [3]
+scales multi-task learning from diverse robot demonstra-
+tions, while RT-2 [48] transfers pretrained vision–language
+knowledge to control through joint fine-tuning on robotic and
+web-scale vision–language data. Open X-Embodiment [29]
+aggregates demonstrations across robots, tasks, and envi-
+ronments to support cross-embodiment learning. Octo [9]
+develops a transformer-based diffusion policy that supports
+adaptation to new observation and action spaces. Open-
+VLA [17] adapts a pretrained vision–language model for
+robotic control and enables parameter-efficient fine-tuning
+for new robot setups.
+For continuous action generation, π0 [2] combines a pre-
+trained vision–language backbone with a flow-matching ac-
+tion expert to generate action chunks. Building on this archi-
+tecture, π0.5 [1] improves open-world generalization through
+2
+
+
+heterogeneous co-training with robot demonstrations, web
+data, and high-level semantic prediction. These advances
+provide a foundation for incorporating tactile observations,
+which complement visual scene understanding with local
+contact cues.
+2.2. Vision-Tactile-Language-Action Models
+Vision–tactile–language–action (VTLA) models extend gen-
+eralist robot policies with physical feedback to improve
+contact-rich manipulation. Prior works [11, 16] explore
+tactile representations and multimodal fusion across sens-
+ing modalities. AnyTouch [6] learns unified static-dynamic
+representations across visuo-tactile sensors. ForceVLA [37]
+and ForceVLA2 [21] incorporate force-aware feedback into
+robot action generation, while DECO [20] introduces a
+lightweight tactile adapter for pretrained policies. FTP-
+1 [38] learns transferable tactile representations across sen-
+sors and embodiments. Beyond direct fusion, AT-VLA [19]
+combines adaptive tactile injection with dual-stream feed-
+back control, while TacVLA [42] activates tactile tokens ac-
+cording to contact states. T-Rex [28] enables high-frequency
+tactile refinement through cached flow states and variable-
+rate action generation.
+Recent studies [31, 39, 40] extend tactile feedback from
+current observations to anticipated physical interactions. N0-
+VTLA [27] predicts latent tactile tokens to condition ac-
+tion generation, while ForeTac-VLA [30] investigates multi-
+step tactile forecasting. UniTacVLA [45] jointly models
+tactile understanding and future contact prediction. These
+approaches [32, 34] demonstrate that predicted tactile re-
+sponses can provide useful information before physical con-
+tact is fully observed.
+Recent methods [35] combine tactile prediction with
+execution-time action refinement. TouchWorld [47] cou-
+ples tactile prediction with high-frequency residual feed-
+back, while ReTouch [44] updates tactile predictions and
+actions using incoming measurements. TacPAC [26] com-
+pares observed touch with cached contact predictions to
+correct unexecuted actions, while ResTacVLA [43] adap-
+tively gates tactile residuals relative to visual predictions.
+However, these methods do not explicitly address reliability
+under unseen illumination changes.
+2.3. Visual Robustness in Robotic Manipulation
+Visual distribution shifts [24, 25] remain a major chal-
+lenge for deploying robotic policies beyond their train-
+ing environments. General robustness studies, including
+ImageNet-C [13], AugMix [14], and DeepAugment [15],
+investigate model sensitivity to visual corruptions and
+augmentation-based generalization. In robotic manipulation,
+LIBERO-Plus [5] systematically evaluates VLA policies un-
+der changes in illumination, camera viewpoints, and other
+environmental factors.
+Recent approaches improve VLA robustness through dif-
+ferent strategies. RobustVLA [10] introduces robustness-
+aware post-training, while StableVLA [7] uses an informa-
+tion bottleneck adapter to suppress irrelevant visual noise.
+ChromaGuard [33] studies illumination robustness while
+preserving task-relevant color information. E-VLA [41]
+incorporates event-based sensing under degraded visual con-
+ditions. Beyond visual feature robustness, Evidence-Gated
+Regularization [36] uses task-relevance signals to regulate
+sensor dependence, while BAS-VLA [23] investigates action
+calibration under task-preserving appearance changes and
+task-semantic variations.
+Building on these studies, we combine action-aware vi-
+sual reliability assessment with tactile feedback as comple-
+mentary physical evidence. This integration supports robust
+manipulation under unseen illumination variations.
+3. Method
+TipDex-VTLA integrates a multimodal base policy with
+reliability-aware tactile refinement during execution (Fig. 2).
+At observation time t, the base policy πθ receives multi-view
+RGB images It, a language instruction ℓ, robot propriocep-
+tive state st, and recent tactile history T≤t, where Tt denotes
+a tactile frame. The VLM encodes the image–language–state
+prefix into context ct, and the Tactile Encoder extracts ob-
+served tactile features Ft. Together, these representations
+condition the Action Expert to generate a nominal chunk
+At of H actions (Sec. 3.1). VASE estimates action-relevant
+visual reliability qv from ct (Sec. 3.2). During execution,
+TACE verifies incoming tactile measurements against tem-
+porally aligned forecasts and combines the resulting discrep-
+ancies with qv to gate bounded feature corrections (Sec. 3.3).
+The fast branch reuses cached flow states to incorporate these
+corrections into replaceable, unexecuted actions, yielding
+an updated chunk eAt while preserving the original action
+positions and execution times. Training proceeds in two
+stages, as illustrated in Fig. 3 and detailed in Sec. 3.4.
+3.1. Model Architecture
+The backbone of πθ comprises a pretrained VLM, a Tactile
+Encoder, and a flow-matching Action Expert [22] (Fig. 2(a)).
+The VLM processes the prefix formed by (It, ℓ, st) to pro-
+duce ct. The Tactile Encoder aggregates recent tactile obser-
+vations into Ft, preserving five fingertip regions and three
+palm sensing regions. The observed tactile features Ft are
+concatenated with ct to condition the Action Expert. VASE
+branches from ct before this concatenation: a lightweight
+VASE Head pools the prefix representation and outputs qv,
+which is cached for fast refinement.
+The Action Expert adopts a slow–fast flow generation
+scheme based on T-Rex [28]. We use τ for flow time, with
+noise at τ = 0 and actions at τ = 1. The slow update caches
+ct and an intermediate flow state Xτs, where 0 < τs < 1. At
+3
+
+
+Figure 2. Overview of TipDex-VTLA. (a) The slow–fast architecture integrates a VLM, Tactile Encoder, and Action Expert with visual
+reliability estimation (VASE) and tactile forecasting. (b) TACE combines visual reliability and tactile forecast discrepancies to gate bounded
+corrections to Action Expert features.
+a subsequent fast update t′ > t, generation resumes from τs
+to 1, reusing the cached prefix and incorporating current tac-
+tile feedback. Within this execution scheme, TACE applies
+reliability-aware feature corrections to refine replaceable, un-
+executed actions. The original action positions and execution
+times remain fixed throughout this process. Implementation
+details of the slow–fast execution scheme are provided in the
+supplementary material.
+An auxiliary Tactile Forecaster P shares the Tactile En-
+coder with the Action Expert. Its inputs are ct and the current
+execution context ξt′, which includes the robot state st′, tac-
+tile features Ft′, and the current action sequence with its
+execution times. After each action update at t′, P predicts
+the next H normalized tactile frames, denoted by bTt′ and
+cached for later verification against time-aligned measure-
+ments, yielding a discrepancy signal for TACE.
+TACE consists of a shared Refinement Network, a Resid-
+ual Head, and a Gate Head.
+It receives current tactile
+and execution information, Action Expert features, qv, and
+the verified tactile discrepancy. At each remaining flow
+step τ, TACE modifies the Action Expert feature tensor
+Uτ ∈RH×dU . The corrected features pass through the re-
+maining Action Expert layers to generate updated actions.
+Only replaceable, unexecuted commands are submitted as
+replacements in eAt.
+3.2. Visual Action Sensitivity Estimation (VASE)
+VASE estimates visual action reliability using the sensitiv-
+ity of a fixed reference policy to illumination changes. For
+each demonstration observation at t, we retain the original
+multi-view image Ia and construct its paired variant Ib by
+applying illumination augmentation to the same observa-
+tion. The paired-image sampling distribution assigns equal
+probability (20% each) to five conditions: low illumination,
+strong illumination, changed illumination direction, uneven
+illumination, and unchanged illumination. The pairing pre-
+serves the viewpoint and physical state. We use lower-case
+action symbols for normalized chunks. The frozen base pol-
+icy obtained in Stage 1 generates baa and bab using identical
+language, robot state, tactile history, sampling noise, and
+sampling settings. Their difference therefore measures the
+reference policy’s response to the image perturbation under
+fixed non-image conditions. As illustrated in Fig. 3(b), the
+same paired predictions supply the supervision targets for
+both VASE and TACE.
+We convert the paired action discrepancy into a supervi-
+sion target for Ib:
+q′
+v = exp
+
+−MSE (baa, bab)
+λ
+
+.
+(1)
+Here, MSE denotes mean squared error between normalized
+action chunks, and λ > 0 sets the decay scale. The target
+q′
+v ∈(0, 1] equals one when the paired action predictions
+4
+
+
+coincide and decreases as their discrepancy grows. The
+prime denotes a constructed supervision target. It provides a
+proxy for visual reliability based on the reference policy’s
+action consistency under illumination changes and does not
+represent action correctness or task-success probability.
+The VASE Head hω maps the prefix representation to a
+visual action reliability score:
+qv(It, ℓ, st) = σ (hω (Pool(ct))) ,
+(2)
+where σ is the sigmoid function and ω denotes the head
+parameters. The score qv ∈(0, 1) estimates the frozen refer-
+ence policy’s action consistency under illumination changes,
+with larger values indicating greater predicted consistency.
+It serves as a proxy for visual reliability. At deployment, the
+head uses the current prefix without requiring a paired refer-
+ence image and caches qv at each slow update. Its training
+objective is given in Sec. 3.4.
+3.3. Tactile Anticipation and Correction during Ex-
+ecution (TACE)
+As illustrated in Fig. 2(b), TACE uses cached tactile predic-
+tions for verification. The discrepancy and visual reliability
+gate feature residuals computed from Action Expert features,
+measured touch, and execution context. The predictor path
+in Fig. 2(a) summarizes this delayed verification.
+Tactile Forecasting and Verification.
+At fast update t′,
+bTt′ denotes the latest eligible cached prediction targeting t′,
+issued before t′ under commands consistent with the inter-
+vening executed actions. We define et′ as the mean absolute
+error between bTt′ and Tt′ after identical normalization. If
+no eligible forecast exists, we set et′ = 0 to fall back to the
+visual score; this does not indicate forecast accuracy. After
+updating the action sequence, P uses the updated execution
+context to issue a new future tactile sequence:
+bTt′ = P(ct, ξt′).
+(3)
+The sequence is cached for later verification. Timestamp
+alignment, command-consistency checks, and forecast inval-
+idation are detailed in the supplementary material.
+Gated Feature Correction.
+We combine the cached visual
+score and tactile discrepancy into an execution score qt′ =
+G(qv, et′) ∈(0, 1). The mapping G is non-decreasing in qv
+and non-increasing in et′, with G(qv, 0) = qv. Thus, visual
+reliability provides the baseline, while tactile verification can
+lower the score. All action positions at a fast update share
+this score.
+For each replaceable, unexecuted action position h,
+Rψ(Uτ,h, ξt′) and Sψ(Uτ,h, ξt′) denote residual and gate-
+logit predictions from the shared Refinement Network and
+their respective heads. The Refinement Network uses only
+Figure 3. Two-stage training of TipDex-VTLA. (a) Demonstra-
+tions jointly train the VTLA backbone and tactile forecaster. (b)
+Frozen-policy predictions under paired illumination conditions su-
+pervise VASE reliability estimation and TACE action refinement.
+the state and tactile components of ξt′; action history and the
+current command schedule are used for tactile forecasting
+and verification. The correction is:
+gτ,h = σ (Sψ(Uτ,h, ξt′) −κ logit(qt′)) ,
+eUτ,h = Uτ,h + gτ,hb tanh (Rψ(Uτ,h, ξt′)) .
+(4)
+Here, ψ denotes the refinement parameters, b > 0 bounds
+each residual component, and κ > 0 controls the execution
+score’s influence on the scalar gate gτ,h. For fixed network
+inputs, lower visual reliability or a larger verified discrepancy
+favors a larger gate. A larger gate permits stronger correction,
+while the actual feature change also depends on the predicted
+residual. Other feature positions remain unchanged.
+The remaining Action Expert layers convert eUτ into re-
+fined actions. Only replaceable, unexecuted commands are
+updated, preserving all other commands and the original
+execution times. Paired-action supervision for the resulting
+action change is introduced in Sec. 3.4.
+3.4. Two-Stage Training
+Stage 1 establishes a tactile-conditioned base policy and an
+auxiliary Tactile Forecaster. Stage 2 keeps these modules
+fixed and trains VASE and TACE from paired illumination
+observations. The same frozen reference predictions supply
+the reliability targets and the action-correction targets.
+Stage 1: VTLA Backbone and Tactile Forecasting.
+As
+shown in Fig. 3(a), we jointly train the VTLA backbone and
+tactile forecaster using demonstrations with unaugmented
+images. Expert actions supervise action generation, while
+recorded future tactile measurements supervise forecasting.
+For a normalized expert action chunk a⋆, we sample ϵ ∼
+N(0, I) and τ ∼U(0, 1) and define the interpolated action
+state:
+Xτ = (1 −τ)ϵ + τa⋆.
+(5)
+5
+
+
+Figure 4. Real-world execution of TipDex-VTLA. Temporally ordered keyframes illustrate four dexterous manipulation tasks: (a) egg
+transfer, (b) grape pinching, (c) tissue extraction, and (d) mung bean pouring.
+The joint objective is:
+L1 = E
+
+∥vθ(Xτ, τ | ct, Ft) −(a⋆−ϵ)∥2
+2 + λT LT
+
+.
+(6)
+The expectation is over demonstrations, noise, and flow time;
+the squared norm sums over action entries. Here, LT is
+the Huber loss between predicted and measured normalized
+tactile sequences, averaged over future frames and tactile
+values, and λT > 0 balances the two losses. Forecast targets
+are paired with their recorded command schedules. All
+Stage 1 parameters are then frozen.
+Stage 2: Reliability-Aware Refinement.
+As shown in
+Fig. 3(b), we optimize the VASE Head ω and TACE modules
+ψ while keeping all Stage 1 parameters fixed. VASE uses
+the paired illumination observations described in Sec. 3.2;
+TACE additionally uses their recorded tactile and execution
+histories. The target q
+′
+v from Eq. (1) supervises the VASE
+score for Ib. The same frozen reference predictions provide
+TACE’s signed action-correction target:
+∆a = baa −bab.
+(7)
+Using Ib, we cache Xτs from the same nominal trajectory
+that produces bab. TACE resumes generation from τs to 1
+with recorded feedback, yielding the normalized refined ac-
+tion chunk eab. Forecast verification and execution scoring
+follow Sec. 3.3. All action outputs use the same normaliza-
+tion and remain aligned to their original execution times.
+Let M select replaceable, unexecuted action coordinates.
+The two losses and their joint objective are:
+LQ = E [BCE (qv(Ib, ℓ, st), q′
+v)] ,
+LR = E [MSEM (eab −bab, ∆a)] ,
+L2 = λQLQ + λRLR.
+(8)
+Expectations are over training samples. BCE denotes
+binary cross-entropy, and MSEM averages over action coor-
+dinates selected by M. Samples with no selected coordinates
+are excluded from LR. The paired target ∆a is fixed, and
+λQ, λR > 0 balance the two losses.
+During refinement training, the gate uses sg(qt′), where
+sg stops gradients. Thus, LQ updates only ω, while LR
+supervises the action change induced by Eq. (4) and back-
+propagates through the remaining generation steps to update
+only ψ, keeping the backbone frozen.
+4. Experiments
+We evaluate TipDex-VTLA on four real-world dexterous
+manipulation tasks and in UniVTAC simulation [4]. We
+assess robustness to unseen lighting and analyze the cues
+that govern execution-time tactile refinement.
+4.1. Experimental Setup
+Platforms and Data.
+Our platform consists of two Real-
+Man RM75 7-DoF arms equipped with Inspire RH56F2-
+E2-T1 dexterous hands. Each hand has eight piezoresistive
+tactile arrays comprising 364 taxels, sampled at 30 Hz. We
+capture multi-view RGB observations using one overhead
+RealSense D405 and two wrist-mounted D435i cameras.
+6
+
+
+Task Success Rate (%)
+Avg.
+Method
+Lift
+Bottle
+Pull-out
+Key
+Lift
+Can
+Put
+Bottle
+Insert
+Hole
+Insert
+HDMI
+Insert
+Tube
+Grasp
+Classify
+Without Tactile
+ACT (Vision Only) [46]
+42.0
+28.0
+20.0
+28.0
+19.0
+15.0
+45.0
+50.0
+30.9
+π0.5 [1]
+100.0
+35.0
+6.0
+34.0
+25.0
+8.0
+74.0
+49.0
+41.4
+LingBot-VA [18]
+0.0
+58.0
+0.0
+0.0
+42.0
+38.0
+96.0
+17.0
+31.4
+With Tactile
+ACT + UniVTAC [4]
+71.0
+46.0
+29.0
+31.0
+24.0
+28.0
+56.0
+99.0
+48.0
+VITaL [8]
+72.0
+47.0
+8.0
+32.0
+25.0
+6.0
+34.0
+100.0
+40.5
+FTP-1 [38]
+97.0
+48.0
+65.0
+47.0
+64.0
+18.0
+79.0
+100.0
+64.8
+T-Rex [28]
+99.0
+99.0
+75.0
+79.0
+100.0
+8.0
+95.0
+95.0
+81.3
+N0-VTLA [27]
+99.0
+99.0
+88.0
+60.0
+95.0
+25.0
+99.0
+100.0
+83.1
+TipDex-VTLA
+100.0
+97.0
+87.0
+80.0
+89.0
+30.0
+96.0
+100.0
+84.9
+Table 1. Full-task success rates (%) on the eight UniVTAC manipulation tasks, grouped by tactile input availability. Published baselines
+retain their originally reported configurations and evaluation results. Bold denotes column-wise best results.
+Method
+Egg
+Grape
+Tissue
+Beans
+Avg.
+Standard lighting (N)
+ACT [46]
+0.0
+30.0
+20.0
+25.0
+18.8
+π0.5 [1]
+20.0
+80.0
+40.0
+80.0
+55.0
+T-Rex [28]
+65.0
+80.0
+60.0
+80.0
+71.3
+N0-VTLA [27]
+60.0
+85.0
+70.0
+60.0
+68.8
+TipDex-VTLA
+90.0
+95.0
+75.0
+90.0
+87.5
+Unseen lighting (U)
+ACT [46]
+0.0
+0.0
+0.0
+0.0
+0.0
+π0.5 [1]
+20.0
+30.0
+25.0
+20.0
+23.8
+T-Rex [28]
+20.0
+30.0
+30.0
+10.0
+22.5
+N0-VTLA [27]
+30.0
+20.0
+35.0
+40.0
+31.3
+TipDex-VTLA
+70.0
+90.0
+60.0
+75.0
+73.8
+Table 2. Real-world full-task success rates (%) across four dex-
+terous manipulation tasks under standard lighting (N) and unseen
+lighting conditions (U).
+We use 300 demonstration trajectories for training: 200
+to train the base policy and tactile forecaster in Stage 1,
+and 100 additional trajectories to train VASE and TACE
+in Stage 2.
+Each Stage 2 trajectory is paired with its
+illumination-perturbed counterpart. Detailed data construc-
+tion procedures and illumination perturbation settings are
+provided in the supplementary material.
+Training and Implementation.
+In Stage 1, we jointly
+train the VTLA backbone, tactile encoder, and tactile fore-
+caster for 20,000 optimization steps. In Stage 2, we freeze
+these modules and optimize only VASE and TACE for
+10,000 steps. Both stages use eight NVIDIA A100 GPUs
+and the AdamW optimizer, with a global batch size of 128
+and a peak learning rate of 5 × 10−5. We use ten uniform
+flow integration steps. Fast tactile refinement is applied dur-
+ing the final four steps, from τs = 0.6 to τ = 1. We bound
+each feature residual component by b = 0.1. All model
+parameters remain fixed during deployment.
+Evaluation Protocol.
+For real-world evaluation, we adapt
+vision–tactile baselines to our piezoresistive tactile sensors
+by integrating our tactile encoder. For each method and task,
+we run 20 trials under standard indoor lighting (N) and 20 un-
+der unseen lighting (U). The 20 unseen configurations span
+ten combinations of asymmetric lighting and color tempera-
+ture, five low-light settings, and five bright-light settings. We
+match task layouts and reset conditions and use automatic
+camera exposure. Further details of the experimental settings
+and evaluation procedures are provided in the supplementary
+material. We report full-task success rates (%) across tasks.
+For simulation, we integrate the optical tactile encoder re-
+leased with UniVTAC into our VTLA backbone and evaluate
+under standard simulated lighting. We use 100 test rollouts
+per policy per task.
+Baselines.
+For real-world evaluation, we compare TipDex-
+VTLA with vision-only ACT [46] and π0.5 [1], as well as
+tactile-enabled T-Rex [28] and N0-VTLA [27]. For a fair
+comparison, all methods are trained on the complete dataset
+described above. For simulation, we compare with these
+four methods on all eight UniVTAC tasks [4]. We addi-
+tionally include published results for vision-only LingBot-
+VA [18] and tactile-enabled VITaL [8], FTP-1 [38], and ACT
+equipped with the UniVTAC tactile encoder [4], retaining
+their reported configurations. The two ACT variants provide
+references with and without tactile conditioning within the
+same policy framework.
+4.2. Real-World Results
+We evaluate four real-world tasks (Egg Transfer, Grape
+Pinching, Tissue Extraction, and Mung Bean Pouring), in-
+volving fragile, soft, deformable, and granular objects, re-
+spectively. Fig. 4 shows representative executions under
+standard lighting. TipDex-VTLA achieves the highest suc-
+cess rate on all four tasks under both lighting conditions,
+averaging 87.5% under standard lighting and 73.8% under
+7
+
+
+Figure 5. Visual reliability and trajectory prediction under illumination changes. Visual reliability qv and RMSE between predicted and
+ground-truth (GT) trajectories under (a) low light and (b) overexposure, comparing TipDex-VTLA with variants without forecast verification
+or feature correction. EV (exposure value) indicates exposure level; values represent EV offsets from the reference (0 EV).
+Configuration
+Egg
+Grape Tissue Beans
+Avg.
+Standard lighting (N)
+Full TipDex-VTLA
+90.0
+95.0
+75.0
+90.0
+87.5
+w/o VASE
+85.0
+95.0
+70.0
+90.0
+85.0
+w/o Tactile Verification
+80.0
+85.0
+60.0
+90.0
+78.8
+w/o Gate Head
+80.0
+85.0
+65.0
+85.0
+78.8
+Unseen lighting (U)
+Full TipDex-VTLA
+70.0
+90.0
+60.0
+75.0
+73.8
+w/o VASE
+45.0
+40.0
+55.0
+30.0
+42.5
+w/o Tactile Verification
+65.0
+80.0
+45.0
+60.0
+62.5
+w/o Gate Head
+30.0
+45.0
+40.0
+45.0
+40.0
+Table 3. Component ablation under standard (N) and unseen (U)
+real-world lighting. Values represent full-task success rates (%).
+unseen lighting (Table 2). Under unseen lighting, it exceeds
+N0-VTLA by 42.5 percentage points.
+4.3. Simulation Results
+We evaluate TipDex-VTLA on all eight UniVTAC tasks with
+both VASE and TACE enabled. Optical tactile images are
+encoded by a shared ResNet-18 [12], initialized from the
+released UniVTAC tactile encoder [4]. The tactile forecaster
+predicts future tactile images for TACE verification.
+As shown in Tab. 1, the full adapted model achieves a
+mean success rate of 84.9%. TACE compares forecasts with
+time-aligned measurements and combines discrepancies with
+VASE reliability to gate Action Expert feature corrections
+for replaceable, unexecuted actions.
+4.4. Ablation Studies
+Component Ablation.
+Tab. 3 compares components un-
+der both lighting conditions. Under standard lighting, the
+full model achieves 87.5% average success, compared with
+85.0% without VASE and 78.8% without either tactile verifi-
+cation or the Gate Head. Under unseen lighting, removing
+VASE, tactile verification, or the Gate Head yields 42.5%,
+62.5%, and 40.0%, respectively, compared with 73.8% for
+the full model. The larger performance drop without VASE
+under unseen lighting supports its role in illumination robust-
+ness, while tactile verification and gating benefit standard-
+light performance. Combining both reliability cues yields an
+11.3-point gain over the variant without tactile verification
+under unseen lighting.
+Action refinement under illumination changes.
+Fig. 5
+shows decreasing qv and larger refinement gains as illumina-
+tion perturbations intensify. At −3 and +3 EV, the full model
+reduces trajectory RMSE by 24.2% and 13.0% relative to
+disabling feature correction; retaining forecast verification
+further reduces error. These results support the complemen-
+tary cues motivating the four regimes in Fig. 1. With fore-
+cast agreement, reliable vision favors nominal preservation,
+while low visual reliability motivates visual compensation.
+Forecast disagreement instead motivates contact correction
+with reliable vision and joint correction with low visual
+reliability.
+5. Conclusion
+We proposed TipDex-VTLA, a policy that addresses action
+drift induced by changes in the visual environment during
+dexterous manipulation. The framework comprises two
+modules: VASE and TACE. VASE estimates visual action
+reliability from policy sensitivity to illumination changes.
+TACE combines this estimate with tactile prediction discrep-
+ancies to regulate execution-time refinement of unexecuted
+actions. Evaluation on four real-world tasks and the UniV-
+TAC benchmark supports the effectiveness of this approach,
+with improved real-world full-task success under unseen
+lighting. The current reliability estimate remains a policy-
+dependent proxy learned from illumination perturbations.
+Future work will explore broader visual disturbances and
+task-level feedback to improve reliability estimation and ex-
+tend tactile-guided refinement to more diverse manipulation
+scenarios.
+8
+
+
+References
+[1] Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia,
+Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea
+Finn, Niccolo Fusai, Manuel Y. Galliker, et al. π0.5: A vision-
+language-action model with open-world generalization. In
+Proc. Conf. Robot Learn., pages 17–40, 2025. 2, 7
+[2] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy
+Groom, Karol Hausman, Brian Ichter, et al. π0: A vision-
+language-action flow model for general robot control. In Proc.
+Robot.: Sci. Syst., 2025. 2
+[3] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Joseph Dabis, Chelsea Finn, Keerthana Gopalakr-
+ishnan, Karol Hausman, Alexander Herzog, Jasmine Hsu,
+et al. RT-1: Robotics transformer for real-world control at
+scale. In Proc. Robot.: Sci. Syst., 2023. 2
+[4] Baijun Chen, Weijie Wan, Tianxing Chen, Xianda Guo, Con-
+gsheng Xu, Yuanyang Qi, Haojie Zhang, Longyan Wu, Tian-
+ling Xu, Zixuan Li, et al. UniVTAC: A unified simulation
+platform for visuo-tactile manipulation data generation, learn-
+ing, and benchmarking. In Proc. Conf. Robot Learn., 2026.
+2, 6, 7, 8
+[5] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai,
+Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye Fei,
+et al. LIBERO-Plus: A progressive robustness benchmark
+for visual-language-action models. In Proc. IEEE/CVF Conf.
+Comput. Vis. Pattern Recog., pages 38574–38583, 2026. 2, 3
+[6] Ruoxuan Feng, Jiangyu Hu, Wenke Xia, Tianci Gao, Ao
+Shen, Yuhao Sun, Bin Fang, and Di Hu. AnyTouch: Learning
+unified static-dynamic representation across multiple visuo-
+tactile sensors. In Int. Conf. Learn. Represent., 2025. 3
+[7] Yiyang Fu, Chubin Zhang, Shukai Gong, Yufan Deng, Kai-
+wei Sun, Qiyang Min, Qibin Hou, Yansong Tang, Jianan
+Wang, and Daquan Zhou. StableVLA: Towards robust vision-
+language-action models without extra data. In Proc. Int. Conf.
+Mach. Learn., pages 32264–32283, 2026. 2, 3
+[8] Abraham George, Selam Gano, Pranav Katragadda, and Amir
+Barati Farimani. Vital pretraining: Visuo-tactile pretraining
+for tactile and non-tactile manipulation policies. In 2025
+IEEE International Conference on Robotics and Automation
+(ICRA), 2025. 7
+[9] Dibya Ghosh, Homer Rich Walke, Karl Pertsch, Kevin Black,
+Oier Mees, Sudeep Dasari, Joey Hejna, Tobias Kreiman,
+Charles Xu, Jianlan Luo, et al. Octo: An open-source gener-
+alist robot policy. In Proc. Robot.: Sci. Syst., 2024. 2
+[10] Jianing Guo, Zhenhong Wu, Chang Tu, Yiyao Ma, Xiangqi
+Kong, Zhiqian Liu, Jiaming Ji, Shuning Zhang, Yuanpei Chen,
+Kai Chen, et al. On robustness of vision-language-action
+model against multi-modal perturbations. In Int. Conf. Learn.
+Represent., 2026. 2, 3
+[11] Irmak Guzey, Yinlong Dai, Ben Evans, Soumith Chintala, and
+Lerrel Pinto. See to touch: Learning tactile dexterity through
+visual incentives. In Proc. IEEE Int. Conf. Robot. Autom.,
+pages 13825–13832, 2024. 3
+[12] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition.
+In Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 770–
+778, 2016. 8
+[13] Dan Hendrycks and Thomas Dietterich. Benchmarking neural
+network robustness to common corruptions and perturbations.
+In Int. Conf. Learn. Represent., 2019. 3
+[14] Dan Hendrycks, Norman Mu, Ekin D. Cubuk, Barret Zoph,
+Justin Gilmer, and Balaji Lakshminarayanan. AugMix: A
+simple data processing method to improve robustness and
+uncertainty. In Int. Conf. Learn. Represent., 2020. 3
+[15] Dan Hendrycks, Steven Basart, Norman Mu, Saurav Kada-
+vath, Frank Wang, Evan Dorundo, Rahul Desai, Tyler Zhu,
+Samyak Parajuli, Mike Guo, et al. The many faces of robust-
+ness: A critical analysis of out-of-distribution generalization.
+In Proc. IEEE/CVF Int. Conf. Comput. Vis., pages 8340–8349,
+2021. 3
+[16] Carolina Higuera, Akash Sharma, Chaithanya Krishna Bod-
+duluri, Taosha Fan, Patrick Lancaster, Mrinal Kalakrishnan,
+Michael Kaess, Byron Boots, Mike Lambeta, Tingfan Wu,
+et al. Sparsh: Self-supervised touch representations for vision-
+based tactile sensing. In Proc. Conf. Robot Learn., pages
+885–915, 2025. 3
+[17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P
+Foster, Pannag R Sanketi, Quan Vuong, et al. OpenVLA: An
+open-source vision-language-action model. In Proc. Conf.
+Robot Learn., pages 2679–2713, 2025. 2
+[18] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin Wang,
+Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing Zhu, Yujun
+Shen, and Yinghao Xu. Causal world modeling for robot
+control. arXiv preprint arXiv:2601.21998, 2026. 7
+[19] Xiaoqi Li, Muhe Cai, Jiadong Xu, Juan Zhu, Hongwei Fan,
+Yan Shen, Guangrui Ren, and Hao Dong. AT-VLA: Adaptive
+tactile injection for enhanced feedback reaction in vision-
+language-action models. In Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 28764–28774, 2026. 2, 3
+[20] Xukun Li, Yu Sun, Lei Zhang, Bo-Sheng Huang, Yibo Peng,
+Yuan Meng, Haojun Jiang, Shaoxuan Xie, Guocai Yao, Alois
+Knoll, et al. DECO: Decoupled multimodal diffusion trans-
+former for bimanual dexterous manipulation with a plugin
+tactile adapter. In Proc. Int. Conf. Mach. Learn., pages 70113–
+70133, 2026. 3
+[21] Yang Li, Zhaxizhuoma Zhaxizhuoma, Hongru Jiang, Junjie
+Xia, Hongquan Zhang, Jinda Du, Yunsong Zhou, Jia Zeng,
+Ce Hao, Jieji Ren, et al. ForceVLA2: Unleashing hybrid
+force-position control with force awareness for contact-rich
+manipulation. In Proc. IEEE/CVF Conf. Comput. Vis. Pattern
+Recog., pages 8911–8920, 2026. 3
+[22] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow matching for generative
+modeling. In Int. Conf. Learn. Represent., 2023. 3
+[23] Shuaijun Liu, Feiyang You, Chengyu Wu, Shuyang Hao,
+Chenglong Zhang, Jingyao Cai, Xingwei Chen, Li Sun, and
+Ningxin Su. Beyond appearance shifts: Task-semantic action
+calibration for VLA models. In Adv. Neural Inf. Process.
+Syst., 2026. 3
+[24] Yepeng Liu, Wenpeng Lai, Zhou Zhao, Yuxuan Xiong, Jinchi
+Zhu, Jun Cheng, and Yongchao Xu. LiftFeat: 3D geometry-
+9
+
+
+aware local feature matching. In Proc. IEEE Int. Conf. Robot.
+Autom., pages 11714–11720, 2025. 3
+[25] Yepeng Liu, Hao Li, Liwen Yang, Fangzhen Li, Xudi Ge, Yu-
+liang Gu, Kuang Gao, Bing Wang, Guang Chen, Hangjun Ye,
+et al. From pairs to sequences: Track-aware policy gradients
+for keypoint detection. In Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 21453–21463, 2026. 3
+[26] Zipei Ma, Xiaofei Wei, Junzhe Jiang, Shunlin Lu, and Li
+Zhang. TacPAC: Tactile prediction and real-time action cor-
+rection in world-action models for contact-rich manipulation.
+arXiv preprint arXiv:2609.05266, 2026. 2, 3
+[27] NeoteAI Team and Fudan TEAI Team. N0-VTLA: Scaling
+vision-tactile-language-action model with latent tactile tokens.
+arXiv preprint arXiv:2607.23782, 2026. 3, 7
+[28] Dantong Niu, Zhuoyang Liu, Zekai Wang, Boning Shao,
+Zhao-Heng Yin, Anirudh Pai, Yuvan Sharma, Stefano Sar-
+avalle, Ruijie Zheng, Jing Wang, et al. T-Rex: Tactile-reactive
+dexterous manipulation. In Proc. Conf. Robot Learn., 2026.
+2, 3, 7
+[29] Open X-Embodiment Collaboration. Open X-Embodiment:
+Robotic learning datasets and RT-X models. In Proc. IEEE
+Int. Conf. Robot. Autom., pages 6892–6903, 2024. 2
+[30] Zhengyu Tao, Xin Li, and Xin Wang.
+ForeTac-VLA:
+A forecasting-based tactile-vision-language-action model
+for contact-rich robotic manipulation.
+arXiv preprint
+arXiv:2609.20980, 2026. 3
+[31] Shuai Tian, Yupeng Zheng, Yuhang Zheng, Songen Gu,
+Yujie Zang, Yuxing Qin, Weize Li, Haoran Li, Wenchao
+Ding, and Dongbin Zhao. VT-WAM: Visual-tactile world
+action model for contact-rich manipulation. arXiv preprint
+arXiv:2607.02503, 2026. 3
+[32] Enyi Wang, Mingxin Wang, Quan Shi, Hetian Guo, Hongyu
+Wang, Xi Wang, Bin Qian, Yupeng Zheng, Wenxuan Song,
+Houde Liu, et al. TacDyn-WAM: Learning implicit tactile
+dynamics in a heterogeneous visuo-tactile world action model.
+arXiv preprint arXiv:2610.00638, 2026. 3
+[33] Marino Watanabe, Takami Sato, and Kentaro Yoshioka.
+Lights, camera, malfunction: When illumination robustness
+leaves VLA models blind to color. In Proc. Conf. Robot
+Learn., 2026. 3
+[34] Siyu Wu, Linjing You, Junjie Zhu, Yaozu Liu, Huang Kaix-
+iang, Chen Yonghang, Jituo Li, Changhao Zhang, Jian Liu,
+Hengshuo Chu, et al. Tactile-WAM: Touch-aware world ac-
+tion model with tactile asymmetric attention. arXiv preprint
+arXiv:2606.26663, 2026. 3
+[35] Chao Xue, Chaofan Zhang, Wenxuan Ma, Guocai Yao,
+Shaowei Cui, and Shuo Wang. HiTac-WAM: A hierarchical
+tactile world action model for contact-rich robot manipulation.
+arXiv preprint arXiv:2608.19574, 2026. 3
+[36] Yue Yang, Diego Romeres, Chiori Hori, Gedas Bertasius,
+Daniel Szafir, and Siddarth Jain. Sensing which modality mat-
+ters: Evidence-gated regularization for robust VLA policies.
+arXiv preprint arXiv:2609.03142, 2026. 2, 3
+[37] Jiawen Yu, Hairuo Liu, Qiaojun Yu, Jieji Ren, Ce Hao,
+Haitong Ding, Guangyu Huang, Guofan Huang, Yan Song,
+Panpan Cai, et al. ForceVLA: Enhancing VLA models with
+a force-aware MoE for contact-rich manipulation. In Adv.
+Neural Inf. Process. Syst., pages 103609–103639, 2025. 3
+[38] Chengbo Yuan, Zicheng Zhang, Mingjie Zhou, Wendi Chen,
+Yi Wang, Zhuoyang Liu, Dantong Niu, Shuo Wang, Hui
+Zhang, Wenkang Zhang, et al. FTP-1: A generalist foun-
+dation tactile policy across tactile sensors for contact-rich
+manipulation. In Proc. Conf. Robot Learn., 2026. 3, 7
+[39] Haoran Yuan, Zekai Wang, Boning Shao, Haoran Lu, Trevor
+Darrell, Ismini Lourentzou, and Wei Zhan. DexTacWAM: A
+visuo-tactile world-action model for dexterous manipulation.
+arXiv preprint arXiv:2609.24976, 2026. 3
+[40] Haoran Yuan, Weigang Yi, Zhenyu Zhang, Wendi Chen,
+Yuchen Mo, Jiashi Yin, Xinzhuo Li, Yue Luo, Jialin Li, Xi-
+angyu Zeng, et al. VTAM: Efficient visuo-tactile world-action
+models for contact-rich manipulation without tactile pretrain-
+ing. arXiv preprint arXiv:2603.23481, 2026. 3
+[41] Jiajun Zhai, Hao Shi, Shangwei Guo, Kailun Yang, and Kai-
+wei Wang. E-VLA: Event-augmented vision-language-action
+model for dark and blurred scenes. In Proc. Eur. Conf. Com-
+put. Vis., pages 274–292, 2026. 3
+[42] Kaidi Zhang, Heng Zhang, Zhengtong Xu, Zhiyuan Zhang,
+Md Rakibul Islam Prince, Xiang Li, Xiaojing Han, Yuhao
+Zhou, Arash Ajoudani, and Yu She. TacVLA: Contact-aware
+tactile fusion for robust vision-language-action manipulation.
+arXiv preprint arXiv:2603.12665, 2026. 3
+[43] Pengwei Zhang, Bin Xie, Xinpan Meng, Xinyu Guo, Ce Hao,
+Fang Deng, Long Cheng, and Tiancai Wang. Feeling the
+unexpected: ResTacVLA for contact-rich manipulation via
+residual tactile representation. In Proc. IEEE/RSJ Int. Conf.
+Intell. Robots Syst., 2026. 3
+[44] Shiqi Zhang, Xin Zhang, Yedong Shen, Yao Li, Yuxuan Gao,
+Sha Zhang, Yuan Zhang, Kaixue Long, Jiajia Wu, Jia Pan,
+et al. ReTouch: Empowering contact-rich dexterous manipu-
+lation with online-refined tactile prediction. arXiv preprint
+arXiv:2608.01824, 2026. 3
+[45] Xidong Zhang, Yichi Zhang, Jiaxin Shi, Fucai Zhu, Siyu
+Zhu, Michael Yu Wang, Xiaojun Wu, and Weihao Yuan.
+UniTacVLA: Unified tactile understanding and predic-
+tion in vision language action models.
+arXiv preprint
+arXiv:2606.31723, 2026. 2, 3
+[46] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn. Learning fine-grained bimanual manipulation with low-
+cost hardware. In Proc. Robot.: Sci. Syst., 2023. 7
+[47] Jianyi Zhou, Feiyang Hong, Yunhao Li, Yicheng Zhao,
+Yongjue Cen, Zirui Liu, Jiakang Huang, Zirui Chen, Ruiyang
+Zhang, Weizhuo Zhu, et al. TouchWorld: A predictive and
+reactive tactile foundation model for dexterous manipulation.
+arXiv preprint arXiv:2607.07287, 2026. 3
+[48] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted Xiao,
+Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker, Ayzaan
+Wahid, et al. RT-2: Vision-language-action models transfer
+web knowledge to robotic control. In Proc. Conf. Robot
+Learn., pages 2165–2183, 2023. 2
+10

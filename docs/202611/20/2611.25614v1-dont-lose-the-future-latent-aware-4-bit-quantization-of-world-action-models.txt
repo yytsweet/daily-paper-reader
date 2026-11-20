@@ -1,0 +1,1389 @@
+Don’t Lose the Future: Latent-Aware 4-Bit Quantization
+of World Action Models
+Yichen Guo1
+Yanlong Chen1
+Xinyue Zhang1
+Mohan Liu1
+Song Zhang2
+Yawei Li1,∗
+1Nanyang Technological University
+2Nanjing University
+∗Corresponding author
+Abstract
+World action models (WAMs) predict how a scene will
+evolve and condition their actions on this predicted future.
+Deploying them on a robot’s onboard computer calls for 4-
+bit weights, activations and key–value caches (W4A4KV4).
+Existing 4-bit quantizers for WAMs preserve the generated
+action, and estimate sensitivity one denoising step at a time.
+However, they fail to preserve the fidelity of the predicted
+future: once the action pathway is protected, the remain-
+ing action error enters mostly through a degraded future
+that none of them deliberately protects. We propose LAQ,
+a latent-aware quantization framework that preserves the
+predicted future where it is written, stored and read. Specif-
+ically, we introduce a reader metric, which measures future
+error by its effect on the action, and a read count, which
+weights each rounding error by the number of denoising
+steps that read it. Together they give the allocation of preci-
+sion over activations and caches a closed-form solution. We
+further develop gaze-guided refinement, which gives the to-
+kens the action attends to a second 4-bit pass in the denois-
+ing loop and in the cache. All weights stay at 4 bits, with no
+high-precision branch and no per-task recalibration. On the
+LIBERO-Plus benchmark, LAQ reaches 76.4% and 83.3%
+average success on Fast-WAM and Cosmos-Policy, within
+1.2 percentage points of the 16-bit models and all above the
+baselines with 16-bit KV caches. It compresses the model
+by 3.8×, reduces the peak GPU memory of the whole policy
+by 2.3×, and runs 1.66× faster than the 16-bit model. On a
+real AgileX PiPER arm, it reaches 47.0% average success
+over three tasks, against 52.0% for the 16-bit model and
+30.0% higher than QuaRot.
+1. Introduction
+World action models (WAMs) jointly predict how a scene
+will evolve and how to act [18, 19, 35, 36]. Trained to-
+gether with a video generator, they condition their actions
+on a predicted future and inherit the visual priors of large
+future degradation drives action error
+observation
+video
+predicted future action
+action error
+BF16
+video
+action
+(reference)
+W4A4
+KV4
+video
+action
+W4A4
+KV4
++ BF16
+future
+video
+action
+swap in BF16 future
+Restoring the future removes 71.2% of action error
+BF16
+4-bit
+degraded future
+BF16 future
+−71.2%
+Figure 1. Protecting the action is not enough. In a 4-bit WAM
+whose action pathway is kept at higher precision, the predicted fu-
+ture still degrades, and 71.2% of the remaining action error enters
+through it (Fast-WAM, W4A4KV4). LAQ preserves the future
+where it is written, stored and read.
+video backbones, and also their size. Fast-WAM [36] has
+6B parameters, and its BF16 weights alone occupy 12 GB
+of the 16 GB that an onboard computer such as the NVIDIA
+Jetson Orin NX shares with the rest of the robot stack.
+Post-training quantization removes most of this cost with-
+out retraining: a fully 4-bit pipeline stores the weights,
+the activations and the key–value caches of attention at 4
+bits (W4A4KV4) [2, 24]. These savings matter only if the
+quantized policy still acts reliably in closed loop. Existing
+quantizers, whether built for language and diffusion mod-
+els [2, 10, 20, 24, 33, 39] or recently for WAMs [1, 31, 40],
+preserve each layer’s output or the final action one denois-
+ing step at a time; none protects the predicted future on
+which the action depends, or the caches through which it
+is read at every denoising step.
+We find that this omission is costly: existing quantizers
+fail to preserve the fidelity of the predicted future, and the
+1
+arXiv:2611.25614v1  [cs.AI]  19 Nov 2026
+
+
+loss reaches the action. We call reader the part of a WAM
+that maps the predicted future to the action, and ask what a
+4-bit WAM still loses once its action pathway is protected.
+Three observations on Fast-WAM answer it (Sec. 3). First,
+protecting the action is not enough: restoring the predicted
+future to full precision removes 71.2% of the remaining ac-
+tion error (Fig. 1). Second, the future is damaged where it
+is written, and most by errors that are read many times: an
+error frozen in a weight, a cache or an unchanging token
+damages the future two to three times more than an error
+of the same energy that is redrawn at each denoising step.
+Third, the reader depends on a narrow part of the future,
+stable in location but not in direction: the tokens it depends
+on agree across contexts while the directions do not. A 4-
+bit WAM must therefore treat the predicted future, as the
+reader sees it, as a quantization target in its own right.
+Building on this diagnosis, we propose LAQ, a latent-
+aware quantization framework for W4A4KV4 world action
+models (Fig. 2).
+LAQ estimates a reader metric, which
+measures future error by its effect on the action, and assigns
+every source of rounding error a read count, the number
+of denoising steps over which one realization of the error
+is read, so that errors frozen in caches and unchanging to-
+kens are weighted by their accumulated effect. With both,
+the allocation of precision over activations and caches has a
+closed-form solution: a single threshold that decides which
+tokens deserve more precision in the denoising loop and in
+the cache. Gaze-guided refinement then gives those tokens
+a second 4-bit pass, and selects them at run time from the
+attention of the action tokens. The quantized model stores
+every weight at 4 bits, has no high-precision branch, and
+needs no training and no recalibration for a new task. In
+summary, our contributions are threefold:
+• We identify future-latent fidelity as a key quantization tar-
+get for WAMs: once the action pathway is protected, the
+remaining action error of a 4-bit WAM enters through a
+degraded predicted future, which is damaged most by er-
+rors that are written once and read at every denoising step.
+• We propose LAQ, a latent-aware quantization framework
+for W4A4KV4 WAMs.
+A reader metric and a read
+count give the allocation of precision over activations and
+caches a closed-form solution, and gaze-guided refine-
+ment protects the tokens the reader depends on with a
+second 4-bit pass.
+• We evaluate LAQ on two WAMs in simulation and on
+a real AgileX PiPER arm.
+On LIBERO-Plus [8], it
+reaches 76.4% average success on Fast-WAM, within 1.2
+points of BF16 and 3.4 points above the strongest baseline
+with 16-bit caches, and 83.3% on Cosmos-Policy (BF16:
+83.5%), while compressing the model by 3.8×. On three
+real-world tasks, it reaches an average success of 47.0%
+(BF16: 52.0%), compared with 17.0% for QuaRot.
+2. Related Work
+World action models. World action models train a video
+generator jointly with an action model and condition actions
+on a predicted future [18, 19, 35, 36], which extends vision-
+language-action policies [3, 17] with the visual priors, and
+the size, of video backbones.
+Post-training quantization. Second-order rounding com-
+pensates the error of each layer with the inverse Hes-
+sian of a layer-wise reconstruction objective [9, 10], and
+activation-aware scaling [22, 33] and rotations [2, 5, 24]
+remove activation outliers, which brings language models
+to 4-bit weights, activations and key–value caches. Mixed-
+precision methods allocate bit widths across layers [25, 30],
+and GuidedQuant weights the layer objective with gradi-
+ents of the end loss [16]. For diffusion and video genera-
+tors, post-training methods correct errors that accumulate
+over the denoising loop [11], handle timestep-dependent
+activations [39] and absorb outliers into a 16-bit low-rank
+branch [20]; quantization-aware training reaches 4 bits and
+below for these generators [13, 21] and for vision-language
+models [6].
+Cache quantizers compress the key–value
+caches of video-language models [27, 28] and of video gen-
+erators and world models [32, 38], down to 2 bits and below.
+These methods preserve layer outputs or generation qual-
+ity; LAQ builds on rotation and second-order rounding, and
+changes what the quantizer preserves: the predicted future
+as the reader sees it.
+Quantization of robot policies and WAMs. QuantVLA
+and BitVLA compress vision-language-action policies with
+calibrated scales and 1-bit weights [29, 37]. For WAMs,
+QuantWAMs [40], Q-WAM [1] and SteerQuant [31] decide
+which channels, activation directions, token streams and de-
+noising steps to protect by their impact on the action, and
+PreDE predicts the task degradation of a quantization con-
+figuration from offline action deviations [34]. They measure
+sensitivity to the final action or the training loss, one denois-
+ing step at a time. LAQ instead targets the predicted future
+that the action is read from, counts how often each rounding
+error is read, and quantizes the caches.
+Token-level precision.
+Squat keeps the tokens with the
+highest attention at 8 bits [26], STaMP concentrates the
+activation energy in a few tokens that receive higher pre-
+cision [7], SemanticDialect re-quantizes the residual of
+salient tokens in video diffusion transformers [15], and Zip-
+Cache assigns cache precision by token saliency [12]. In all
+of these token-level quantizers, a model’s own attention or
+activation energy decides which tokens matter. In a WAM,
+the predicted future is consumed by a different part of the
+model, and LAQ lets this reader decide: tokens are selected
+by their effect on the action and tracked at run time through
+the attention of the action tokens.
+2
+
+
+a Reader metric
+z∗
+Reader R
+a∗
+reader probes
+M = Ec[Jc
+T Dc Jc]
+tr(Mjj)
+token sensitivity
+future error
+ZM
+b Read count
+denoising step 1
+2
+T
+···
+sum
+Frozen
+···
+weights, caches, static tokens
+Fresh
+···
+tokens being denoised
+nu =
+ZM(frozen)
+ZM(fresh)
+nu
+c Joint allocation
+Offline, once
+ℒ= Ec[A + λM ZM + βK]
+action
+future
+reader
+Activations and K/V
+Weights
+μ
+activation
+K/V
+budget B sets μ
+W
+second-order
+rounding
+Q4(W)
+first gaze  tr(Mjj)
+nu
+μ
+Q4(W)
+d Gaze-guided refinement
+At every control step
+All weights 4-bit, no 16-bit branch
+1 Score and select
+scoreu = nu ωu σu
+2 / cu ≥  μ
+φs
+ωsj
+selected
+gaze gj
+2 Quantize the residual
+1st 4-bit pass q1
+x̂ = ς1q1 + ς2q2
+ς1q1
+x
+residual
+ς2q2
+2nd 4-bit pass q2
+error:  ς1/2 → ς1/28
+3 Apply both codes
+Linear
+× q1
+all rows
+× q2
+selected rows
++
+K/V
+q1
+q2
+4 Update the gaze
+attention
+action
+tokens
+Σ
+gaze gj
+next control step
+Figure 2. Overview of LAQ. Offline, LAQ estimates the reader metric M, which measures future error as the reader sees it (a), and the
+read count nu, the damage of a rounding error that is frozen across the denoising steps relative to one that is redrawn at every step (b),
+and sets from one objective a threshold µ shared by activations and caches (c). At every control step, gaze-guided refinement (d) gives the
+tokens selected under the current gaze a second 4-bit code in the linear layers and in the cache, and the attention of the action tokens gives
+the gaze for the next step.
+3. Motivation
+3.1. Quantizing a WAM
+World action models. A WAM maps an observation o and
+an instruction ℓto a predicted future latent z and an action
+chunk a, and the action is conditioned on z:
+z = GW(o, ℓ),
+a = RW(o, ℓ, z),
+(1)
+where W collects all weights and both are produced by it-
+erative denoising over T steps. We call R the reader, the
+computation that turns the predicted future into an action; it
+is well defined whether z and a are generated one after the
+other or denoised jointly (Sec. 5.1). We write z⋆, a⋆for the
+outputs of the full-precision model and ˆG, ˆR, ˆz, ˆa for those
+of a quantized one.
+4-bit quantization.
+A b-bit quantizer maps a tensor X
+onto a scaled integer grid, Qb(X) = ς · round(X/ς), with
+one scale ς = max |X|/(2b−1 −1) per group of entries.
+Weights are quantized once offline and activations per to-
+ken at run time, so that a linear layer with weight W and
+input x computes Q4(W) Q4(x). Post-training quantizers
+choose the rounded weight ˆ
+W by minimizing the layer-
+wise reconstruction error tr
+ ( ˆ
+W −W) H ( ˆ
+W −W)⊤
+,
+where H = E[xx⊤] collects the layer inputs on calibration
+data [10]. A WAM also caches keys and values: tokens that
+are computed once per control step, such as those of the
+observation or of the finished future, are read by attention
+at every denoising step that follows, and W4A4KV4 stores
+their keys and values at 4 bits as well [2, 24].
+Fresh and frozen errors. Rounding errors differ in how
+they recur over the denoising steps. An error is fresh if every
+step draws a new realization, as for the activations of tokens
+that are being denoised. It is frozen if one realization is
+reused at every step, as for a weight, a cached key or value,
+or a token that does not change across steps.
+Errors and the future share. We measure the action error
+A = ∥ˆa−a⋆∥2 on the executed part of the chunk, the future
+error Z = ∥ˆz −z⋆∥2/∥z⋆∥2 on the predicted frames, and
+the reader error
+K = KL
+ π(R(z⋆))
+ π(R(ˆz))
+
+,
+(2)
+where R is the full-precision reader and π maps each stan-
+dardized action coordinate to a soft histogram; K measures
+how much the future error alone changes the action.
+A
+rounding error can change the action directly, or by degrad-
+ing the predicted future on which the action is conditioned.
+We measure the second path with the future share
+ρ = 1 −E ∥ˆR(z⋆) −a⋆∥2
+E ∥ˆR(ˆz) −a⋆∥2 ,
+(3)
+the fraction of the action error that disappears when the
+quantized reader is given the full-precision future.
+3
+
+
+third-person view
+wrist view
+0
+0.5
+1
+2%
+share
+Figure 3. The reader depends on a narrow part of the future: share
+of the reader metric M carried by each token of the first predicted
+frame of Fast-WAM, averaged over 80 contexts and shown over
+the frame of one of them.
+3.2. Observations
+We quantize Fast-WAM [36] to W4A4KV4 with rotation
+and second-order rounding [2, 10], protect the action path-
+way by keeping the activations of the action tokens at higher
+precision, and measure A, Z and ρ on LIBERO contexts.
+We also inject errors of equal energy that are either frozen
+across the denoising steps or redrawn at every step.
+Observation 1: Protecting the action is not enough. Sen-
+sitivities measured on the final action concentrate on the ac-
+tion pathway [1], which suggests protecting this pathway
+first. Doing so removes only 16% of the action error, and
+the future error does not change at all (Tab. 1). Restoring
+the predicted future to full precision removes 71.2% of the
+remaining action error (Fig. 1). This implies that the quanti-
+zation target must include the predicted future itself, rather
+than only the generated action.
+Observation 2: The future is damaged where it is writ-
+ten, and most by errors that are read many times. Rais-
+ing the precision of the reader leaves the future error exactly
+unchanged, so the future can only be preserved in the com-
+putation that writes it. Within this computation, rounding
+errors differ in how often they are read: the tokens of the
+observed frame keep the same rounding error at every de-
+noising step, cached keys and values are written once and
+read at every step, and a weight is read by every token at
+every step. An injected error of fixed energy damages the
+future 3.1×, 2.2× and 2.1× more in the observation tokens,
+the observation cache and the text cache when it is frozen
+across the denoising steps than when it is redrawn at each
+step (Tab. 2), because its effects on successive steps add up.
+A sensitivity estimated one step at a time misses this accu-
+mulation: quantizing the ten video denoising steps together
+damages the part of the future that the reader depends on
+2.50× more than the sum of the ten steps quantized one at
+a time (Tab. 2, bottom). This implies that an error should
+be weighted by how many times it is read, not only by the
+layer and step where it occurs.
+Model
+A (×10−4) ↓
+Z ↓
+W4A4KV4
+3.53
+0.0188
++ protected action pathway
+2.96
+0.0188
++ full-precision future
+0.85
+0
+Table 1. Future swap on Fast-WAM. In the last row the quantized
+reader reads the future predicted by the BF16 model.
+Injected error
+Frozen
+Redrawn
+Ratio
+Observation tokens
+11.56
+3.68
+3.1×
+Cache of the observed frame
+3.29
+1.49
+2.2×
+Cache of the text
+0.48
+0.23
+2.1×
+Quantized video steps
+Together
+One at a time
+Ratio
+All 10 denoising steps
+35.0
+14.0
+2.50×
+Table 2. Future error weighted by the reader metric, ZM (×10−3,
+Eq. (5)). Top: an injected error of fixed energy, kept over the
+denoising steps (frozen) or redrawn at every read. Bottom: the 10
+video denoising steps quantized together, against the sum of the
+10 steps quantized one at a time.
+Observation 3: The reader depends on a narrow part of
+the future, stable in location but not in direction. We
+linearize the reader at the full-precision future and com-
+pute its Gauss–Newton metric M (Sec. 4.1). In a 37,632-
+dimensional latent, M has an effective rank of 41.5, and the
+first predicted frame carries 98% of its trace. Which loca-
+tions of the latent the reader depends on is stable: the di-
+agonal of M correlates at 0.86 across disjoint halves of the
+calibration contexts, and it concentrates on a small region of
+the scene, the arm and the gripper (Fig. 3). The directions
+are not: the leading 32 eigenvectors estimated on the two
+halves overlap by only 0.19. This implies that protection
+should follow the tokens the reader depends on, rather than
+a fixed set of directions.
+4. Methodology
+As illustrated in Fig. 2, LAQ preserves the predicted future
+where it is written, stored and read. A reader metric and a
+read count, both estimated offline, place the errors of activa-
+tions and caches in one objective with a closed-form mini-
+mizer, and gaze-guided refinement gives the selected tokens
+a second 4-bit pass at run time. LAQ involves no training.
+4.1. Reader metric
+The reader metric measures an error in the predicted future
+by how much it changes the action. As Observation 3 shows
+(Sec. 3.2), the reader depends on a narrow part of the pre-
+dicted future, whereas the uniform future error Z weighs
+every latent dimension equally. For a calibration context c,
+let Jc = ∂R(oc, ℓc, z)/∂z at z = z⋆
+c, and let Dc be the
+4
+
+
+diagonal curvature of the reader error K (Eq. (2)) with re-
+spect to the reader output at a⋆
+c. We define the reader metric
+as the Gauss–Newton matrix of K averaged over contexts,
+and the corresponding future error:
+M = Ec
+
+J⊤
+c DcJc
+
+,
+ZM = (ˆz −z⋆)⊤M (ˆz −z⋆)
+∥z⋆∥2
+(4)
+Here, ZM is the second-order change of the reader error
+caused by the future error ˆz −z⋆. It reduces to the uniform
+future error Z when M = I. A rounding error outside the
+reader changes the action only through the predicted future,
+so one metric prices the errors of every layer, token and de-
+noising step that write the future, and estimating it involves
+the reader alone.
+We never form Jc and estimate M with Rademacher
+projections [14]: for a Rademacher vector ϵ, the probe
+v = J⊤
+c (D1/2
+c
+ϵ) satisfies E[vv⊤] = J⊤
+c DcJc and costs
+one reverse pass through the reader. We normalize the es-
+timate of each context to unit trace, average over contexts,
+keep the leading r eigendirections together with the residual
+diagonal, which gives Mr, and mix in the identity:
+M = (1 −α)
+d
+tr Mr
+Mr + α I,
+(5)
+where d is the latent dimension and α ∈(0, 1). The diag-
+onal is stable across contexts (Observation 3), the identity
+keeps every part of the future constrained, and M is esti-
+mated once, on the full-precision model.
+4.2. Read count
+The read count of an error source is the number of denois-
+ing steps over which one realization of its rounding error
+is read. Observation 2 shows that this number changes the
+damage of an error, and that a sensitivity estimated one step
+at a time misses it. Let u index a source of rounding er-
+ror: the activation of a token or a cached key or value.
+Let eu,s be the error that enters at denoising step s, and
+Ju,s = ∂z/∂eu,s its effect on the predicted future. To first
+order, ˆz −z⋆= P
+s Ju,s eu,s, so the future error in the
+reader metric is governed by the T × T matrix
+Ωu(s, s′) = E
+
+tr
+ J⊤
+u,s M Ju,s′
+.
+(6)
+For a fresh error with variance σ2
+u, the cross terms between
+steps vanish and the expected damage is σ2
+u tr Ωu. For a
+frozen error, eu,s = eu at every step, every pair of steps
+contributes, and the damage is σ2
+u 1⊤Ωu1. We define the
+read count as their ratio:
+nu = 1⊤Ωu 1
+tr Ωu
+∈[0, T]
+(7)
+A frozen error does the damage of a fresh error read nu
+times, and we set nu = 1 for fresh sources. Per-step sensi-
+tivities [1, 31] keep only the diagonal of Ωu, which corre-
+sponds to nu = 1 for every source.
+We measure nu by intervention rather than by differen-
+tiating through the sampler: we inject an error of fixed en-
+ergy into u, once frozen across the denoising steps and once
+redrawn at every step, and take the ratio of the resulting
+ZM, which holds at the error level of the 4-bit quantizer
+and not only to first order. Sources of the same kind share
+one read count (each cache, the tokens that do not change
+across steps, and the tokens that are being denoised), so a
+few dozen forward passes suffice.
+4.3. Joint allocation
+Joint allocation decides, under one budget, which tokens re-
+ceive more precision in the denoising loop and in the cache.
+Observation 1 shows that the target must include the pre-
+dicted future, so LAQ keeps the quantized model close to
+the full-precision one in
+L = Ec
+
+A + λMZM + βK
+
+,
+(8)
+where the three terms cover the action, the future as the
+reader sees it, and the action read from the future.
+We
+fix λM and β once from the initial magnitudes of the three
+terms. To second order in the rounding errors, L separates
+over their sources:
+L ≈CW +
+X
+u
+nu ωu σ2
+u(ru),
+(9)
+where CW collects the errors of the 4-bit weights, which
+refinement does not change. The sum runs over the units
+of activations and caches, a token at a denoising step or a
+cached token, with sensitivity ωu = tr Ωu, error variance
+σ2
+u, and ru ∈{0, 1} indicating whether unit u is refined
+(Sec. 4.4).
+Refining unit u divides σ2
+u by at least 196 (Eq. (11)) at
+a cost cu: one more row of a 4-bit matrix product for an
+activation, one more 4-bit code for a cached entry. Mini-
+mizing Eq. (9) under a budget P
+u curu ≤B is solved by a
+threshold on the damage removed per unit cost:
+ru = 1 ⇐⇒nu ωu σ2
+u
+cu
+≥µ
+(10)
+where µ is set by B. One threshold serves activations and
+caches alike, so precision is traded between the denoising
+loop and the cache in a single currency.
+For the token at position j and denoising step s, we fac-
+tor the sensitivity as ωs,j = ϕs gj, where the step profile
+ϕs is measured by refining all tokens at step s alone and gj
+is the gaze of Sec. 4.4. Cached tokens and tokens that do
+not change across steps have large read counts and are writ-
+ten once, so they are refined first; the tokens that are being
+denoised follow, at the denoising steps and token positions
+where the product ϕs gj is largest.
+5
+
+
+LIBERO-Plus
+LIBERO
+Model
+Method
+W
+A
+KV
+Spatial Object Goal Long Avg. Spatial Object Goal Long Avg.
+Fast-WAM
+BF16
+16
+16
+16
+81.4
+82.9
+67.6
+78.6
+77.6
+98.6
+99.5
+97.6
+96.2
+98.0
+QuaRot
+4.13
+4
+16
+77.1
+77.6
+61.4
+72.4
+72.1
+97.6
+99.0
+97.6
+97.1
+97.8
+SpinQuant
+4.13
+4
+16
+79.5
+76.2
+59.5
+72.9
+72.0
+98.1
+99.0
+98.1
+96.2
+97.9
+ViDiT-Q
+4.33
+4
+16
+77.1
+77.6
+63.8
+72.4
+72.7
+97.6
+99.0
+98.1
+96.6
+97.8
+SVDQuant 4.81
+4
+16
+77.4
+74.1
+68.2
+72.2
+73.0
+97.1
+100.0
+98.1
+97.1
+98.1
+LAQ
+4.01 4.62 4.24
+82.4
+81.9
+64.3
+77.1
+76.4
+98.1
+99.5
+98.1
+97.1
+98.2
+Cosmos-Policy
+BF16
+16
+16
+16
+84.3
+89.5
+73.3
+86.7
+83.5
+98.6
+100.0
+98.6
+98.1
+98.8
+QuaRot
+4.13
+4
+16
+86.7
+86.7
+69.5
+84.8
+81.9
+97.6
+100.0
+97.1
+98.1
+98.2
+SpinQuant
+4.13
+4
+16
+81.0
+86.2
+66.7
+87.1
+80.2
+98.1
+100.0
+95.2
+98.6
+98.0
+ViDiT-Q
+4.29
+4
+16
+86.7
+87.1
+70.0
+87.6
+82.9
+97.6
+99.5
+97.1
+99.5
+98.5
+SVDQuant 4.89
+4
+16
+84.3
+88.1
+72.9
+86.2
+82.9
+99.0
+99.5
+97.1
+99.5
+98.8
+LAQ
+4.01 4.58 4.70
+86.7
+89.5
+68.6
+88.6
+83.3
+98.6
+100.0
+98.6
+97.6
+98.7
+Table 3. Closed-loop success rates (%) on LIBERO-Plus and LIBERO. W, A and KV give the average bits of the weights (including their
+scales and any high-precision component), of the activations, and of the cached keys and values: the baselines keep their caches in BF16,
+and LAQ also quantizes them to 4 bits. Bold: best quantized result for each model; underline: second best.
+4.4. Gaze-guided refinement
+Gaze-guided refinement gives the selected tokens a second
+4-bit pass and follows the attention of the reader to decide
+which tokens these are. Observation 3 shows that the loca-
+tions the reader depends on are stable while the directions
+are not, so we protect tokens rather than directions, and we
+do so without leaving 4-bit arithmetic.
+For the activation x of a selected token, we quantize the
+residual of the first pass a second time:
+q1 = round
+ x
+ς1
+
+,
+q2 = round
+x −ς1q1
+ς2
+
+,
+ˆx = ς1q1 + ς2q2
+(11)
+with ς1 the scale of Sec. 3.1 and ς2 = max |x −ς1q1|/7 ≤
+ς1/14. The rounding error is bounded by ς1/28 instead of
+ς1/2, which lowers its power by a factor of at least 196. The
+layer output becomes ς1 Q4(W) q1 +ς2 Q4(W) q2: two 4-
+bit matrix products, the second over the selected rows only.
+For a selected token in a cache, the second code q2 is stored
+next to the first. No weight is stored at higher precision, and
+the quantized model has no branch outside the 4-bit path.
+The gaze gj of token j is its share of the reader’s sensi-
+tivity. Offline, it is the trace of the block of M that belongs
+to token j. At run time the reader provides it for free: the
+attention that the action tokens pay to token j, summed over
+layers, heads and action denoising steps, is a by-product of
+generating the action. Because consecutive control steps
+see nearly the same scene, the gaze of one control step se-
+lects the tokens that are refined at the next, and the first
+control step of an episode uses the offline gaze. Observa-
+tion tokens inherit the gaze through the attention of the fu-
+ture tokens, and when the future and the action are denoised
+jointly, the gaze of one denoising step selects the tokens of
+the next. The selection therefore follows the reader in the
+current scene, and the quantities fixed offline (M, nu, ϕs
+and µ) do not depend on the task, so LAQ needs no recali-
+bration for a new task.
+5. Experiments
+5.1. Experimental setup
+Models and benchmarks. We quantize Fast-WAM [36]
+(6B parameters, of which 1B form the action expert) and
+Cosmos-Policy [18] (2B parameters). Fast-WAM first de-
+noises the future latent and then denoises an action chunk
+that attends to it through a key–value cache; the tokens of
+its observed frame do not depend on the denoising step and
+are computed once. Cosmos-Policy denoises the future and
+the action jointly, so its reader starts from the future state at
+an intermediate denoising step and runs the remaining steps
+to the action, and its keys and values are quantized at ev-
+ery step. We evaluate in simulation on LIBERO-Plus [8],
+which perturbs the four LIBERO suites [23] along seven
+dimensions, on the original LIBERO suites, and on a real
+robot arm (Sec. 5.3). LIBERO-Plus is our main benchmark,
+since both BF16 models already succeed in about 98% of
+the episodes of the original LIBERO suites.
+Baselines and quantization settings. We compare with
+the general-purpose quantizers QuaRot [2] and Spin-
+Quant [24], and the diffusion quantizers ViDiT-Q [39] and
+SVDQuant [20]; the WAM quantizers [1, 31, 40] have no
+public implementation. All baselines quantize weights and
+activations to 4 bits and keep the cached keys and val-
+ues in BF16, whereas LAQ also quantizes the caches to
+4 bits. Since adaptive layer normalization prevents a ro-
+6
+
+
+tation of the residual stream, QuaRot and SpinQuant ro-
+tate the input of every linear layer by block rotations of
+size 128; ViDiT-Q and SVDQuant follow their published
+recipes, the latter with a 16-bit low-rank branch of rank 32.
+LAQ uses 4-bit weights rounded by GPTQ [10] in random-
+ized Hadamard coordinates, 4-bit activations with per-token
+scales, and 4-bit keys and values with one scale per token
+and head. As is common, all methods keep the input and
+output interface layers (0.01% of the weights) in BF16 and
+store the timestep-conditioning layers as exact per-step ta-
+bles. ViDiT-Q, SVDQuant and LAQ calibrate on the same
+80 LIBERO contexts, and the budget of LAQ refines 15.4%
+of the activation values of the denoising loops and 6.0% of
+the cached keys and values.
+5.2. Main results
+Results on Fast-WAM. On LIBERO-Plus (Tab. 3), LAQ
+reaches 76.4% average success, within 1.2 points of BF16
+(77.6%) and 3.4 points above SVDQuant, the strongest
+baseline, although the baselines keep their caches in BF16.
+The baselines lose 4.6–5.6 points relative to BF16. The
+gains of LAQ concentrate on the camera-viewpoint and
+sensor-noise perturbations, where the baselines lose the
+most. On LIBERO, where BF16 reaches 98.0%, the base-
+lines stay within 0.2 points of it, and LAQ reaches 98.2%,
+above every baseline and level with BF16.
+Results on Cosmos-Policy.
+On LIBERO-Plus, LAQ
+reaches 83.3% average success, level with BF16 (83.5%)
+and 0.4 points above ViDiT-Q and SVDQuant, the strongest
+baselines.
+The baselines lose 0.6–3.3 points, mostly on
+the Goal suite. On LIBERO, where BF16 reaches 98.8%,
+the baselines lose up to 0.8 points, SpinQuant again the
+most, and LAQ reaches 98.7%, level with BF16 and with
+SVDQuant, the strongest baseline. On the Goal suite, where
+every baseline loses 1.5 points or more, LAQ keeps the
+98.6% of BF16.
+5.3. Real-world deployment
+Setup. We deploy Fast-WAM on an AgileX PiPER arm (6
+degrees of freedom and a parallel gripper). We fine-tune
+it on teleoperation data collected with LeRobot [4] from
+a third-person and a wrist camera, with 75 to 80 demon-
+strations per task. We quantize the fine-tuned BF16 model
+to W4A4KV4 with calibration contexts drawn from the
+demonstrations and re-estimate the reader metric on it. We
+compare BF16, QuaRot with the settings of Tab. 3 and LAQ
+with 25 trials per task and method on the same set of marked
+initial object placements on the table.
+Tasks. Fig. 4 shows the three tasks: two-object pick-and-
+place, which puts a red apple and then a green cube into a
+box among three distractors; shelf placement, which places
+a bowl on the second floor of a shelf; and box stacking,
+which stacks a white box on a black base and then a brown
+a
+Pick-and-place “place the red apple then green cube to the box”
+b
+Shelf placement “place the bowl to the second floor”
+c
+Box stacking “pile the boxes”
+Grasp apple
+Grasp cube
+Done
+Grasp bowl
+Into shelf
+Done
+Grasp white box
+Grasp brown box
+Done
+Figure 4.
+Real-world tasks on the AgileX PiPER arm: three
+key frames of one demonstration each, with the wrist view inset.
+The bar under a frame spans the demonstration (orange: gripper
+closed; dot: time of the frame).
+Pick-and-place
+Method
+First
+Both
+Shelf
+Stacking
+Avg.
+BF16
+19/25
+2/25
+15/25
+16/25
+52.0%
+QuaRot
+4/25
+2/25
+3/25
+8/25
+17.0%
+LAQ
+15/25
+4/25
+13/25
+15/25
+47.0%
+Table 4. Real-world results on the AgileX PiPER arm (successes
+/ trials). For pick-and-place, First counts trials in which the apple
+reaches the box and Both trials in which both objects do; the aver-
+age is over the four columns.
+box on the white one.
+Results. Tab. 4 summarizes the real-world results. LAQ
+reaches 47.0% average success, against 17.0% for QuaRot
+and 52.0% for BF16. On pick-and-place, it places the ap-
+ple in 15 of 25 trials and both objects in 4, against 4 and 2
+for QuaRot. On shelf placement and box stacking, it stays
+within two trials of BF16 (13 and 15 against 15 and 16),
+while QuaRot succeeds in 3 and 8. The closed-loop gains
+of LAQ under 4-bit quantization thus carry over from sim-
+ulation to a physical robot arm.
+5.4. Ablation study
+Tab. 5 isolates each component of LAQ.
+Exact actions are not enough. Plain W4A4KV4 loses 6.4
+points to BF16. Keeping the action tokens in BF16 recov-
+ers only 0.7 of them although its action tokens are exact:
+the action error falls by only 11%, and the reader error
+7
+
+
+Bits
+Error ↓
+Succ.
+Variant
+A
+KV Action Reader (%) ↑
+Refined tokens
+None
+4
+4
+4.70
+1.75
+71.2
+Action tokens (BF16)
+4.71
+4
+4.18
+1.75
+71.9
+Observation tokens
+4.55 4.12
+2.62
+1.08
+74.3
+Selection criterion, same budget
+Random
+4.61 4.33
+3.19
+1.23
+72.5
+Per-step sensitivity
+4.62 4.24
+2.71
+1.52
+72.9
+Offline gaze
+4.62 4.24
+2.28
+0.96
+75.2
+Component removed, same budget
+Reader metric (M = I) 4.62 4.24
+2.74
+1.31
+73.6
+Read count (nu = 1)
+4.62 4.24
+2.55
+1.17
+74.0
+Cache precision
+BF16 caches
+4.62
+16
+2.02
+0.78
+76.8
+LAQ
+4.62 4.24
+2.10
+0.82
+76.4
+Table 5. Ablations on Fast-WAM. A and KV: average bits of the
+activations and of the cached keys and values; Action and Reader:
+action error A (×10−4) and reader error K (×10−2) on held-out
+LIBERO contexts; Succ.: closed-loop success rate on LIBERO-
+Plus.
+does not change at all, since the exact action tokens read
+the same degraded future. This confirms Observation 1 in
+closed loop. Refining only the observation tokens, which
+are written once and read at every denoising step, recovers
+3.1 points, and the future tokens and cached entries selected
+by the gaze bring LAQ to 76.4%, with both errors below
+half of those of plain W4A4KV4.
+The reader decides which tokens matter.
+With the
+pipeline, the budget and the refinement fixed, random to-
+kens leave 1.5× the action error and the reader error of
+LAQ and reach 72.5%. A per-step sensitivity of the final
+action, the kind of criterion that existing WAM quantiz-
+ers use [1, 31], depends on the action alone and reaches
+72.9%: it spends the budget on the action pathway and low-
+ers the reader error by only 13%. The offline gaze reaches
+75.2%, and tracking the gaze at run time lowers the reader
+error by a further 15% and adds 1.2 points, mostly on the
+camera-viewpoint perturbations.
+Criteria computed from
+the video model itself, its activation energy [7] and its self-
+attention [15, 26], fall behind the gaze as well.
+The reader metric and the read count both matter. Re-
+placing the reader metric by the identity, so that every part
+of the predicted future counts equally, lowers the success
+rate from 76.4% to 73.6%. Setting nu = 1 for every source
+moves the budget from the tokens that are read at every de-
+noising step to the tokens that are being denoised, and low-
+ers it to 74.0%.
+Cache precision. Keeping the caches of LAQ in BF16 adds
+Method Weights Caches Peak mem. Latency
+(GB)
+(MB)
+(GB)
+(ms)
+BF16
+12.0
+204
+14.0
+1475
+LAQ
+3.2
+56
+6.0
+888
+Table 6. Cost of one Fast-WAM policy call on an NVIDIA A100.
+Weights cover the whole denoiser, caches are the keys and values
+of one call, peak memory covers the whole policy with the text
+embedding of the instruction computed once, and latency is mea-
+sured end to end from observation to action chunk.
+only 0.4 points, so its 4-bit caches cost little.
+5.5. Efficiency
+Tab. 6 reports the cost of LAQ on Fast-WAM on an NVIDIA
+A100, with its weights stored and multiplied as 4-bit codes.
+With 4.01 bits per weight and no high-precision branch,
+LAQ compresses the denoiser from 12.0 GB to 3.2 GB
+(3.8×) and reduces the peak GPU memory of the whole pol-
+icy from 14.0 GB to 6.0 GB (2.3×). The cached keys and
+values of one call shrink from 204 MB to 56 MB (3.6×).
+One policy call takes 888 ms from observation to action
+chunk, 1.66× faster than the BF16 model (1475 ms): the
+runtime multiplies the packed 4-bit codes directly on the in-
+teger tensor cores of the GPU, and the second pass of a re-
+fined token is the same integer product on additional rows.
+Calibration takes 1.2 GPU-hours with a peak memory of
+27 GB, since it only runs forward passes of the quantized
+model on calibration contexts.
+6. Conclusion
+We presented LAQ, a latent-aware quantization framework
+for 4-bit world action models. Once the action pathway of
+a 4-bit WAM is protected, its remaining action error enters
+through a degraded predicted future. LAQ measures future
+error as the reader sees it, weights each rounding error
+by how many times it is read, allocates precision jointly
+over activations and caches, and gives the tokens the reader
+attends to a second 4-bit pass.
+With every weight at 4
+bits and no recalibration per task, it recovers closed-loop
+success across two WAMs in simulation and on a real
+robot arm.
+When compressing a WAM, the predicted
+future is not an intermediate quantity that can be sacrificed.
+References
+[1] Arash Akbari, Arman Akbari, Jingwu Luo, Yuhao Lei, Yi
+Gao, Weiwei Chen, Xuan Zhang, Zhenman Fang, Geng
+Yuan, and Yanzhi Wang.
+Q-WAM: 4-Bit Quantization
+of World Action Models with Action-Subspace Protection.
+arXiv preprint arXiv:2609.33269, 2026. 1, 2, 4, 5, 6, 8
+[2] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L
+Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alis-
+8
+
+
+tarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-
+Free 4-Bit Inference in Rotated LLMs. Advances in Neural
+Information Processing Systems, 37:100213–100240, 2024.
+1, 2, 3, 4, 6
+[3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim
+Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mo-
+hith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang
+Shi, James Tanner, Quan Vuong, Anna Walling, Haohuan
+Wang, and Ury Zhilinsky. π0: A Vision-Language-Action
+Flow Model for General Robot Control, 2026. 2
+[4] Remi Cadene, Simon Alibert, Francesco Capuano, Michel
+Aractingi, Adil Zouitine, Pepijn Kooijmans, Jade Choghari,
+Martino Russi, Caroline Pascal, Steven Palma, et al. LeR-
+obot: An Open-Source Library for End-to-End Robot Learn-
+ing. In International Conference on Learning Representa-
+tions, pages 122398–122417, 2026. 7
+[5] Yanlong Chen, Yining Chen, Song Zhang, Amirhossein
+Habibian, and Yawei Li.
+PrismQuant:
+Optimal Null-
+Space Rotations for Grouped Quantizers.
+arXiv preprint
+arXiv:2609.32429, 2026. 2
+[6] Yanlong Chen, Amirhossein Habibian, Luca Benini, and
+Yawei Li.
+Gated Relational Alignment via Confidence-
+based Distillation for Efficient VLMs.
+arXiv preprint
+arXiv:2601.22709, 2026. 2
+[7] Marco Federici, Riccardo Del Chiaro, Boris van Breugel,
+Paul Whatmough, and Markus Nagel.
+STaMP: Sequence
+Transformation and Mixed Precision for Low-Precision Ac-
+tivation Quantization. In International Conference on Learn-
+ing Representations, pages 14334–14358, 2026. 2, 8
+[8] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai,
+Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye
+Fei, et al. LIBERO-Plus: A Progressive Robustness Bench-
+mark for Visual-Language-Action Models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 38574–38583, 2026. 2, 6
+[9] Elias Frantar and Dan Alistarh.
+Optimal Brain Compres-
+sion: A Framework for Accurate Post-Training Quantization
+and Pruning. Advances in Neural Information Processing
+Systems, 35:4475–4488, 2022. 2
+[10] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan
+Alistarh.
+GPTQ: Accurate Post-Training Quantization
+for Generative Pre-trained Transformers.
+arXiv preprint
+arXiv:2210.17323, 2022. 1, 2, 3, 4, 7
+[11] Yefei He, Luping Liu, Jing Liu, Weijia Wu, Hong Zhou, and
+Bohan Zhuang. PTQD: Accurate Post-Training Quantiza-
+tion for Diffusion Models. Advances in neural information
+processing systems, 36:13237–13249, 2023. 2
+[12] Yefei He, Luoming Zhang, Weijia Wu, Jing Liu, Hong
+Zhou, and Bohan Zhuang.
+ZipCache: Accurate and Effi-
+cient KV Cache Quantization with Salient Token Identifica-
+tion. Advances in Neural Information Processing Systems,
+37:68287–68307, 2024. 2
+[13] Yushi Huang, Ruihao Gong, Jing Liu, Yifu Ding, Cheng-
+tao Lv, Haotong Qin, and Jun Zhang.
+QVGen: Pushing
+the Limit of Quantized Video Generative Models.
+In In-
+ternational Conference on Learning Representations, pages
+155088–155121, 2026. 2
+[14] Michael F Hutchinson. A stochastic estimator of the trace of
+the influence matrix for Laplacian smoothing splines. Com-
+munications in Statistics-Simulation and Computation, 18
+(3):1059–1076, 1989. 5
+[15] Wonsuk Jang and Thierry Tambe.
+SemanticDialect:
+Semantic-Aware Mixed-Format Quantization for Video Dif-
+fusion Transformers.
+arXiv preprint arXiv:2603.02883,
+2026. 2, 8
+[16] Jinuk Kim, Marwa El Halabi, Wonpyo Park, Clemens JS
+Schaefer, Deokjae Lee, Yeonhong Park, Jae W Lee, and
+Hyun Oh Song.
+GuidedQuant: Large Language Model
+Quantization via Exploiting End Loss Guidance.
+arXiv
+preprint arXiv:2505.07004, 2025. 2
+[17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-
+ter, Grace Lam, Pannag Sanketi, et al. OpenVLA: An Open-
+Source Vision-Language-Action Model.
+arXiv preprint
+arXiv:2406.09246, 2024. 2
+[18] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin,
+Yunhao Ge, Grace Lam, Percy Liang, Shuran Song, Ming-
+Yu Liu, Chelsea Finn, et al. Cosmos Policy: Fine-Tuning
+Video Models for Visuomotor Control and Planning. arXiv
+preprint arXiv:2601.16163, 2026. 1, 2, 6
+[19] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin
+Wang, Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing
+Zhu, et al. Causal World Modeling for Robot Control. arXiv
+preprint arXiv:2601.21998, 2026. 1, 2
+[20] Muyang Li, Yujun Lin, Zhekai Zhang, Tianle Cai, Xiuyu Li,
+Junxian Guo, Enze Xie, Chenlin Meng, Jun-Yan Zhu, and
+Song Han. SVDQuant: Absorbing Outliers by Low-Rank
+Components for 4-Bit Diffusion Models.
+arXiv preprint
+arXiv:2411.05007, 2024. 1, 2, 6
+[21] Shuaiting Li, Zelin Gao, Haibin Shen, Yujun Shen, Haotong
+Qin, and Yinghao Xu. DSAQuant: Denoising-Stage-Aligned
+Quantization-Aware Training for Video Generation. arXiv
+preprint arXiv:2609.04031, 2026. 2
+[22] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-
+Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu
+Dang, Chuang Gan, and Song Han. AWQ: Activation-aware
+Weight Quantization for LLM Compression and Accelera-
+tion. Proceedings of machine learning and systems, 6:87–
+100, 2024. 2
+[23] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. LIBERO: Benchmarking Knowl-
+edge Transfer for Lifelong Robot Learning.
+Advances in
+Neural Information Processing Systems, 36:44776–44791,
+2023. 6
+[24] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge So-
+ran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas
+Chandra, Yuandong Tian, and Tijmen Blankevoort. Spin-
+Quant: LLM quantization with learned rotations.
+In In-
+ternational Conference on Learning Representations, pages
+92009–92032, 2025. 1, 2, 3, 6
+[25] Vladimir Malinovskii, Andrei Panferov, Ivan Ilin, Han Guo,
+Peter Richt´arik, and Dan Alistarh. HIGGS: Pushing the Lim-
+its of Large Language Model Quantization via the Linearity
+9
+
+
+Theorem. In Proceedings of the 2025 Conference of the Na-
+tions of the Americas Chapter of the Association for Com-
+putational Linguistics: Human Language Technologies (Vol-
+ume 1: Long Papers), pages 10857–10886, 2025. 2
+[26] Xuan Shen, Peiyan Dong, Zhenglun Kong, Yifan Gong,
+Changdi Yang, Zhaoyang Han, Yanyue Xie, Lei Lu, Cheng
+Lyu, Chao Wu, et al. Squat: Quant Small Language Mod-
+els on the Edge. In 2025 IEEE/ACM International Confer-
+ence On Computer Aided Design (ICCAD), pages 1–9. IEEE,
+2025. 2, 8
+[27] Keda Tao,
+Haoxuan You,
+Yang Sui,
+Can Qin,
+and
+Huan Wang.
+Plug-and-Play 1.x-Bit KV Cache Quantiza-
+tion for Video Large Language Models.
+arXiv preprint
+arXiv:2503.16257, 2025. 2
+[28] Wei Tao, Xiaoyang Qu, Peiqiang Wang, Guokuan Li,
+Jiguang Wan, Kai Lu, and Jianzong Wang. WindowQuant:
+Mixed-Precision KV Cache Quantization based on Window-
+Level Similarity for VLMs Inference Optimization, 2026. 2
+[29] Hongyu Wang, Chuyan Xiong, Ruiping Wang, and Xilin
+Chen. BitVLA: 1-bit Vision-Language-Action Models for
+Robotics Manipulation. arXiv preprint arXiv:2506.07530,
+2025. 2
+[30] Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song
+Han. HAQ: Hardware-Aware Automated Quantization with
+Mixed Precision. In 2019 IEEE/CVF conference on com-
+puter vision and pattern recognition (CVPR), pages 8604–
+8612. IEEE, 2019. 2
+[31] Yunhan Wang, Haodong Wang, Zhiming Liu, Zicong Hong,
+Qianli Liu, Xiaoyi Pang, Yangjia Hu, Quanxin Shou, Yikun
+Miao, and Song Guo.
+SteerQuant: Steering Quantization
+Error with Action-Guided Scaling in World-Action Models.
+arXiv preprint arXiv:2609.39056, 2026. 1, 2, 5, 6, 8
+[32] Haocheng Xi, Shuo Yang, Yilong Zhao, Muyang Li, Han
+Cai, Xingyang Li, Yujun Lin, Zhuoyang Zhang, Jintao
+Zhang, Xiuyu Li, et al. Quant VideoGen: Auto-Regressive
+Long Video Generation via 2-Bit KV-Cache Quantization.
+arXiv preprint arXiv:2602.02958, 2026. 2
+[33] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien
+Demouth, and Song Han. SmoothQuant: Accurate and Effi-
+cient Post-Training Quantization for Large Language Mod-
+els. In International conference on machine learning, pages
+38087–38099. PMLR, 2023. 1, 2
+[34] Jiuyi Xu, Jinjia Guo, Meida Chen, Jing Du, and Yang-
+ming Shi. Predict Before You Deploy: Offline Prediction
+of Quantization-Induced Task Degradation for World Action
+Models. arXiv preprint arXiv:2609.19441, 2026. 2
+[35] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan
+Gao,
+Sihyun
+Yu,
+George
+Kurian,
+Suneel
+Indupuru,
+You Liang Tan, Chuning Zhu, Jiannan Xiang, et al. World
+Action Models are Zero-shot Policies.
+arXiv preprint
+arXiv:2602.15922, 2026. 1, 2
+[36] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+Fast-WAM: Do World Action Models Need Test-time Future
+Imagination? arXiv preprint arXiv:2603.16666, 2026. 1, 2,
+4, 6
+[37] Jingxuan Zhang, Yunta Hsieh, Zhongwei Wan, Haokun
+Lin, Xin Wang, Ziqi Wang, Yingtie Lei, and Mi Zhang.
+QuantVLA: Scale-Calibrated Post-Training Quantization
+for Vision-Language-Action Models.
+arXiv preprint
+arXiv:2602.20309, 2026. 2
+[38] Jiaqi Zhao, Xiaobin Hu, Bo Yin, Junpeng Jiang, Miao Zhang,
+and Shuicheng Yan. QuantWM: Temporally Consistent 2-
+Bit KV Cache Quantization for Video World Models. arXiv
+preprint arXiv:2609.26425, 2026. 2
+[39] Tianchen Zhao, Tongcheng Fang, Haofeng Huang, Enshu
+Liu, Rui Wan, Widyadewi Soedarmadji, Shiyao Li, Zinan
+Lin, Guohao Dai, Shengen Yan, et al. ViDiT-Q: Efficient and
+Accurate Quantization of Diffusion Transformers for Image
+and Video Generation.
+arXiv preprint arXiv:2406.02540,
+2024. 1, 2, 6
+[40] Jiacheng Zhou, Jinfan Lv, Ruixuan Li, Longtai Zhang, Yan
+Wang, Wenqiang Zhang, and Lizhe Qi. QuantWAMs: Cal-
+ibrating at the Right Granularity for World Action Models.
+arXiv preprint arXiv:2607.28405, 2026. 1, 2, 6
+10

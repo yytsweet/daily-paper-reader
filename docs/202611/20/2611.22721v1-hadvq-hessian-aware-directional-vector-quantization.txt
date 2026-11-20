@@ -1,0 +1,3135 @@
+HADVQ: Hessian Aware Directional Vector
+Quantization
+Daniil Li1,2, Mars Davletshin2, Vadim Klyzhenko2, Artem Danilishin2
+Valery Sandul2, Daniil Ryazanov2, Ekaterina Muravleva1
+1Applied AI Institute, Moscow, Russia
+2Luzin Research Center, Moscow, Russia
+Abstract
+Ultra-low-bit quantization of large language models is a challenging task because
+aggressive compression severely distorts model parameters and disproportionately
+harms a small number of highly sensitive channels. We present a vector quantization
+method tailored for this regime. Our approach begins with random preconditioning,
+which regularizes the weight space and makes it more amenable to quantization.
+We then represent weights in polar coordinates and decouple the quantization
+of directions and magnitudes. To quantize directions, we leverage the structure
+induced by random preconditioning and design a structured codebook based on
+the E8 lattice, yielding a compact yet expressive representation. To further reduce
+degradation, we detect extremely important channels using a proxy Hessian and
+preserve them with an additional cost of only 0.16 bits. Together, these components
+provide an effective quantization pipeline for LLMs in the extremely low-bit
+regime. Empirical results demonstrate improved accuracy, highlighting the benefit
+of combining geometric structure, lattice-based codebooks, and selective channel
+preservation.
+1
+Introduction
+Large language models (LLMs) such as GPT Brown et al. [5], LLaMA Touvron et al. [41, 42],
+Grattafiori et al. [19], DeepSeek, and Qwen Yang et al. [47] have become a central component of
+modern natural language processing. Their strong performance across a wide range of language tasks
+has led to rapid adoption, but their large memory footprint remains a major obstacle for practical
+deployment. For example, storing very large models in BF16 may require hundreds of gigabytes or
+even more than a terabyte of memory, which makes deployment expensive and hardware-demanding.
+Several approaches have been proposed to reduce model size, including distillation Hinton et al.
+[25], Kim and Rush [29], pruning [22], low-rank approximation Denton et al. [10], and quantiza-
+tion Han et al. [21]. In this work, we focus on post-training quantization (PTQ), a practical approach
+for reducing the memory cost of pretrained models without retraining them from scratch. Scalar
+quantization (SQ) Frantar et al. [15], Lin et al. [31], Xiao et al. [46], which maps each weight
+independently to a low-bit representation, is widely used and performs well in the 3–4-bit regime.
+However, in the more aggressive low-bit setting, vector quantization (VQ) Chee et al. [6], Tseng et al.
+[43], Yue et al. [49] is often more robust because it can better capture local structure in the weight
+space.
+In this paper, we study ultra-low-bit vector quantization without fine-tuning. Our method is
+motivated by the observation that quantization error is not distributed uniformly across channels:
+a relatively small subset of channels contributes disproportionately to performance degradation.
+Building on this observation, we propose a structured vector quantization method that combines
+random preconditioning, magnitude–direction decoupling, and Hessian-aware channel preservation.
+Preprint.
+arXiv:2611.22721v1  [cs.LG]  17 Nov 2026
+
+
+Contributions.
+The main contributions of this work are as follows:
+• We propose a training-free vector quantization method that combines magnitude–direction
+decoupling with Hessian-aware preservation of sensitive channels.
+• We introduce and study new strategies for directional codebook construction, and show in
+ablation experiments that the final design performs better than alternative initializations.
+• We evaluate the method across multiple model families and benchmarks, including both
+question answering and perplexity tasks, and study how quantization sensitivity differs
+across models.
+• We provide code and supporting materials to facilitate reproducibility.
+2
+Background
+2.1
+Post-training Quantization of LLMs
+Post-training quantization (PTQ) reduces the cost of a pretrained model by encoding its weights
+in a low-bit representation without retraining the model from scratch. For large language models,
+this setting is important because full-precision checkpoints use a lot of memory, and lower weight
+precision makes deployment easier.
+PTQ for LLMs is difficult because quantization errors can accumulate across many layers and lead to
+a noticeable drop in model quality, as illustrated in Figure 2. A common way to measure the local
+effect of quantization is to consider the expected output distortion induced by replacing a weight
+matrix W with its quantized version ˆW, as in Nagel et al. [35]
+ℓ( ˆW) = Ex
+h
+∥( ˆW −W)x∥2i
+= tr
+
+( ˆW −W)H( ˆW −W)T 
+,
+(1)
+where H = E[xxT ] is the input second-moment matrix.
+This problem becomes more severe in the very low-bit regime. As a result, simple scalar quantization
+is often not sufficient at 2–3 bits [43, 49]. In this work, we focus on weight-only PTQ with vector
+quantization in the extremely low-bit regime.
+2.2
+Preconditioned Vector Quantization
+Vector Quantization.
+In our setting, weights are quantized in small blocks rather than indepen-
+dently, element by element. Let W ∈Rm×n be a weight matrix, and let each block be reshaped into
+a vector wi ∈Rd. This allows us to use vector quantization (VQ), where each block is represented as
+a d-dimensional vector and replaced by the index of its nearest codeword from a codebook
+C = {c1, . . . , cK},
+cj ∈Rd.
+The quantized block is then written as
+Q(wi) = arg min
+c∈C ∥wi −c∥2
+2,
+If the quantization budget is b bits per element, then each d-dimensional block is represented with bd
+bits, and the codebook contains K = 2bd codewords.
+Compared with scalar quantization, this gives the quantizer more flexibility to model correlations
+within each block, which is especially important in the extremely low-bit regime.
+Random Preconditioning.
+A direct application of vector quantization to raw weight blocks is
+often difficult because their distribution is highly unbalanced across coordinates. In particular, a
+small number of coordinates may dominate the quantization error, which makes a fixed codebook
+less effective.
+To make weight blocks more suitable for quantization, we first apply random preconditioning. Let
+w ∈Rm be a weight column vector. We construct the preconditioned vector ˜w = HDw, where
+D ∈Rm×m is a diagonal matrix with independent random signs on the diagonal, and H ∈Rm×m is
+2
+
+
+Figure 1: Pipeline of HADVQ. The method applies random preconditioning, decomposes each
+weight block into magnitude and direction, quantizes the two components separately, reconstructs the
+quantized blocks, and preserves highly sensitive channels using proxy Hessian scores.
+the normalized Hadamard matrix. Since both D and H are orthogonal, this transformation preserves
+the Euclidean norm, that is, ∥˜w∥2 = ∥w∥2.
+The role of this transformation is to spread the energy of the vector more evenly across coordinates.
+After random sign flipping and Hadamard mixing, each coordinate of ˜w becomes a sum of many
+signed components of w. As a result, the coordinates of ˜w become more balanced, and for sufficiently
+large block sizes, they can be viewed as approximately Gaussian due to a central-limit effect. More
+precisely, if we normalize by scale = ∥w∥2
+√m , then the coordinates of ˜w/scale can be approximated by
+a standard Gaussian N(0, 1). A proof is given in Appendix A.
+After quantizing the preconditioned vector ˜w, we obtain its low-bit approximation ˆ˜w. This approxi-
+mation can then be mapped back to the original space using the inverse transformation w ≈DHT ˆ˜w.
+Magnitude–Direction Decoupling.
+After preconditioning, each weight block is represented as a
+vector w ∈Rd. We decompose w into magnitude and direction
+w = ru,
+r = ∥w∥2,
+u =
+w
+∥w∥2
+,
+where r is the magnitude and u is a unit vector with ∥u∥2 = 1.
+This representation separates two different sources of quantization error. Errors in r affect only the
+scale of the block, while errors in u affect its direction. In the extremely low-bit regime, Yue et al.
+[49] showed that directional distortion can be especially harmful. This makes it natural to quantize
+the two components independently.
+The approximation w ≈ˆw is written as w = ru −→ˆw = ˆrˆu, where ˆr and ˆu are quantized separately.
+This allows the quantizer to allocate its limited bit budget more effectively: vector quantization can
+be focused on the directional component, while the magnitude can be handled with a simpler scalar
+quantizer.
+3
+HADVQ: Hessian Aware Directional Vector Quantization
+HADVQ combines several ideas within a single post-training quantization pipeline. Figure 1 gives
+an overview of the method. Starting from the weights of linear layers in a pretrained model, we
+first apply random preconditioning to make weight blocks more suitable for vector quantization.
+Each preconditioned block is then represented by its magnitude and direction. The directional
+component is quantized with a structured codebook, while the magnitude is quantized separately.
+The quantized direction and magnitude are then combined to reconstruct the weight block. Finally,
+to reduce the degradation caused by aggressive compression, we preserve a small subset of highly
+sensitive channels selected using proxy Hessian scores. Together, these steps define our method for
+post-training quantization in the extremely low-bit regime.
+3
+
+
+3.1
+Codebooks construction
+Directional codebook construction.
+To build a structured directional codebook in R8, we use
+normalized points from shells of the E8 lattice. For a shell of radius R, we define
+ΛR = {x ∈E8 : ∥x∥2 = R},
+CR =
+n x
+R : x ∈ΛR
+o
+⊂S7,
+where S7 = {u ∈R8 | ∥u∥2 = 1} is the unit sphere in R8. Thus, each codeword is obtained by
+normalizing a lattice point on the shell of radius R, and the resulting codebook consists of unit
+directions.
+This construction is well matched to our preconditioned setting. After random Hadamard precon-
+ditioning, the coordinates of weight blocks become approximately Gaussian, as also observed in
+PolarQuant [20]. As a consequence, the normalized directions can be viewed as approximately
+uniform on the sphere. This makes normalized shells of the E8 lattice a natural choice for the
+directional codebook, since they have strong uniformity properties. In particular, Bannai and Bannai
+[2] and Elkies [14] show that each normalized shell of the E8 lattice forms a spherical 7-design.
+This means that the resulting directions are distributed in a highly symmetric and well-balanced way,
+which makes them suitable as a structured directional codebook.
+The number of E8 lattice points with squared norm n is
+NE8(n) =
+
+
+
+
+
+
+
+1,
+n = 0,
+240 σ3(n/2),
+n ∈2Z>0,
+0,
+otherwise,
+(2)
+where σ3(n) = P
+d|n d3. Therefore, a shell of radius R is nonempty only if R2 is a positive even
+integer.
+In practice, the shell size does not always match the target codebook size of 2b·d. To obtain the
+final codebook, we augment the lattice-based codebook with additional directions taken from weight
+blocks with the largest directional approximation error. For a block with magnitude r, original
+direction u, and quantized direction ˆu, this squared directional reconstruction error is
+∥ru −rˆu∥2
+2 = 2r2(1 −cos θ),
+where θ is the angle between u and ˆu. We rank candidate directions by this score and add those with
+the largest values until the desired codebook size is reached.
+Magnitude codebook construction.
+After magnitude–direction decoupling, each weight block is
+written as w = ru, where r = ∥w∥2 is the magnitude. Since r is a scalar, we quantize it separately
+using a one-dimensional codebook. Following PCDVQ [49], we construct this codebook with the
+Lloyd–Max algorithm [33], which iteratively minimizes the mean squared reconstruction error over
+the empirical distribution of magnitudes. Given a codebook Cm = {c1
+m, . . . , cK
+m} with K = 2bm
+quantization levels, each magnitude is quantized as
+Qr(r) = arg min
+c∈Cm |r −c|2.
+3.2
+Hessian-Aware Channel Preservation
+A small subset of input channels can contribute disproportionately to the total quantization error. To
+reduce this effect, we preserve the most sensitive input channels in higher precision and quantize only
+the remaining channels.
+We estimate channel sensitivity based on the proxy loss in Eq. (1). In our setting, a channel
+corresponds to an input dimension of a linear weight matrix W ∈Rm×n. Let h ∈Rn denote the
+diagonal of the proxy Hessian, and let wj ∈Rm be the j-th column of W, corresponding to the j-th
+input channel. We define the sensitivity score of this channel as
+sj = hj∥wj∥2
+2.
+In vectorized form, this is computed as
+s = h ⊙
+Xm
+i=1 W 2
+i,:
+
+,
+4
+
+
+where ⊙denotes element-wise multiplication. We rank input channels according to these scores and
+preserve the top-ranked fraction in higher precision. Although the preserved fraction is small, this
+step noticeably improves model quality in the extremely low-bit regime.
+4
+Experimental Results
+4.1
+Settings
+Quantization.
+The directional component is quantized using an E8-based vector codebook. Specif-
+ically, we use shells with radii
+√
+12,
+√
+14, and
+√
+78, which yield 60 480, 82 560, and 14 770 560
+candidate directions, respectively, as given by Eq. 2. These codebooks are then expanded to sizes 216,
+217, and 224 to obtain integer directional bit-widths. The magnitude is quantized independently to 2
+bits using the Lloyd–Max algorithm [33]. We also preserve the top 1% of highly sensitive channels.
+Bit budget.
+If the directional component uses bd bits per block, the magnitude uses bm bits per
+block, the block size is d, and a fraction p of highly sensitive channels is preserved in precision t,
+then the average number of bits per parameter is
+bavg = bd + bm
+d
++ t p.
+In our experiments, we use d = 8, bm = 2, t = 16, and p = 0.01. This makes bavg equal to 2.41,
+2.535, and 3.41, respectively, for different codebook sizes.
+Models and Datasets.
+We evaluate a diverse collection of large language models from the
+Qwen3 [47], Llama2 [42], and Llama3 [19] families. Our experiments cover sizes ranging from
+0.6B to 13B parameters, including Qwen3-0.6B/1.7B/4B/8B, Llama2-7B/13B, Llama3-8B, and
+Llama3.2-1B/3B. We report perplexity on the WikiText-2 [34] test set and zero-shot accuracy on
+BoolQ [7], WinoGrande [38], ARC-Easy and ARC-Challenge [8], HellaSwag [50], PIQA [4], and
+MMLU [24, 23], and additionally report five-shot results on MMLU. For downstream evaluation, we
+use the LM Eval Harness [17] versions 0.3.0, 0.4.4, and 0.4.11, depending on model and benchmark
+compatibility.
+Baselines.
+We compare against representative PTQ baselines. Scalar quantization baselines include
+GPTQ [15], AWQ [31], QuaRot [1], OSTQuant [26], and ReSpinQuant [28]. Vector quantization
+baselines include QuIP# [43], AQLM [13], ICQuant [30], VPTQ [32], PCDVQ [49], and QTIP [44].
+Some vector quantization methods, such as QuIP#, AQLM, PCDVQ, and QTIP, can optionally be
+combined with fine-tuning to further improve performance. In contrast, our method is evaluated in a
+pure post-training setting without fine-tuning. We leave this direction for future work.
+Calibration setup.
+For proxy Hessian estimation, we use mit-han-lab/pile-val-backup [16]
+with 256 calibration samples of sequence length 1024. The resulting scores are used to identify highly
+sensitive channels for selective preservation.
+Implementation details.
+We use a block size of 8 and evaluate effective bit budgets of 2.41,
+2.535, and 3.41 bits per parameter. We quantize directional and magnitude components separately.
+Magnitudes are quantized to 2 bits using the Lloyd–Max algorithm [33], while directions are quan-
+tized to 2, 2.125, and 3 bits for the 2.41, 2.535, and 3.41 bit settings, respectively. For efficient
+nearest-neighbor lookup in the directional codebook, we use torch_kdtree [18]. Randomized
+Hadamard preconditioning is implemented with fast-hadamard-transform [9]. Proxy Hessian
+scores are aggregated at the channel level and used to rank channels by sensitivity, and the top-ranked
+channels are preserved separately. Our implementation is based on PyTorch [36] and Hugging Face
+Transformers [45]. All experiments were conducted on a single V100 32GB GPU.
+4.2
+Main Results
+Table 1 reports downstream results for Llama2-7B, Llama2-13B, and Llama3-8B. Overall, HADVQ
+provides a strong accuracy-compression trade-off across all three models and remains competitive
+with both scalar and vector quantization baselines in the ∼2-bit and ∼3-bit regimes.
+5
+
+
+At around 3 bits, HADVQ preserves model quality well and achieves the best results on several
+tasks across all three models. In the more aggressive low-bit setting, performance drops as expected,
+but HADVQ remains stable and competitive with strong baselines such as PCDVQ, QTIP, and
+ICQuant. This is especially notable since several competing methods, marked by square brackets, use
+fine-tuning, whereas HADVQ is evaluated purely in the post-training setting.
+Table 2 shows a similar pattern for WikiText-2 perplexity at sequence lengths 2048 and 4096. In
+the ∼3-bit regime, HADVQ consistently matches or improves upon prior methods across all three
+models, while in the lower-bit regime, it remains substantially more stable than several aggressive
+baselines. Additional results are provided in the Appendix B.
+Table 1: Zero-shot accuracy (↑) comparison on Llama2-7B, Llama2-13B, and Llama3-8B under
+low-bit quantization. Gray rows denote our method. [·] indicates results obtained with any form of
+fine-tuning. All results are reported using LM Eval Harness v0.3.0.
+Model
+Method
+Bits
+BoolQ↑WinoGrande↑ArcE↑ArcC↑HellaSwag↑PiQA↑
+Llama2-7B
+FP16
+16
+71.10
+67.17
+69.28
+39.93
+56.70
+78.35
+QuIP#
+3
+[69.70]
+[66.50]
+[68.40] [39.20]
+-
+[77.30]
+AQLM
+3.04
+-
+[66.93]
+[68.06] [38.40]
+[54.12]
+[76.88]
+QTIP
+3
+-
+[66.90]
+[68.10] [38.90]
+-
+[78.10]
+ICQuant
+3.3
+-
+66.90
+66.60
+39.00
+-
+77.70
+HADVQ
+3.41
+70.95
+66.85
+69.07
+38.48
+55.49
+77.97
+QuIP#
+2
+[68.30]
+[64.90]
+[64.60] [34.60]
+-
+[75.10]
+AQLM
+2.02
+-
+[65.67]
+[63.68] [32.76]
+[49.55]
+[74.76]
+AQLM
+2.29
+-
+[65.67]
+[66.50] [34.90]
+[50.88]
+[74.92]
+QTIP
+2
+-
+[64.70]
+[65.60] [35.70]
+-
+[75.90]
+ICQuant
+2.3
+-
+63.60
+62.00
+34.10
+-
+75.00
+ICQuant
+2.4
+-
+65.60
+63.60
+35.90
+-
+76.10
+VPTQ
+2.02
+-
+[64.33]
+[63.80] [35.24]
+[52.08]
+[75.19]
+VPTQ
+2.26
+-
+[66.46]
+[64.90] [36.43]
+[52.87]
+[76.17]
+PCDVQ
+2.25
+-
+[66.46]
+[67.92] [38.31]
+[53.13]
+[76.38]
+HADVQ
+2.535
+72.69
+65.35
+66.96
+35.49
+52.86
+75.95
+HADVQ
+2.41
+69.02
+66.54
+65.74
+36.35
+51.55
+76.88
+Llama2-13B
+FP16
+16
+68.96
+69.69
+73.23
+45.56
+59.74
+78.78
+QuIP#
+3
+[69.80]
+[69.10]
+[69.30] [39.50]
+-
+[77.30]
+AQLM
+3.03
+-
+[68.43]
+[70.88] [42.58]
+[58.30]
+[77.26]
+QTIP
+3
+-
+[69.50]
+[72.80] [44.00]
+-
+[72.80]
+ICQuant
+3.3
+-
+69.80
+70.90
+44.50
+-
+78.70
+HADVQ
+3.41
+69.05
+70.24
+72.69
+43.43
+58.86
+78.45
+QuIP#
+2
+[68.30]
+[67.70]
+[72.50] [44.00]
+-
+[78.40]
+AQLM
+1.97
+-
+[68.82]
+[69.28] [38.82]
+[53.80]
+[75.90]
+AQLM
+2.19
+-
+[67.64]
+[70.29] [38.65]
+[55.03]
+[77.37]
+AQLM
+2.53
+-
+[69.77]
+[70.33] [39.16]
+[56.15]
+[76.99]
+QTIP
+2
+-
+[67.60]
+[70.80] [41.40]
+-
+[70.80]
+ICQuant
+2.3
+-
+64.70
+69.10
+39.40
+-
+76.90
+ICQuant
+2.4
+-
+64.20
+68.40
+39.80
+-
+77.00
+VPTQ
+2.02
+-
+[66.85]
+[71.55] [40.02]
+[56.18]
+[77.26]
+VPTQ
+2.18
+-
+[68.43]
+[71.80] [40.96]
+[56.89]
+[77.28]
+PCDVQ
+2.25
+-
+[70.63]
+[70.53] [43.34]
+[56.57]
+[77.25]
+HADVQ
+2.535
+72.05
+66.77
+69.82
+40.61
+56.71
+77.64
+HADVQ
+2.41
+75.20
+67.80
+69.87
+36.18
+49.43
+74.65
+Llama3-8B
+FP16
+16
+81.38
+72.69
+80.09
+50.43
+60.17
+79.65
+Quip#
+3
+-
+[72.90]
+[77.40] [46.40]
+-
+[77.90]
+QTIP
+3
+-
+[74.50]
+[79.30] [49.20]
+-
+[79.20]
+ICQuant
+3.3
+-
+72.90
+78.10
+47.40
+-
+78.60
+HADVQ
+3.41
+81.38
+71.74
+77.99
+47.01
+56.21
+78.29
+GPTQ
+2
+-
+50.50
+28.80
+19.90
+27.70
+53.90
+VPTQ
+2.08
+-
+[65.90]
+[71.00] [36.90]
+[52.20]
+[75.10]
+VPTQ
+2.24
+-
+[69.10]
+[73.20] [42.60]
+[53.10]
+[75.40]
+PCDVQ
+2.25
+-
+[70.08]
+[75.04] [43.68]
+[54.29]
+[76.49]
+Quip#
+2
+-
+[68.20]
+[72.90] [39.20]
+-
+[75.60]
+QTIP
+2
+-
+[70.70]
+[75.20] [44.20]
+-
+[77.60]
+ICQuant
+2.4
+-
+67.90
+71.60
+38.00
+-
+76.60
+ICQuant
+2.3
+-
+66.60
+70.70
+35.80
+-
+74.90
+HADVQ
+2.535
+75.96
+68.75
+72.64
+41.81
+51.50
+75.90
+HADVQ
+2.41
+75.20
+67.80
+69.87
+36.18
+49.43
+74.65
+[h!]
+4.3
+Ablation Study
+We study two aspects of the proposed method. First, we evaluate the contribution of selective
+preservation of highly sensitive channels and the proposed directional codebook construction. Second,
+we examine how sensitive the set of selected highly sensitive channels is to the choice of calibration
+dataset.
+6
+
+
+Table 2: WikiText-2 perplexity (↓) for sequence lengths 2048 and 4096. [·] indicates results reported
+with fine-tuning.
+Llama2-7B
+Llama2-13B
+Llama3-8B
+Method
+bits
+2048↓
+4096↓
+bits
+2048↓
+4096↓
+bits
+2048↓
+4096↓
+FP16
+16
+5.47
+5.12
+16
+4.88
+4.57
+16
+6.14
+5.75
+QuIP#
+3
+[5.79]
+[5.41]
+3
+[5.10]
+[4.78]
+–
+–
+–
+AQLM
+3.04
+–
+[5.46]
+3.03
+–
+[4.82]
+–
+–
+–
+QTIP
+3
+–
+[5.28]
+3
+–
+[4.69]
+–
+–
+–
+ICQuant
+3.3
+–
+5.35
+3.3
+–
+4.75
+–
+–
+–
+VPTQ
+3.02
+[5.82]
+[5.43]
+3.03
+[5.12]
+[4.79]
+3.03
+[6.97]
+–
+HADVQ
+3.41
+5.72
+5.35
+3.41
+5.07
+4.74
+3.41
+6.92
+6.48
+ICQuant
+2.3
+7.21
+6.75
+2.3
+6.10
+5.74
+–
+–
+–
+ICQuant
+2.4
+–
+6.35
+2.4
+–
+5.54
+–
+–
+–
+VPTQ
+2.02
+–
+[6.13]
+2.02
+–
+[5.32]
+2.08
+9.29
+–
+VPTQ
+2.26
+–
+[5.95]
+2.18
+–
+[5.28]
+2.24
+9.19
+–
+AQLM
+2.02
+–
+[6.59]
+1.97
+–
+[5.60]
+–
+–
+–
+AQLM
+2.29
+–
+[6.29]
+2.76
+–
+[4.94]
+–
+–
+–
+QuIP#
+2
+[6.66]
+[6.19]
+2
+[5.74]
+[5.35]
+–
+–
+–
+QTIP
+2
+–
+[5.86]
+2
+–
+[5.11]
+–
+–
+–
+PCDVQ
+2.225
+–
+[5.68]
+2.225
+–
+[5.04]
+2.225
+[7.93]
+–
+HADVQ
+2.535
+6.42
+5.98
+2.535
+5.52
+5.16
+2.535
+9.03
+8.46
+HADVQ
+2.41
+6.65
+6.20
+2.41
+5.69
+5.31
+2.41
+9.86
+9.21
+(a) Without sensitive-channel preservation.
+(b) With 1% sensitive channels preserved.
+Figure 2: Layer-wise quantization loss on Qwen3-0.6B for different projection matrices.
+Impact of sensitive channels and codebook design.
+Table 4 reports ablations on Qwen3-0.6B,
+Qwen3-4B, and Qwen3-8B. We compare the full HADVQ pipeline against several variants: removing
+sensitive-channel preservation, replacing the selected channels with a random subset of the same size,
+and replacing the proposed directional codebook construction with alternative initialization strategies.
+We observe the same pattern across all three models. First, preserving a small subset of highly
+sensitive channels is important in the extremely low-bit regime: removing these channels or replacing
+them with random ones leads to a clear drop in both downstream accuracy and WikiText-2 perplexity.
+Figure 2 shows that preserving 1% of sensitive channels reduces quantization loss on a number of
+layers, although it does not remove the overall growth of the loss across depth and does not fully stop
+error accumulation. Figure 3 shows that 99% of channels have relatively small sensitivity compared
+to the top 1% sensitive channels. Second, the proposed codebook construction is also important:
+both the greedy min-max initialization, similar to the procedure used in Yue et al. [49], and the
+evolutionary alternative perform worse than the final HADVQ design. For the evolutionary approach,
+we use the method of Khrulkov et al. [27]. The best results are obtained when both components are
+used together. We also observe that reducing the preserved fraction from 1% to 0.5% only slightly
+affects performance on Qwen3-4B and Qwen3-8B, but causes a more visible drop on Qwen3-0.6B,
+suggesting that smaller models are more sensitive to this budget.
+Sensitivity to the calibration dataset.
+We further study whether the selection of highly sensitive
+channels depends strongly on the calibration dataset. For this experiment, we use Qwen3-1.7B and
+compute the top 1% most important channels using three different calibration datasets: Pile [16],
+BoolQ [7], and C4 [37]. Table 3 reports the overlap ratio between the resulting channel sets.
+The overlap remains high across all dataset pairs: 91.7% for Pile vs. C4, 78.7% for Pile vs. BoolQ,
+and 80.4% for BoolQ vs. C4. This suggests that the ranking of highly sensitive channels is fairly
+7
+
+
+Figure 3: Sensitive channels for model Qwen3-0.6B in
+layers.2.mlp.down_proj layer.
+Table 3: Overlap ratio of the selected
+top 1% highly sensitive channels for
+Qwen3-1.7B across different calibration
+datasets.
+Dataset pair
+Overlap ratio (%)
+The Pile / C4
+91.7
+The Pile / BoolQ
+78.7
+BoolQ / C4
+80.4
+Table 4: Ablation of sensitive-channel preservation and directional codebook construction. We report
+average zero-shot accuracy (%) over BoolQ, WinoGrande, ARC-Easy, ARC-Challenge, and PIQA,
+together with WikiText-2 perplexity. Results were obtained with LM Eval Harness v0.4.11.
+Qwen3-0.6B
+Qwen3-4B
+Qwen3-8B
+Variant
+Bits
+Avg. Acc↑
+Wiki2↓
+Avg. Acc↑
+Wiki2↓
+Avg. Acc↑
+Wiki2↓
+FP16
+16
+56.05
+20.90
+71.40
+13.70
+73.98
+9.71
+HADVQ (1% important, final codebook)
+2.41
+45.73
+49.39
+64.09
+17.73
+69.95
+12.10
+w/o important channels
+2.25
+45.47
+107.71
+61.25
+21.34
+64.60
+14.18
+1% random channels
+2.41
+43.90
+249.04
+59.19
+24.56
+48.04
+69.98
+greedy min–max codebook
+2.25
+40.45
+306.02
+58.40
+26.69
+51.82
+55.53
+evolutionary codebook
+2.25
+39.67
+29013.72
+52.51
+36.14
+49.18
+53.17
+HADVQ (0.5% important, final codebook)
+2.33
+46.11
+56.74
+63.14
+17.84
+69.58
+12.41
+stable with respect to the calibration data and that the selected channels are not determined by a
+single narrow dataset. Based on this observation, we use The Pile as the default calibration dataset.
+5
+Related Work
+Post-Training Quantization.
+PTQ is an approach for compressing LLMs without retraining, and
+it has become a crucial technique for LLMs deployment. Lin et al. [31] introduced a technique
+that protects a small subset of salient channels determined from the activation distribution. Frantar
+et al. [15] showed a method that is based on approximate second-order information. Xiao et al.
+[46] explored the fact that weights are easy to quantize while activations are not; they smoothed the
+activation outliers from activations to weights. These works show that the quality of the PTQ method
+depends on salient channels, second-order information, and outlier handling.
+Sensitivity-aware and outlier-aware quantization.
+An important observation in quantization
+is that the sensitivity of weight channels and outliers of weight values can dramatically influence
+quantization performance. There are works [12, 11, 48] that are dedicated to measuring layer
+sensitivity using Hessian trace information. As mentioned above Lin et al. [31] used activation
+statistics to identify salient channels. Li et al. [30] leveraged outlier statistics to design an efficient
+index coding scheme for low-bit quantization. Our method belongs to this family of methods, we
+identify an extremely small subset of highly sensitive channels using a proxy Hessian criterion.
+Per-channel transformations.
+A single global quantization scale does not consider sensitive
+channels and different value ranges. Therefore, per-channel transformations improve quantization
+quality. Xiao et al. [46] uses per-channel scaling to migrate outlier channels from activation to weight.
+Shao et al. [39] uses a differentiable approach to learn optimal scaling and shifting parameters. In our
+work, we use another approach with random preconditioning to change the geometry of the weight
+space.
+8
+
+
+Preconditioning-based quantization.
+Another line of work improves quantization by transforming
+the geometry of weights and activations before the quantization procedure. Sun et al. [40] developed
+a learnable affine transformation that flattens the distributions of weights and activations. Kim
+et al. [28] proposed a rotation-based transformation using offline activation rotation fusion and
+matching bases with efficient residual subspace rotation. Tseng et al. [43] uses randomized Hadamard
+preconditioning to make weight matrices more incoherent. These methods explain that the geometry
+of weights/activations is a very important factor for low-bit quantization.
+Vector quantization.
+In ultra-low-bit scenario, scalar quantization becomes inadequate because it is
+difficult to consider the distribution and geometry of weights. Egiazarian et al. [13] demonstrated from
+the point of view of additive quantization and multi-codebook quantization through learned additive
+codebooks. Tseng et al. [43] combines incoherence processing through random preconditioning with
+lattice codebooks based on the E8 lattice. Liu et al. [32] formulates vector post-training quantization
+as a second-order optimization problem and introduces channel-independent refinement and improved
+codebook initialization. Yue et al. [49] found out that the directional component of a weight vector
+exhibits significantly greater quantization sensitivity compared to magnitude. Our method is closely
+related to this line of work; it combines random preconditioning, direction-magnitude decomposition,
+and structured vector quantization.
+6
+Conclusion
+We presented HADVQ, a post-training quantization method for large language models in the extremely
+low-bit regime. The method combines random preconditioning, magnitude–direction decoupling,
+structured directional vector quantization, and Hessian aware preservation of sensitive input channels.
+Together, these components provide a practical way to reduce model size while maintaining strong
+downstream performance.
+Across multiple Llama and Qwen models, HADVQ achieves a favorable accuracy–compression
+trade-off and remains competitive with recent scalar and vector quantization baselines, despite not
+using fine-tuning. The ablation study further shows that both the structured directional codebook and
+sensitive-channel preservation contribute to the final performance, while the selected channels remain
+relatively stable across calibration datasets.
+A direction for future work is to extend HADVQ beyond the current post-training setting, for
+example by combining it with fine-tuning or by studying larger block sizes and alternative structured
+codebooks.
+7
+Limitations
+This work has several limitations. First, we consider only the weight-only post-training quantization
+setting and do not study activation quantization or joint weight–activation compression. Second,
+the current method is evaluated purely without fine-tuning, so its behavior in combination with
+post-quantization fine-tuning remains an open question. Third, the directional codebook is based on
+the E8 lattice and is therefore naturally tied to 8-dimensional blocks; extending the same construction
+to other block sizes may require different structured codebooks. Finally, the method relies on a
+random Hadamard transform (RHT), which must also be applied during de-quantization and therefore
+introduces additional runtime overhead. In practice, this overhead is moderate since the transform can
+be computed in O(n log n) time. The additional memory used by the codebooks and the sensitive-
+channel mask is shared across the whole model and is therefore negligible when spread over billions
+of parameters.
+References
+[1] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Martin Jaggi, Dan
+Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated
+llms. arXiv preprint arXiv:2404.00456, 2024.
+9
+
+
+[2] Eiichi Bannai and Etsuko Bannai. A survey on spherical designs and algebraic combinatorics
+on spheres. European Journal of Combinatorics, 30(6):1392–1425, 2009. doi: 10.1016/j.ejc.
+2008.11.007.
+[3] Patrick Billingsley. Probability and Measure. Wiley, 2 edition, 1986. ISBN 0-471-80478-9.
+[4] Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. Piqa: Reasoning
+about physical commonsense in natural language. In Thirty-Fourth AAAI Conference on
+Artificial Intelligence, 2020.
+[5] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhari-
+wal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agar-
+wal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh,
+Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Ma-
+teusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish,
+Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners.
+In H. Larochelle, M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin, editors, Advances in
+Neural Information Processing Systems, volume 33, pages 1877–1901. Curran Associates,
+Inc., 2020. URL https://proceedings.neurips.cc/paper_files/paper/2020/file/
+1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf.
+[6] Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. Quip: 2-bit quantization
+of large language models with guarantees, 2023. URL https://arxiv.org/abs/2307.
+13304.
+[7] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and
+Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In
+NAACL, 2019.
+[8] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick,
+and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning
+challenge. ArXiv, abs/1803.05457, 2018.
+[9] Dao-AILab.
+Fast
+hadamard
+transform.
+https://github.com/Dao-AILab/
+fast-hadamard-transform, 2024. GitHub repository, accessed 2026-04-24.
+[10] Emily Denton, Wojciech Zaremba, Yann LeCun Joan Bruna, and Rob Fergu. Exploiting linear
+structure within convolutional networks for efficient evaluation. In NIPS’14: Proceedings
+of the 28th International Conference on Neural Information Processing Systems - Volume
+1, Pages 1269 - 1277, 2014. URL https://proceedings.neurips.cc/paper_files/
+paper/2014/file/1adaeb993eba95859121a43ea61bd858-Paper.pdf.
+[11] Zhen Dong, Zhewei Yao, Yaohui Cai, Daiyaan Arfeen, Amir Gholami, Michael W. Mahoney,
+and Kurt Keutzer. Hawq-v2: Hessian aware trace-weighted quantization of neural networks,
+2019. URL https://arxiv.org/abs/1911.03852.
+[12] Zhen Dong, Zhewei Yao, Amir Gholami, Michael Mahoney, and Kurt Keutzer. Hawq: Hessian
+aware quantization of neural networks with mixed-precision, 2019. URL https://arxiv.
+org/abs/1905.03696.
+[13] Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan
+Alistarh. Extreme compression of large language models via additive quantization, 2024.
+[14] Noam D. Elkies. Some applications of the 7-design property for e8, 2019. URL https:
+//people.math.harvard.edu/~elkies/M272.19/oct23.pdf.
+Lecture notes for Math
+272y, Harvard University.
+[15] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training
+compression for generative pretrained transformers. arXiv preprint arXiv:2210.17323, 2022.
+[16] Leo Gao, Stella Biderman, Sid Black, Laurence Golding, Travis Hoppe, Charles Foster, Jason
+Phang, Horace He, Anish Thite, Noa Nabeshima, Shawn Presser, and Connor Leahy. The pile:
+An 800gb dataset of diverse text for language modeling, 2020. URL https://arxiv.org/
+abs/2101.00027.
+10
+
+
+[17] Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles
+Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas
+Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron,
+Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. The language
+model evaluation harness, 07 2024. URL https://zenodo.org/records/12608602.
+[18] Thomas Grandits, Alexander Effland, Thomas Pock, Rolf Krause, Gernot Plank, and Simone
+Pezzuto. GEASI: Geodesic-based earliest activation sites identification in cardiac models.
+International Journal for Numerical Methods in Biomedical Engineering, 37(8):e3505, 2021.
+ISSN 2040-7947. doi: 10.1002/cnm.3505. URL https://onlinelibrary.wiley.com/
+doi/abs/10.1002/cnm.3505.
+[19] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian,
+Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama
+3 herd of models, 2024. URL https://arxiv.org/abs/2407.21783.
+[20] Insu Han, Praneeth Kacham, Amin Karbasi, Vahab Mirrokni, and Amir Zandieh. PolarQuant:
+Quantizing kv caches with polar transformation, 2025. URL https://arxiv.org/abs/2502.
+02617. arXiv:2502.02617.
+[21] Song Han, Huizi Mao, and William J. Dally. Deep compression: Compressing deep neural
+networks with pruning, trained quantization and huffman coding, 2015. URL https://arxiv.
+org/abs/1510.00149.
+[22] Song Han, Jeff Pool, John Tran, and William Dally.
+Learning both weights and con-
+nections for efficient neural network.
+In Advances in Neural Information Processing
+Systems 28, 2015.
+URL https://papers.nips.cc/paper_files/paper/2015/file/
+ae0eb3eed39d2bcef4622b2499a05fe6-Paper.pdf.
+[23] Dan Hendrycks, Collin Burns, Steven Basart, Andrew Critch, Jerry Li, Dawn Song, and Jacob
+Steinhardt. Aligning ai with shared human values. Proceedings of the International Conference
+on Learning Representations (ICLR), 2021.
+[24] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and
+Jacob Steinhardt. Measuring massive multitask language understanding. Proceedings of the
+International Conference on Learning Representations (ICLR), 2021.
+[25] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural network,
+2015. URL https://arxiv.org/abs/1503.02531.
+[26] Xing Hu, Yuan Cheng, Dawei Yang, Zukang Xu, Sifan Zhou, Jiangyong Yu, Chen Xu, Zhixuan
+Chen, Zhe Jiang, and Zhihang Yuan. OSTQuant: Refining large language model quantization
+with orthogonal and scaling transformations for better distribution fitting. In The Thirteenth
+International Conference on Learning Representations, 2025. URL https://openreview.
+net/forum?id=rAcgDBdKnP.
+[27] Valentin Khrulkov, Andrey Galichin, Denis Bashkirov, Dmitry Vinichenko, Oleg Travkin,
+Roman Alferov, Andrey Kuznetsov, and Ivan Oseledets. Gigaevo: An open source optimization
+framework powered by llms and evolution algorithms, 2025. URL https://arxiv.org/abs/
+2511.17592.
+[28] Suyoung Kim, Sunghyun Wee, Hyeonjin Kim, Kyomin Hwang, Hyunho Lee, and Nojun Kwak.
+Respinquant: Efficient layer-wise llm quantization via subspace residual rotation approximation,
+2026. URL https://arxiv.org/abs/2604.11080.
+[29] Yoon Kim and Alexander M. Rush.
+Sequence-level knowledge distillation, 2016.
+URL
+https://arxiv.org/abs/1606.07947.
+[30] Xinlin Li, Osama Hanna, Christina Fragouli, and Suhas Diggavi. Icquant: Index coding enables
+low-bit llm quantization. arXiv preprint arXiv:2505.00850, 2025.
+[31] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan
+Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization
+for llm compression and acceleration. In MLSys, 2024.
+11
+
+
+[32] Yifei Liu, Jicheng Wen, Yang Wang, Shengyu Ye, Li Lyna Zhang, Ting Cao, Cheng Li, and
+Mao Yang. Vptq: Extreme low-bit vector post-training quantization for large language models.
+In The 2024 Conference on Empirical Methods in Natural Language Processing, 2024.
+[33] S. Lloyd. Least squares quantization in pcm. IEEE Transactions on Information Theory,
+28(2):129–137, March 1982.
+ISSN 0018-9448.
+doi: 10.1109/TIT.1982.1056489.
+URL
+http://ieeexplore.ieee.org/document/1056489/.
+[34] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture
+models, 2016.
+[35] Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Christos Louizos, and Tijmen Blankevoort.
+Up or down? Adaptive rounding for post-training quantization. In Hal Daumé III and Aarti
+Singh, editors, Proceedings of the 37th International Conference on Machine Learning, volume
+119 of Proceedings of Machine Learning Research, pages 7197–7206. PMLR, 13–18 Jul 2020.
+URL https://proceedings.mlr.press/v119/nagel20a.html.
+[36] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan,
+Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas
+Köpf, Edward Yang, Zach DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy,
+Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style,
+high-performance deep learning library, 2019. URL https://arxiv.org/abs/1912.01703.
+[37] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena,
+Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified
+text-to-text transformer, 2023. URL https://arxiv.org/abs/1910.10683.
+[38] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An
+adversarial winograd schema challenge at scale. arXiv preprint arXiv:1907.10641, 2019.
+[39] Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng
+Zhang, Peng Gao, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantiza-
+tion for large language models. arXiv preprint arXiv:2308.13137, 2023.
+[40] Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi
+Yu, Lu Hou, Chun Yuan, et al. Flatquant: Flatness matters for llm quantization. arXiv preprint
+arXiv:2410.09426, 2024.
+[41] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timo-
+thée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez,
+Armand Joulin, Edouard Grave, and Guillaume Lample. Llama: Open and efficient foundation
+language models, 2023. URL https://arxiv.org/abs/2302.13971.
+[42] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei,
+Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open
+foundation and fine-tuned chat models, 2023. URL https://arxiv.org/abs/2307.09288.
+[43] Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP$\#$:
+Even better LLM quantization with hadamard incoherence and lattice codebooks. In Forty-first
+International Conference on Machine Learning, 2024. URL https://openreview.net/
+forum?id=9BrydUVcoe.
+[44] Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. QTIP: Quantization with
+trellises and incoherence processing. In The Thirty-eighth Annual Conference on Neural Informa-
+tion Processing Systems, 2024. URL https://openreview.net/forum?id=7sdkLVuYCU.
+[45] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony
+Moi, Pierric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer,
+Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain
+Gugger, Mariama Drame, Quentin Lhoest, and Alexander M. Rush. Transformers: State-of-the-
+art natural language processing. In Proceedings of the 2020 Conference on Empirical Methods
+in Natural Language Processing: System Demonstrations, pages 38–45, Online, October 2020.
+Association for Computational Linguistics. URL https://www.aclweb.org/anthology/
+2020.emnlp-demos.6.
+12
+
+
+[46] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han.
+SmoothQuant: Accurate and efficient post-training quantization for large language models. In
+Proceedings of the 40th International Conference on Machine Learning, 2023.
+[47] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang
+Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu,
+Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin
+Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang,
+Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui
+Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang
+Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger
+Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan
+Qiu. Qwen3 technical report, 2025. URL https://arxiv.org/abs/2505.09388.
+[48] Zhewei Yao, Zhen Dong, Zhangcheng Zheng, Amir Gholami, Jiali Yu, Eric Tan, Leyuan Wang,
+Qijing Huang, Yida Wang, Michael W. Mahoney, and Kurt Keutzer. Hawqv3: Dyadic neural
+network quantization, 2021. URL https://arxiv.org/abs/2011.10680.
+[49] Yuxuan Yue, Zukang Xu, Zhihang Yuan, Dawei Yang, Jianlong Wu, and Liqiang Nie. Pcdvq:
+Enhancing vector quantization for large language models via polar coordinate decoupling, 2025.
+URL https://arxiv.org/abs/2506.05432.
+[50] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can
+a machine really finish your sentence?
+In Proceedings of the 57th Annual Meeting of the
+Association for Computational Linguistics, 2019.
+[51] Xingyu Zheng, Yuye Li, Haoran Chu, Yue Feng, Xudong Ma, Jie Luo, Jinyang Guo, Haotong
+Qin, Michele Magno, and Xianglong Liu. An empirical study of qwen3 quantization, 2025.
+URL https://arxiv.org/abs/2505.02214.
+13
+
+
+A
+Proof of Approximate Gaussianity under Randomized Hadamard
+Preconditioning
+Lemma.
+Let w ∈Rm be a deterministic vector such that
+∥w∥∞
+∥w∥2
+−−−−→
+m→∞0.
+Let D = diag(d1, . . . , dm) with dj
+i.i.d.
+∼
+Unif{−1, 1}, and let H ∈Rm×m be a normalized
+Hadamard matrix, HH⊤= I, h2
+ij = 1/m. Define
+˜w = HDw.
+Then, for any fixed coordinate i,
+√m ˜wi
+∥w∥2
+d−→N(0, 1).
+Proof.
+Write ˜wi = Pm
+j=1 ξ(i)
+j , where ξ(i)
+j
+:= hijdjwj are independent, Eξ(i)
+j
+= 0, and Var(ξ(i)
+j ) =
+w2
+j/m. Let s2
+m = Pm
+j=1 Var(ξ(i)
+j ) = ∥w∥2
+2/m. By the Lindeberg–Feller theorem [3], it suffices to
+check
+m
+X
+j=1
+E
+"
+(ξ(i)
+j )2
+s2m
+1{|ξ(i)
+j
+|>εsm}
+#
+→0.
+Since |ξ(i)
+j | = |wj|/√m and sm = ∥w∥2/√m, the indicator is equivalent to |wj| > ε∥w∥2, and
+(ξ(i)
+j )2
+s2m
+=
+w2
+j
+∥w∥2
+2
+.
+Thus, the sum reduces to
+m
+X
+j=1
+w2
+j
+∥w∥2
+2
+1{|wj|>ε∥w∥2},
+which is zero for all sufficiently large m by the assumption ∥w∥∞/∥w∥2 →0. Hence the claim
+follows.
+■
+Figure 4 illustrates the lemma empirically on the first column vector of the query projection matrix in
+layer 0 of Qwen3-0.6B.
+Figure 4: Empirical distributions of the coordinates of the first column vector of the query projec-
+tion matrix in layer 0 of Qwen3-0.6B, before and after random Hadamard preconditioning. After
+preconditioning, the distribution becomes noticeably closer to Gaussian, which is consistent with the
+asymptotic normality stated in the lemma.
+14
+
+
+B
+Additional Results
+B.1
+Qwen3 models
+We evaluate Qwen3 models on zero-shot benchmarks, including BoolQ [7], WinoGrande [38], ARC-
+Easy [8], ARC-Challenge [8], and PIQA [4], we report five-shot accuracy on MMLU [24, 23]. We
+refer to Zheng et al. [51].
+Table 5: Zero-shot accuracy (↑) comparison on Qwen3-0.6B, Qwen3-1.7B, Qwen3-4B, and Qwen3-
+8B under low-bit quantization. BoolQ, WinoGrande, ARC-Easy, ARC-Challenge, and PIQA are
+evaluated in the zero-shot setting, while MMLU is evaluated in the five-shot setting. Gray rows
+denote our method. All results are reported using LM Eval Harness v0.4.11.
+Model
+Method
+Bits
+BoolQ↑
+WinoGrande↑
+ArcE↑
+ArcC↑
+PiQA↑
+MMLU↑
+Qwen3-0.6B
+FP16
+16
+64.31
+55.96
+60.82
+31.40
+67.74
+47.00
+AWQ
+3
+57.50
+50.90
+38.60
+21.60
+60.00
+26.40
+HADVQ
+3.41
+53.15
+54.30
+58.08
+28.33
+65.29
+41.40
+RTN
+2
+45.80
+51.50
+23.70
+22.50
+51.50
+24.40
+AWQ
+2
+50.40
+51.90
+23.60
+22.30
+52.70
+25.50
+GPTQ
+2
+44.30
+49.50
+25.20
+21.40
+51.90
+24.50
+HADVQ
+2.535
+60.34
+55.33
+40.70
+23.63
+60.61
+29.80
+HADVQ
+2.41
+56.12
+50.99
+40.40
+22.18
+58.98
+28.80
+Qwen3-1.7B
+FP16
+16
+77.60
+60.90
+72.40
+40.10
+72.50
+60.00
+AWQ
+3
+61.20
+52.60
+49.80
+24.70
+63.50
+35.60
+HADVQ
+3.41
+71.62
+58.17
+66.04
+37.20
+71.00
+55.80
+RTN
+2
+48.40
+51.90
+24.50
+22.80
+52.30
+24.40
+AWQ
+2
+45.00
+50.40
+25.00
+22.40
+54.80
+24.20
+GPTQ
+2
+44.50
+50.70
+25.30
+21.90
+53.70
+24.40
+HADVQ
+2.535
+67.00
+56.27
+59.09
+30.29
+66.81
+43.40
+HADVQ
+2.41
+68.65
+53.91
+57.20
+27.99
+64.20
+41.00
+Qwen3-4B
+FP16
+16
+85.10
+65.80
+80.50
+50.60
+75.00
+69.70
+AWQ
+3
+63.60
+54.60
+61.70
+32.60
+66.40
+43.90
+HADVQ
+3.41
+84.10
+64.80
+77.19
+48.81
+73.39
+67.00
+RTN
+2
+48.90
+49.90
+24.60
+22.00
+52.00
+24.00
+AWQ
+2
+47.70
+51.90
+23.40
+22.10
+49.90
+24.70
+GPTQ
+2
+41.80
+50.40
+80.10
+21.30
+52.90
+24.60
+HADVQ
+2.535
+79.27
+58.48
+73.65
+41.55
+71.16
+59.50
+HADVQ
+2.41
+79.27
+58.41
+70.88
+40.36
+71.55
+57.40
+Qwen3-8B
+FP16
+16
+86.50
+68.00
+83.50
+55.50
+76.40
+74.70
+AWQ
+3
+78.50
+62.20
+68.20
+41.00
+71.90
+52.20
+HADVQ
+3.41
+85.57
+68.35
+80.81
+50.34
+76.99
+72.40
+RTN
+2
+49.80
+51.20
+25.30
+22.30
+52.90
+24.40
+AWQ
+2
+46.60
+48.80
+25.30
+21.40
+52.60
+24.70
+GPTQ
+2
+41.80
+49.30
+25.80
+22.80
+51.80
+24.20
+HADVQ
+2.535
+84.92
+63.77
+79.46
+49.49
+73.83
+66.90
+HADVQ
+2.41
+82.23
+65.98
+78.45
+48.29
+74.81
+66.40
+We also evaluate on token perplexity benchmarks, including WikiText-2 [34] and a 256-sample subset
+of C4 [37] with a sequence length of 2048.
+Table 6: Token perplexity (↓) on WikiText-2 and C4 for Qwen3 models under low-bit quantization.
+15
+
+
+Qwen3-0.6B
+Qwen3-1.7B
+Qwen3-4B
+Qwen3-8B
+Method
+bits
+Wiki2↓
+C4↓
+Wiki2↓
+C4↓
+Wiki2↓
+C4↓
+Wiki2↓
+C4↓
+FP16
+16
+20.90
+25.40
+16.70
+19.20
+13.70
+16.60
+9.71
+13.30
+AWQ
+3
+80.40
+72.90
+29.00
+32.50
+33.40
+29.90
+14.90
+18.50
+HADVQ
+3.41
+24.57
+28.77
+17.55
+20.59
+14.24
+17.41
+10.18
+13.89
+RTN
+2
+9.090E7
+5.66E7
+1.65E7
+1.63E7
+9.31E6
+8.17E6
+NaN
+NaN
+AWQ
+2
+3.86E7
+3.43E7
+6.71E6
+7.97E6
+6.53E6
+5.55E6
+4.16E7
+2.89E7
+GPTQ
+2
+7.19E5
+5.91E5
+1.43E5
+3.89E3
+2.06E4
+1.25E4
+4.66E3
+2.93E3
+HADVQ
+2.535
+41.92
+44.68
+22.11
+25.69
+17.03
+19.69
+11.58
+15.43
+HADVQ
+2.41
+49.39
+54.32
+25.90
+28.46
+17.73
+20.89
+12.10
+15.84
+B.2
+Llama models results for different LM Eval Harness versions
+LM Eval Harness v0.3.0.
+Addition to the table 1 we also report results on Llama3.2-1B and
+Llama3.2-3B. For all benchmarks, we report accuracy (acc).
+Table 7: Zero-shot accuracy (↑) comparison on Llama3.2-1/3B models using LM Eval Harness
+v0.4.11. We report acc for all benchmarks.
+Model
+Method
+Bits
+BoolQ↑
+Wino↑
+ArcE↑
+ArcC↑
+Hella↑
+PiQA↑
+Llama3.2-1B
+FP16
+16
+64.46
+60.62
+65.49
+31.48
+47.76
+74.43
+HADVQ
+2.41
+61.5
+52.88
+45.33
+23.12
+33.58
+61.75
+HADVQ
+2.535
+60.58
+52.88
+48.95
+23.46
+36.01
+65.51
+HADVQ
+3.41
+63.52
+58.48
+57.66
+27.65
+41.46
+71.27
+Llama3.2-3B
+FP16
+16
+73.55
+69.77
+74.62
+42.24
+55.24
+76.71
+HADVQ
+2.41
+50.18
+61.64
+61.83
+32.00
+43.88
+72.20
+HADVQ
+2.535
+69.33
+63.61
+64.10
+32.85
+46.51
+73.01
+HADVQ
+3.41
+65.47
+67.48
+69.23
+39.16
+51.15
+75.57
+Table 8: Token perplexity (↓) on WikiText-2 with 2048 and 4096 sequences lengths.
+Llama3.2-1B
+Llama3.2-3B
+Method
+bits
+2048↓
+4096↓
+2048↓
+4096↓
+FP16
+16
+9.75
+9.06
+7.81
+7.28
+HADVQ
+3.41
+11.98
+11.09
+8.69
+8.1
+HADVQ
+2.535
+22.1
+20.8
+11.67
+10.91
+HADVQ
+2.41
+29.1
+27.57
+13.13
+12.24
+LM Eval Harness v0.4.4.
+We also report results obtained with LM Eval Harness v0.4.4 on models
+from the Llama family [41], including Llama2-7B, Llama2-13B, Llama3-8B, Llama3.2-1B, and
+Llama3.2-3B. Compared with the v0.3.0 setup used in the main text, this evaluation additionally
+includes recent scalar PTQ baselines such as ReSpinQuant [28], QuaRot [1], and OSTQuant [26].
+For BoolQ [7], WinoGrande [38], ARC-Easy [8], ARC-Challenge [8] and PIQA [4], we report the
+normalized scores.
+Table 9: Zero-shot accuracy (↑) comparison on Llama-family models using LM Eval Harness v0.4.4.
+For ARC-Easy, ARC-Challenge, HellaSwag, and PIQA, we report normalized scores.
+16
+
+
+Model
+Method
+Bits
+BoolQ↑
+Wino↑
+ArcE↑
+ArcC↑
+Hella↑
+PiQA↑
+Llama2-7B
+FP16
+16
+77.74
+68.82
+74.58
+46.16
+75.99
+79.11
+ReSpinQuant
+4
+74.89
+66.22
+70.20
+43.94
+73.38
+76.17
+QuaRot
+4
+74.13
+66.85
+70.24
+43.52
+73.27
+77.09
+OSTQuant
+4
+74.31
+66.85
+69.23
+41.72
+73.78
+76.88
+ReSpinQuant
+3
+65.84
+55.72
+49.41
+29.78
+59.52
+67.95
+QuaRot
+3
+56.36
+48.38
+43.22
+27.13
+41.73
+41.73
+OSTQuant
+3
+60.12
+55.56
+52.23
+29.95
+56.14
+68.88
+HADVQ
+3.41
+76.42
+68.35
+74.16
+45.56
+74.33
+78.45
+HADVQ
+2.535
+72.94
+67.96
+69.78
+40.53
+71.24
+76.71
+HADVQ
+2.41
+74.07
+68.19
+68.43
+42.06
+70.55
+76.93
+Llama2-13B
+FP16
+16
+80.52
+72.20
+77.48
+49.23
+79.39
+80.52
+ReSpinQuant
+4
+79.42
+69.77
+74.87
+46.76
+77.24
+78.94
+QuaRot
+4
+79.27
+69.53
+75.46
+45.82
+76.19
+78.18
+OSTQuant
+4
+78.62
+69.14
+73.36
+48.29
+77.04
+78.89
+ReSpinQuant
+3
+70.46
+59.59
+60.23
+36.77
+67.20
+72.42
+QuaRot
+3
+58.35
+51.54
+47.69
+27.30
+45.84
+64.04
+OSTQuant
+3
+69.27
+61.09
+59.22
+34.90
+66.48
+72.31
+HADVQ
+3.41
+79.54
+72.93
+76.64
+48.38
+78.34
+80.03
+HADVQ
+2.535
+80.21
+70.17
+72.22
+45.56
+76.05
+78.70
+HADVQ
+2.41
+78.96
+70.72
+71.51
+43.52
+75.05
+78.84
+Llama3-8B
+FP16
+16
+81.35
+72.45
+77.78
+53.33
+79.14
+80.85
+ReSpinQuant
+4
+77.49
+68.11
+75.84
+47.10
+75.55
+79.11
+QuaRot
+4
+76.61
+67.48
+67.59
+44.80
+74.83
+77.58
+OSTQuant
+4
+77.83
+69.38
+75.55
+47.10
+74.44
+77.15
+ReSpinQuant
+3
+65.75
+55.88
+54.63
+31.91
+59.86
+67.41
+QuaRot
+3
+50.34
+51.30
+31.23
+22.53
+31.68
+52.94
+OSTQuant
+3
+60.15
+55.01
+47.31
+29.78
+56.04
+65.13
+HADVQ
+3.41
+80.98
+74.19
+77.40
+52.05
+76.66
+78.84
+HADVQ
+2.535
+74.46
+70.56
+70.66
+44.37
+71.74
+76.66
+HADVQ
+2.41
+73.58
+67.72
+66.62
+39.59
+68.46
+75.41
+Llama3.2-1B
+FP16
+16
+63.94
+60.46
+60.48
+36.35
+63.66
+74.54
+ReSpinQuant
+4
+58.04
+57.38
+52.65
+31.91
+55.17
+69.26
+QuaRot
+4
+50.83
+52.96
+50.25
+30.55
+54.23
+67.41
+OSTQuant
+4
+57.77
+53.59
+52.02
+31.14
+55.71
+69.37
+ReSpinQuant
+3
+56.48
+50.67
+36.74
+21.76
+35.04
+58.00
+QuaRot
+3
+49.94
+49.57
+27.99
+23.29
+27.84
+50.65
+OSTQuant
+3
+53.52
+50.04
+36.20
+24.15
+32.46
+55.28
+HADVQ
+3.41
+64.01
+59.43
+56.90
+33.79
+59.69
+72.63
+HADVQ
+2.535
+60.24
+53.75
+46.04
+28.50
+47.83
+67.30
+HADVQ
+2.41
+62.2
+55.64
+44.49
+27.30
+43.34
+62.68
+Llama3.2-3B
+FP16
+16
+73.33
+69.77
+71.68
+45.90
+73.63
+77.42
+ReSpinQuant
+4
+69.88
+63.54
+66.20
+40.53
+68.64
+75.95
+QuaRot
+4
+66.42
+63.06
+63.64
+38.99
+67.67
+73.12
+OSTQuant
+4
+66.39
+63.06
+66.37
+41.47
+69.31
+74.70
+ReSpinQuant
+3
+61.47
+52.09
+45.12
+27.99
+48.31
+60.88
+QuaRot
+3
+44.43
+51.38
+29.46
+22.10
+30.67
+55.11
+OSTQuant
+3
+53.43
+52.64
+42.00
+26.11
+42.80
+61.21
+HADVQ
+3.41
+69.33
+67.96
+66.50
+42.49
+70.79
+76.88
+HADVQ
+2.535
+71.04
+63.93
+60.10
+36.01
+64.22
+73.34
+HADVQ
+2.41
+55.11
+62.35
+61.20
+36.86
+60.92
+72.69
+In addition, we report MMLU [24, 23] with zero-shot and five-shot settings.
+17
+
+
+Table 10: MMLU accuracy (↑) with zero-shot and five-shot settings. All results are reported using
+LM Eval Harness v0.4.4.
+Llama2-7B
+Llama2-13B
+Llama3-8B
+Llama3.2-1B
+Llama3.2-3B
+Method
+bits
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+FP16
+16
+41.84
+45.84
+52.07
+55.17
+62.15
+65.33
+37.68
+32.
+54.37
+56.38
+HADVQ
+3.41
+31.09
+35.19
+44.49
+48.29
+47.51
+47.40
+25.34
+24.43
+37.37
+37.32
+HADVQ
+2.535
+31.44
+40.34
+48.00
+49.32
+49.76
+52.25
+25.35
+26.83
+38.67
+41.63
+HADVQ
+2.41
+36.92
+44.43
+50.64
+53.07
+59.02
+61.48
+30.78
+26.83
+49.12
+52.19
+LM Eval Harness v0.4.11.
+We also report results obtained with LM Eval Harness v0.4.11 on
+models from the Llama family [41], including Llama2-7B, Llama2-13B, Llama3-8B, Llama3.2-1B,
+and Llama3.2-3B. For all benchmarks, we report accuracy (acc).
+Table 11: Zero-shot accuracy (↑) comparison on Llama-family models using LM Eval Harness
+v0.4.11. We report acc for all benchmarks.
+Model
+Method
+Bits
+BoolQ↑
+Wino↑
+ArcE↑
+ArcC↑
+Hella↑
+PiQA↑
+Llama2-7B
+FP16
+16
+79.39
+69.38
+75.51
+42.92
+57.12
+78.13
+HADVQ
+2.41
+74.46
+67.56
+70.92
+38.82
+51.84
+76.50
+HADVQ
+2.535
+74.74
+68.43
+73.48
+37.54
+52.76
+76.55
+HADVQ
+3.41
+78.38
+68.51
+75.04
+42.06
+55.97
+77.37
+Llama2-13B
+FP16
+16
+82.14
+72.61
+78.96
+47.35
+60.20
+79.54
+HADVQ
+2.41
+80.15
+70.40
+75.63
+41.89
+56.55
+77.37
+HADVQ
+2.535
+81.44
+71.03
+75.51
+41.98
+57.12
+77.86
+HADVQ
+3.41
+81.62
+72.61
+78.66
+45.22
+59.55
+79.16
+Llama3-8B
+FP16
+16
+82.26
+73.95
+80.77
+51.88
+60.67
+78.84
+HADVQ
+2.41
+73.58
+67.01
+70.92
+37.29
+50.90
+74.37
+HADVQ
+2.535
+75.26
+69.77
+73.11
+40.27
+53.44
+75.90
+HADVQ
+3.41
+81.59
+73.40
+79.34
+47.35
+58.04
+78.40
+Llama3.2-1B
+FP16
+16
+63.82
+60.77
+66.29
+31.48
+48.18
+75.19
+HADVQ
+2.41
+61.90
+54.30
+47.69
+25.09
+35.18
+65.02
+HADVQ
+2.535
+60.98
+54.85
+51.47
+24.83
+37.81
+67.36
+HADVQ
+3.41
+63.70
+59.04
+62.79
+28.67
+44.82
+73.67
+Llama3.2-3B
+FP16
+16
+74.19
+69.46
+74.54
+43.00
+55.82
+76.44
+HADVQ
+2.41
+53.33
+62.04
+65.66
+34.81
+45.80
+72.85
+HADVQ
+2.535
+71.31
+65.59
+67.34
+34.64
+48.01
+73.67
+HADVQ
+3.41
+71.22
+68.35
+72.81
+41.21
+53.20
+76.44
+In addition, we report MMLU [24, 23] in both zero-shot and five-shot settings.
+Table 12: MMLU accuracy (↑) with zero-shot and five-shot settings. All results are reported using
+LM Eval Harness v0.4.11.
+Llama2-7B
+Llama2-13B
+Llama3-8B
+Llama3.2-1B
+Llama3.2-3B
+Method
+bits
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+0-shot↑
+5-shot↑
+FP16
+16
+41.71
+45.98
+52.36
+55.50
+62.41
+65.48
+38.48
+32.17
+55.13
+56.68
+HADVQ
+2.41
+31.17
+35.45
+45.00
+48.19
+48.38
+47.96
+24.95
+24.62
+38.35
+37.84
+HADVQ
+2.535
+32.83
+40.42
+47.91
+49.52
+50.37
+52.68
+25.94
+27.30
+42.33
+41.71
+HADVQ
+3.41
+37.05
+44.59
+50.58
+53.13
+58.86
+61.75
+31.57
+26.83
+50.17
+52.32
+18
+
+
+C
+Broader Impacts
+This work studies post-training quantization for large language models. A potential positive impact
+is that improved ultra-low-bit quantization can reduce memory usage and deployment costs, which
+may make language models more accessible in resource-constrained settings and lower the hardware
+requirements needed for inference.
+C.1
+Inference Efficiency
+We also report a simple throughput comparison between full-precision and quantized models. Table 13
+shows generation speed in tokens per second measured on a single A100 40GB GPU.
+At present, we optimized only the pack_int2 kernel for the magnitude codebook indices. Other parts
+of the quantized inference pipeline are not yet fully optimized. As a result, the reported throughput
+likely underestimates the efficiency that could be achieved with a more careful implementation.
+Table 13: Inference throughput in tokens per second.
+Bits
+Qwen3-0.6B
+Qwen3-4B
+Qwen3-8B
+tok/s
+tok/s
+tok/s
+16
+21.48
+17.05
+16.73
+2.41
+9.48
+5.90
+3.59
+D
+Licenses for Existing Assets
+We cite the main external assets used in this work in the paper and summarize their licenses below.
+19
+
+
+Table 14: Main external assets used in this work and their licenses.
+Asset
+Type
+License
+Notes
+Llama2, Llama3,
+Llama3.2
+Base models
+Llama Community
+License
+Use is subject to the corresponding Llama
+Community License Agreement and Acceptable
+Use Policy.
+Qwen3
+Base models
+Apache 2.0
+We use publicly released Qwen3 checkpoints.
+The Pile
+Calibration data
+MIT (repository)
+We use mit-han-lab/pile-val-backup for
+calibration. The Pile aggregates multiple
+sources, so users should also respect the terms
+of the underlying components.
+BoolQ
+Evaluation dataset
+CC BY-SA 3.0
+Used only for evaluation.
+WinoGrande
+Evaluation dataset
+Not clearly specified
+Used only for evaluation; we cite the original
+dataset source.
+ARC-Easy /
+ARC-Challenge
+Evaluation dataset
+Not clearly specified
+Used only for evaluation; we cite the original
+dataset source.
+HellaSwag
+Evaluation dataset
+MIT
+Used only for evaluation.
+PIQA
+Evaluation dataset
+Academic Free
+License v3.0
+Used only for evaluation.
+MMLU
+Evaluation dataset
+Not clearly specified
+Used only for evaluation; we cite the original
+dataset source.
+LM Eval Harness
+Evaluation framework
+MIT
+Used for downstream evaluation.
+PyTorch
+Software library
+BSD-style license
+Used for implementation.
+Transformers
+Software library
+Apache 2.0
+Used for model loading and inference.
+fast-hadamard-
+transform
+Software library
+BSD-3-Clause
+Used for randomized Hadamard
+preconditioning.
+torch_kdtree
+Software library
+MIT
+Used for nearest-neighbor lookup in the
+directional codebook.
+20
+
+
+NeurIPS Paper Checklist
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justification: The main claims in the abstract and introduction are consistent with the actual
+scope of the paper and are supported by both the experimental results and the ablation study.
+In particular, the paper claims that HADVQ combines random preconditioning, magnitude–
+direction decoupling, structured directional vector quantization, and Hessian-aware channel
+preservation, and these components are described in Section 3 and evaluated in Sections 4.2
+and 4.3. The abstract and introduction also focus on the extremely low-bit post-training
+setting, which matches the experiments reported in the paper.
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+Justification: The paper includes a dedicated Limitations section discussing the main
+constraints of the current study, including the focus on weight-only PTQ, the fact that
+the method is not evaluated together with fine-tuning, the dependence of the directional
+codebook on 8-dimensional E8 structure, and the additional runtime overhead introduced
+by the random Hadamard transform. It also clarifies that the extra memory used by the
+codebooks and the sensitive-channel mask is negligible when amortized over a model with
+billions of parameters.
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+21
+
+
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an impor-
+tant role in developing norms that preserve the integrity of the community. Reviewers
+will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+Answer: [Yes]
+Justification: The paper includes one explicit theoretical result, stated as a lemma in Ap-
+pendix A, together with its assumptions and a complete proof. In particular, the lemma
+states the asymptotic normality of coordinates after randomized Hadamard preconditioning
+under the assumption ∥w∥∞/∥w∥2 →0, and the proof is given using the Lindeberg–Feller
+theorem. The assumptions are stated directly in the lemma, and the proof is provided in full
+in the appendix.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and cross-
+referenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-
+perimental results of the paper to the extent that it affects the main claims and/or conclusions
+of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justification: The paper describes the main information needed to reproduce the experiments,
+including the quantization setup, bit-budget formula, block size, codebook design, calibration
+setup, evaluated models and datasets, baseline methods, and implementation details. We
+also specify the LM Eval Harness versions used for different result tables. In addition,
+the submission includes a link to the project repository, where we provide the code and
+supporting materials needed for reproduction.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+22
+
+
+• While NeurIPS does not require releasing code, the conference does require all submis-
+sions to provide some reasonable avenue for reproducibility, which may depend on the
+nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+Question: Does the paper provide open access to the data and code, with sufficient instruc-
+tions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+Answer:[Yes]
+Justification: The submission provides open access to the code and supporting materials,
+together with instructions for reproducing the main experimental results. The paper also
+states that the code and supporting materials will be released and describes the main
+experimental setup, including quantization settings, calibration data, evaluation benchmarks,
+and implementation details needed to run the experiments.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperpa-
+rameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justification: The paper specifies the main experimental details needed to understand the
+results, including the quantization setup, bit-budget formula, block size, directional and
+magnitude bit allocations, calibration data, evaluated models and datasets, baseline methods,
+and implementation details such as the main libraries and evaluation framework versions.
+23
+
+
+These details are provided in Experimental Results and complemented by the appendix
+tables for additional settings and benchmarks.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical significance
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+Answer: [No]
+Justification: The paper does not report error bars or formal statistical significance estimates
+for the experimental results. Most evaluations are deterministic once the quantized model is
+fixed, and the main results are presented as single-run benchmark scores across models and
+datasets. We instead support the empirical claims through consistent trends across multiple
+model families, benchmarks, and ablation settings.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, confidence
+intervals, or statistical significance tests, at least for the experiments that support the
+main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufficient information on the com-
+puter resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justification: The paper specifies the main compute resources used in the experiments.
+Unless stated otherwise, the quantization and evaluation experiments were conducted on
+a single V100 32GB GPU, while the throughput measurements reported in the appendix
+were obtained on a single A100 40GB GPU. The appendix also reports tokens-per-second
+measurements for several Qwen3 models, which provides an additional indication of runtime
+cost.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+24
+
+
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justification: The research in this paper is conducted in accordance with the NeurIPS Code
+of Ethics. The work studies post-training quantization methods for existing language models
+and does not involve human subjects, crowdsourcing, private data, or any intervention
+that would raise additional ethical concerns beyond those discussed in the broader impacts
+section.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consid-
+eration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [Yes]
+Justification: The paper includes a Appendix C discussing both a positive impact, namely
+reduced memory and deployment cost.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+25
+
+
+Answer: [N/A]
+Justification: The paper does not release a new pretrained language model or a new dataset.
+It studies a quantization method for existing models and may release code for reproducing
+the experiments, but it does not introduce a standalone high-risk model or data asset that
+would require additional release safeguards beyond those of the underlying base models.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justification: The paper explicitly lists and cites the main external assets used in the experi-
+ments, and their licenses and terms of use are summarized in Appendix D. For assets whose
+dataset cards do not clearly specify a license, we state this explicitly and cite the original
+source.
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+Answer: [Yes]
+Justification: We release the code for the proposed method and provide documentation
+and usage instructions alongside it. The repository includes the information needed to
+reproduce the main experiments and describes the scope and intended use of the released
+implementation.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+26
+
+
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+14. Crowdsourcing and research with human subjects
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+Answer: [N/A]
+Justification: The paper does not involve crowdsourcing, user studies, or any research with
+human subjects. All experiments are conducted on existing models and benchmark datasets.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is fine, but if the main contribu-
+tion of the paper involves human subjects, then as much detail as possible should be
+included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justification: The paper does not involve crowdsourcing, user studies, or any research with
+human subjects, so IRB approval or an equivalent review was not required.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientific rigor, or originality of the research, declaration is not required.
+Answer: [N/A]
+Justification: The core methodology, theoretical results, and experimental pipeline of this
+work do not rely on LLMs as an important, original, or non-standard component. Any
+possible use of LLMs for writing or editing does not affect the scientific content of the paper.
+27
+
+
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should not
+be described.
+28

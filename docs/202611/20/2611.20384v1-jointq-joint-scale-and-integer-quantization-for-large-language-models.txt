@@ -1,0 +1,3486 @@
+JointQ: Joint Scale-and-Integer Quantization
+for Large Language Models
+Keiji Kimura*
+Yuma Ichikawa†
+Abstract
+GPTQ is the de facto standard solver for layer-wise post-training quantization
+(PTQ) of large language models, yet the solver itself has received less attention
+than weight preprocessing and cross-layer objectives. We target a bottleneck of
+GPTQ: its greedy procedure optimizes continuous group scales separately from
+the assignment of discrete integers. Evaluating each integer candidate with its
+closed-form optimal scale has been used for per-channel quantization; JointQ
+extends it to group-wise quantization, where a row’s scales are coupled through
+the Hessian, and applies it to refine the GPTQ solution. Each local-search move
+changes one integer and recomputes its group’s optimal scale in closed form,
+accounting for the other groups through the full Hessian; all scales are periodically
+re-solved jointly. The search starts from a row-wise selection among scale-refitted
+candidates including the GPTQ solution, so unregularized JointQ never has a
+larger layer-wise calibration error than GPTQ. JointQ preserves the GPTQ output
+format and is thus a drop-in replacement. Across four models and four settings,
+JointQ improves six-task average zero-shot accuracy over vanilla GPTQ in 14 of
+16 comparisons and perplexity in 12 of 16. The mean accuracy gain increases
+from 0.0044 in W4G128 to 0.1559 in W3 per-channel, and JointQ also improves
+average accuracy over GPTQ with MSE-based scale search and activation ordering
+in all eight per-channel comparisons, though rarely in G128. An ablation shows
+that JointQ’s diagonal Tikhonov regularization mitigates severe W3 per-channel
+perplexity degradation, so the largest gains are not due to the local search alone.
+Overall, JointQ’s primary empirical benefit is downstream accuracy preservation in
+challenging low-bit and large-group regimes. Code is available in the OneComp
+library at https://github.com/FujitsuResearch/OneCompression.
+1
+Introduction
+The rapid scaling of transformer-based language models has made efficient deployment a
+central challenge. Modern models now routinely contain billions to hundreds of billions
+of parameters, placing substantial pressure on memory capacity, memory bandwidth,
+and inference cost [Vaswani et al., 2017, Touvron et al., 2023, Dubey et al., 2024,
+*Fujitsu Limited, Kanagawa, Japan, E-mail: kimura-keiji@fujitsu.com
+†Fujitsu Limited, Kanagawa, Japan, E-mail: ichikawa.yuma@fujitsu.com
+1
+arXiv:2611.20384v1  [cs.LG]  16 Nov 2026
+
+
+Yang et al., 2025]. Post-training quantization (PTQ) is therefore a key technique for
+practical inference: it compresses pretrained weights from 16-bit precision to 4, 3,
+or even fewer bits without retraining, thereby reducing both model size and serving
+cost [Gholami et al., 2022, Nagel et al., 2021]. Among PTQ methods, layer-wise
+approaches are particularly attractive for large language models because each linear
+layer can be quantized independently using only a small calibration set, while the
+resulting model remains compatible with efficient low-bit inference kernels.
+In this layer-wise setting, GPTQ [Frantar et al., 2023], built on Optimal Brain
+Compression [Frantar et al., 2022], has become the de facto standard solver due to its
+strong speed–quality trade-off: it quantizes weight columns greedily using second-order
+activation statistics while compensating for the induced error in the remaining columns.
+It is widely used both as a standalone quantizer and as the final projection step in more
+elaborate PTQ pipelines [Arai and Ichikawa, 2025, Li et al., 2025, Lin and Wan, 2025,
+Ichikawa et al., 2025]. Recent progress in LLM quantization has largely advanced
+along two complementary directions. The first improves the geometry of weights and
+activations before quantization, for example, through rotation-based preprocessing meth-
+ods [Ashkboos et al., 2024, Liu et al., 2025, Tseng et al., 2024b,a, Chee et al., 2023, Lin
+et al., 2024a, Sun et al., 2025] that mitigate outliers and make weight distributions more
+quantization-friendly. The second modifies the quantization objective to better account
+for calibration mismatch and error propagation, for example, through asymmetric cali-
+bration, output-aware formulations, or submodule-level correction [Arai and Ichikawa,
+2025, Li et al., 2025, Lin and Wan, 2025, Ichikawa et al., 2025]. Although these ad-
+vances have substantially improved PTQ performance, they mainly refine the context
+in which quantization is performed while leaving the core projector—the optimization
+step that maps a real-valued layer back to a low-bit group-wise quantized representation
+in the standard GPTQ format—largely unchanged.
+We argue that this bottleneck becomes especially pronounced in challenging quan-
+tization regimes. In group-wise scalar quantization, the final quantized weights are
+governed by two tightly coupled components: continuous group scales and discrete
+integer assignments. The scales determine the spacing of the quantization grid, while
+the integers select the grid points. Standard GPTQ-style quantization optimizes these
+two components separately: it first sets the scales using a heuristic rule and then greed-
+ily assigns integers under the resulting fixed grid. Although this decoupling is often
+sufficient when the grid is dense or groups are small, it becomes increasingly restrictive
+in more challenging settings, such as low-bit quantization or large-group schemes like
+per-channel quantization, where the choice of scale significantly impacts reconstruction
+quality.
+Joint treatments of the two components have so far been formulated mainly for a
+single scale per layer or per output channel. COMQ [Zhang et al., 2025] alternates be-
+tween integer updates under a fixed scale and closed-form scale updates. Beacon [Zhang
+and Saab, 2026] eliminates the scale analytically, obtaining a reduced objective that
+evaluates every integer candidate with its optimal scale, and searches over the integers
+under a cosine criterion derived from it. Neither addresses group-wise quantization, in
+which the scales of a row are coupled through the off-diagonal blocks of the Hessian,
+and both construct their integers independently of GPTQ. PiSO [Amboage et al., 2026]
+computes optimal scales for round-to-nearest assignment and interleaves them with
+2
+
+
+GPTQ, but the integers are then still assigned under fixed scales.
+To address these gaps, we propose JointQ, a drop-in replacement for GPTQ that
+jointly optimizes scales and integer assignments while preserving the exact deployment
+format. JointQ rests on two design choices. First, its local search extends scale-
+eliminated integer search to the group-wise setting. Each candidate move modifies a
+single integer assignment and recomputes the optimal scale of the affected group in
+closed form, while accounting for the other groups through the full Hessian, so that the
+cross-group coupling enters the score of every move; after each pass over the groups,
+the search also re-solves all group scales of selected rows jointly with the integers fixed.
+Second, JointQ refines the GPTQ solution rather than replacing it. A GPTQ solution
+and a clipping-based solution are each given jointly refitted group scales, the candidate
+with the lower layer-local objective is selected independently for each output row, and
+the local search starts from this selection. Because the GPTQ solution is in the candidate
+pool, unregularized JointQ never has a larger layer-wise calibration error than GPTQ. In
+the per-channel case, the move score coincides with Beacon’s reduced objective, so the
+distinction from such methods there lies in the second choice and in the regularization
+of Section 3.7. The resulting representation remains fully compatible with existing
+inference kernels and GPTQ-style checkpoints.
+Empirically, across four models and four quantization configurations, JointQ im-
+proves six-task average zero-shot accuracy over vanilla GPTQ in 14 of 16 comparisons
+and perplexity in 12 of 16. The benefit grows with the difficulty of the quantization
+regime: averaged over the models, the accuracy gain increases from 0.0044 in W4G128
+to 0.1559 in W3 per-channel. Against GPTQ with MSE-based scale search and activa-
+tion ordering, JointQ wins all eight per-channel accuracy comparisons, with the clearest
+gains appearing in W3 per-channel. In G128, by contrast, the value of JointQ when
+its GPTQ candidate uses the same enhanced heuristics is model dependent; under the
+actorder-free evaluation condition, JointQ remains stronger than both vanilla and MSE-
+only GPTQ in most comparisons. A staged ablation separates the unregularized JointQ
+pipeline, consisting of the warm start and the local search, from the full stabilization
+policy: by construction, the unregularized pipeline never increases layer-wise calibration
+output error relative to GPTQ, and it reduces this error in every model, setting, and layer
+type shown, but the magnitude of this reduction does not predict downstream improve-
+ment. These findings are consistent with the mechanism exposed by our separation
+result, but the theory does not guarantee downstream-metric improvement. Perplexity
+also remains model dependent. We do not compare with COMQ, Beacon, or PiSO, so
+the experiments do not isolate the source of the per-channel gains, which are the largest
+(Section 6). We therefore identify downstream accuracy preservation in challenging
+low-bit and large-group regimes, rather than uniform dominance on every metric, as the
+principal empirical benefit. The gains require no change to the standard GPTQ output
+format.
+2
+Background
+This section introduces the mathematical framework underlying both GPTQ and JointQ.
+We begin by defining the notation, presenting the layer-wise PTQ objective, describing
+3
+
+
+the group-wise quantization format, and reviewing the OBQ and GPTQ algorithms that
+form the basis of JointQ.
+Notation.
+We adopt row-vector notation, following the convention of Li et al. [2025].
+Let W ∈Rm×p denote the weight matrix of a linear layer, stored row-wise by output
+channel, and let X ∈Rp×n denote the input activation matrix, where m is the number
+of output channels, p is the number of input neurons, and n is the number of calibration
+tokens. The layer output is given by Y = WX ∈Rm×n. For a single output channel,
+we use w ∈R1×p to denote a row of W and bw ∈R1×p for its quantized counterpart.
+We write ej ∈R1×p for the j-th standard basis row vector, such that we⊤
+j = wj extracts
+the j-th coordinate. Throughout the theoretical analysis, we define the regularized
+Hessian as eH := H + nλR, where λ ≥0 is a regularization parameter and R ⪰0 is the
+diagonal regularization matrix defined in Section 3.7. Results that require strict positive
+definiteness state eH ≻0 explicitly.
+2.1
+Layer-wise PTQ objective
+The goal of layer-wise PTQ is to find a quantized weight matrix c
+W that minimizes the
+reconstruction error of the layer output for the calibration data. Formally, the problem is
+min
+c
+W ∈Q
+∥WX −c
+WX∥2
+F ,
+(1)
+where Q denotes the set of representable quantized matrices determined by bit-width,
+grouping scheme, and quantization format. Introducing the Hessian matrix H =
+∆
+XX⊤∈Rp×p, the objective can be expressed as
+∥(W −c
+W)X∥2
+F = tr
+
+(W −c
+W)H(W −c
+W)⊤
+.
+(2)
+The Hessian H encodes second-order information about the input activations: its diago-
+nal entry Hjj = Pn
+i=1 X2
+ji measures the sensitivity of the layer output to perturbations
+of the j-th weight column, while the off-diagonal entry Hjk captures the correlation
+between columns j and k. Columns with large Hjj are important because quantization
+errors in these columns affect the output.
+A crucial structural property is that the trace in Eq. (2) decomposes row-wise.
+Writing wi, bwi ∈R1×p for the i-th rows of W and c
+W,
+∥(W −c
+W)X∥2
+F =
+m
+X
+i=1
+(wi −bwi)H(wi −bwi)⊤.
+(3)
+This separability is fundamental: once H is computed from the calibration data, the
+layer-wise PTQ problem reduces to m independent row-wise quadratic programs, one
+for each output channel. We denote the per-row objective by
+ϕ(w, bw) =
+∆(w −bw)H(w −bw)⊤∈R.
+(4)
+Both GPTQ and JointQ exploit this row-wise separability, differing only in their methods
+for solving each row problem.
+4
+
+
+2.2
+Group-wise Uniform Scalar Quantization
+The feasible set Q in Eq. (1) is defined by the quantization format. In the standard
+group-wise scalar quantization scheme used by GPTQ, each row of p weights is divided
+into T contiguous groups G0, . . . , GT −1 of size d where
+Gt = {td, td+1, . . . , td+d−1},
+t = 0, . . . , T−1.
+Common choices include d = 128 and d = p; the latter refers to per-channel quantiza-
+tion. When activation ordering is enabled (Appendix E), the columns are first permuted
+and the groups are contiguous in the permuted order; all results below apply verbatim in
+the permuted coordinates. For bit-width b ≥2, let L := 2b−1. We use the fixed-zero-
+point format of the GPTQ reference implementation, in which each centered integer
+satisfies
+qj ∈Cb := {−L, −L + 1, . . . , L −1},
+and each group carries one scale, so that bwGt = stqt with qt ∈Cd
+b . Following common
+usage, we call this format symmetric; the term refers to the zero point being fixed at
+the midpoint of the raw range, not to Cb being symmetric about zero. Indeed, Cb has
+L negative levels and L −1 positive levels. In storage, the centered integers are offset
+as qraw
+j
+= qj + L ∈{0, . . . , 2b −1}, so all 2b raw levels are used. The asymmetric
+format, in which stored raw integers qraw
+j
+, zt ∈{0, . . . , 2b −1} define centered integers
+¯qj = qraw
+j
+−zt, is deferred to Appendix B.
+In standard practice, the group scale is selected by the min–max rule
+st = 2 maxj∈Gt |wj|
+2b −1
+= maxj∈Gt |wj|
+L −1
+2
+,
+(5)
+followed by qj = clamp(⌊wj/st⌉, −L, L −1), where ⌊·⌉rounds half to even. Under
+this rule, the entry of largest magnitude is mapped to ±(L−1
+2), exactly halfway between
+two levels, so it is never reproduced exactly. After rounding and clipping, a positive
+extreme is reconstructed as maxj |wj| · (L −1)/(L −1
+2) and, under round-half-to-even,
+a negative extreme as −maxj |wj| · L/(L −1
+2); the error is st/2 in either case. The
+rule thus fixes the grid from a single extreme value and can use the available levels
+inefficiently, particularly when outliers are present.
+A central observation in this paper is that the quantized row bw is determined by
+two distinct but tightly coupled sets of variables: the continuous group scales {st}T −1
+t=0
+and the discrete integers {qj}p−1
+j=0. Standard GPTQ treats these components separately,
+whereas JointQ optimizes them jointly.
+2.3
+OBQ and GPTQ
+We review how GPTQ addresses the row-wise objective in Eq. (4). GPTQ [Frantar
+et al., 2023] builds on the Optimal Brain Quantization (OBQ) framework [Frantar et al.,
+2022], which extends the classical Optimal Brain Surgeon method [Hassibi et al., 1993]
+for quantization.
+We assume that the solver uses a positive-definite Hessian surrogate. In practice,
+GPTQ regularizes the Hessian as H ←H + ϵ · mean(diag(H))Ip before inversion.
+5
+
+
+OBQ then quantizes one coordinate at a time. When quantizing the l-th coordinate of
+a row w, it seeks a perturbation ∆w = bw −w ∈R1×p that minimizes the row-wise
+reconstruction error, subject to the constraint that coordinate l is fixed at its quantized
+value, namely ∆we⊤
+l = bwl −wl. The resulting Lagrangian optimality conditions yield
+the closed-form update
+∆w = ( bwl −wl)
+[H−1]ll
+· [H−1]l,:,
+El = ( bwl −wl)2
+[H−1]ll
+.
+The first expression indicates that the quantization error introduced at coordinate l is
+redistributed across the remaining coordinates according to the l-th row of the inverse
+Hessian. The second gives the associated per-coordinate loss, which is larger when
+[H−1]ll is small, indicating that coordinate l is more sensitive. After quantizing coor-
+dinate l, the inverse Hessian over the remaining coordinates ¯l = {0, . . . , p−1} \ {l} is
+updated via the Schur complement:
+[H−1]¯l,¯l ←[H−1]¯l,¯l −[H−1]¯l,l[H−1]l,¯l
+[H−1]ll
+.
+Although OBQ provides closed-form optimal updates, it is too expensive for billion-
+parameter models because its greedy ordering based on El hinders efficient paralleliza-
+tion across output channels. GPTQ [Frantar et al., 2023] makes this framework practical
+through three key modifications. First, instead of following the greedy ordering induced
+by El, it processes coordinates in a fixed column order l = 0, 1, . . . , p −1, enabling
+parallel quantization across all m output channels. Second, it accumulates updates in
+blocks of size B and applies them lazily, which raises the compute-to-memory ratio
+and improves hardware efficiency. Third, instead of repeatedly applying the Schur-
+complement update above, which accumulates numerical errors at billion-parameter
+scale, it precomputes the required rows of the updated inverse Hessians from a single
+Cholesky factorization of H−1, improving numerical stability.
+Despite its effectiveness, GPTQ does not jointly optimize the continuous group
+scales {st} and the discrete integer assignments {qj}. Each group scale is set by Eq. (5)
+before any integer of the group is assigned, and once the greedy column-wise pass
+fixes the integer assignments, the scales are not revisited; Appendix E describes at
+which point of the pass each scale is computed. This decoupling is often harmless
+when the quantization grid is sufficiently dense, such as at higher bit-widths or with
+small groups. However, it becomes much more restrictive in low-bit or per-channel
+settings, where each group contains only a few available grid points and scale selection
+significantly affects reconstruction quality. The next section introduces JointQ, which
+directly addresses this limitation.
+3
+JointQ
+This section introduces JointQ. We begin by formulating the coupled row-wise opti-
+mization problem and showing that the continuous scale variables can be eliminated
+analytically, yielding a reduced discrete reference objective. We then present the
+6
+
+
+group-conditional surrogate used by the practical algorithm, derive the corresponding
+closed-form best-response scale, and decompose the resulting conditional error into
+a direction gap and a scale gap. Next, we provide an illustrative separation example
+for a single-group instance, showing that frozen-scale quantization can be fundamen-
+tally suboptimal in low-bit regimes. Finally, we describe the local search procedure,
+regularization strategy, and implementation details.
+3.1
+Problem formulation
+JointQ targets the same quantization format as GPTQ, but differs in one essential respect:
+it treats group scales and integer assignments as coupled optimization variables rather
+than optimizing them separately. By Eq. (3), the layer-wise objective decomposes across
+output channels, so analyzing a single row w ∈R1×p is sufficient. For notational
+convenience, we assume that d divides p; otherwise, the final group may be smaller,
+and all results extend without modification. Each row is partitioned into T = p/d
+groups, with associated scales s = (s0, . . . , sT −1) ∈RT and integer assignments
+qj ∈Cb for all j. In the theoretical development, we use the fixed-zero-point codebook
+Cb = {−L, . . . , L −1} of Section 2.2. None of the results in this section requires the
+codebook to be symmetric about zero, except Proposition 3.5, which is an illustrative
+example stated for the symmetric subcodebook Csym
+b
+:= {−(L −1), . . . , L −1} ⊂Cb.
+The extension to asymmetric quantization is presented in Appendix B, and the zero-point
+used in the implementation is described in Section 3.9.
+For each group Gt, let at ∈R1×p denote the zero-padded vector with entries qj
+for j ∈Gt and 0 elsewhere. The quantized row can be expressed as bw = PT −1
+t=0 stat,
+resulting in the row-wise coupled objective being
+ϕ(s, q) =
+
+w −PT −1
+t=0 stat
+
+eH
+
+w −PT −1
+t=0 stat
+⊤
+.
+(6)
+Here, we use the regularized Hessian eH = H +nλR from the outset, where the diagonal
+matrix R is defined in Section 3.7. We allow signed scales st ∈R. Because Cb is not
+symmetric about zero, this is not without loss of generality: a pair (st, qt) with st < 0
+represents the same dequantized group as (|st|, −qt), where −qt ∈{−(L−1), . . . , L}d
+need not lie in Cd
+b . Allowing st < 0 therefore lets each group choose on which side of
+zero the extra level lies. The best-response scale in Proposition 3.2 may be negative, and
+the implementation stores it as computed; the GPTQ-format dequantization st(qraw
+j
+−L)
+is well defined for either sign and requires no change to the storage format.
+3.2
+Scale Elimination and Reduced Objective
+The continuous scale variables in Eq. (6) can be eliminated analytically, reducing the
+coupled discrete-continuous problem to a purely discrete optimization over integer
+assignments. For a single scale per output channel, this elimination is known [Zhang
+and Saab, 2026]; Theorem 3.1 states it for T group scales, which remain coupled through
+the off-diagonal blocks of eH. The elimination is more than a technical simplification;
+it demonstrates that the core difficulty of group-wise quantization lies in the discrete
+7
+
+
+search itself, while the optimal scales are implicitly determined once the integers are
+fixed.
+Formally, let A(q) ∈RT ×p denote the matrix whose t-th row is at, and define the
+matrix B(q) := A(q) eHA(q)⊤∈RT ×T .
+Theorem 3.1 (Global Scale Elimination). Assume eH ≻0. Let I(q) = {t : at̸ = 0}
+denote the set of active groups. If I(q) = ∅, then F(q) = w eHw⊤, and every scale
+vector is optimal. If I(q)̸ = ∅, restricting A(q) to its active rows yields a matrix AI(q)
+such that BI(q) := AI eHA⊤
+I is positive definite. In this case, the active components of
+every minimizer of Eq. (6) are uniquely defined by
+s⋆
+I(q) = w eHAI(q)⊤BI(q)−1,
+(7)
+while the inactive scales remain unconstrained; throughout the paper, we adopt the
+canonical choice s⋆
+t = 0 for t /∈I(q). The resulting reduced objective is
+F(q) := min
+s ϕ(s, q) = w eHw⊤−w eHAI(q)⊤BI(q)−1AI(q) eHw⊤.
+(8)
+The proof can be found in Appendix A.1. The reduced objective F(q) in Eq. (8) can
+be interpreted as the total energy minus the energy captured by the integer directions,
+that is, as a projection residual. The better the integer vectors {at} span the weight
+vector w under the eH-induced geometry, the smaller F(q) becomes. For T > 1, BI(q)
+is in general not diagonal; its off-diagonal entries at eHa⊤
+u couple the groups. This
+also shows that F(q) provides a natural reference lower bound: for any scale vector
+s, we have ϕ(s, q) ≥F(q), with equality if and only if the active scales are set to
+s⋆
+I(q); the inactive scales remain arbitrary. JointQ uses Eq. (7) in two places: in its
+warm start (Section 3.8), where it refits the scales of each candidate solution before the
+candidates are ranked, and in the joint scale re-solve of the local search (Section 3.6).
+The integer moves of the local search, however, are not scored by F. Instead, they use
+the group-conditional surrogate introduced in Section 3.3. This perspective highlights a
+fundamental difference between JointQ and approaches that optimize scales and integer
+assignments in separate stages.
+Positive Definiteness of BI(q).
+Among the active rows {at : t ∈I(q)}, each has
+support from a distinct group Gt and is nonzero by definition; therefore, any nonzero
+linear combination is also nonzero. Since eH ≻0, the eH-quadratic form evaluates to a
+strictly positive value, which results in BI(q) ≻0. The detailed argument is found in
+Appendix A.1.
+3.3
+Best-response scale update
+JointQ does not solve the entire T × T linear system in Eq. (7) for every candidate
+move, as doing so would be prohibitively expensive when T is large. Instead, it scores
+each move with a closed-form best-response rule that re-optimizes only the scale of the
+affected group while keeping all other groups fixed. The full system is solved only once
+8
+
+
+per pass of the local search, and only for a subset of rows (Section 3.6). Specifically, fix
+all groups except for group t, and define the residual
+rt =
+∆w −
+X
+u̸=t
+suau ∈R1×p.
+(9)
+Intuitively, rt indicates the portion of w that remains unexplained by other groups.
+Under this conditioning, the objective becomes a scalar quadratic function of st:
+ϕ(st) = rt eHr⊤
+t −2st(at eHr⊤
+t ) + s2
+t(at eHa⊤
+t ).
+(10)
+Proposition 3.2 (Best-Response Scale). If at eHa⊤
+t > 0, then the unique minimizer of
+Eq. (10) over st ∈R is
+s⋆
+t = at eHr⊤
+t
+at eHa⊤
+t
+,
+ϕ(s⋆
+t ) = rt eHr⊤
+t −(at eHr⊤
+t )2
+at eHa⊤
+t
+.
+(11)
+If at eHa⊤
+t = 0, we set s⋆
+t = 0. The proof is included in Appendix A.2.
+The best-response scale s⋆
+t can be viewed as a weighted regression coefficient; it
+projects the residual rt onto the integer direction at using the eH-inner product. With
+T = 1 and r0 = w, Eq. (11) is the closed-form scale used by COMQ and Beacon [Zhang
+et al., 2025, Zhang and Saab, 2026]; the residual rt extends it to a group whose neighbors
+are held fixed. The minimized value ϕ(s⋆
+t ) represents the residual after this projection.
+This expression clarifies the scale–integer coupling: changing the integer assignments
+alters the direction at, which in turn impacts the optimal scale. Standard GPTQ does
+not capture this dependence because it fixes the scale before optimizing the integers.
+Group-Conditional Surrogate.
+The best-response update naturally leads to the quan-
+tity used by the practical algorithm. Fix all groups except t, and define the group-
+conditional surrogate
+Lt(u) =
+∆min
+σ∈R ϕ((s−t, σ), (q−t, u)),
+where s−t and q−t denote the current scales and integer assignments for all groups
+except t, and u ∈Cd
+b is a candidate integer vector for group t. Let αt := rt eHr⊤
+t , which
+is independent of u, and define
+βt(u) := at(u) eHr⊤
+t , γt(u) := at(u) eHat(u)⊤,
+where at(u) is the zero-padded vector formed by placing u at Gt. Then Proposition 3.2
+gives
+Lt(u) =
+
+
+
+αt −βt(u)2
+γt(u) ,
+γt(u) > 0,
+αt,
+γt(u) = 0.
+When eH ≻0, every nonzero u satisfies γt(u) > 0, so the second case occurs only for
+u = 0. The explicit zero-curvature branch remains necessary when eH is only positive
+semidefinite.
+9
+
+
+Algorithm 2 evaluates this surrogate Lt for every candidate move rather than the
+globally reduced objective F. This distinction is important: F(q′) jointly optimizes
+all T scales, whereas Lt(u) re-optimizes only the scale of group t. As a result, for
+q′ = (q−t, u), we always have F(q′) ≤Lt(u). For T = 1, the residual is r0 = w
+and the two coincide, L0(u) = F(u), so in the per-channel case the moves are scored
+by the same reduced objective as in Beacon [Zhang and Saab, 2026], with eH in place
+of H. For T > 1, Lt also differs from a group-local objective that ignores the other
+groups: through rt, the quantity βt(u) depends on the current reconstruction of every
+other group via the off-diagonal blocks of eH, so the cross-group coupling enters every
+move although only one scale is re-optimized.
+3.4
+Error Decomposition
+We next derive an exact decomposition of the single group conditional error for a fixed
+residual rt, illustrating the advantage of joint scale–integer optimization over frozen-
+scale methods within a single group. The decomposition separates the error into two
+independent, non-negative terms, each with a clear geometric interpretation. In this
+subsection, group-level vectors such as x, qt, vt, and gt are treated as column vectors
+in Rd. Let eHt := [ eH]Gt,Gt ∈Rd×d denote the principal submatrix of eH restricted to
+group t, and let gt := [ eHr⊤
+t ]Gt ∈Rd denote the corresponding subvector. We define
+the group-level error function
+Ψt(x) := rt eHr⊤
+t −2x⊤gt + x⊤eHtx, x ∈Rd.
+Theorem 3.3 (Conditional Direction-Gap and Scale-Gap Decomposition). Fix a resid-
+ual rt as in Eq. (9) and assume eHt ≻0. For any nonzero qt ∈Cd
+b and any s ∈R, the
+excess error relative to the unrestricted continuous optimum admits the decomposition
+Ψt(sqt) −Ψcont
+t
+=
+
+∥vt∥2
+e
+Ht −
+
+⟨qt,vt⟩2
+f
+Ht/∥qt∥2
+f
+Ht
+
+|
+{z
+}
+direction gap
++ (q⊤
+t eHtqt)
+ s −s⋆
+t (qt)
+2
+|
+{z
+}
+scale gap
+, (12)
+where Ψcont
+t
+:= rt eHr⊤
+t −g⊤
+t eH−1
+t
+gt is the continuous minimum, vt := eH−1
+t
+gt is the
+unrestricted continuous optimizer, and s⋆
+t (qt) := (q⊤
+t gt/q⊤
+t e
+Htqt) is the best-response
+scale. We use the notation ⟨qt, vt⟩e
+Ht = q⊤
+t eHtvt and ∥qt∥2
+e
+Ht = q⊤
+t eHtqt. If vt̸ = 0, the
+direction gap can be expressed as ∥vt∥2
+e
+Ht sin2 θ e
+Ht(qt, vt). If vt = 0 or equivalently
+gt = 0, then the unrestricted continuous optimizer is x⋆
+t = 0, the continuous minimum
+is Ψcont
+t
+= rt eHr⊤
+t , and the direction gap vanishes.
+The proof is in Appendix A.3. For a fixed residual rt, Eq. (12) identifies two distinct
+sources of single-group conditional error. The direction gap represents the cost of
+integrality: even with the optimal scale, the integer direction qt cannot, in general, align
+perfectly with the continuous optimum vt. Geometrically, this term is proportional to
+sin2 θ, where θ is the angle between qt and vt under the Hessian-induced geometry. This
+error is inherent to the discrete codebook and cannot be removed by scale optimization
+alone. By contrast, the scale gap represents the cost of selecting a suboptimal scale. It
+10
+
+
+takes the form γ(s −s⋆
+t )2, where γ = q⊤
+t eHtqt > 0. JointQ eliminates this term for the
+updated group at each proposal by recomputing s⋆
+t in closed form, as Beacon does for a
+single scale per channel [Zhang and Saab, 2026]. GPTQ, CDQuant, and COMQ [Nair
+and Suggala, 2024, Zhang et al., 2025] evaluate integer updates under a frozen scale
+and therefore incur both contributions at each such update. The following corollary
+explicitly states the advantage over frozen-scale evaluation.
+Corollary 3.4 (Dominance over Frozen-Scale Evaluation). For any candidate q′
+t ∈Cd
+b ,
+let s⋆
+t (q′
+t) denote the best-response scale, following the convention s⋆
+t (0) = 0. Then
+Ψt(stq′
+t) −Ψt(s⋆
+t (q′
+t)q′
+t) = (q′⊤
+t
+eHtq′
+t)
+ st −s⋆
+t (q′
+t)
+2.
+For q′
+t̸ = 0, this follows directly from Theorem 3.3, as both evaluations share the same
+direction gap. For q′
+t = 0, both sides equal zero under the convention s⋆
+t (0) = 0.
+3.5
+Separation in Low-Bit Regimes
+Theorem 3.3 demonstrates that joint optimization can qualitatively outperform the
+standard decoupled procedure. The following result makes this point concrete in
+a simple single-group setting. It constructs an explicit instance on the symmetric
+subcodebook Csym
+b
+in which the ratio between the error of a min–max initialization
+and that of a nearby jointly optimized solution exceeds (Q2 + d −1)/(Q2 + 1), where
+Q := L −1 = 2b−1 −1, and thus grows linearly with the group size d and is of order
+d/Q2. It also shows that the ±1 local search used by JointQ reaches the improved
+solution through a monotone sequence of strictly improving moves.
+Proposition 3.5 (Separation on the symmetric subcodebook). Let b ≥2 and Q :=
+2b−1−1. Consider a single group (T = 1) of size d ≥2 with eH = Id and the symmetric
+subcodebook Csym
+b
+= {−Q, . . . , Q}. Let w = (M, 1, . . . , 1) ∈R1×d, where
+2Q < M < Q +
+p
+Q2 + 1.
+For q ∈(Csym
+b
+)d, define E(q) =
+∆mins∈R∥w −sq∥2
+2. Let q(0) be obtained by the
+symmetric min–max scale s(0) = maxj |wj|/Q followed by nearest-integer rounding
+and clipping to [−Q, Q], and define E0 =
+∆E(q(0)). Then q(0) = (Q, 0, . . . , 0) and
+E0 = d −1. Moreover, there exists a sequence q(1), . . . , q(d−1) ∈(Csym
+b
+)d such that
+each q(k+1) differs from q(k) by a single ±1 update, the errors Ek =
+∆E(q(k)) decrease
+strictly, and
+Ed−1 = (M −Q)2(d −1)
+Q2 + d −1
+,
+E0
+Ed−1
+= Q2 + d −1
+(M −Q)2 > Q2 + d −1
+Q2 + 1
+.
+In particular, E0/Ed−1 = Ω(d/Q2). Finally, consider Algorithm 2 run on a single row
+(m = 1) with g0,0 = w⊤, initial integers q(0), any ωin ≥0, and ε < min0≤k<d−1(Ek−
+Ek+1), for example ε = 0. Each of its first d −1 iterations raises one coordinate from 0
+to 1, so its iterates coincide with q(1), . . . , q(d−1) up to a permutation of the coordinates
+1, . . . , d −1, which leaves every Ek unchanged. This holds whether its feasibility check
+uses Csym
+b
+or Cb.
+11
+
+
+The proof, including the explicit monotone path, is provided in Appendix A.4.
+Proposition 3.5 provides a mechanism consistent with the empirical trend in Section 4:
+the separation grows with the group size d and is larger when the bit-width is small. For
+b = 2 (Q = 1), the admissible range is 2 < M < 1 +
+√
+2, and the ratio exceeds d/2,
+which grows as Ω(d). The proposition is an idealized example. It uses the symmetric
+subcodebook and the symmetric min–max scale maxj |wj|/Q rather than the GPTQ
+rule in Eq. (5). This scale is the one used by the Clip-Optimize candidate of JointQ’s
+warm start (Section 3.8); because |wj|/s(0) ≤Q, clipping to Cb never binds, so q(0)
+is also the initial Clip-Optimize assignment, and with T = 1 and eH = Id the group-
+local refinement of that candidate is exactly the run of Algorithm 2 described in the
+proposition. Because Csym
+b
+⊂Cb, every iterate in the constructed sequence is also a
+valid solution in the implemented format. The scope is deliberately limited: the result
+concerns a single group with eH = Id and min–max initialization, and does not guarantee
+monotonic gains for multi-group GPTQ, downstream accuracy, or the regularized full
+system. Within this setting, the group-conditional surrogate coincides with the reduced
+objective, demonstrating that a better jointly optimized solution exists and that JointQ’s
+strictly improving ±1 updates reach it. Because T = 1, the proposition illustrates
+the gap between frozen min–max scaling and any scale-eliminated per-channel search,
+such as Beacon [Zhang and Saab, 2026], rather than an advantage of JointQ over such
+searches.
+3.6
+Local Search Procedure
+Having established the underlying motivation, we describe the practical JointQ algorithm.
+Starting from any feasible GPTQ-format solution (s(0), q(0)), in all our experiments
+the multi-candidate warm start of Section 3.8, JointQ improves all m rows of a layer
+simultaneously. We write qi,t ∈Cd
+b and si,t ∈R for the integers and the scale of group
+t in row i, ri,t for the residual of Eq. (9) of row i, and ϕi for its row objective in Eq. (6).
+Algorithm 1 is a block-coordinate descent over the groups. One pass visits the groups
+t = 0, . . . , T −1 in order and, at each visit, runs the integer search of Algorithm 2 on
+group t while all other groups are fixed. After each pass, the scales of a subset of rows
+are re-solved jointly, and passes are repeated until few rows still improve.
+Integer search within a group.
+During the visit to group t, the residual ri,t depends
+only on the other groups and is therefore fixed. So are αt and the vector gi,t :=
+[ eHr⊤
+i,t]Gt ∈Rd of Section 3.4; for all rows at once, the vectors g⊤
+i,t are the rows of
+(W −c
+W) eH:,Gt + c
+W:,Gt eHt, which takes a single matrix product. Suppressing the row
+index in αt, βt, and γt, a candidate u ∈Cd
+b has βt(u) = u⊤gi,t and γt(u) = u⊤eHtu in
+the notation of Section 3.3. We define the energy captured by u as
+κt(u) :=
+(
+βt(u)2/γt(u),
+γt(u) > ε,
+0,
+otherwise,
+(13)
+where ε ≥0 is a numerical tolerance. Under the condition on ε in Proposition 3.6,
+Lt(u) = αt −κt(u), so minimizing the surrogate amounts to maximizing κt. Algo-
+12
+
+
+rithm 2 keeps βt, γt, and the cache ci,t := eHtu = [ eHat(u)⊤]Gt ∈Rd of the current u,
+so a move uj ←uj + δ with δ ∈{−1, +1} is scored in O(1) time through
+β′
+t = βt + δ[gi,t]j,
+γ′
+t = γt + 2δ[ci,t]j + [ eHt]jj.
+(14)
+The search uses best improvement. In each iteration, it scores every feasible move of
+every row, takes for each row the best +1 move and the best −1 move, and applies
+the better of the two, choosing the +1 move on ties, if it increases κt by more than ε.
+An applied move also updates the cache as ci,t ←ci,t + δ[ eHt]:,j in O(d) time. Rows
+without such a move are left unchanged in that iteration. Writing ∆i for the largest
+increase of κt available to row i in an iteration, the search stops once more than a
+fraction ωin of the rows have ∆i < ε, or after 10d iterations. It returns, for every row,
+the final u together with its best-response scale σ = βt(u)/γt(u) of Proposition 3.2,
+with σ = 0 if γt(u) ≤ε.
+Group update.
+The returned pair (u, σ) replaces (qi,t, si,t) in every row where it
+differs from the current pair; if no row changed its integers, the visit leaves the group
+unchanged. Installing the best-response scale gives ϕi = Lt(u), so the scale of a group
+is re-optimized whenever the group is updated, and the row objective never increases
+(Proposition 3.6). Because the quantities in Eq. (14) are updated incrementally, the
+implementation recomputes ϕi from scratch after every group update. This guards
+against the accumulation of floating-point error and is not needed for the guarantees
+below.
+Joint scale re-solve.
+Let µi be the number of groups whose pair (qi,t, si,t) was
+replaced in row i during a pass. After the pass, Algorithm 1 re-solves all scales of row i
+with its integers fixed if two conditions hold: the row is active, that is, ϕi decreased by
+more than nε in the previous pass (all rows are active in the first pass), and µi > τhiT
+or µi < τloT. It solves B(qi)s⊤= A(qi) eHw⊤
+i , which coincides with Eq. (7) when
+all groups of row i are active. The systems of the selected rows are solved together. If
+any of them is singular, for example because a row has an all-zero group, all of them
+are re-solved with B(qi) + ξiIT , where ξi = max(0.01 maxt[B(qi)]tt, 10−6). The
+same damped re-solve is applied to every row whose solution contains a scale with
+|st| > 65504/L, the bound that keeps every stqj representable in FP16. The new scales
+are installed only if they decrease ϕi by more than nε; without damping, Theorem 3.1
+already ensures that the solution does not increase ϕi, so this test only filters numerical
+noise and damped solutions. For per-channel quantization (T = 1), µi ∈{0, 1}, so every
+active row is selected. However, the 1 × 1 re-solve only recomputes the best-response
+scale, which the group updates and the warm-start refit of Section 3.8 have already
+applied, so it never passes the acceptance test. The per-channel results are therefore
+independent of (τlo, τhi). We chose (τlo, τhi) = (0.2, 0.6) in a brief preliminary tuning
+on a few randomly selected layers, by comparing the resulting layer objective, and we
+have not ablated this choice.
+Stopping rule.
+After a pass, a row is active if ϕi decreased by more than nε during
+the pass, that is, if the normalized objective ϕi/n decreased by more than ε. Algo-
+13
+
+
+rithm 1 stops when fewer than a fraction ωout of the rows are active, so the number of
+passes is not fixed in advance. In all experiments, ε = 10−12 and ωin = ωout = 0.1
+(Appendix C).
+Proposition 3.6 (Descent and Termination). Let λ ≥0, and let ε ≥0 be smaller than
+every positive value of γt(u) over all groups t and all u ∈Cd
+b ; such a threshold exists
+because Cd
+b is finite. Then the following hold for every row i. (i) A group update either
+leaves ϕi unchanged or replaces it by Lt(u) ≤ϕi. If Algorithm 2 applied k ≥1 moves
+to row i, then Lt(u) < ϕi −kε. (ii) An installed joint re-solve decreases ϕi by more
+than nε. (iii) Consequently, ϕi is nonincreasing throughout Algorithm 1. Moreover,
+Algorithm 2 stops after at most 10d iterations, and if ε > 0 and ωout > 0, Algorithm 1
+stops after at most 1 + P
+i ϕ(0)
+i /(n ωout m ε) passes, where ϕ(0)
+i
+is the row objective of
+the warm start.
+The proof is provided in Appendix A.5. The condition on ε only ensures that the
+guard in Eq. (13) coincides with the zero-curvature branch of Proposition 3.2. The
+proposition holds for any choice of ωin, τlo, and τhi, and the bound on the number of
+passes only certifies finiteness. This descent statement applies to the row objective
+defined by eH; when λ > 0, it is a regularized objective and does not imply monotonic
+improvement of the unregularized output error, perplexity, or downstream accuracy. The
+full procedure is summarized in Algorithms 1 and 2.
+Cost.
+Forming the vectors gi,t of all rows takes one (m × p)-by-(p × d) product, that
+is, O(mpd) time per visit and O(mp2) time per pass. An iteration of Algorithm 2 costs
+O(md) for all rows, so a visit costs O(md2) under the cap of 10d iterations, and a pass
+costs O(mpd). Recomputing ϕi costs O(p2) per updated row and visit, which amounts
+to O(Tmp2) per pass when most rows are updated. This term dominates in group-wise
+settings. Since ϕi = αt −κt(u) after a group update, it could be reduced to O(d) per
+row and visit, but we keep the exact recomputation for numerical robustness. The joint
+re-solve costs O(p2 + T 3) per selected row: forming B(qi) and the right-hand side
+takes O(p2) time because each at has at most d nonzero entries, and the solve takes
+O(T 3) time. The number of passes is determined by the stopping rule.
+3.7
+Tikhonov Regularization
+The Hessian matrix H = XX⊤can be ill-conditioned when the calibration set is small
+relative to p. To enhance robustness while prioritizing input features that are important
+on the calibration distribution, JointQ uses a diagonal Tikhonov regularizer. Define the
+activation energy of input feature j and its average across features as
+dj := Hjj =
+n
+X
+i=1
+X2
+ji,
+¯d := 1
+p
+p
+X
+j=1
+dj = tr(H)
+p
+.
+Because the activations need not be centered, dj/n is a noncentral second moment
+rather than a variance. For ¯d > 0, we set
+ρj :=
+dj
+¯d
+η
+,
+R := diag(ρ1, . . . , ρp),
+η = 0.5,
+(15)
+14
+
+
+Algorithm 1 JointQ local search for one layer
+Input: W, e
+H, groups {Gt}, codebook Cb, warm start (si, qi)i; ε, ωout, τlo, τhi
+1: ϕi ←ϕ(si, qi) for all rows i; A ←{0, . . . , m−1}
+▷active rows
+2: repeat
+3:
+ϕprev
+i
+←ϕi and µi ←0 for all rows i
+4:
+for t = 0, . . . , T−1 do
+▷one pass
+5:
+g⊤
+i,t ←row i of (W −c
+W) e
+H:,Gt + c
+W:,Gt e
+Ht for all rows i
+6:
+(ui, σi)i ←Algorithm 2 on group t
+7:
+if ui̸ = qi,t for some row i then
+8:
+for each row i with (ui, σi)̸ = (qi,t, si,t) do
+9:
+(qi,t, si,t) ←(ui, σi); µi ←µi + 1; recompute ϕi
+10:
+end for
+11:
+end if
+12:
+end for
+13:
+U ←{i ∈A : µi > τhiT or µi < τloT}
+14:
+for each row i ∈U do
+▷joint scale re-solve
+15:
+s′ ←solution of B(qi)s⊤= A(qi) e
+Hw⊤
+i , with the damping fallback
+16:
+if ϕ(s′, qi) < ϕi −nε then
+17:
+si ←s′; ϕi ←ϕ(s′, qi)
+18:
+end if
+19:
+end for
+20:
+A ←{i : ϕi < ϕprev
+i
+−nε}
+21: until |A| < ωout m
+22: return (si, qi)i
+and replace H with
+eH := H + nλR.
+(16)
+The exponent η controls how strongly the penalty on feature j scales with its activation
+energy: η = 0 gives a uniform Tikhonov term R = Ip, and η = 1 makes ρj proportional
+to dj. We fix η = 0.5 in all experiments and have not tuned it (Appendix D). Importantly,
+“diagonal” refers only to the added matrix R; the off-diagonal entries of H, which encode
+correlations between input features, remain unchanged.
+This substitution is equivalent to solving
+min
+s,q ∥WX −c
+WX∥2
+F + nλ∥(W −c
+W)R1/2∥2
+F ,
+(17)
+whose regularization term can be written as
+nλ
+p
+X
+j=1
+ρj∥W:,j −c
+W:,j∥2
+2.
+Thus, the regularizer does not shrink c
+W toward zero; it discourages quantization errors
+relative to the original weights, with stronger absolute penalties on features having
+larger calibration activation energy. The factor n makes λ interpretable relative to
+the normalized Hessian 1
+nXX⊤. The equivalence is proved in Appendix A.7, and
+Appendix A.8 gives the resulting weighted curvature and scale-sensitivity bounds.
+15
+
+
+Algorithm 2 Best-improvement integer search on group t (all rows in parallel)
+Input: gi,t ∈Rd and initial ui = qi,t ∈Cd
+b for all rows i; e
+Ht; ε, ωin
+1: ci ←e
+Htui; βi ←u⊤
+i gi,t; γi ←u⊤
+i ci; κi ←β2
+i /γi if γi > ε, else 0
+2: for ℓ= 1, . . . , 10d do
+3:
+for each row i, coordinate j, and δ ∈{+1, −1} do
+4:
+βδ
+ij ←βi + δ[gi,t]j; γδ
+ij ←γi + 2δ[ci]j + [ e
+Ht]jj
+5:
+κδ
+ij ←(βδ
+ij)2/γδ
+ij if uij + δ ∈Cb and γδ
+ij > ε, else 0
+6:
+end for
+7:
+κδ
+i ←maxj κδ
+ij and jδ
+i ∈arg maxj κδ
+ij for δ = ±1, for all rows i
+8:
+δi ←+1 if κ+
+i ≥κ−
+i , else −1; ∆i ←κδi
+i −κi for all rows i
+9:
+if |{i : ∆i < ε}| > ωin m then
+10:
+break
+11:
+end if
+12:
+for each row i with ∆i > ε do
+▷one move per row
+13:
+j ←jδi
+i ; uij ←uij + δi; (βi, γi, κi) ←(βδi
+ij , γδi
+ij , κδi
+i ); ci ←ci + δi[ e
+Ht]:,j
+14:
+end for
+15: end for
+16: Recompute βi, γi from ui; σi ←βi/γi if γi > ε, else 0
+17: return (ui, σi)i
+Equation (16) does not necessarily make the Hessian positive definite: if dj = 0,
+then ρj = 0 and no regularization is added in that direction. We therefore state eH ≻0
+explicitly in results that require uniqueness or a matrix inverse. The implementation
+also supports positive-semidefinite cases through the canonical zero-curvature branch in
+Proposition 3.2.
+3.8
+Multi-Candidate Warm Start
+Because the search in Section 3.6 is local, its result depends on the initial state. JointQ
+therefore builds its warm start from a pool of candidate solutions and selects among them
+independently for each output row. Every step below uses the same regularized Hessian
+eH as the subsequent local search. All experiments in this paper use the two candidates
+described next; additional candidates can be added to the pool without changing the
+procedure.
+Clip-Optimize candidate.
+For each row and group, we set the initial scale to the
+symmetric min–max value s(0)
+t
+= maxj∈Gt |wj|/(L −1) and the integers to q(0)
+j
+=
+clamp(⌊wj/s(0)
+t ⌉, −L, L −1) with round-half-to-even, where s(0)
+t
+is clamped below at
+10−8, so that an all-zero group starts from q(0)
+t
+= 0. Unlike Eq. (5), this rule maps the
+entry of largest magnitude exactly to ±(L −1). We then refine each group by a single
+call of Algorithm 2 on the single-group problem
+min
+σ∈R, u∈Cd
+b
+ w⊤
+Gt −σu
+⊤eHt
+ w⊤
+Gt −σu
+
+,
+(18)
+16
+
+
+where wGt ∈R1×d is the restriction of w to Gt and eHt is the principal submatrix of
+Section 3.4. That is, Algorithm 2 is run with gi,t = eHtw⊤
+i,Gt, the clipped integers as
+initial values, and the same ε, ωin, and iteration cap as in Algorithm 1, and the returned
+pair (u, σ) becomes the integers and scale of the group. This group-local objective
+ignores the off-diagonal blocks of eH, so the groups can be refined independently of
+one another. The candidate is thus a direct group-wise extension of scale-eliminated
+per-channel search that treats the groups independently; the local search of Section 3.6,
+which starts from the selected candidate, accounts for the cross-group coupling that this
+candidate ignores. For T = 1, eHt = eH and Eq. (18) is the full row objective, so the
+candidate is a Beacon-type search [Zhang and Saab, 2026] started from round-to-nearest,
+with ±1 best-improvement moves in place of Beacon’s greedy initialization and cyclic
+coordinate updates.
+GPTQ candidate.
+We run GPTQ with the same bit-width, grouping, and codebook,
+using eH in place of H and the same damping ϵ = 0.01 as the GPTQ baseline (Sec-
+tion 2.3). Unless otherwise noted, this run uses min–max scales and no activation
+ordering, so for λ = 0 its integers coincide with those of the GPTQ baseline. The
+variant in which this candidate is produced by GPTQ⋆is described in Appendix E.
+Global scale refit.
+For each candidate c, we keep the integers q(c)
+i
+of every row i
+fixed and re-solve all group scales by the joint scale re-solve of Section 3.6, applied to
+all rows and including its damping fallback and acceptance test. We write ϕ(c)
+i
+for the
+objective of row i of candidate c after this refit. Because the refit installs new scales
+only if they decrease the objective, ϕ(c)
+i
+is at most the objective before the refit; because
+the refitted scales are feasible for q(c)
+i , Theorem 3.1 gives ϕ(c)
+i
+≥Fi(q(c)
+i ), where Fi
+denotes Eq. (8) for row wi. When the undamped solution is installed, the refitted scales
+are the jointly optimal scales s⋆
+I(q(c)
+i ) of Eq. (7), and equality holds. The refitted scales
+may be negative (Section 3.1); in particular, the scales of the GPTQ candidate generally
+differ from those produced by GPTQ. As in Section 3.6, the refit costs O(p2 + T 3) per
+row.
+Row-wise selection.
+For each output row i, we select c⋆
+i ∈arg minc ϕ(c)
+i , preferring
+the Clip-Optimize candidate on ties, and initialize Algorithm 1 with the refitted scales
+and integers of candidate c⋆
+i . Different rows of a layer may therefore start from different
+candidates, whereas all groups of a row come from a single candidate. Selection uses
+only the layer-local objective on the calibration data and never accesses evaluation data
+or downstream metrics. Algorithm 3 in Appendix C summarizes the procedure.
+Because the pool contains the GPTQ candidate, the warm start yields the following
+guarantee.
+Proposition 3.7 (Dominance over the GPTQ candidate). Under the assumptions of
+Proposition 3.6, for each row i, let (sG
+i , qG
+i ) be the GPTQ candidate before the scale
+refit, let ϕ(G)
+i
+be its objective after the refit, and let (sJ
+i , qJ
+i ) be the output of Algorithm 1
+17
+
+
+started from the warm start above. Then
+ϕ(sJ
+i , qJ
+i ) ≤ϕ(c⋆
+i )
+i
+≤ϕ(G)
+i
+≤ϕ(sG
+i , qG
+i ),
+(19)
+irrespective of the stopping rule and the thresholds of Algorithm 1. If, in addition,
+eH ≻0, then Fi(qG
+i ) ≤ϕ(G)
+i
+, with equality when the undamped refit is installed.
+The proof is given in Appendix A.6. For λ = 0, the GPTQ candidate has the same
+integers as the GPTQ baseline, so Eq. (19) states that unregularized JointQ never has a
+larger row-wise calibration output error than GPTQ. The guarantee rests on including
+the GPTQ solution in the pool together with the monotonicity of the local search
+(Proposition 3.6); methods that construct the integers without reference to GPTQ have
+no such guarantee. For λ > 0, the inequality holds for the regularized objective and
+relative to GPTQ run on eH, not relative to the GPTQ baseline; it says nothing about
+perplexity or downstream accuracy.
+3.9
+Implementation
+We use the diagonal regularizer in Eq. (15) with the fixed exponent η = 0.5. The
+regularization strength is set per quantization setting and layer type and shared across
+all model families; Section 4 summarizes the values and how they were selected, and
+Appendix D gives the full table and selection procedure. When λ > 0, the same
+regularized Hessian is used in every step of the warm start (both candidates, the scale
+refit, and the row-wise selection) and in the local search. Unless otherwise noted, a
+layer assigned λ = 0 is first quantized without regularization. If its relative weight error
+∥W −c
+W∥2
+F /∥W∥2
+F is at least 0.2, the entire layer quantization is retried with λ = 0.01:
+both candidates are regenerated, the scales are refitted, the selection is repeated, and
+the local search is rerun, all with the new regularized Hessian. The retry is therefore
+not a post-hoc correction of the scales. The retry strength 0.01 is the smallest nonzero
+value in our candidate grid, and the threshold 0.2 was set from preliminary W4G128
+runs (Appendix D). Because the retry applies only to layers assigned λ = 0, it is never
+triggered in a setting in which every layer type has λ > 0.
+Zero point and storage.
+In the fixed-zero-point format, every group uses zt = L =
+2b−1, exactly as in GPTQ. JointQ modifies only the centered integers qt ∈Cd
+b and the
+scales st ∈R, so its output is packed in the same way as a GPTQ checkpoint: raw
+integers qj + L ∈{0, . . . , 2b −1} and one scale per group, stored in FP16.
+Numerical settings.
+All computations of JointQ outside the GPTQ run that pro-
+duces the GPTQ candidate are performed in float64. The tolerances and thresholds of
+Algorithms 1–3 are fixed in all experiments and listed in Table 5 of Appendix C.
+4
+Experiments
+We empirically evaluate JointQ, investigating its overall effectiveness and the contribu-
+tion of regularization.
+18
+
+
+Setup.
+We evaluate JointQ on four models from two families: Llama-2-7B [Touvron
+et al., 2023], Llama-3-8B [Dubey et al., 2024], Qwen3-8B, and Qwen3-14B [Yang et al.,
+2025].1 The main evaluation uses weight-only symmetric quantization in W4G128,
+W4 per-channel, W3G128, and W3 per-channel settings. For calibration, we sample
+1024 sequences of length 2048 tokens from the C4 training split [Raffel et al., 2020],
+using seed 0. The unquantized models use bfloat16 weights. We report perplexity
+on WikiText-2 [Merity et al., 2017]. Zero-shot performance is measured using lm-
+eval-harness [Gao et al., 2024] on ARC-c, ARC-e [Clark et al., 2018], PIQA [Bisk
+et al., 2020], WinoGrande [Sakaguchi et al., 2021], HellaSwag [Zellers et al., 2019],
+and BoolQ [Clark et al., 2019]. We use normalized accuracy where available and
+raw accuracy for WinoGrande and BoolQ; “Avg.” is the arithmetic mean over all six
+tasks. JointQ uses the diagonal regularizer in Eq. (15) with η = 0.5 and, in the four
+main settings, λ ∈{0, 0.01, 0.15}, set per setting and layer type and shared across
+all model families; the larger value 0.15 appears only in the per-channel settings, and
+W3 per-channel assigns λ > 0 to every layer type (Table 6 in Appendix D). These
+values were chosen by a manual preliminary search on Llama-3-8B, Qwen3-8B, and
+Qwen3-14B that used WikiText-2 perplexity and zero-shot accuracy on ARC-c, ARC-
+e, PIQA, and WinoGrande, that is, evaluation data also used for the results below;
+Llama-2-7B, HellaSwag, and BoolQ were not used in this search (Appendix D). For
+the four main settings, entries with λ = 0 use the retry rule described in Section 3.9.
+Table 3 separates the contribution of the unregularized JointQ pipeline from that of
+the full stabilization policy. Additional comparisons with GPTQ scale-search and
+activation-ordering heuristics are provided in Appendix E. Throughout, JointQ denotes
+the complete configuration: the multi-candidate warm start of Section 3.8 with Clip-
+Optimize and vanilla GPTQ candidates, the layer-specific regularization in Table 6,
+and adaptive retry. JointQ w/o stab. disables both regularization and retry, so the
+entire pipeline, including warm-start generation and selection, runs with λ = 0. JointQ
+(GPTQ⋆cand.) replaces the vanilla GPTQ candidate with a GPTQ⋆candidate while
+retaining the Clip-Optimize candidate; it is therefore not a pure GPTQ⋆warm start.
+Every JointQ result in this paper, including the W2G32 and calibration-sensitivity
+experiments, uses this two-candidate warm start. The tolerances and thresholds of
+the local search are fixed in all experiments (Table 5 in Appendix C). Baselines are
+GPTQ (min–max scales, no activation ordering), GPTQ-MSE (MSE-based scale search
+only), and GPTQ⋆(MSE-based scale search and activation ordering; Appendix E). All
+methods use the same fixed-zero-point codebook Cb and zero point 2b−1 (Section 2.2),
+matching the GPTQ reference implementation. JointQ and all baselines are implemented
+in the open-source OneComp library [Ichikawa et al., 2026], and every result in this
+paper was obtained with OneComp v1.4.2 (Appendix C).
+Hardware and timing.
+Each experiment is allocated a single NVIDIA B200 GPU,
+16 CPU cores, and 240 GB of host memory; all nodes used have the same configuration.
+Reported quantization times are the total wall-clock seconds spent quantizing the linear
+1All four models are pretrained base checkpoints from Hugging Face, so Qwen3-8B and Qwen3-14B
+refer to the base models rather than the post-trained models: meta-llama/Llama-2-7b-hf, meta-llama/
+Meta-Llama-3-8B, Qwen/Qwen3-8B-Base, and Qwen/Qwen3-14B-Base.
+19
+
+
+Table 1: WikiText-2 perplexity (↓) and average zero-shot accuracy (↑). JointQ uses the
+layer-specific diagonal regularization in Table 6 (Appendix D). Bold denotes the better
+quantized result for each model and setting.
+W4G128
+W4 per-ch
+W3G128
+W3 per-ch
+Model
+Method
+PPL
+Avg.
+PPL
+Avg.
+PPL
+Avg.
+PPL
+Avg.
+Llama-2-7B
+BF16
+PPL: 5.47
+Avg.: 0.7038
+GPTQ
+5.89 0.6918
+6.17 0.6816
+6.80 0.6359
+27.74 0.5020
+JointQ
+5.67 0.6914
+5.96 0.6836
+6.78 0.6610
+7.98 0.6032
+Llama-3-8B
+BF16
+PPL: 6.14
+Avg.: 0.7442
+GPTQ
+14.09 0.7248 399.02 0.5960 57.69 0.5036 3381.46 0.3732
+JointQ
+6.65 0.7426
+7.41 0.7247
+8.75 0.7060
+13.09 0.6606
+Qwen3-8B
+BF16
+PPL: 9.73
+Avg.: 0.7403
+GPTQ
+10.33 0.7323
+11.04 0.7114 11.75 0.6919
+19.55 0.5449
+JointQ
+10.17 0.7336
+10.71 0.7240 11.50 0.7250
+22.11 0.6686
+Qwen3-14B
+BF16
+PPL: 8.65
+Avg.: 0.7736
+GPTQ
+8.85 0.7709
+9.11 0.7525 10.07 0.7356
+13.84 0.6089
+JointQ
+8.89 0.7699
+9.40 0.7710
+9.91 0.7472
+18.92 0.7203
+layers and exclude the calibration forward passes used to collect H; for JointQ, they
+include warm-start generation and any adaptive retries. Each node hosts eight GPUs,
+and other jobs may have run on the same node concurrently, so the times are indicative
+rather than precise benchmarks. Since JointQ performs all computations outside its
+GPTQ candidate run in float64 (Section 3.9), its time relative to GPTQ depends on the
+FP64 throughput of the GPU and can be considerably larger on GPUs with limited FP64
+support.
+4.1
+Main Results
+Table 1 compares JointQ with GPTQ across four quantization regimes that vary in
+bit-width and grouping granularity. The GPTQ baseline and the GPTQ candidate inside
+JointQ both use actorder=false and mse=false. These settings cover the standard
+W4G128 configuration and more challenging per-channel and 3-bit configurations.
+Proposition 3.5 provides an idealized mechanism by which frozen-scale assignment
+can become more restrictive with smaller bit-widths or larger groups; it does not imply
+monotonic improvement of downstream metrics. We evaluate whether the empirical
+trend is consistent with this mechanism.
+JointQ improves average zero-shot accuracy over GPTQ in 14 of the 16 model–
+configuration pairs and individual task accuracy in 80 of 96 comparisons, with one tie.
+Averaged over the four models, the accuracy gains are 0.0044 for W4G128, 0.0405 for
+W4 per-channel, 0.0680 for W3G128, and 0.1559 for W3 per-channel. This progression
+is consistent with the mechanism in Proposition 3.5: reducing the bit-width limits the
+available integer directions, while per-channel quantization couples more weights to a
+single scale, making frozen-scale assignment increasingly restrictive. The two average-
+20
+
+
+Table 2: JointQ versus GPTQ-MSE. Entries count model-level wins/ties/losses for
+JointQ; ∆Avg. is the mean JointQ accuracy gain.
+Setting
+PPL W/T/L
+Avg. W/L
+∆Avg.
+W4G128
+3/0/1
+3/1
++0.0029
+W4 per-ch
+3/1/0
+4/0
++0.0316
+W3G128
+3/0/1
+4/0
++0.0257
+W3 per-ch
+3/0/1
+4/0
++0.1435
+Overall
+12/1/3
+15/1
+–
+accuracy decreases, 0.0004 on Llama-2-7B and 0.0010 on Qwen3-14B in W4G128, are
+small.
+The advantage is particularly pronounced on Llama-3-8B, where JointQ improves
+both metrics in every setting and mitigates the severe degradation of GPTQ in the
+per-channel regimes. For example, in W3 per-channel, JointQ reduces perplexity from
+3381.46 to 13.09 and raises average accuracy from 0.3732 to 0.6606. The trend is not
+confined to one model: in W3 per-channel, the accuracy gains are 0.1012 on Llama-2-
+7B, which was not used to select λ, 0.1237 on Qwen3-8B, and 0.1114 on Qwen3-14B.
+Perplexity follows a less uniform pattern: JointQ improves it in 12 of the 16 com-
+parisons but worsens it in four Qwen3 cases. The clearest discrepancy occurs for
+Qwen3-14B W3 per-channel, where perplexity increases from 13.84 to 18.92 despite
+the accuracy improvement from 0.6089 to 0.7203. Thus, the results do not support
+uniform dominance on every metric. Instead, JointQ better preserves downstream accu-
+racy as quantization becomes more aggressive, while its effect on language-modeling
+perplexity can be model dependent.
+Comparison with MSE-based scale search.
+To test whether JointQ’s gains can be
+reproduced by improving only the initial scales while keeping them fixed during integer
+assignment, we compare JointQ with GPTQ-MSE. GPTQ-MSE enables MSE-based
+scale search but not activation ordering, so both configurations are evaluated under
+an actorder-free condition. Table 2 summarizes the model-level comparisons; full
+results are reported in Appendix E. JointQ achieves higher average accuracy in 15 of 16
+comparisons and lower perplexity in 12, with one tie. In G128, it wins 7 of 8 accuracy
+comparisons and 6 of 8 perplexity comparisons; its W3G128 accuracy gain is positive
+for all four models. These results indicate that the advantage of JointQ, particularly
+in W3G128, cannot be explained solely by the min–max scale initialization used by
+vanilla GPTQ. Note, however, that JointQ itself refits all group scales with the integers
+fixed, both in its warm start (Section 3.8) and, for selected rows, after each pass of the
+local search (Section 3.6); these refits are Hessian-aware scale improvements. This
+comparison therefore does not separate the contribution of the fixed-integer refits from
+that of the integer moves.
+21
+
+
+Table 3: Staged ablation of the unregularized JointQ pipeline and stabilization. Bold
+denotes the best result in each row and metric.
+GPTQ
+JointQ w/o stab.
+JointQ
+Model
+Setting
+PPL↓
+Avg.↑
+PPL↓
+Avg.↑
+PPL↓
+Avg.↑
+Llama-2-7B
+W4G128
+5.89
+0.6918
+5.67
+0.6896
+5.67
+0.6914
+W4 per-ch
+6.17
+0.6816
+6.27
+0.6694
+5.96
+0.6836
+W3G128
+6.80
+0.6359
+6.89
+0.6485
+6.78
+0.6610
+W3 per-ch
+27.74
+0.5020
+23.02
+0.4511
+7.98
+0.6032
+Llama-3-8B
+W4G128
+14.09
+0.7248
+6.65
+0.7348
+6.65
+0.7426
+W4 per-ch
+399.02
+0.5960
+7.59
+0.7256
+7.41
+0.7247
+W3G128
+57.69
+0.5036
+8.90
+0.6905
+8.75
+0.7060
+W3 per-ch
+3381.46
+0.3732
+315.46
+0.6324
+13.09
+0.6606
+Qwen3-8B
+W4G128
+10.33
+0.7323
+10.11
+0.7305
+10.17
+0.7336
+W4 per-ch
+11.04
+0.7114
+10.66
+0.7207
+10.71
+0.7240
+W3G128
+11.75
+0.6919
+11.54
+0.7186
+11.50
+0.7250
+W3 per-ch
+19.55
+0.5449
+30.19
+0.6697
+22.11
+0.6686
+Qwen3-14B
+W4G128
+8.85
+0.7709
+8.88
+0.7709
+8.89
+0.7699
+W4 per-ch
+9.11
+0.7525
+9.41
+0.7684
+9.40
+0.7710
+W3G128
+10.07
+0.7356
+9.91
+0.7479
+9.91
+0.7472
+W3 per-ch
+13.84
+0.6089
+20.20
+0.7267
+18.92
+0.7203
+4.2
+Ablation: Unregularized Pipeline and Stabilization
+Table 3 provides a staged comparison across all four models. Comparing GPTQ with
+JointQ w/o stab. measures the effect of the unregularized JointQ pipeline, that is, the
+multi-candidate warm start together with the local search; this comparison does not
+separate the two components. Comparing JointQ w/o stab. with JointQ measures the
+full stabilization policy, including its effect on the warm start, rather than regularization
+or retry separately.
+Figure 1 reports unregularized calibration output error; Appendix F provides the
+other three models. At each layer, X is the BF16-model calibration activation used by
+all methods and to form H = XX⊤for quantization. Across every model, quantization
+setting, and layer type shown, JointQ w/o stab. has an error ratio below one. This sign
+is guaranteed by construction rather than an empirical finding: with λ = 0, the GPTQ
+candidate has the same integers as the GPTQ baseline, so Proposition 3.7 implies that
+no row of JointQ w/o stab. has a larger unregularized calibration error than GPTQ. The
+figures therefore quantify the size of the reduction, not its sign.
+The layer-wise error reduction does not, however, predict downstream improvement.
+Comparing GPTQ with JointQ w/o stab. in Table 3, the unregularized pipeline improves
+perplexity in 10 of 16 model–configuration pairs and worsens it in 6; average accuracy
+improves in 11, worsens in 4, and ties in 1. On Llama-3-8B W4G128, a total error
+ratio of 0.92 (Figure 2) accompanies a large perplexity reduction from 14.09 to 6.65.
+In contrast, Llama-2-7B W4 per-channel has a similar ratio of 0.91 (Figure 1), yet
+perplexity worsens from 6.17 to 6.27 and average accuracy decreases from 0.6816 to
+0.6694. On Qwen3-14B W3 per-channel, the error falls to 0.66 of GPTQ (Figure 4)
+while perplexity worsens from 13.84 to 20.20. Thus, even a substantial reduction of the
+layer-local calibration objective need not translate into better end-to-end metrics.
+The figures also show that, for layer types assigned λ > 0, JointQ often attains
+22
+
+
+Figure 1: Layer-type-wise unregularized output-error ratios on the common calibration
+inputs for Llama-2-7B. At each layer, X is the BF16-model calibration activation used
+by all methods and to form H = XX⊤for quantization. For each layer type, ∥(W −
+c
+W)X∥2
+F is summed over all transformer blocks and normalized by the corresponding
+GPTQ sum; “total” sums all seven layer types before normalization. A ratio below one
+indicates a lower error than GPTQ.
+lower unregularized calibration error than JointQ w/o stab.; layer types with λ = 0
+coincide unless adaptive retry is triggered. The gap for λ > 0 is larger on the Llama
+models and smaller on the Qwen3 models; in particular, the Qwen3 query, key, and
+value projections remain close even with λ = 0.15 in W3 per-channel. This is notable
+because the regularized objective adds a nonnegative penalty and does not guarantee
+improvement in the unregularized error. It suggests that regularization may lead the
+quantization procedure to a different and better solution of the unregularized objective.
+However, the same regularized Hessian is used for both warm-start candidates, the
+scale refit, the row-wise selection, and the subsequent local search, so these results do
+not isolate whether the difference arises from the warm start or from the local-search
+trajectory.
+The downstream effect of stabilization is most pronounced in the constrained W3
+per-channel regime. Relative to JointQ w/o stab., JointQ reduces perplexity from 23.02
+to 7.98 on Llama-2-7B and from 315.46 to 13.09 on Llama-3-8B. It also improves W3
+per-channel perplexity from 30.19 to 22.11 on Qwen3-8B and from 20.20 to 18.92 on
+Qwen3-14B. Because every layer type is assigned λ > 0 in W3 per-channel, adaptive
+retry is never triggered in this setting, so these differences are due to regularization
+alone. They support the role of regularization in mitigating severe perplexity degradation,
+23
+
+
+including on Llama-2-7B, which was not used to select λ.
+JointQ does not uniformly outperform JointQ w/o stab. across models and metrics.
+Over all 16 model–configuration pairs, JointQ improves perplexity in 10 cases, ties in
+3, and worsens it in 3; average accuracy improves in 11 cases and worsens in 5. In
+particular, W3 per-channel accuracy decreases slightly on both Qwen models despite the
+perplexity improvements. Because a retry requantizes an entire layer, adaptive retry can
+also add substantial offline quantization cost in the settings where it can be triggered,
+namely W4G128, W4 per-channel, and W3G128.
+4.3
+Calibration-set Sensitivity
+We evaluate calibration-set sensitivity on Llama-3-8B in W3G128 and W4G128 using
+8–128 length-2048 calibration sequences and 20 paired seeds per sequence count. Full
+results are reported in Appendix G.
+In W3G128, JointQ has lower PPL variance than GPTQ⋆at every sequence count;
+with eight sequences, the results are 11.10 ± 0.30 and 11.37 ± 1.67, respectively. The
+full stabilization policy also lowers PPL relative to JointQ w/o stab. in all 100 W3G128
+runs and 99 of 100 W4G128 runs. JointQ (GPTQ⋆cand.) lowers W4G128 PPL in
+94 of 100 runs without a consistent accuracy difference, whereas W3G128 exhibits an
+accuracy–perplexity trade-off. These results demonstrate robust low-sample behavior
+for JointQ and a strong contribution from its stabilization policy.
+4.4
+Additional Results in the 2-bit Regime
+Table 4 reports W2G32 quantization results on all four models. JointQ uses the W2G32
+layer-specific regularization values in Table 6 with adaptive retry disabled, because with
+the threshold and retry strength of Section 3.9 it degraded both perplexity and accuracy
+in preliminary runs (Appendix D). We report this aggressive setting separately from
+the main results because its absolute model quality remains far below BF16 despite
+substantial improvements over GPTQ.
+JointQ outperforms GPTQ on both metrics for all four models. Its average-accuracy
+gains are 0.1320 on Llama-2-7B, 0.1184 on Llama-3-8B, 0.1692 on Qwen3-8B, and
+0.1106 on Qwen3-14B. The absolute perplexities likewise show that JointQ mitigates
+the extreme degradation of GPTQ, particularly on the Llama models. This trend is
+consistent with the mechanism in Proposition 3.5, while not constituting a guarantee for
+end-to-end metrics.
+Nevertheless, W2G32 remains substantially below BF16. JointQ’s perplexities
+are 26.33, 108.77, 45.98, and 20.78, compared with BF16 values of 5.47, 6.14, 9.73,
+and 8.65. Its average-accuracy gaps to BF16 are 0.2111, 0.2576, 0.1648, and 0.1536,
+respectively. Thus, JointQ markedly improves the 2-bit solution relative to GPTQ, but
+does not recover practical model quality in this aggressive regime.
+24
+
+
+Table 4: Additional W2G32 results. Bold denotes the better quantized result within
+each model.
+Model
+Method
+PPL↓
+Avg.↑
+Time (s)
+Llama-2-7B
+BF16
+5.47
+0.7038
+–
+GPTQ
+583.21
+0.3607
+266.6
+JointQ
+26.33
+0.4927
+1164.1
+Llama-3-8B
+BF16
+6.14
+0.7442
+–
+GPTQ
+195282.65
+0.3682
+292.1
+JointQ
+108.77
+0.4866
+1330.4
+Qwen3-8B
+BF16
+9.73
+0.7403
+–
+GPTQ
+147.46
+0.4063
+321.2
+JointQ
+45.98
+0.5755
+1971.2
+Qwen3-14B
+BF16
+8.65
+0.7736
+–
+GPTQ
+23.93
+0.5094
+518.4
+JointQ
+20.78
+0.6200
+6219.7
+5
+Related Work
+Layer-wise solvers.
+Recent advances in post-training quantization (PTQ) for large
+language models have been shaped largely by layer-wise reconstruction objectives and
+second-order approximations. OBQ [Frantar et al., 2022] quantizes weights sequen-
+tially using second-order updates, and GPTQ [Frantar et al., 2023] extends this line
+to billion-parameter transformers. CDQuant [Nair and Suggala, 2024] also minimizes
+reconstruction error through coordinate descent, but it assumes fixed scales throughout
+the optimization.
+Joint optimization of scales and integers.
+The works closest to JointQ treat the scales
+and the integers of a standard scalar format as joint variables of the layer-wise objective.
+COMQ [Zhang et al., 2025] applies coordinate descent to both: it updates the integers
+one coordinate at a time with the scale held fixed and then updates the scale in closed
+form, so each integer update is evaluated under a frozen scale, the setting of Corollary 3.4.
+Beacon [Zhang and Saab, 2026] instead substitutes the closed-form optimal scale into
+the per-channel objective, which reduces the problem to maximizing the absolute value
+of the cosine of the angle between wX and qX, where q is the integer vector. Its
+search then drops the absolute value: it assigns the integers by a greedy sequential pass
+followed by cyclic coordinate updates that maximize the signed cosine, and computes
+the scale in closed form only at the end. In the per-channel case (T = 1), JointQ scores
+its integer moves by this reduced objective rather than by the signed criterion: with
+r0 = w, the captured energy in Eq. (13) is κ0(u) = ∥w∥2
+e
+H cos2 θ e
+H(u, w⊤) whenever
+γ0(u) > ε and w eHw⊤> 0, where ∥w∥2
+e
+H = w eHw⊤and θ e
+H(·, ·) denotes the angle
+in the eH-inner product. This squared cosine ranks candidates as the absolute cosine
+does, with eH in place of H; the two methods also differ in the codebook and in the
+search procedure. Scoring integer candidates by their best-response scale is therefore
+25
+
+
+not new in this setting, and the closed form in Proposition 3.2 and the case T = 1 of
+Theorem 3.1 are known [Zhang et al., 2025, Zhang and Saab, 2026].
+JointQ differs from these methods in two respects. First, it targets group-wise
+quantization, in which the T scales of a row are coupled through the off-diagonal blocks
+of eH, whereas COMQ and Beacon are formulated with one scale per layer or per output
+channel. A group-wise extension of COMQ would still evaluate each integer update
+under frozen scales. A direct group-wise extension of Beacon would either treat the
+groups independently, discarding the cross-group coupling, or score every candidate
+move by the reduced objective F, which couples all T scales of the row (Theorem 3.1)
+and makes each evaluation considerably more expensive. JointQ takes an intermediate
+route. Its surrogate Lt re-optimizes only the scale of the modified group but retains the
+full eH through the residual rt, so the cross-group coupling enters every move while
+each move is still scored in O(1) time. Its block-coordinate passes revisit every group
+and are interleaved with joint re-solves of all T scales. Second, JointQ refines the
+GPTQ solution rather than replacing it: its warm start contains the error-compensated
+GPTQ solution, and Proposition 3.7 guarantees that, without regularization, the output
+never has a larger row-wise calibration error than GPTQ. In the per-channel case, the
+Clip-Optimize candidate of the warm start is itself a Beacon-type search (Section 3.8).
+We do not include COMQ or Beacon as baselines; Section 6 discusses what this leaves
+open.
+Scale selection and continuous parameters.
+PiSO [Amboage et al., 2026] approaches
+the same coupling from the scale side. Under round-to-nearest assignment, the integers
+are piecewise constant in the scale, and PiSO computes the optimal channel-wise scale
+exactly by sweeping these pieces. It extends the sweep to group-wise quantization by
+treating the groups independently or sequentially in a single pass, and it interleaves
+the sweep with GPTQ, which then assigns the integers under the fixed scales. JointQ
+works in the opposite direction: it changes the integers after GPTQ and re-optimizes
+the scales for the integers it selects. Two-Stage Grid Optimization [Kim et al., 2026]
+refines group scales while keeping integer assignments fixed. JointQ also uses such
+fixed-integer refinement: its warm start refits all group scales with the integers fixed, and
+its local search periodically re-solves them jointly. Our contribution lies not in this refit
+but in the group-wise coupled search and the GPTQ-anchored design described above.
+EasyQuant [Wu et al., 2020], AWQ [Lin et al., 2024b], OmniQuant [Shao et al., 2024],
+AffineQuant [Ma et al., 2024], and LRQ [Lee et al., 2024] optimize scales, clipping
+thresholds, or related continuous transformations. JointQ differs from these methods
+in that it does not introduce a new parameterization; instead, it jointly optimizes the
+quantities already present in the standard GPTQ format.
+Rounding under a fixed grid.
+Another closely related direction seeks to improve
+rounding while holding the quantization grid fixed. Representative methods include
+AdaRound [Nagel et al., 2020], AdaQuant [Hubara et al., 2020], BRECQ [Li et al.,
+2021], SignRound [Cheng et al., 2023], GuidedQuant [Kim et al., 2025], YAQA [Tseng
+et al., 2025], VQRound [Zhou et al., 2026], and regularized successive-rounding [Cha
+et al., 2026]. Rather than improving rounding under a fixed grid, JointQ addresses the
+26
+
+
+underlying discrete–continuous coupling between integer assignments and group scales.
+Other quantization families.
+Finally, several methods pursue alternative quantization
+families altogether, including QuIP [Chee et al., 2023], AQLM [Egiazarian et al., 2024],
+GPTVQ [van Baalen et al., 2024], and QTIP [Tseng et al., 2024b]. By contrast, JointQ
+targets the standard group-wise uniform scalar quantization format and improves the
+solver itself within this widely used deployment setting.
+6
+Conclusion
+We introduced JointQ, a layer-wise PTQ method that improves quantization within the
+standard GPTQ deployment format. The central idea is to address a limitation of standard
+GPTQ-style quantization: continuous group scales and discrete integer assignments are
+treated separately even though they are tightly coupled. JointQ addresses this mismatch
+by extending scale-eliminated integer search, previously formulated for a single scale per
+output channel, to group-wise quantization: each move updates an integer assignment
+and recomputes the optimal scale of the affected group in closed form while accounting
+for the other groups through the full Hessian. The search refines the GPTQ solution
+rather than replacing it, so that its unregularized layer-wise calibration error never
+exceeds that of GPTQ. The resulting weights retain the standard low-bit representation.
+Our analysis provides a mechanism for why this joint treatment can matter when
+bit-widths are low or groups are large, without claiming a downstream-metric guarantee.
+Across four models and four quantization configurations, JointQ improves six-task
+average zero-shot accuracy over GPTQ in 14 of 16 comparisons and perplexity in 12 of
+16, with the mean accuracy gain increasing from 0.0044 in W4G128 to 0.1559 in W3
+per-channel. A staged ablation shows that the unregularized JointQ pipeline reduces
+layer-wise calibration output error in every case shown, as guaranteed by its construction,
+while improving perplexity in 10 of 16 model–configuration pairs and average accuracy
+in 11 of 16. Thus, better layer-local reconstruction alone does not ensure better end-
+to-end performance. JointQ also improves average accuracy over GPTQ⋆in all eight
+per-channel comparisons, although the additional value of JointQ (GPTQ⋆cand.) in
+G128 is model dependent. The full stabilization policy further mitigates severe W3 per-
+channel perplexity degradation and reduces calibration-seed sensitivity in the evaluated
+low-sample setting. Consequently, the largest gains in the most challenging regimes
+cannot be attributed to the local search alone. Perplexity remains model dependent, and
+W2G32 remains far below BF16 despite substantial improvement over GPTQ. Overall,
+the results support a focused conclusion: strengthening scale–integer optimization
+helps preserve downstream accuracy when challenging quantization regimes expose the
+limitations of a frozen grid, while retaining the deployment format practitioners already
+use.
+Limitations.
+Our experiments evaluate JointQ as a complete pipeline. Because the
+local search starts from a multi-candidate warm start that already refits all group scales
+and selects candidates per output row, the present results do not separate the contributions
+of the Clip-Optimize candidate, the global scale refit, the row-wise selection, and the
+27
+
+
+local search. Within the local search, the G128 results also do not separate the per-pass
+joint scale re-solve from the integer moves. The thresholds (τlo, τhi) that select rows for
+this re-solve were set by a brief preliminary tuning and have not been ablated, although
+the per-channel results do not depend on them (Section 3.6). We have also not studied
+the effect of the stopping parameters ωin and ωout or of the iteration cap. Finally, JointQ
+(GPTQ⋆cand.) retains the Clip-Optimize candidate and therefore does not measure
+the effect of a pure GPTQ⋆warm start. Quantifying these components, for example
+by evaluating the warm start without the local search or with a single candidate, or the
+local search without the joint re-solve, is left for future work.
+We also do not compare JointQ with COMQ, Beacon, or PiSO [Zhang et al., 2025,
+Zhang and Saab, 2026, Amboage et al., 2026]. In the per-channel settings, where
+the gains over GPTQ are largest, the move score of JointQ coincides with Beacon’s
+reduced objective, and the Clip-Optimize candidate is itself a Beacon-type search
+(Section 3.8). The results therefore do not show whether JointQ improves on such
+methods, or how much of its per-channel gain over GPTQ is due to the scale-eliminated
+search rather than to the GPTQ candidate, the row-wise selection, or the regularization.
+Likewise, we have not compared the group-wise local search with a variant that treats
+the groups independently, so the benefit of retaining the cross-group coupling has not
+been measured separately.
+The regularization strengths λ were selected by a manual preliminary search on
+Llama-3-8B, Qwen3-8B, and Qwen3-14B using WikiText-2 perplexity and zero-shot
+accuracy on ARC-c, ARC-e, PIQA, and WinoGrande, which are part of the evaluation
+data that we report (Appendix D), whereas the baselines use their default settings. The
+reported results for these three models may therefore be optimistically biased. Llama-2-
+7B and the HellaSwag and BoolQ tasks, which were not used in the search, provide only
+a partial check of how the values transfer. A selection protocol based on held-out data,
+the effect of the exponent η, which was not tuned, and the choice of the retry threshold
+and retry strength, including whether a different retry policy would help in W2G32,
+remain to be studied.
+JointQ is also considerably more expensive than GPTQ at quantization time. In the
+four main settings, its quantization time is 2.63–15.71× that of GPTQ (Appendix H),
+with the largest ratios on Qwen3-14B, and the ratio depends on the FP64 throughput of
+the GPU (Section 4). This cost is incurred once, offline, and the quantized model has
+the same format and hence the same inference cost as a GPTQ model, but it may matter
+when many models or configurations must be quantized.
+References
+Juan Amboage, Pablo Monteagudo-Lago, Ian Colbert, Giuseppe Franco, and Nicholas
+Fraser. Optimal post-training quantization scales and where to find them. arXiv
+preprint arXiv:2606.10890, 2026.
+Yamato Arai and Yuma Ichikawa. Quantization error propagation: Revisiting layer-wise
+post-training quantization. In NeurIPS, 2025.
+Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina
+28
+
+
+Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot:
+Outlier-free 4-bit inference in rotated LLMs. NeurIPS, 2024.
+Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA:
+Reasoning about physical commonsense in natural language. In AAAI, 2020.
+Seohyeon Cha, Huancheng Chen, Dongjun Kim, Haoran Zhang, Kevin Chan, Gustavo
+de Veciana, and Haris Vikalo. Regularized calibration with successive rounding for
+post-training quantization. arXiv preprint arXiv:2602.05902, 2026.
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit
+quantization of large language models with guarantees. In NeurIPS, 2023.
+Wenhua Cheng, Weiwei Zhang, Haihao Shen, Yiyang Cai, Xin He, Kaokao Lv, and
+Yi Liu. Optimize weight rounding via signed gradient descent for the quantization of
+LLMs. arXiv preprint arXiv:2309.05516, 2023.
+Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins,
+and Kristina Toutanova. BoolQ: Exploring the surprising difficulty of natural yes/no
+questions. In NAACL, 2019.
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa
+Schoenick, and Oyvind Tafjord. Think you have solved question answering? try
+ARC, the AI2 reasoning challenge. arXiv preprint arXiv:1803.05457, 2018.
+Abhimanyu Dubey et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783,
+2024.
+Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko,
+and Dan Alistarh. Extreme compression of large language models via additive
+quantization. ICML, 2024.
+Elias Frantar, Sidak Pal Singh, and Dan Alistarh. Optimal brain compression: A
+framework for accurate post-training quantization and pruning. NeurIPS, 2022.
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate
+post-training quantization for generative pre-trained transformers. In ICLR, 2023.
+Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi,
+Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, et al. A framework
+for few-shot language model evaluation. Zenodo, 2024.
+Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W Mahoney, and Kurt
+Keutzer. A survey of quantization methods for efficient neural network inference.
+In Low-Power Computer Vision: Improve the Efficiency of Artificial Intelligence.
+Chapman and Hall/CRC, 2022.
+Babak Hassibi, David G Stork, and Gregory J Wolff. Optimal brain surgeon and general
+network pruning. In IEEE International Conference on Neural Networks, 1993.
+29
+
+
+Itay Hubara, Yury Nahshan, Yair Hanani, Ron Banner, and Daniel Soudry. Improving
+post training neural quantization: Layer-wise calibration and integer programming.
+arXiv preprint arXiv:2006.10518, 2020.
+Yuma Ichikawa, Yudai Fujimoto, and Akira Sakai. LPCD: Unified framework from
+layer-wise to submodule quantization. arXiv preprint arXiv:2512.01546, 2025.
+Yuma Ichikawa, Keiji Kimura, Akihiro Yoshida, Yudai Fujimoto, Hiroki Tokura,
+Yamato Arai, Yoshiyuki Ishii, Yusei Kawakami, Genki Shikada, Achille Jacque-
+mond, Yoshihiko Fujisawa, Katsuki Fujisawa, Takumi Honda, and Akira Sakai.
+OneComp: One-line revolution for generative AI model compression. arXiv preprint
+arXiv:2603.28845, 2026.
+Jinuk Kim, Marwa El Halabi, Wonpyo Park, Clemens JS Schaefer, Deokjae Lee, Yeon-
+hong Park, Jae W. Lee, and Hyun Oh Song. GuidedQuant: Large language model
+quantization via exploiting end loss guidance. In ICML, 2025.
+Junhan Kim, Gukryeol Lee, Seungwoo Son, Jeewook Kim, and Yongkweon Jeon.
+Two-stage grid optimization for group-wise quantization of LLMs. arXiv preprint
+arXiv:2602.02126, 2026.
+Jung Hyun Lee, Jeonghoon Kim, June Yong Yang, Se Jung Kwon, Eunho Yang,
+Kang Min Yoo, and Dongsoo Lee. LRQ: Optimizing post-training quantization
+for large language models by learning low-rank weight-scaling matrices. arXiv
+preprint arXiv:2407.11534, 2024.
+Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei
+Wang, and Shi Gu. BRECQ: Pushing the limit of post-training quantization by block
+reconstruction. In ICLR, 2021.
+Yuhang Li, Ruokai Yin, Donghyun Lee, Shiting Xiao, and Priyadarshini Panda. GPTAQ:
+Efficient finetuning-free quantization for asymmetric calibration. ICML, 2025.
+Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi
+Song, Zhenan Sun, and Ying Wei. DuQuant: Distributing outliers via dual transfor-
+mation makes stronger quantized LLMs. In NeurIPS, 2024a.
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang,
+Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-
+aware weight quantization for on-device LLM compression and acceleration. MLSys,
+2024b.
+Li Lin and Xiaojun Wan. LoaQ: Layer-wise output approximation quantization. arXiv
+preprint arXiv:2509.06297, 2025.
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghu-
+raman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort.
+SpinQuant: LLM quantization with learned rotations. In ICLR, 2025.
+30
+
+
+Yuexiao Ma, Huixia Li, Xiawu Zheng, Feng Ling, Xuefeng Xiao, Rui Wang, Shilei
+Wen, Fei Chao, and Rongrong Ji. AffineQuant: Affine transformation quantization
+for large language models. In ICLR, 2024.
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel
+mixture models. ICLR, 2017.
+Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen
+Blankevoort. Up or down? adaptive rounding for post-training quantization. ICML,
+2020.
+Markus Nagel, Marios Fournarakis, Rana Ali Amjad, Yelysei Bondarenko, Mart van
+Baalen, and Tijmen Blankevoort. A white paper on neural network quantization.
+arXiv preprint arXiv:2106.08295, 2021.
+Pranav Ajit Nair and Arun Sai Suggala. CDQuant: Greedy coordinate descent for
+accurate LLM quantization. arXiv preprint arXiv:2406.17542, 2024.
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael
+Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning
+with a unified text-to-text transformer. Journal of Machine Learning Research, 21
+(140):1–67, 2020.
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande:
+An adversarial Winograd schema challenge at scale. Communications of the ACM,
+2021.
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li,
+Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally
+calibrated quantization for large language models. ICLR, 2024.
+Yuxuan Sun et al. FlatQuant: Flatness matters for LLM quantization. In ICML, 2025.
+Hugo Touvron, Louis Martin, Kevin Stone, et al. Llama 2: Open foundation and
+fine-tuned chat models. arXiv preprint arXiv:2307.09288, 2023.
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa.
+QuIP#: Even better LLM quantization with hadamard incoherence and lattice code-
+books. ICML, 2024a.
+Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. QTIP: Quantization
+with trellises and incoherence processing. In NeurIPS, 2024b.
+Albert Tseng, Zhaofeng Sun, and Christopher De Sa. Model-preserving adaptive
+rounding. arXiv preprint arXiv:2505.22988, 2025.
+Mart van Baalen, Andrey Kuzmin, Ivan Koryakovskiy, Markus Nagel, Peter Coupe-
+rus, Cedric Bastoul, Eric Mahurin, Tijmen Blankevoort, and Paul Whatmough.
+GPTVQ: The blessing of dimensionality for LLM quantization. arXiv preprint
+arXiv:2402.15319, 2024.
+31
+
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N
+Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In NeurIPS,
+2017.
+Di Wu, Qi Tang, Yongle Zhao, Ming Zhang, Ying Fu, and Debing Zhang. EasyQuant:
+Post-training quantization via scale optimization. arXiv preprint arXiv:2006.16669,
+2020.
+An Yang et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag:
+Can a machine really finish your sentence? In ACL, 2019.
+Aozhong Zhang, Zi Yang, Naigang Wang, Yingyong Qi, Jack Xin, Xin Li, and Penghang
+Yin. COMQ: A backpropagation-free algorithm for post-training quantization. IEEE
+Access, 2025. arXiv:2403.07134.
+Shihao Zhang and Rayan Saab. Beacon: Post-training quantization with integrated grid
+selection. IEEE Signal Processing Letters, 2026. doi: 10.1109/LSP.2026.3657704.
+arXiv:2508.20293.
+Yuli Zhou, Qingxuan Chen, Luca Benini, Guolei Sun, and Yawei Li. Revisiting adaptive
+rounding with vectorized reparameterization for LLM quantization. arXiv preprint
+arXiv:2602.02151, 2026.
+32
+
+
+A
+Proofs
+This appendix collects the proofs of all theorems, propositions, and corollaries presented
+in the main text.
+A.1
+Global scale elimination – Theorem 3.1
+Let I = I(q) = {t : at̸ = 0} be the set of active groups. If I = ∅, then bw = 0 for any
+s and ϕ = w eHw⊤; every s functions as a minimizer, yielding F(q) = w eHw⊤. Now
+assume I̸ = ∅and let AI(q) be the submatrix of active rows. We establish that BI(q) =
+AI eHA⊤
+I ≻0. For any z ∈R1×|I| with z̸ = 0, we compute zBIz⊤= (zAI) eH(zAI)⊤.
+The vector zAI ∈R1×p is a linear combination of the active rows of A(q). Since
+each active at has support on the disjoint set Gt and is nonzero by definition, z̸ = 0
+implies zAI̸ = 0. Since eH ≻0, this leads to zBIz⊤> 0, thereby establishing BI ≻0.
+Inactive groups do not affect the objective; following the canonical convention, we set
+s⋆
+t = 0 for t /∈I.
+Restricting to the active scales sI and expanding Eq. (6) with bw = sIAI(q):
+ϕ(sI, q) = w eHw⊤−2sIAI(q) eHw⊤+ sIBI(q)s⊤
+I .
+Setting ∇sIϕ = 0 yields s⋆
+I(q) = w eHAI(q)⊤BI(q)−1. Completing the square:
+ϕ(sI, q) = F(q) + (sI −s⋆
+I)BI(q)(sI −s⋆
+I)⊤.
+Since BI(q) ≻0, the second term is non-negative and vanishes only at sI = s⋆
+I; thus,
+the active components of the minimizer are uniquely determined. Under the canonical
+convention s⋆
+t = 0 for t /∈I, this provides the unique canonical representative of the
+minimizer.
+A.2
+Best-response scale – Proposition 3.2
+Eq. (10) takes the form ϕ(st) = α −2βst + γs2
+t with α = rt eHr⊤
+t , β = at eHr⊤
+t ,
+and γ = at eHa⊤
+t . When γ > 0, this is strictly convex, featuring a unique minimizer
+s⋆
+t = β/γ and a second derivative of ϕ′′(st) = 2γ > 0, confirming the minimum.
+Substituting: ϕ(s⋆
+t ) = α −β2/γ. When γ = 0, since eH ⪰0, we have 0 = at eHa⊤
+t =
+∥eH1/2a⊤
+t ∥2
+2, hence eHa⊤
+t = 0, and therefore β = at eHr⊤
+t = 0. The objective ϕ(st) = α
+is independent of st; we choose s⋆
+t = 0 as the canonical representative.
+A.3
+Conditional error decomposition – Theorem 3.3
+Fix the residual rt as in Eq. (9). The group-t conditional error with x ∈Rd is Ψt(x) =
+rt eHr⊤
+t −2x⊤gt + x⊤eHtx. Since eHt ≻0, completing the square gives
+Ψt(x) = Ψcont
+t
++ (x −vt)⊤eHt(x −vt),
+33
+
+
+where vt = eH−1
+t
+gt and Ψcont
+t
+= rt eHr⊤
+t −g⊤
+t eH−1
+t
+gt. Setting x = sqt and writing
+β = q⊤
+t gt, γ = q⊤
+t eHtqt:
+Ψt(sqt) −Ψcont
+t
+= (sqt −vt)⊤eHt(sqt −vt)
+= γs2 −2βs + v⊤
+t eHtvt
+= (v⊤
+t eHtvt −β2/γ) + γ(s −β/γ)2.
+For the first term, note that
+v⊤
+t eHtvt = g⊤
+t eH−1
+t
+gt = ∥vt∥2
+e
+Ht,
+β2/γ = ⟨qt, vt⟩2
+e
+Ht/∥qt∥2
+e
+Ht,
+where the second identity uses ⟨qt, vt⟩e
+Ht = q⊤
+t eHtvt = q⊤
+t gt = β. Hence the first
+term equals the direction gap in projection form. If vt̸ = 0, this is ∥vt∥2
+e
+Ht sin2 θ where
+cos θ = ⟨qt, vt⟩e
+Ht/(∥qt∥e
+Ht∥vt∥e
+Ht); if vt = 0 then β = 0 and the direction gap is zero.
+A.4
+Separation – Proposition 3.5
+Initialization.
+With eH = Id, the symmetric min–max scale is s(0) = M/Q. Since
+M > 2Q, we have 1/s(0) = Q/M < 1/2, so the components wj = 1 for j ≥1
+round to 0, while w0/s(0) = Q exactly. Thus q(0) = (Q, 0, . . . , 0). Its best-response
+scale is w · q(0)/∥q(0)∥2 = MQ/Q2 = M/Q, which reproduces w0 = M exactly, so
+E0 = ∥w∥2 −M 2 = d −1.
+Monotone path.
+Define q(k) = (Q, 1, . . . , 1
+| {z }
+k
+, 0, . . . , 0) for k = 0, . . . , d −1. Every
+entry lies in {0, 1, Q} ⊆Csym
+b
+, and q(k+1) differs from q(k) by the single update δ = +1
+at coordinate k + 1. Write Nk := w · q(k) = MQ + k and Dk := ∥q(k)∥2 = Q2 + k.
+The best-response scale is sk = Nk/Dk > 0, and Ek = ∥w∥2 −N 2
+k/Dk. Then
+Ek+1 −Ek = N 2
+k
+Dk
+−(Nk + 1)2
+Dk + 1
+= N 2
+k −Dk(2Nk + 1)
+Dk(Dk + 1)
+,
+and expanding the numerator gives
+N 2
+k −Dk(2Nk + 1) = Q2(M 2 −2MQ −1) −(2Q2 + 1)k −k2.
+The roots of M 2 −2MQ −1 are Q ±
+p
+Q2 + 1, so 0 < M < Q +
+p
+Q2 + 1 implies
+M 2 −2MQ −1 < 0. The remaining terms are non-positive for k ≥0. Hence every
+difference is negative, and the path is strictly decreasing.
+Endpoint and ratio.
+At k = d −1, using ∥w∥2 = M 2 + d −1,
+(M 2 + d −1)(Q2 + d −1) −(MQ + d −1)2 = (M −Q)2(d −1),
+so Ed−1 = (M −Q)2(d −1)/(Q2 + d −1) and E0/Ed−1 = (Q2 + d −1)/(M −Q)2.
+The admissible range gives Q < M −Q <
+p
+Q2 + 1, so (M −Q)2 < Q2 + 1,
+which yields the stated lower bound. The admissible range is nonempty because
+Q +
+p
+Q2 + 1 −2Q =
+p
+Q2 + 1 −Q > 0.
+34
+
+
+Reachability by Algorithm 2.
+With T = 1 and eH = Id, the residual is r0 = w,
+so g0,0 = w⊤, α0 = ∥w∥2, and γ0(u) = ∥u∥2. By the computation above, the first
+decrease is E0 −E1 = (1 −M(M −2Q))/(Q2 + 1) < 1 because M > 2Q, so the
+assumption on ε implies ε < 1. Every nonzero u ∈Cd
+b has γ0(u) ≥1 > ε, so the guard
+in Eq. (13) is inactive except at u = 0, where κ0(0) = 0. Hence E(u) = ∥w∥2 −κ0(u)
+for every candidate, and increasing κ0 is the same as decreasing E.
+Fix 0 ≤k < d −1, and suppose that the current iterate is obtained from q(k) by
+permuting the coordinates 1, . . . , d−1. It has the value Q at coordinate 0, k coordinates
+equal to 1, and d −1 −k ≥1 coordinates equal to 0, and it has N = Nk and D = Dk.
+Since κ0 = N 2/D for nonzero candidates, the ±1 updates fall into six classes.
+(a) +1 at a coordinate with value 0 gives (N + 1, D + 1). The result is a permutation
+of q(k+1), so κ0 increases by Ek −Ek+1 > ε.
+(b) +1 at a coordinate with value 1, feasible only if Q ≥2, gives (N + 1, D + 3). Its
+value κ0 is smaller than in (a) because (N + 1)2 > 0.
+(c) −1 at a coordinate with value 0 gives (N −1, D + 1). Its value is smaller than in
+(a) because N > 0.
+(d) −1 at a coordinate with value 1, possible only if k ≥1, gives a permutation of
+q(k−1), which has a larger E because the path is strictly decreasing.
+(e) −1 at coordinate 0 gives the value Q −1 there. If k = 0, the candidate is
+(Q −1, 0, . . . , 0), whose error is d −1 if Q ≥2 and ∥w∥2 > d −1 if Q = 1. If
+k ≥1, let h(c) := (Mc + k)2/(c2 + k) for c ≥0. Its derivative has the sign of
+k(Mc + k)(M −c), which is positive for 0 ≤c < M, so h(Q −1) < h(Q), the
+current value of κ0. In both cases, the candidate does not increase κ0.
+(f) +1 at coordinate 0 is infeasible, because Q = L −1 is the upper end of both Csym
+b
+and Cb.
+Every candidate in (a) has the same value. The best +1 candidate is therefore in
+class (a), whichever index the arg max returns, while no −1 candidate exceeds the
+current κ0. Algorithm 2 thus selects δ = +1 with ∆= Ek −Ek+1 > ε. The
+break condition cannot hold, because no row has ∆< ε, so the move is applied, and
+the new iterate is a permutation of q(k+1) that fixes coordinate 0. Starting from q(0),
+induction over k = 0, . . . , d −2 shows that the first d −1 iterations reach permutations
+of q(1), . . . , q(d−1); the cap of 10d iterations is not reached. Because eH = Id and
+wj = 1 for all j ≥1, the error E is invariant under these permutations. Every candidate
+considered above is feasible in Csym
+b
+if and only if it is feasible in Cb, because the iterates
+only take the values 0, 1, and Q, so the run is the same for both feasibility checks.
+A.5
+Descent and termination – Proposition 3.6
+Zero-curvature guard.
+By the assumption on ε, γt(u) ≤ε implies γt(u) = 0, and
+then βt(u) = 0 by the argument in Appendix A.2. Hence κt(u) in Eq. (13) equals
+βt(u)2/γt(u) if γt(u) > 0 and 0 otherwise. By Proposition 3.2, Lt(u) = αt −κt(u)
+for every u ∈Cd
+b , and the scale σ returned by Algorithm 2 is the best-response scale
+s⋆
+t (u).
+35
+
+
+(i) Group update.
+Fix a row and a visit to group t, and suppress the row index. Before
+the visit, Eq. (10) and Proposition 3.2 give ϕ = αt −2stβt(qt) + s2
+tγt(qt) ≥Lt(qt).
+Algorithm 2 starts from u = qt with κ = κt(qt), and Eq. (14) keeps β, γ, and κ equal to
+βt(u), γt(u), and κt(u) for the current u. Each applied move increases κt(u) by more
+than ε, so after k moves,
+Lt(u) = αt −κt(u) ≤Lt(qt) −kε ≤ϕ −kε,
+with strict inequality in the first step if k ≥1. If k ≥1, then u̸ = qt because κt strictly
+increased, so some row changed its integers and the pair (u, σ) of this row is installed.
+An installed pair changes only group t, so the residual rt is unchanged, and the new
+objective equals Lt(u) because σ = s⋆
+t (u). If the pair is not installed, then k = 0 and ϕ
+is unchanged.
+(ii) Joint re-solve.
+By construction, a re-solved scale vector is installed only if it
+decreases ϕi by more than nε, and rows without an installed re-solve keep their objective.
+(iii) Monotonicity and termination.
+By (i) and (ii), no step of Algorithm 1 increases
+any ϕi. Algorithm 2 runs at most 10d iterations by construction. Let ε > 0 and
+ωout > 0, and suppose that the first N passes do not trigger the stopping rule. After
+each of these passes, at least ωoutm rows are active, that is, their objectives decreased
+by more than nε during the pass, while no objective increased. Each of these passes
+therefore decreases P
+i ϕi by more than n ωout m ε. Since eH ⪰0 implies ϕi ≥0,
+N n ωout m ε ≤
+X
+i
+ϕ(0)
+i ,
+and Algorithm 1 stops after at most N + 1 ≤1 + P
+i ϕ(0)
+i /(n ωout m ε) passes.
+A.6
+Dominance over the GPTQ candidate – Proposition 3.7
+The first inequality follows from Proposition 3.6(iii): Algorithm 1 starts from the
+selected refitted candidate, whose objective is ϕ(c⋆
+i )
+i
+, and never increases ϕi, whatever
+its stopping rule and thresholds. The second inequality holds because c⋆
+i minimizes ϕ(c)
+i
+over a pool that contains the GPTQ candidate. The third holds because the refit installs
+new scales only if they decrease the objective. Finally, the refitted scales are feasible
+for qG
+i , so ϕ(G)
+i
+≥mins ϕ(s, qG
+i ) = Fi(qG
+i ) by Theorem 3.1. When the undamped
+solution is installed, it equals s⋆
+I(qG
+i ), and equality holds.
+A.7
+Regularization equivalence
+Define e
+X = [X |
+√
+nλR1/2] ∈Rp×(n+p). Then e
+X e
+X⊤= H + nλR = eH, and
+∥(W −c
+W) e
+X∥2
+F = ∥(W −c
+W)X∥2
+F + nλ∥(W −c
+W)R1/2∥2
+F ,
+which is Eq. (17).
+36
+
+
+A.8
+Regularization curvature and sensitivity
+Corollary A.1 (Curvature and sensitivity bounds). Let Rt = [R]Gt,Gt. For λ > 0 and
+any qt ∈Cd
+b ,
+q⊤
+t eHtqt ≥nλq⊤
+t Rtqt = nλ
+X
+j∈Gt
+ρjq2
+j .
+(20)
+Consequently, the scale gap is at least nλ(q⊤
+t Rtqt)(s −s⋆
+t )2. If q⊤
+t Rtqt > 0, the scale
+sensitivity is bounded by
+|s⋆
+t (rt) −s⋆
+t (r′
+t)| ≤∥rt −r′
+t∥e
+H
+p
+nλq⊤
+t Rtqt
+.
+(21)
+Proof. Since eHt ⪰nλRt, Eq. (20) follows. For sensitivity, s⋆
+t (r) = ˜qt eHr⊤/(˜qt eH ˜q⊤
+t )
+where ˜qt is the zero-padded qt. By Cauchy–Schwarz in the eH-inner product: |˜qt eH(r −
+r′)⊤| ≤∥˜qt∥e
+H∥r −r′∥e
+H. Dividing by ˜qt eH ˜q⊤
+t = ∥˜qt∥2
+e
+H ≥nλq⊤
+t Rtqt gives Eq. (21).
+If qt is supported only on coordinates with ρj = 0, the diagonal regularizer sup-
+plies no strictly positive uniform lower bound; this is why the positive-definiteness
+assumptions in the main text are stated separately.
+B
+Extension to asymmetric quantization
+In asymmetric quantization, the stored integers and zero-points satisfy qraw
+Gt
+∈
+{0, . . . , 2b−1}d and zt ∈{0, . . . , 2b−1}. Define the centered integers ¯qGt := qraw
+Gt −zt1
+and the zero-padded row embedding at(¯qt) ∈R1×p, so that bwGt = st¯qGt and
+bw = P
+t stat as in the symmetric case. The theory below is written in terms of ¯qt,
+while feasibility is enforced through the raw variables (qraw
+Gt , zt). Because at depends
+on qraw
+t
+and zt only through ¯qt, the row objective ϕ = (w −bw) eH(w −bw)⊤and the
+residual rt = w −P
+u̸=t suau retain their original forms. The fixed-zero-point format
+of Section 2.2 is the special case zt ≡L = 2b−1, for which ¯qGt ∈Cd
+b .
+Best-response scale.
+The best-response scale derived in Proposition 3.2 carries over
+verbatim: s⋆
+t = at eHr⊤
+t /(at eHa⊤
+t ) whenever at eHa⊤
+t > 0, regardless of whether at
+was produced by a symmetric or asymmetric codebook. The minimized value ϕ(s⋆
+t ) =
+rt eHr⊤
+t −(at eHr⊤
+t )2/(at eHa⊤
+t ) is likewise unchanged.
+Fixed zero points.
+If the zero points are fixed at initialization, the asymmetric problem
+has the same structure as the problem of Section 3. The centered integers of group t then
+range over the set of consecutive integers ¯Ct := {−zt, . . . , 2b −1 −zt}, which depends
+on the group but stays fixed during the optimization. Algorithms 1–3 therefore apply
+without modification once their feasibility checks use the bounds of ¯Ct instead of Cb.
+Theorem 3.1, Proposition 3.2, Theorem 3.3, Corollary 3.4, and Propositions 3.6 and 3.7
+continue to hold with Cd
+b replaced by ¯Cd
+t , because none of them uses the symmetry of
+37
+
+
+the codebook. The zero points can be fixed, for example, by the asymmetric min–max
+rule
+st = maxj∈Gt wj −minj∈Gt wj
+2b −1
+,
+zt = clamp
+ ⌊−min
+j∈Gt wj/st⌉, 0, 2b −1
+
+,
+where st is clamped below at 10−8 so that a constant group does not divide by zero,
+with qraw
+j
+= clamp(⌊wj/st + zt⌉, 0, 2b −1) for the Clip-Optimize candidate, and by
+the zero points of GPTQ for the GPTQ candidate. Each row keeps the zero points of its
+selected candidate throughout the local search. We have not evaluated this asymmetric
+mode in this paper.
+Zero-point moves.
+A natural extension also moves the zero points. A move zt ←
+zt + δz with δz ∈{−1, +1} and fixed raw integers shifts every centered integer of the
+group by −δz. In the notation of Section 3.6, the quantities of Eq. (14) change as
+β′
+t = βt −δz1⊤
+d gi,t,
+γ′
+t = γt −2δz1⊤
+d ci,t + 1⊤
+d eHt1d,
+so such a move can still be scored in O(d) time, with 1⊤
+d eHt1d precomputed once
+per group. Because it changes the feasible set ¯Ct itself, however, it does not fit the
+fixed-codebook search of Algorithms 1 and 2. Combining zero-point moves with the
+integer search and evaluating asymmetric quantization are left for future work.
+C
+Warm-Start Algorithm and Reproducibility
+Algorithm 3 summarizes the multi-candidate warm start of Section 3.8. Its output is the
+warm start (s(0), q(0)) required by Algorithm 1.
+Settings used in all experiments.
+The candidate pool contains exactly the Clip-
+Optimize candidate and one GPTQ candidate. The GPTQ candidate is vanilla GPTQ
+(actorder=false, mse=false) for JointQ and JointQ w/o stab., and GPTQ⋆for JointQ
+(GPTQ⋆cand.). Both candidates, the scale refit, the selection, and the local search use
+the same eH; the GPTQ candidate additionally uses the damping ϵ = 0.01, identical to
+the GPTQ baseline. Candidates are selected per output row by the objective ϕ(c)
+i
+after
+the scale refit. An adaptive retry regenerates the whole warm start under the new λ.
+Reported quantization times follow the conventions in Section 4; in particular, JointQ
+times include warm-start generation.
+Search settings.
+Table 5 lists the tolerances and thresholds of Algorithms 1–3. They
+are identical for the local search and for the Clip-Optimize refinement, and they are
+fixed in all experiments.
+Code release.
+JointQ and all baselines are implemented in the open-source OneComp
+library [Ichikawa et al., 2026], whose source code is available at the following URL:
+https://github.com/FujitsuResearch/OneCompression
+38
+
+
+Algorithm 3 Multi-candidate warm start for one layer
+Input: W, e
+H, groups {Gt}, codebook Cb, GPTQ damping ϵ; ε, ωin
+1: for t = 0, . . . , T−1 do
+▷Clip-Optimize candidate (c = 1)
+2:
+σi ←max(maxj∈Gt |wi,j|/(L −1), 10−8) for all rows i
+3:
+ui ←clamp(⌊w⊤
+i,Gt/σi⌉, −L, L −1) for all rows i
+4:
+(ui, σi)i ←Algorithm 2 with gi,t = e
+Htw⊤
+i,Gt and initial ui
+▷Eq. (18)
+5:
+(q(1)
+i,t , s(1)
+i,t ) ←(ui, σi) for all rows i
+6: end for
+7: (s(2), q(2)) ←GPTQ run on e
+H with damping ϵ
+▷GPTQ candidate (c = 2)
+8: for c ∈{1, 2} and each row i do
+▷global scale refit
+9:
+s′ ←solution of B(q(c)
+i
+)s⊤= A(q(c)
+i
+) e
+Hw⊤
+i , with the damping fallback
+10:
+if ϕ(s′, q(c)
+i
+) < ϕ(s(c)
+i , q(c)
+i
+) −nε then
+11:
+s(c)
+i
+←s′
+12:
+end if
+13:
+ϕ(c)
+i
+←ϕ(s(c)
+i , q(c)
+i
+)
+14: end for
+15: for each row i do
+▷row-wise selection
+16:
+c⋆
+i ←arg minc ϕ(c)
+i , with c⋆
+i = 1 on ties; (s(0)
+i
+, q(0)
+i
+) ←(s
+(c⋆
+i )
+i
+, q
+(c⋆
+i )
+i
+)
+17: end for
+18: return (s(0), q(0))
+The JointQ quantizer is in onecomp/quantizer/jointq and the GPTQ quantizer in
+onecomp/quantizer/gptq; the latter is used both for the GPTQ, GPTQ-MSE, and
+GPTQ⋆baselines and for the GPTQ candidate of the warm start. The code used to run
+the experiments is in the benchmark directory of the repository. All results in this paper
+were obtained with OneComp v1.4.2. Default settings may change in later releases, so
+this release should be used to reproduce the reported numbers.
+D
+Regularization and Retry Settings
+Table 6 lists the regularization strengths used by JointQ. This section describes how
+they, the exponent η, and the parameters of adaptive retry were chosen.
+Selection of λ.
+The values in Table 6 were chosen by a manual preliminary search, not
+by an automated procedure. The candidate values were {0, 0.01, 0.05, 0.1, 0.15, 0.2,
+0.3}. The search used Llama-3-8B, Qwen3-8B, and Qwen3-14B with the JointQ
+configuration and the same calibration and evaluation protocol as Section 4; Llama-2-7B
+was not used. We first ran each setting with a single λ shared by all layer types. For
+each layer type, we then kept as candidates the values whose unregularized calibration
+output error was not much larger than with λ = 0, and chose among them over a few
+trials. The choice was based on WikiText-2 perplexity and on zero-shot accuracy on
+ARC-c, ARC-e, PIQA, and WinoGrande; HellaSwag and BoolQ were not used. We
+preferred configurations that balanced perplexity and accuracy and did not cause a large
+drop on any of these four tasks. Because these metrics are also reported in Section 4, λ
+39
+
+
+Table 5: Tolerances and thresholds of Algorithms 1–3, fixed in all experiments.
+Setting
+Value
+Role
+ε
+10−12
+Absolute tolerance. Algorithm 2 compares it
+with increases of κt, in the units of e
+H, and
+uses it as the guard in Eq. (13); Algorithms 1
+and 3 compare it with decreases of ϕi/n.
+Iteration cap
+10d
+Maximum number of iterations of one call of
+Algorithm 2.
+ωin
+0.1
+Algorithm 2 stops when more than this frac-
+tion of the rows has ∆i < ε.
+ωout
+0.1
+Algorithm 1 stops when fewer than this frac-
+tion of the rows is active.
+(τlo, τhi)
+(0.2, 0.6)
+Selection of the rows for the joint scale re-
+solve.
+ξi
+max(0.01 maxt[B]tt, 10−6)
+Diagonal damping of the fallback solve.
+Scale bound
+65504/L
+Largest scale magnitude accepted without the
+damped re-solve.
+Ties
++1; Clip-Optimize
+Preferred move in Algorithm 2; preferred
+candidate in the row-wise selection.
+Precision
+float64
+All computations outside the GPTQ run.
+was selected on evaluation data for three of the four models, and their perplexities and
+accuracies on the four tasks, and hence their six-task averages, may be optimistically
+biased. Llama-2-7B shares the same values but was not used in the search, so its results
+show how the selected values transfer to a model outside the search. Relative to JointQ
+w/o stab., which uses λ = 0 throughout, JointQ improves the average accuracy of
+Llama-2-7B in all four main settings and its perplexity in three of them, with a tie in
+W4G128 (Table 3). Likewise, HellaSwag and BoolQ were not used for any model, so
+their scores (Appendix H) are not directly affected by the selection. On these two tasks,
+JointQ outperforms GPTQ in 26 of the 32 model–setting–task comparisons, including
+all 16 comparisons in W3G128 and W3 per-channel; the six losses all occur in 4-bit
+settings and are at most 0.012. Neither check is fully held out: the Llama-2-7B results
+use the same evaluation data as the search, and the HellaSwag and BoolQ results come
+from values selected partly with WikiText-2 perplexity and the other four tasks. The
+same values are used without further tuning for JointQ (GPTQ⋆cand.) and in the
+calibration-sensitivity study of Appendix G. The baselines use their default settings and
+were not tuned on these metrics.
+Exponent η.
+The exponent η = 0.5 in Eq. (15) was fixed before the search above and
+was not tuned, because it worked adequately in initial runs. We have not evaluated other
+values.
+Adaptive retry.
+The threshold 0.2 on the relative weight error ∥W −c
+W∥2
+F /∥W∥2
+F
+was set from preliminary W4G128 runs, in which layers at or above this value were
+outliers among all layers. The retry strength λ = 0.01 is the smallest nonzero value in
+40
+
+
+Table 6: Layer-type-specific regularization strengths λ, shared across model families.
+All settings use η = 0.5. In the four main settings, adaptive retry applies to the entries
+with λ = 0; it is disabled in W2G32.
+Layer type
+W4G128
+W4 per-ch
+W3G128
+W3 per-ch
+W2G32
+q_proj
+0
+0
+0.01
+0.15
+0.1
+k_proj
+0
+0
+0.01
+0.15
+0.1
+v_proj
+0.01
+0.15
+0.01
+0.15
+0.1
+o_proj
+0
+0
+0
+0.15
+0
+gate_proj
+0.01
+0.15
+0.01
+0.15
+0
+up_proj
+0.01
+0.15
+0.01
+0.15
+0
+down_proj
+0
+0.01
+0
+0.01
+0
+the candidate grid. Neither value was tuned further. Because the retry applies only to
+layers assigned λ = 0, it can be triggered in W4G128, W4 per-channel, and W3G128,
+but never in W3 per-channel, where every layer type has λ > 0. In W2G32, the retry
+is disabled: with the threshold 0.2 and retry strength 0.01, enabling it degraded both
+perplexity and accuracy in preliminary runs. Other retry parameters might improve the
+W2G32 results, but we have not ablated them.
+E
+Enhanced GPTQ Heuristics
+We denote by GPTQ⋆an enhanced GPTQ configuration that combines two independent
+heuristics—activation ordering and MSE-based scale search—on top of the base GPTQ
+algorithm described in Section 2.3.
+Activation ordering (actorder).
+The base GPTQ processes columns in the natural
+order l = 0, 1, . . . , p −1. The actorder heuristic instead processes them in decreas-
+ing order of the Hessian diagonal Hll, so that the most activation-sensitive columns
+are quantized first, before the inverse Hessian accumulates error from less important
+columns. Concretely, let π be a permutation such that Hπ(0),π(0) ≥Hπ(1),π(1) ≥
+· · · ≥Hπ(p−1),π(p−1), and let P be the corresponding permutation matrix. GPTQ
+is then applied to the permuted system W ′ = WP, H′ = P ⊤HP, and the result is
+permuted back. Since the layer objective tr((W −c
+W)H(W −c
+W)⊤) is invariant under
+simultaneous column permutation of W, c
+W, and H, the final reconstruction error is
+well-defined. With group-wise quantization, the groups are formed contiguously in
+the permuted order, that is, Gt = {π(td), . . . , π(td+d−1)} in the original coordinates.
+The cost of the permutation itself is O(mp), negligible compared to the O(mp2) GPTQ
+pass.
+MSE-based scale search (mse).
+The base GPTQ sets each group scale by the min–
+max rule in Eq. (5) and keeps it fixed thereafter. In per-channel quantization, the scale
+is computed from W before the column-wise pass begins. In group-wise quantization,
+it is computed when the pass reaches the first column of the group, from the weights as
+41
+
+
+updated by the error compensation of all previously completed blocks of B columns.
+The MSE heuristic replaces the min–max rule, at the same point and on the same
+weights, with a grid search over N = 480 shrinkage factors. For the symmetric setting
+used throughout the experiments, the search keeps the centered zero-point fixed and
+varies only the scale. For group t, each candidate c = 0, . . . , N −1 produces
+s(c)
+t
+=
+
+1 −
+c
+600
+
+· 2 maxj∈Gt |wj|
+2b −1
+,
+and each weight is quantized as q(c)
+j
+= clamp(⌊wj/s(c)
+t ⌉, −L, L −1) and dequantized
+as ˆw(c)
+j
+= s(c)
+t q(c)
+j . The shrinkage factor 1 −c/600 thus decreases from 1, which gives
+the min–max scale, to 121/600 ≈0.20 in steps of 1/600. The step 1/600 is the default
+grid resolution of OneComp, and N = 0.8 × 600 keeps the shrinkage c/600 below
+0.8, as in the reference GPTQ implementation. The selected candidate minimizes a
+generalized reconstruction metric with exponent ν = 2.4:
+c⋆=
+arg min
+c∈{0,...,N−1}
+X
+j∈Gt
+wj −ˆw(c)
+j
+ν,
+with ties broken in favor of the smaller c, that is, the larger scale. The exponent ν > 2
+penalizes large per-element errors more heavily than the squared loss, which can be
+advantageous when the weight distribution has outliers within a group. Note that this
+heuristic optimizes only the scale; it does not revisit individual integer assignments after
+selection.
+GPTQ-MSE.
+Table 7 gives the model-wise values underlying the summary in Ta-
+ble 2. GPTQ-MSE uses mse=true and actorder=false; JointQ also uses no activation
+ordering.
+JointQ achieves higher average accuracy in 15 of the 16 comparisons and lower
+perplexity in 12, with one tie. The accuracy gain is positive for all four models in
+W3G128 and is largest in the per-channel settings. These results show that stronger
+one-shot scale selection alone does not reproduce the gains of JointQ.
+GPTQ⋆= actorder + mse.
+Table 8 compares GPTQ⋆with JointQ used in Table 1.
+GPTQ⋆is a useful heuristic configuration but is not uniformly the strongest GPTQ
+baseline: in some per-channel settings it is worse than GPTQ.
+JointQ achieves higher average accuracy than GPTQ⋆in 9 of the 16 comparisons.
+The split by grouping granularity is more informative: JointQ wins only 1 of 8 G128
+comparisons but all 8 per-channel comparisons. The W3 per-channel gains are positive
+for every model, ranging from 0.0261 on Qwen3-14B to 0.1520 on Llama-2-7B. Thus,
+the two heuristics are often effective in G128, while joint scale–integer optimization is
+most consistently beneficial when a single scale is shared across an entire channel.
+Perplexity is again less uniform: JointQ wins 8 comparisons, ties 1, and loses 7.
+In particular, Qwen3-14B favors GPTQ⋆in three of the four perplexity comparisons
+despite favoring JointQ in both per-channel accuracy comparisons. GPTQ⋆is also not
+uniformly stronger than GPTQ; for example, its Qwen3-8B W3 per-channel perplexity is
+42
+
+
+Table 7: GPTQ-MSE versus JointQ. Bold denotes the better quality result within each
+model and setting.
+GPTQ-MSE
+JointQ
+Model
+Setting
+PPL↓
+Avg.↑
+PPL↓
+Avg.↑
+Llama-2-7B
+W4G128
+5.97
+0.6913
+5.67
+0.6914
+W4 per-ch
+27.21
+0.5928
+5.96
+0.6836
+W3G128
+7.19
+0.6568
+6.78
+0.6610
+W3 per-ch
+855.39
+0.4496
+7.98
+0.6032
+Llama-3-8B
+W4G128
+8.84
+0.7294
+6.65
+0.7426
+W4 per-ch
+7.79
+0.7151
+7.41
+0.7247
+W3G128
+56.76
+0.6506
+8.75
+0.7060
+W3 per-ch
+58.55
+0.4616
+13.09
+0.6606
+Qwen3-8B
+W4G128
+10.36
+0.7322
+10.17
+0.7336
+W4 per-ch
+12.78
+0.7084
+10.71
+0.7240
+W3G128
+14.09
+0.6872
+11.50
+0.7250
+W3 per-ch
+51.11
+0.4950
+22.11
+0.6686
+Qwen3-14B
+W4G128
+8.79
+0.7731
+8.89
+0.7699
+W4 per-ch
+9.40
+0.7607
+9.40
+0.7710
+W3G128
+9.65
+0.7418
+9.91
+0.7472
+W3 per-ch
+17.64
+0.6725
+18.92
+0.7203
+43.42, compared with 19.55 for GPTQ in Table 1. These results reinforce the distinction
+between language-modeling perplexity and downstream task accuracy.
+JointQ (GPTQ⋆cand.).
+For the G128 settings, we further evaluate JointQ (GPTQ⋆
+cand.), which replaces the vanilla GPTQ candidate in the warm start of Section 3.8
+with a GPTQ⋆candidate. When activation ordering is enabled, the columns of the
+layer are permuted once, before any candidate is generated, and the groups are formed
+contiguously in the permuted order; the Clip-Optimize candidate, the GPTQ⋆candidate,
+the row-wise selection, and the local search all operate on this common grouping. The
+Clip-Optimize candidate remains in the pool, so this configuration is not a pure GPTQ⋆
+warm start. The layer-specific regularization and adaptive retry are retained. The results
+are mixed: JointQ (GPTQ⋆cand.) improves perplexity in 4 of 8 cases, ties in 1, and
+improves average accuracy in 5 of 8. Its total quantization time is 1.32–1.45× that of
+GPTQ⋆. Hence, in G128, the additional value of JointQ (GPTQ⋆cand.) remains model
+dependent.
+F
+Layer-wise Output Error
+Figures 2–4 complement the Llama-2-7B results in Figure 1. At each layer, X is the
+BF16-model calibration activation used by all methods and to form H = XX⊤for
+quantization. For each layer type, we sum the unregularized calibration output error
+43
+
+
+Table 8: GPTQ⋆versus JointQ. Bold denotes the better quality result within each model
+and setting.
+GPTQ⋆
+JointQ
+Model
+Setting
+PPL↓
+Avg.↑
+Time (s)
+PPL↓
+Avg.↑
+Time (s)
+Llama-2-7B
+W4G128
+5.67
+0.6935
+1301.1
+5.67
+0.6914
+706.2
+W4 per-ch
+16.53
+0.5753
+362.9
+5.96
+0.6836
+1906.5
+W3G128
+9.87
+0.6077
+1536.4
+6.78
+0.6610
+965.9
+W3 per-ch
+334.30
+0.4512
+363.8
+7.98
+0.6032
+2161.8
+Llama-3-8B
+W4G128
+6.55
+0.7478
+1454.3
+6.65
+0.7426
+937.0
+W4 per-ch
+8.19
+0.7176
+397.6
+7.41
+0.7247
+2564.0
+W3G128
+8.37
+0.7110
+1705.5
+8.75
+0.7060
+1202.8
+W3 per-ch
+27.55
+0.6020
+399.2
+13.09
+0.6606
+2736.9
+Qwen3-8B
+W4G128
+9.93
+0.7355
+1546.3
+10.17
+0.7336
+2019.8
+W4 per-ch
+11.18
+0.7234
+414.3
+10.71
+0.7240
+1631.7
+W3G128
+11.42
+0.7255
+1824.0
+11.50
+0.7250
+1997.8
+W3 per-ch
+43.42
+0.5338
+417.3
+22.11
+0.6686
+2236.2
+Qwen3-14B
+W4G128
+8.92
+0.7705
+2610.6
+8.89
+0.7699
+7435.3
+W4 per-ch
+9.26
+0.7626
+698.2
+9.40
+0.7710
+3923.5
+W3G128
+9.52
+0.7611
+3104.6
+9.91
+0.7472
+6937.9
+W3 per-ch
+15.68
+0.6942
+694.0
+18.92
+0.7203
+5184.3
+∥(W −c
+W)X∥2
+F over all transformer blocks and divide by the corresponding GPTQ
+sum. The “total” entry sums all seven layer types before taking the ratio; a ratio below
+one indicates a lower error than GPTQ.
+G
+Calibration-set Stability
+This section provides the full results for the calibration-sensitivity study in Section 4.3.
+We evaluate sensitivity to calibration-set sampling on Llama-3-8B in W3G128 and
+W4G128. Each calibration example is a sequence of length 2048; the sequence counts
+below are therefore distinct from the calibration-token dimension n used in the theory.
+For each sequence count, seeds 0–19 share paired calibration data across methods. We
+report three complementary comparisons: JointQ against GPTQ⋆, the contribution of
+JointQ’s stabilization policy, and JointQ (GPTQ⋆cand.) versus GPTQ⋆.
+Recommended systems in W3G128.
+Table 10 compares JointQ with GPTQ⋆. This
+comparison directly measures the sensitivity of the recommended systems.
+JointQ has lower PPL variance at all five sequence counts. It also has lower mean
+PPL for 8–32 sequences, whereas GPTQ⋆is slightly better for 64 and 128 sequences.
+This comparison supports the low-sample robustness of JointQ.
+44
+
+
+Table 9: GPTQ⋆versus JointQ (GPTQ⋆cand.) in G128. Bold denotes the better quality
+result within each model and setting.
+GPTQ⋆
+JointQ (GPTQ⋆cand.)
+Model
+Setting
+PPL↓
+Avg.↑
+Time (s)
+PPL↓
+Avg.↑
+Time (s)
+Llama-2-7B
+W4G128
+5.67
+0.6935
+1301.1
+5.66
+0.6960
+1805.4
+W3G128
+9.87
+0.6077
+1536.4
+6.56
+0.6639
+2226.3
+Llama-3-8B
+W4G128
+6.55
+0.7478
+1454.3
+6.55
+0.7439
+1913.8
+W3G128
+8.37
+0.7110
+1705.5
+8.41
+0.7191
+2341.4
+Qwen3-8B
+W4G128
+9.93
+0.7355
+1546.3
+9.88
+0.7382
+2089.2
+W3G128
+11.42
+0.7255
+1824.0
+11.58
+0.7193
+2549.3
+Qwen3-14B
+W4G128
+8.92
+0.7705
+2610.6
+8.93
+0.7741
+3747.3
+W3G128
+9.52
+0.7611
+3104.6
+9.48
+0.7561
+4499.6
+Table 10: System-level calibration sensitivity in W3G128. Values are mean ± sample
+standard deviation over 20 paired seeds. Avg. is the six-task mean accuracy. Bold
+denotes lower mean PPL or higher mean accuracy.
+JointQ
+GPTQ⋆
+Sequences
+PPL
+Avg.
+PPL
+Avg.
+8
+11.0952 ± 0.2984
+0.6303 ± 0.0131
+11.3662 ± 1.6689
+0.6322 ± 0.0297
+16
+9.9750 ± 0.2107
+0.6629 ± 0.0093
+10.0652 ± 0.7537
+0.6561 ± 0.0257
+32
+9.3967 ± 0.1010
+0.6758 ± 0.0042
+9.8167 ± 0.7994
+0.6772 ± 0.0173
+64
+9.1449 ± 0.0786
+0.6828 ± 0.0054
+9.0630 ± 0.3937
+0.6826 ± 0.0201
+128
+8.9921 ± 0.0838
+0.6891 ± 0.0058
+8.8243 ± 0.4315
+0.6915 ± 0.0184
+Stabilization-policy ablation.
+JointQ in Table 11 uses the layer-specific regularization
+and adaptive retry from Table 6; JointQ w/o stab. disables both. PPL values are mean ±
+sample standard deviation, and accuracy differences are reported in percentage points.
+The full policy improves PPL in every W3G128 run and all but one W4G128 run.
+The effect is strongest with eight W3G128 sequences, where it reduces mean PPL by
+1.6305, reduces PPL standard deviation from 1.0680 to 0.2984, and improves mean
+accuracy by 3.185 points. The diminishing differences as the sequence count increases
+indicate that stabilization is most valuable when calibration data are scarce.
+JointQ (GPTQ⋆cand.) versus GPTQ⋆.
+Table 12 compares JointQ (GPTQ⋆cand.)
+and GPTQ⋆. Both enable MSE-based scale search and activation ordering, while JointQ
+(GPTQ⋆cand.) additionally retains its Clip-Optimize candidate and its stabilization
+policy. Differences are JointQ (GPTQ⋆cand.) minus GPTQ⋆, and the confidence
+intervals are paired 95% t intervals over 20 seeds.
+In W4G128, JointQ (GPTQ⋆cand.) reduces PPL at every sequence count and wins
+94 of 100 paired runs; all five PPL confidence intervals exclude zero, whereas the
+accuracy intervals include zero. In W3G128, both the PPL and accuracy differences
+are positive at every sequence count, showing that JointQ (GPTQ⋆cand.) trades higher
+PPL for higher downstream accuracy. Overall, these results characterize calibration
+45
+
+
+Figure 2: Layer-type-wise unregularized output-error ratios for Llama-3-8B.
+sensitivity on Llama-3-8B in G128 with sequence length 2048.
+H
+Detailed Per-Task Results
+Tables 13–16 report the individual zero-shot task scores underlying the averages in
+Table 1. ARC-c, ARC-e, PIQA, and HellaSwag use normalized accuracy; WinoGrande
+and BoolQ use raw accuracy. Because the tasks have different chance levels and
+sampling uncertainty, small cell-wise differences should not be overinterpreted.
+46
+
+
+Figure 3: Layer-type-wise unregularized output-error ratios for Qwen3-8B.
+Figure 4: Layer-type-wise unregularized output-error ratios for Qwen3-14B.
+47
+
+
+Table 11: Effect of the JointQ stabilization policy. ∆is JointQ minus JointQ w/o stab.;
+lower ∆PPL and higher ∆Avg. favor JointQ. Wins are counted over 20 paired seeds.
+Bold denotes the lower mean PPL.
+Bits
+Sequences
+JointQ PPL
+JointQ w/o stab. PPL
+∆PPL
+PPL wins
+∆Avg. (pt.)
+Avg. wins
+4
+8
+6.9823 ± 0.2164
+7.0707 ± 0.2338
+−0.0883
+20/20
++0.371
+16/20
+16
+6.7973 ± 0.0368
+6.8603 ± 0.0953
+−0.0630
+20/20
++0.123
+12/20
+32
+6.7211 ± 0.0199
+6.7575 ± 0.0304
+−0.0365
+20/20
++0.183
+16/20
+64
+6.6843 ± 0.0142
+6.7135 ± 0.0151
+−0.0292
+19/20
++0.260
+13/20
+128
+6.6657 ± 0.0137
+6.6892 ± 0.0141
+−0.0235
+20/20
++0.176
+14/20
+3
+8
+11.0952 ± 0.2984
+12.7257 ± 1.0680
+−1.6305
+20/20
++3.185
+20/20
+16
+9.9750 ± 0.2107
+10.5154 ± 0.3841
+−0.5404
+20/20
++1.743
+19/20
+32
+9.3967 ± 0.1010
+9.7241 ± 0.1355
+−0.3274
+20/20
++0.669
+15/20
+64
+9.1449 ± 0.0786
+9.3636 ± 0.0827
+−0.2187
+20/20
++0.388
+13/20
+128
+8.9921 ± 0.0838
+9.1804 ± 0.0692
+−0.1883
+20/20
++0.205
+12/20
+Table 12: JointQ (GPTQ⋆cand.) versus GPTQ⋆. Negative ∆PPL and positive ∆Avg.
+favor JointQ (GPTQ⋆cand.). Wins are counted over 20 paired seeds.
+Bits
+Sequences
+∆PPL (95% CI)
+PPL wins
+∆Avg. points (95% CI)
+Avg. wins
+4
+8
+−0.0387 [−0.0552, −0.0221]
+18/20
++0.140 [−0.070, +0.349]
+12/20
+16
+−0.0327 [−0.0399, −0.0255]
+20/20
++0.096 [−0.064, +0.256]
+13/20
+32
+−0.0207 [−0.0271, −0.0142]
+18/20
++0.049 [−0.145, +0.242]
+10/20
+64
+−0.0202 [−0.0273, −0.0131]
+19/20
+−0.046 [−0.194, +0.102]
+9/20
+128
+−0.0211 [−0.0261, −0.0162]
+19/20
++0.071 [−0.062, +0.205]
+14/20
+3
+8
++1.9338 [+0.4762, +3.3914]
+2/20
++2.387 [+1.433, +3.340]
+20/20
+16
++0.6937 [+0.1803, +1.2071]
+6/20
++2.202 [+1.175, +3.230]
+19/20
+32
++1.0020 [+0.5276, +1.4763]
+2/20
++1.632 [+0.695, +2.569]
+16/20
+64
++1.1658 [+0.6928, +1.6388]
+1/20
++2.057 [+0.979, +3.135]
+17/20
+128
++1.4316 [+1.1041, +1.7591]
+0/20
++1.358 [+0.568, +2.148]
+17/20
+Table 13: Detailed results for Llama-2-7B.
+Method Setting
+PPL↓ARC-c ARC-e
+PIQA
+WG
+HS
+BQ
+Avg.↑Time (s)
+BF16
+–
+5.47 0.4480 0.7378 0.7845 0.6961 0.7617 0.7945 0.7038
+–
+GPTQ
+W4G128
+5.89 0.4437 0.7176 0.7824 0.6867 0.7551 0.7654 0.6918
+268.1
+JointQ
+W4G128
+5.67 0.4352 0.7176 0.7797 0.6961 0.7510 0.7688 0.6914
+706.2
+GPTQ
+W4 per-ch
+6.17 0.4369 0.6982 0.7824 0.6827 0.7401 0.7492 0.6816
+260.3
+JointQ
+W4 per-ch
+5.96 0.4480 0.7113 0.7791 0.6922 0.7336 0.7373 0.6836
+1906.5
+GPTQ
+W3G128
+6.80 0.3857 0.6170 0.7563 0.6496 0.6906 0.7162 0.6359
+263.1
+JointQ
+W3G128
+6.78 0.3959 0.6894 0.7693 0.6882 0.6926 0.7306 0.6610
+965.9
+GPTQ
+W3 per-ch 27.74 0.2782 0.4125 0.6572 0.5343 0.5154 0.6144 0.5020
+257.6
+JointQ
+W3 per-ch
+7.98 0.3601 0.5934 0.7405 0.6267 0.6236 0.6749 0.6032
+2161.8
+48
+
+
+Table 14: Detailed results for Llama-3-8B.
+Method Setting
+PPL↓ARC-c ARC-e
+PIQA
+WG
+HS
+BQ
+Avg.↑Time (s)
+BF16
+–
+6.14 0.5384 0.7757 0.8058 0.7332 0.7921 0.8199 0.7442
+–
+GPTQ
+W4G128
+14.09 0.5060 0.7559 0.7824 0.7167 0.7810 0.8070 0.7248
+277.9
+JointQ
+W4G128
+6.65 0.5401 0.7828 0.7965 0.7293 0.7843 0.8226 0.7426
+937.0
+GPTQ
+W4 per-ch
+399.02 0.3268 0.5206 0.6763 0.6464 0.6916 0.7144 0.5960
+273.1
+JointQ
+W4 per-ch
+7.41 0.4940 0.7580 0.7829 0.7301 0.7739 0.8092 0.7247
+2564.0
+GPTQ
+W3G128
+57.69 0.2628 0.4482 0.6153 0.5943 0.4888 0.6122 0.5036
+274.8
+JointQ
+W3G128
+8.75 0.4693 0.7168 0.7742 0.7395 0.7424 0.7936 0.7060
+1202.8
+GPTQ
+W3 per-ch 3381.46 0.2312 0.2753 0.5305 0.5107 0.2752 0.4165 0.3732
+269.4
+JointQ
+W3 per-ch
+13.09 0.4010 0.6334 0.7388 0.7056 0.7065 0.7783 0.6606
+2736.9
+Table 15: Detailed results for Qwen3-8B.
+Method Setting
+PPL↓ARC-c ARC-e
+PIQA
+WG
+HS
+BQ
+Avg.↑Time (s)
+BF16
+–
+9.73 0.5640 0.8093 0.7758 0.6772 0.7489 0.8664 0.7403
+–
+GPTQ
+W4G128
+10.33 0.5614 0.7879 0.7639 0.6693 0.7404 0.8709 0.7323
+321.0
+JointQ
+W4G128
+10.17 0.5572 0.7950 0.7628 0.6756 0.7393 0.8719 0.7336
+2019.8
+GPTQ
+W4 per-ch 11.04 0.5077 0.7441 0.7557 0.6835 0.7246 0.8529 0.7114
+315.2
+JointQ
+W4 per-ch 10.71 0.5367 0.7740 0.7688 0.6859 0.7323 0.8465 0.7240
+1631.7
+GPTQ
+W3G128
+11.75 0.4881 0.7193 0.7584 0.6527 0.6914 0.8413 0.6919
+318.5
+JointQ
+W3G128
+11.50 0.5375 0.7950 0.7666 0.6882 0.6968 0.8661 0.7250
+1997.8
+GPTQ
+W3 per-ch 19.55 0.3217 0.4735 0.6850 0.5391 0.5814 0.6691 0.5449
+310.9
+JointQ
+W3 per-ch 22.11 0.4582 0.7104 0.7345 0.6448 0.6366 0.8269 0.6686
+2236.2
+Table 16: Detailed results for Qwen3-14B.
+Method Setting
+PPL↓ARC-c ARC-e
+PIQA
+WG
+HS
+BQ
+Avg.↑Time (s)
+BF16
+–
+8.65 0.6041 0.8279 0.7976 0.7309 0.7877 0.8936 0.7736
+–
+GPTQ
+W4G128
+8.85 0.6015 0.8224 0.8003 0.7301 0.7813 0.8896 0.7709
+473.2
+JointQ
+W4G128
+8.89 0.5998 0.8245 0.7938 0.7269 0.7806 0.8939 0.7699
+7435.3
+GPTQ
+W4 per-ch
+9.11 0.5887 0.8001 0.7840 0.7040 0.7722 0.8657 0.7525
+463.9
+JointQ
+W4 per-ch
+9.40 0.5956 0.8266 0.8020 0.7324 0.7767 0.8930 0.7710
+3923.5
+GPTQ
+W3G128
+10.07 0.5478 0.7862 0.7889 0.6914 0.7489 0.8508 0.7356
+461.7
+JointQ
+W3G128
+9.91 0.5486 0.7959 0.7873 0.7214 0.7526 0.8774 0.7472
+6937.9
+GPTQ
+W3 per-ch 13.84 0.3720 0.5669 0.7291 0.5746 0.6839 0.7266 0.6089
+455.2
+JointQ
+W3 per-ch 18.92 0.5162 0.7504 0.7709 0.7080 0.7141 0.8621 0.7203
+5184.3
+49

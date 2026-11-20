@@ -1,0 +1,1550 @@
+Efficient Latent Reasoning for Vision-Language Model
+via Dynamics-Aware Quantization and Distillation
+Yanjing Li
+Nanyang Technological University
+Sheng Xu
+Communication University of China
+Baochang Zhang
+Beihang University
+Xianbin Cao
+Beihang University
+Yawei Li†
+Nanyang Technological University
+1
+Abstract
+Efficient
+chain-of-thought (CoT) reasoning in vision-language mod-
+els (VLMs) requires reducing both intermediate reasoning
+steps and their execution cost. Latent CoT methods com-
+press textual rationales into continuous thoughts, yet their
+full-precision (FP) models retain substantial storage and
+computation costs. Lowering numerical precision could re-
+duce these remaining costs, yet direct quantization severely
+degrades reasoning accuracy,
+particularly with 4-bit
+weights and activations. Operator and perturbation analy-
+ses reveal key sensitivity and direction-dependent predictive
+effects of continuous-thought errors, motivating preser-
+vation of information retrieval and subsequent reasoning
+beyond reconstruction accuracy.
+We therefore introduce
+QL-VLM, a dynamics-aware Quantization framework
+for efficient Latent reasoning in Vision-Language Models
+(VLMs).
+First, Dynamics-Guided Quantization (DGQ)
+uses
+nonuniform
+codebooks
+that
+preserve
+rotary-key
+structure, mitigating quantization-induced distortion in
+vision-language information retrieval. Second, Dynamics-
+Preserving Distillation (DPD) aligns continuous thoughts,
+latent-query readouts, and predictions with a full-precision
+teacher, maintaining predictive consistency through subse-
+quent low-precision reasoning. On ScienceQA-IMG with
+Qwen2-VL-2B-Instruct, 4-bit QL-VLM achieves 90.43%
+accuracy and improves baseline by 40.33%, with 16.64×
+fewer bit-operations and 6.40× lower measured latency
+than explicit CoT.
+1. Introduction
+Multimodal
+chain-of-thought
+(CoT)
+enables
+vision-
+language models (VLMs) to integrate visual evidence and
+1†: Corresponding author.
+textual knowledge through intermediate rationales [33, 38],
+at an inference cost that grows along two axes. The first
+is the number of decoding steps: on MMStar [1], explicit
+CoT with Qwen3-VL-8B spends 7.24 s generating 142.1
+reasoning tokens against 0.47 s encoding the input [10],
+and thinking-style models further push output to several
+thousand tokens per example (about 4.4K for Kimi-VL-
+Thinking-2506) [24]. The second is the cost per step: each
+token or thought requires a forward pass through a multi-
+billion-parameter backbone whose weights, activations,
+and attention history are stored and read at full precision.
+Efficient deployment must reduce both.
+Prior work largely treats the two axes separately. Token
+pruning [2] and concise-reasoning objectives [34] shorten
+the sequence, and latent CoT [8, 10, 21] goes further by re-
+placing textual rationales with a few continuous thoughts;
+each remaining step, however, still executes a full-precision
+model. On ScienceQA [15] with Qwen2-VL-2B (Fig. 1),
+full-precision latent CoT [21] cuts generation from 56.28
+tokens to six thoughts and six answer tokens, but the model
+still occupies 4.89 GB and its theoretical per-answer com-
+pute falls by only 8% (223.10 to 205.65 TBitOps). Low-bit
+quantization addresses the second axis: post-training and
+quantization-aware methods [6, 13, 31] reach 8-bit, and in-
+creasingly 4-bit, weights and activations with modest loss.
+Yet, the two remedies do not combine additively. Quan-
+tizing the latent-CoT model to 4-bit weights and activa-
+tions lowers ScienceQA accuracy from 79.97% to 11.16%,
+and quantization-aware training recovers it only to 50.10%
+(Fig. 1). We attribute this to the structure of latent rea-
+soning rather than to tuning. In explicit CoT, a quantization
+error perturbs a single token that is immediately re-encoded
+as a discrete symbol. In latent CoT, continuous thoughts are
+fed back as the next input embeddings, while their cached
+keys remain accessible to subsequent queries. These path-
+ways allow errors to propagate through later reasoning and
+arXiv:2611.25670v1  [cs.AI]  19 Nov 2026
+
+
+1.5
+2
+2.5
+3
+3.5
+4
+4.5
+5
+Model storage (GB)
+50
+60
+70
+80
+90
+100
+Accuracy (%)
+Bubble area ∝ inference cost (TBitOps / answer)
+223.1
+Explicit
+CoT
+205.6
+Latent
+CoT
+51.9
+QL-VLM
+W8A8
+vs Explicit CoT
+Storage 1.67×
+BitOps 4.30×
+51.8
+Baseline
+W8A8
+13.4 Baseline
+W4A4
+13.4
+QL-VLM
+W4A4
+vs Explicit CoT
+Storage 2.52×
+BitOps 16.64×
+0
+30
+60
+Explicit CoT
+W4A4
+W8A8
+56.28
+5.86 + 6  (4.75×)
+6.00 + 6  (4.69×)
+Generated Length
+Tokens
+Latent
+Figure 1.
+Accuracy-efficiency trade-off on ScienceQA-IMG
+with Qwen2-VL-2B-Instruct. Bubble area denotes inference cost
+(TBitOps per answer), and arrows show gains over matched-
+precision baselines. The inset compares generated tokens (solid)
+and latent steps (hatched).
+affect answer predictions.
+Two analyses support this account and determine our de-
+sign. Operator ablations (Sec. 3.2) identify attention keys
+as the dominant bottleneck: with linear layers at W4A4,
+raising only the keys from 4 to 8 bits lifts accuracy from
+11.16% to 70.35%, against at most 33.41% for queries, val-
+ues, or attention probabilities. A perturbation analysis using
+the total Jacobian of the answer logits through subsequent
+latent steps further shows that predictive impact depends on
+direction, not only magnitude: equal-norm perturbations of
+continuous thoughts differ in induced KL by a median fac-
+tor of 2.82, and a direction-aware estimate ranks them with
+Spearman correlation 0.999 versus 0.270 for a magnitude-
+based one (Fig. 4). Reconstruction error, the objective of
+most quantizers, is therefore the wrong target; what must
+be preserved is the information later steps retrieve and the
+reasoning that consumes it.
+We therefore introduce QL-VLM, a dynamics-aware
+Quantization framework for low-bit Latent reasoning in
+VLMs (Fig. 2), whose two components correspond to these
+two findings. Dynamics-Guided Quantization (DGQ) quan-
+tizes each rotary key pair jointly in polar coordinates with
+a learned nonuniform codebook, so that the angular struc-
+ture imposed by M-RoPE [22, 26] survives quantization,
+and selects codewords under a prediction-sensitivity met-
+ric rather than Euclidean distance, with codebooks grouped
+by layer, head, rotary axis, key source, and the reasoning
+step at which a latent key is created. Dynamics-Preserving
+Distillation (DPD) trains the quantized student against a
+full-precision teacher by aligning the information that la-
+tent queries retrieve from multimodal tokens and earlier
+thoughts, the continuous thoughts weighted by their esti-
+mated downstream sensitivity, and the answer distribution,
+so that the student’s reasoning trajectory, not only its output,
+follows the teacher’s. Both vision and language backbones
+are quantized.
+On ScienceQA with Qwen2-VL-2B, QL-VLM reaches
+90.43% at 4 bits and 94.20% at 8 bits, improving over
+the matched-precision baseline by 40.33 and 7.49 points;
+across three backbones and three datasets, the 4-bit gains
+range from 21.37 to 48.39 points, and the quantized models
+match or exceed full-precision latent CoT in eight of nine
+settings. The 4-bit model generates 5.86 answer tokens on
+average, shortening the decoding sequence by 4.75× rela-
+tive to explicit CoT-SFT once the six thoughts are counted,
+with 2.52× lower storage. Measured on an RTX PRO 6000
+GPU, it answers in 0.50 s per question, against 3.20 s for
+explicit CoT and 0.80 s for full-precision latent CoT.
+2. Related Work
+2.1. Efficient Chain-of-Thought
+Efficient reasoning methods for Large-Language Models
+(LLMs) can be grouped into input-based, output-based, and
+model-based approaches [23].
+Input-based methods en-
+courage concise reasoning through prompting, as in Chain
+of Draft [34], while prompt compression such as LLMLin-
+gua [11] removes redundant input tokens.
+Output-based
+methods [5, 35] replace textual traces with latent represen-
+tations: Coconut [8] reuses hidden representations as in-
+puts, CODI [21] learns continuous thoughts through self-
+distillation, and SIM-CoT [27] adds step-level supervi-
+sion through a training-only decoder. Model-based meth-
+ods optimize reasoning length through length-aware re-
+wards or variable-length training data, exemplified by O1-
+Pruner [16]. For VLMs, efficient reasoning must addition-
+ally preserve visual evidence and cross-modal interactions.
+FastV [2] prunes visual inputs, while Skywork R1V [18]
+reduces excessive reasoning through adaptive-length distil-
+lation. Heima [20] compresses multimodal rationales into
+abstract thinking tokens, and CoLT [10] learns compact la-
+tent thoughts through decoder-based and internal supervi-
+sion. These methods primarily compress token sequences
+while retaining backbone precision, leaving substantial stor-
+age and arithmetic costs. How low-bit errors affect multi-
+modal retrieval and subsequent latent reasoning remains in-
+sufficiently characterized.
+2.2. Vision Language Model Quantization
+Quantization methods broadly comprise post-training quan-
+tization (PTQ) and quantization-aware training (QAT).
+PTQ relies on calibration and reconstruction without end-
+
+
+(a) QL-VLM with Dynamics-Preserving Distillation
+(b) Dynamics-Guided Quantization
+Latent-query 
+readouts
+Continuous 
+thoughts
+Predictions
+Frozen Teacher
+Vision + language
+Full-precision Latent CoT
+𝒓!,#
+∗
+Image
+History
+𝐳"
+∗
+𝐳$
+∗
+𝐳%
+∗
+𝑝∗
+Quant Student
+Vision + language
+4-bit / 8-bit
+b
+𝒓!,#
+Image
+History
+𝐳"
+𝐳$
+𝐳%
+𝑝&
+Hidden-state feedback
+Dynamics-
+Preserving
+Distillation
+ℒ!"#$
+ℒ!%&&
+ℒ'(
+Computation
+DPD supervision
+Cartesian K Quantization (Baseline)
+Reference alternative
+Key pairs
+M-RoPE
+Uniform scalar grid
+Quantized key
+Dynamics-Guided Quantization (Ours)
+Group key pairs
+Nonuniform codebook
+Metric-based selection
+Time    Height    Width
+Image
+Text
+History
+Source / axis / birth step
+d, d + D/2
+Normalize
+𝐤̅ = 𝐤/𝛄
+𝐂% = ρ%,& cosψ%,', sinψ%,'
+(
+Group metric
+𝐇!
+ν
+μ
+Joint codeword search
+min!,# 𝐤̅ −𝐂$ 𝐇!
+𝟐
+FP calibration
+𝐇!
+Reconstruct
+γ𝐂! µ∗, v∗ 
+M-RoPE
+𝐐*'
+𝐊' !
+"
+𝐏*'
+𝐕*'
+×
+Softmax + quant
+×
+Output
+Query
+Key
+Probability
+Value
+What state 
+is the dog in?
+<image>
+<question>
++
+Figure 2. Overview of QL-VLM. (a) Dynamics-Preserving Distillation aligns the quantized student’s continuous thoughts, latent-query
+readouts, and predictions with a frozen full-precision teacher. (b) Compared with Cartesian key quantization, Dynamics-Guided Quantiza-
+tion reconstructs rotary key pairs using grouped nonuniform codebooks and a calibration-based predictive metric at the same bit width.
+to-end retraining.
+For LLMs, GPTQ [6] uses second-
+order weight reconstruction, while SmoothQuant [31] re-
+distributes activation outliers.
+For VLMs, Q-VLM [25]
+considers cross-layer dependencies, MBQ [12] balances
+modality-dependent sensitivity, and MQuant [36] intro-
+duces modality-specific scaling and outlier suppression.
+RGSQ [30] further incorporates Fisher–Riemannian recon-
+struction geometry. KV-cache quantization additionally ac-
+counts for the distinct distributions of keys and values [14].
+Polar-coordinate approaches [7, 29] further exploit recur-
+sively transform KV vectors before quantization. Neverthe-
+less, aggressive weight–activation quantization can substan-
+tially degrade accuracy, motivating training-based adapta-
+tion, particularly at lower bits.
+QAT adapts model pa-
+rameters under quantization during optimization.
+LLM-
+QAT [13] uses generated data and distillation to quan-
+tize weights, activations, and KV caches, while NVFP4-
+QAD [32] recovers LLM and VLM accuracy by matching
+full-precision output distributions. These methods do not
+explicitly address how quantized keys alter information re-
+trieval or how intermediate errors affect subsequent contin-
+uous thoughts, leaving their effectiveness for low-bit multi-
+modal latent reasoning insufficiently established.
+3. Methodology
+QL-VLM combines low-bit quantization with multimodal
+latent reasoning, using a full-precision reference to super-
+vise the compressed model.
+We introduce the prelimi-
+naries in Sec. 3.1 and diagnose quantization sensitivity in
+Sec. 3.2. This analysis motivates Dynamics-Guided Rotary
+Key Quantization in Sec. 3.3 and Dynamics-Preserving La-
+tent Reasoning Distillation in Sec. 3.4.
+3.1. Preliminaries
+Vision-language latent reasoning. We adapt CODI [21]
+to a VLM, which jointly processes visual tokens and a tex-
+tual question as the multimodal prompt x. Explicit-CoT and
+implicit-CoT branches share the same full-precision param-
+eters θ. The implicit branch replaces textual reasoning with
+T continuous thoughts indexed by i ∈1, . . . , T, bounded
+by learnable <bot> (begin-of-thoughts) and <eot> (end-
+of-thoughts) tokens:
+f0 = Fθ(x),
+Zi = Πθ(fi−1),
+fi = Fθ(x, Z1:i).
+(1)
+where i ∈{1, . . . , T}, Fθ returns the last decoder hid-
+den vector, and Πθ is a two-layer MLP followed by Lay-
+erNorm. Each zi becomes the next input embedding. After
+T thoughts, a learnable <eot> token is manually inserted
+before answer decoding. Both branches receive token-level
+cross-entropy supervision. CODI additionally aligns their
+hidden activations as:
+LFP
+bd = El
+ 1
+σl
+Ecoord
+h
+|bl,coord −sg(bexp
+l,coord)|
+i
+,
+(2)
+Here, bℓ,coord and bexp
+ℓ,coord denote implicit and explicit hid-
+den coordinates at layer ℓ; σℓis the detached teacher-
+
+
+activation standard deviation within the batch.
+Both ex-
+pectations are uniform empirical averages, and sg stops tar-
+get gradients. The shared full-precision model is trained
+jointly:
+LCODI = Lans + λcotLcot + λbdLFP
+bd ,
+(3)
+where Lans supervises the implicit answer, Lcot supervises
+the explicit rationale and answer, and λcot, λbd ≥0 are
+loss weights. Inference uses only the implicit branch. For
+subsequent QAT, we adapt the implicit answer loss by nor-
+malizing its segments separately:
+˜Lans = LO + λpLP + λeLE.
+(4)
+Here, O, P, and E contain valid shifted prediction positions
+for the option token sequence, answer template, and final
+stop token, respectively.
+Quantization. Quantization reconstructs a tensor X as
+Qb(X; ∆, o) = ∆[clip(⌊X/∆⌉+ o, qmin, qmax) −o], (5)
+where b is the bit width, ∆> 0 the scale, o the integer
+zero point, and qmin, qmax the integer bounds. Attention
+consumes reconstructed operands:
+P = softmax( ˆQ ˆKT/
+√
+D + M),
+O = ˆP ˆV,
+(6)
+where Q, K, V are queries, keys, and values, D is the head
+width, M the attention mask, and O the output. Hats indi-
+cate quantized reconstructions. Subsequent sections use Q
+and ⋆for quantized and full-precision execution.
+3.2. Quantization Sensitivity in Latent CoT
+Operator sensitivity.
+Fig. 3(a) shows that accuracy de-
+creases from 79.97% to 73.49% with Linear-only quantiza-
+tion and 40.16% with attention-operand-only quantization;
+quantizing both yields 11.16%. With Linear layers fixed at
+W4A4, increasing only K from four to eight bits achieves
+70.35%, compared with 18.74%, 17.65%, and 33.41%
+when increasing Q, V, and P, respectively (Fig. 3(b)). This
+identifies key precision as a major bottleneck under the
+tested protocol. A possible contributor is cached-key reuse
+across reasoning steps, allowing key perturbations to affect
+multiple subsequent reads and continuous thoughts. This
+motivates using the answer logits to characterize perturba-
+tion effects and derive a prediction-sensitive error metric.
+Prediction sensitivity.
+We examine prediction sensitiv-
+ity by perturbing one intermediate representation in full-
+precision implict CoT and recomputing subsequent latent
+reasoning, as illustrated in Fig. 4. Let η denote a pre-M-
+RoPE key pair or a continuous thought, and δ an addi-
+tive perturbation. We measure the resulting change through
+FP
+Linear
+only
+Attention
+operands
+only
+Fully
+W4A4
+0
+20
+40
+60
+80
+100
+Accuracy (%)
+79.97
+73.49
+40.16
+11.16
+Q
+4→8
+K
+4→8
+V
+4→8
+P
+4→8
+0
+20
+40
+60
+80
+100
+Accuracy (%)
+18.74
+70.35
+17.65
+33.41
+Fixed Linear W4A4
+Reference: Q4K4V4 (11.16%)
+(a) Module Sensitivity in VLM
+(b) Activation Sensitivity in Attention
+Figure 3. Quantization sensitivity of Qwen2-VL-2B-Instruct on
+ScienceQA. (a) Module-level comparison between FP and 4-bit
+Linear layers, attention operands, or both. (b) Activation-level
+comparison with 4-bit Linear layers: the precision of Q (query),
+K (key), V (value), or P (attention probability) is individually in-
+creased from 4 to 8 bits, while the remainder stays at 4 bits.
+the KL divergence between unperturbed and perturbed full-
+vocabulary prediction distributions [17], using the same
+teacher-forced answer context.
+Under local smoothness,
+this change admits the second-order approximation as
+X
+n∈N
+DKL(p⋆
+n(η) ∥p⋆
+n(η + δ)) = 1
+2δ⊤F(η)δ + o(∥δ∥2
+2),
+F(η) =
+X
+n∈N
+J⊤
+n
+
+diag(p⋆
+n) −p⋆
+np⋆⊤
+n
+
+Jn,
+(7)
+where N contains the option and stop-token prediction po-
+sitions, p⋆
+n is the unperturbed reference distribution, and
+Jn = ∂u⋆
+n/∂η is the total Jacobian of the corresponding
+logits u⋆
+n, including paths through subsequent latent reason-
+ing. The prediction Fisher metric F therefore captures local
+predictive effects beyond perturbation magnitude, detailed
+derivation and offline estimation are provided in the sup-
+plementary material. Fig. 4 compares (a) measured/JVP-
+predicted KL and (b) local/fixed ranking agreement across
+perturbation magnitudes. At 1% relative magnitude, nearly
+equal-norm perturbations across 48 thought sites from 8
+held-out examples yield a median larger-to-smaller KL ratio
+of 2.82. Local predictions achieve a Spearman correlation
+of 0.999, versus 0.270 for the fixed approximation.
+These results demonstrate direction-dependent predic-
+tive effects while exposing limitations of the tested fixed
+approximation. Together with the operator diagnosis, these
+findings motivate structure-preserving key quantization and
+full-precision teacher supervision of subsequent reasoning.
+3.3. Dynamics-Guided Quantization
+To preserve structured key representations for subsequent
+information retrieval, we use prediction sensitivity to guide
+rotary-pair reconstruction at a fixed bit width.
+Follow-
+ing Eq. (7), we first group rotary key pairs and estimate a
+prediction-sensitive metric for each group, then use these
+metrics to guide codebook fitting and codeword selection.
+
+
+10−20 10−16 10−12
+10−8
+10−4
+Predicted KL
+10−19
+10−14
+10−9
+10−4
+Measured KL
+Key pair
+Continuous thought
+Identity
+10−3
+10−2
+10−1
+Relative perturbation ‖δ‖2/‖η‖2
+−1.0
+−0.5
+0.0
+0.5
+1.0
+Spearman correlation
+Key / local
+Key / fixed
+Thought / local
+Thought / fixed
+(a) Local Prediction Sensitivity
+(b) Sensitivity Ranking
+Figure 4.
+Prediction sensitivity of Qwen2-VL-2B trained with
+CODI on ScienceQA. (a) KL between unperturbed/perturbed pre-
+dictions versus sample-specific quadratic estimates. (b) Spearman
+correlation with measured KL for local/fixed estimates, computed
+separately at each perturbation magnitude. Shading indicates 95%
+bootstrap confidence intervals over 8 held-out examples.
+Rotary geometry and grouping. Within a fixed language
+layer and KV head, let kj,d be the raw key pair formed
+by channels (d, d + D/2), where j indexes a key to-
+ken and d ∈{1, . . . , D/2} a rotary pair. M-RoPE [26],
+most used in VLMs, assigns each pair to an axis a ∈
+{temporal, height, width} and rotates it as
+˜kj,d = R(ϕa,j,d)kj,d,
+R(ϕ) =
+cos ϕ
+−sin ϕ
+sin ϕ
+cos ϕ
+
+,
+(8)
+where ϕa,j,d is the angle supplied by the model’s M-RoPE
+positions and frequencies.
+For fixed positions, the raw-
+coordinate metric satisfies
+F(kj,d) = R(ϕa,j,d)⊤F(˜kj,d)R(ϕa,j,d).
+(9)
+Although rotation preserves Euclidean length, the predic-
+tion metric need not be isotropic.
+We therefore pre-
+serve the rotary pairs and use their measured prediction
+sensitivity.
+Each codebook group is g
+=
+(l, κ, a, ξ),
+where l is the language layer, κ the KV head, and ξ ∈
+{text, image, latent1, . . . , latentT } the key source. A la-
+tent source records the step at which the key was created, in-
+dependently of the later query that reads it. For each group,
+we average sampled raw-pair Fisher blocks with sampling
+weights, add trace-scaled isotropic damping, and divide all
+groups by one common trace normalizer. The resulting pos-
+itive metric is denoted Hg. A common normalizer preserves
+relative sensitivity across groups.
+Polar codebooks.
+Normalize a pair using γj
+=
+maxd ∥kj,d∥2, floored at 10−8, within its token and KV
+head, and set ¯kj,d = kj,d/γj. Each group learns radius en-
+tries ρg,µ ∈[0, 1] and circular phase entries ψg,ν ∈[−π, π),
+with indices µ, ν ∈{0, . . . , 2b −1}. One radius entry is
+fixed to zero. The normalized codeword is
+Cg(µ, ν) = ρg,µ
+
+cos ψg,ν
+sin ψg,ν
+
+.
+(10)
+The selected indices (µ⋆, ν⋆) minimize
+(¯kj,d −Cg(µ, ν))THg(¯kj,d −Cg(µ, ν)).
+(11)
+We reconstruct ˆkj,d = γjCg(µ⋆, ν⋆) and apply the actual
+M-RoPE rotation to obtain the key operand in Eq. (6). The
+factor γ2
+j multiplies all candidate distortions equally for a
+given pair and therefore cancels in assignment. It is re-
+tained when fitting shared codebooks across pairs with dif-
+ferent scales. Calibration alternates codeword assignment,
+closed-form radius updates, and periodic phase optimiza-
+tion. During QAT, we compute the key reconstruction loss
+by uniformly averaging over valid rotary key pairs within
+each quantizer invocation and then over active invocations:
+Lkey = 1
+2Ecall[Ek|call[(ˆk −k)⊤Hg(ˆk −k)]].
+(12)
+Here, an invocation denotes one application of a layer’s key
+quantizer during a forward pass, k and ˆk denote the raw
+and reconstructed key pairs, and g identifies their codebook
+group. The group metric Hg remains fixed and is also used
+for codeword selection at inference, without requiring gra-
+dients from future queries. The main configuration fixes
+both indices to b = 4: a pair uses eight logical index bits, or
+four per original key component. It does not assign higher
+precision to selected groups. We perform a chunked joint
+search over the 16 × 16 codewords on 4-bit runs. 8-bit runs
+use coordinate search.
+This component incorporates reasoning dynamics into
+the key encoding rule. Quantized queries, probabilities, val-
+ues, and subsequent parameter updates also affect the gener-
+ated reasoning sequence, motivating supervision of the se-
+quence and its retrieved information.
+3.4. Dynamics-Preserving Distillation
+To preserve how retrieved information supports subsequent
+latent reasoning, Dynamics-Preserving Distillation (DPD)
+aligns continuous thoughts, latent-query readouts, and an-
+swer distributions with a full-precision teacher parameter-
+ized by θ⋆. The teacher is trained from the full-precision
+latent CoT [21], including its trained adapters and rea-
+soning projection, and remains frozen in evaluation mode
+throughout training.
+Let zi and z⋆
+i denote student and
+teacher thoughts at step i ∈{1, . . . , T}, each follow-
+ing its own reasoning history, where T is the reasoning
+budget.
+Using the diagonal calibration estimate Gi of
+F(z⋆
+i ) in Eq. (7), we define the common normalizer ZF =
+max(T −1 PT
+i=1 tr(Gi), 10−20).
+Latent-query readout alignment. We first align the infor-
+mation retrieved by latent queries from visual tokens and
+historical thoughts. For language layer l, query head h, rea-
+soning step i, and source s ∈{image, history}, the student
+
+
+and teacher readouts are
+rl,h,i,s =
+X
+j∈Ji,s
+ˆPl,h,i,j ˆVl,h,j,
+r⋆
+l,h,i,s =
+X
+j∈Ji,s
+P ⋆
+l,h,i,jV⋆
+l,h,j.
+(13)
+Here, Ji,image and Ji,history contain visible image tokens
+and earlier thoughts, respectively. Softmax precedes proba-
+bility quantization and source selection over the full visible
+history, without source-wise renormalization applied. For
+each example, let A contain the valid selected layer–head–
+step–source tuples. We minimize
+wi = tr(Gi)
+ZF
+,
+Lread =
+1
+|A|
+X
+(l,h,i,s)∈A
+wi ℓ1(
+rl,h,i,s −r⋆
+l,h,i,s
+q
+max(∥r⋆
+l,h,i,s∥2
+2/D, ϵ)
+),
+(14)
+where ℓ1 is the coordinate-averaged Smooth-L1 penalty,
+and ϵ = 10−4 floors the reference mean-square norm.
+Sensitivity-weighted thought alignment. Readout align-
+ment constrains the information accessed during reasoning;
+thought alignment further regularizes the intermediate rep-
+resentations supporting subsequent predictions. We use
+Lroll =
+1
+2TZF
+T
+X
+i=1
+(zi −z⋆
+i )⊤Gi(zi −z⋆
+i ).
+(15)
+Because each model follows its own reasoning history, the
+discrepancy includes the effects of earlier reasoning differ-
+ences. The diagonal metrics weight thought coordinates ac-
+cording to their estimated downstream predictive sensitiv-
+ity. As fixed local approximations, they provide sensitivity-
+based regularization without guaranteeing a monotonic re-
+duction in final prediction KL.
+Answer-level supervision. We supervise answer correct-
+ness using the adapted loss ˜Lans in Eq. (4) and preserve
+predictive behavior by distilling the frozen teacher’s full-
+vocabulary distributions at option positions:
+LKD = τ 2
+|O|
+X
+n∈O
+DKL[sg(softmax(u⋆
+n
+τ ))∥softmax(uQ
+n
+τ )],
+(16)
+where u⋆
+n and uQ
+n are teacher and student logits, sg stops
+gradients, and τ > 0 is the temperature [9], set to one by
+default. Each model conditions on its own latent reason-
+ing history and the same preceding teacher-forced answer
+tokens. Ground-truth supervision remains active.
+We retain the student’s explicit-CoT CE Lcot and bound-
+ary alignment Lbd, using a reference-standard-deviation-
+normalized Smooth-L1 penalty against the frozen teacher’s
+explicit-CoT boundary activations. Explicit rationales are
+used only for this training branch and its boundary targets,
+not for the teacher’s latent reasoning.
+Overall objective. We combine answer-level supervision
+and CODI [21] training losses in Eq. 3 with key reconstruc-
+tion, thought alignment, and readout alignment:
+L =LCODI + λKDLKD
++ αm
+h
+λkeyLkey + χMref
+ λreadLread + λrollLroll
+i
+.
+(17)
+The first three terms follow CODI’s implicit-answer su-
+pervision, explicit-CoT supervision, and answer-boundary
+alignment, with the adaptations described above. The re-
+maining terms introduce frozen-teacher prediction distilla-
+tion and dynamics-aware reconstruction and alignment. All
+λ are nonnegative loss weights. The factor αm ∈[0, 1]
+gradually activates auxiliary supervision at optimizer up-
+date m ≥0.
+To reduce training overhead, readout and
+thought alignment are evaluated on micro-batches selected
+by χ ∼Bernoulli(1/Mref), where Mref ≥1 is an integer.
+Multiplication by Mref preserves their expected loss contri-
+bution. Details are in Appendix.
+4. Experiments
+4.1. Experimental Setup
+Datasets
+and
+models.
+We
+evaluate
+Qwen2-VL-
+2B-Instruct
+[26],
+Qwen2.5-VL-7B-Instruct
+[28],
+and
+InternVL2.5-8B [4] on ScienceQA-IMG [15] and A-
+OKVQA [19], and M3CoT [3]. Explicit-CoT references use
+CoT-SFT on the first two datasets and Multimodal-CoT on
+M3CoT; latent-CoT references use a multimodal adaptation
+of CODI [21]. We compare QL-VLM with Q-VLM, LLM-
+QAT, and a Cartesian QAT baseline. For zero-shot transfer,
+fixed ScienceQA-IMG-trained checkpoints are evaluated on
+MMStar [1] and MMMU-MC [37] without target-data fine-
+tuning, recalibration, or model selection.
+Quantization and training.
+We quantize linear-layer
+weights and input activations, as well as attention queries,
+keys, values, and scores, to 4 or 8 bits in both vision and lan-
+guage backbones. The output head and reasoning projection
+remain in floating point. All QAT variants start from the
+same dataset-specific full-precision CODI checkpoint and
+use an independent frozen teacher. The Cartesian baseline
+shares the remaining quantizers and adapted CODI supervi-
+sion as in Eq. (3). All models use six continuous thoughts
+and one QAT epoch. Details are provided in the appendix.
+4.2. Main Results
+CoT reasoning. Tab. 1 shows that QL-VLM enables low-
+bit latent reasoning while achieving accuracy competitive
+with or superior to full-precision CoT across diverse back-
+bones and datasets. First, QL-VLM preserves strong per-
+formance relative to both full-precision explicit and latent
+
+
+Table 1. Generated-answer accuracy (%) on supervised vision-
+language CoT reasoning. Each dataset uses its own FP-trained
+initialization (gray-shadowed rows). Explicit CoT denotes CoT-
+SFT on ScienceQA-IMG and A-OKVQA, and Multimodal-CoT
+on M3CoT. #B specifies the corresponding bit width defined in
+Sec. 4.1. The best results are in bold. “-” indicates failure to con-
+verge under the specified training budget.
+Method
+#B
+ScienceQA
+A-OKVQA
+M3CoT
+Qwen2-VL-2B-Instruct
+Explicit CoT
+16
+70.50
+71.32
+42.52
+Latent CoT
+16
+79.97
+79.91
+44.16
+Q-VLM [25]
+4
+-
+-
+-
+LLM-QAT [13]
+4
+-
+-
+-
+Baseline
+4
+50.10
+34.10
+20.40
+QL-VLM
+4
+90.43
+82.49
+41.77
+Q-VLM [25]
+8
+72.50
+70.35
+31.39
+LLM-QAT [13]
+8
+79.31
+77.78
+32.25
+Baseline
+8
+86.71
+83.59
+34.50
+QL-VLM
+8
+94.20
+89.73
+44.34
+Qwen2.5-VL-7B-Instruct
+Explicit CoT
+16
+89.74
+84.38
+70.25
+Latent CoT
+16
+90.74
+88.89
+71.10
+Q-VLM [25]
+4
+35.14
+30.01
+-
+LLM-QAT [13]
+4
+40.26
+38.72
+-
+Baseline
+4
+63.31
+59.46
+40.12
+QL-VLM
+4
+93.78
+89.72
+71.34
+Q-VLM [25]
+8
+81.93
+72.64
+59.97
+LLM-QAT [13]
+8
+86.67
+79.68
+61.42
+Baseline
+8
+91.13
+82.34
+68.67
+QL-VLM
+8
+96.25
+91.22
+75.69
+InternVL2.5-8B
+Explicit CoT
+16
+97.68
+85.59
+75.70
+Latent CoT
+16
+98.07
+87.42
+77.91
+Q-VLM [25]
+4
+61.58
+40.92
+-
+LLM-QAT [13]
+4
+67.99
+45.82
+-
+Baseline
+4
+70.92
+60.97
+44.32
+QL-VLM
+4
+98.02
+89.01
+77.89
+Q-VLM [25]
+8
+69.26
+44.27
+63.20
+LLM-QAT [13]
+8
+72.21
+53.82
+65.21
+Baseline
+8
+79.89
+69.80
+69.87
+QL-VLM
+8
+98.87
+91.08
+79.92
+CoT. At 8-bit, it surpasses both counterparts across all nine
+settings. Even at 4-bit, it achieves 90.43% on ScienceQA-
+IMG with Qwen2-VL-2B-Instruct, exceeding full-precision
+latent CoT by 10.46%. On the more challenging M3CoT,
+its 4-bit performance also closely matches or exceeds full-
+precision latent CoT with both larger backbones. Second,
+QL-VLM consistently outperforms conventional quantiza-
+tion methods at matched precision, improving over the 4-bit
+Cartesian baseline by 21.37–48.39 percentage points. The
+largest gain occurs on A-OKVQA with the 2B backbone,
+where accuracy increases from 34.10% to 82.49%. More-
+over, QL-VLM converges in every evaluated setting, includ-
+ing those where Q-VLM and LLM-QAT fail to converge un-
+der the specified training budget. Notably, latent CoT out-
+performs explicit CoT, possibly by retaining task-relevant
+information without reproducing lengthy rationales, consis-
+tent with CODI [21].
+Table 2. Zero-shot accuracy (%) with a fixed ScienceQA-IMG-
+trained source checkpoint.
+#B specifies the corresponding bit
+width defined in Sec. 4.1. The best results are in bold.
+Method
+#B
+MMStar
+MMMU-MC
+Qwen2-VL-2B-Instruct
+Explicit CoT
+16
+40.50
+31.20
+Latent CoT
+16
+43.28
+32.24
+Baseline
+4
+30.11
+24.19
+QL-VLM
+4
+44.27
+31.18
+Baseline
+8
+37.26
+28.79
+QL-VLM
+8
+45.67
+33.10
+Qwen2.5-VL-7B-Instruct
+Explicit CoT
+16
+60.80
+55.45
+Latent CoT
+16
+61.60
+56.97
+Baseline
+4
+41.91
+36.72
+QL-VLM
+4
+61.32
+56.60
+Baseline
+8
+58.90
+52.19
+QL-VLM
+8
+62.20
+57.20
+Zero-shot generalization. Tab. 2 evaluates transfer from
+fixed ScienceQA-IMG-trained checkpoints to MMStar [1]
+and MMMU-MC [37] without target-dataset adaptation.
+QL-VLM consistently outperforms baseline across both
+models and benchmarks.
+At 4-bit, it improves accu-
+racy by 14.16% and 6.99% on MMStar and MMMU-MC
+with Qwen2-VL-2B-Instruct and by 19.41%/19.88% with
+Qwen2.5-VL-7B-Instruct. At 8-bit, QL-VLM surpasses FP
+latent CoT across all four comparisons. These results in-
+dicate that its improvements extend beyond the training
+dataset, supporting the preservation of transferable multi-
+modal reasoning under low-bit computation.
+Efficiency and reasoning compression. Fig. 5 compares
+inference time and decoding length on ScienceQA-IMG us-
+ing an NVIDIA RTX PRO 6000 GPU. Supported low-bit
+matrix multiplications use compiled CUDA kernels, while
+the remaining use BF16 GEMM. 4-bit QL-VLM reduces
+average generated tokens from 56.28 to 5.86 with Qwen2-
+VL-2B-Instruct and from 162.87 to 5.99 with Qwen2.5-VL-
+7B-Instruct. Including six continuous thoughts, the decod-
+ing sequences are 4.75× and 13.58× shorter, respectively.
+Inference time decreases from 3.20 to 0.50 seconds per an-
+swer for the 2B model and from 11.40 to 2.10 seconds for
+the 7B model, yielding 6.40× and 5.43× speedups over ex-
+plicit CoT. Compared with full-precision latent CoT, 4-bit
+QL-VLM provides additional 1.60× and 1.67× speedups;
+8-bit QL-VLM also reduces latency on both models. These
+results demonstrate complementary reductions in reasoning
+
+
+length and measured execution time.
+0
+5
+10
+15
+Inference time (s / answer)
+Explicit CoT
+Latent CoT
+QL-VLM 8-bit
+QL-VLM 4-bit
+(56.28 tokens)
+3.20 s
+(6.04 tokens + 6 thoughts)
+0.80 s  (4.00 × )
+(6.00 tokens + 6 thoughts)
+0.70 s  (4.57 × )
+(5.86 tokens + 6 thoughts)
+0.50 s  (6.40 × )
+(a) Qwen2-VL-2B-Instruct
+0
+5
+10
+15
+Inference time (s / answer)
+(162.87 tokens)
+11.40 s
+(6.06 tokens + 6 thoughts)
+3.50 s  (3.26 × )
+(6.00 tokens + 6 thoughts)
+2.90 s  (3.93 × )
+(5.99 tokens + 6 thoughts)
+2.10 s  (5.43 × )
+(b) Qwen2_5-VL-7B-Instruct
+ScienceQA-IMG
+Figure 5.
+Inference efficiency on ScienceQA-IMG with (a)
+Qwen2-VL-2B-Instruct and (b) Qwen2.5-VL-7B-Instruct, mea-
+sured on an NVIDIA RTX PRO 6000 GPU. Bars show infer-
+ence time; annotations report generated tokens and continuous
+thoughts. Speedups are relative to explicit CoT within each model.
+4.3. Ablation studies
+Component analysis. Tab. 3 progressively constructs DGQ
+under fixed DPD supervision. Polar encoding and learned
+nonuniform codebooks improve accuracy over Cartesian
+keys, while axis-, source-, and birth-step-specific grouping
+provide further gains. In particular, distinguishing historical
+thoughts by birth step increases accuracy from 72.69% to
+80.68%, supporting reasoning-step-specific key reconstruc-
+tion. Applying the predictive metric and key reconstruction
+loss further improves accuracy to 90.43%.
+Table 3. Progressive DGQ analysis on ScienceQA-IMG at 4-bit
+Qwen2-VL-2B-Instruct. After enabling DPD, each row cumula-
+tively adds the indicated design choice. Acc. denotes accuracy.
+Configuration
+Correspondence
+Acc. (%)
+Cartesian baseline
+Eqs. (5)-(6)
+50.10
+Cartesian K + DPD
+Eqs. (14)-(15)
+52.69
++ Polar encoding
+Eq. (10), fixed grids
+60.20
++ Nonuniform codebooks
+Learn ρg,µ, ψg,ν
+64.28
++ Axis grouping
+Axis index a in g
+70.11
++ Source grouping
+Source index ξ in g
+72.69
++ Birth-step grouping
+ξ = latenti
+80.68
++ Predictive metric
+Hg in Eq. (11)
+83.97
++ Lkey (QL-VLM)
+Eq. (12)
+90.43
+Tab. 4 separates the effects of thought and readout su-
+pervision with DGQ fixed. Both objectives improve over
+DGQ alone, with readout alignment providing larger gains
+on both backbones. Their combination reaches 90.43% and
+93.78%, exceeding the stronger single-loss configuration by
+17.69% and 11.65%, respectively. These results support the
+complementarity of aligning retrieved information and the
+continuous thoughts that support subsequent predictions.
+Table 4. DPD ablations on ScienceQA-IMG at 4-bit setting. DGQ
+is enabled except in the Cartesian baseline. 2B (Qwen2-VL-2B-
+Instruct) and 7B (Qwen2.5-VL-7B-Instruct) report accuracy (%).
+Variant
+λroll
+λread
+λKD
+2B
+7B
+Cartesian baseline
+0
+0
+1
+50.10
+63.31
+DGQ only
+0
+0
+1
+55.89
+68.05
++Lroll
+0.05
+0
+1
+69.72
+79.79
++Lread
+0
+0.05
+1
+72.74
+82.13
++Lroll + Lread
+(QL-VLM)
+0.05
+0.05
+1
+90.43
+93.78
+Hyper-parameter selection. Fig. 6 examines the three aux-
+iliary loss weights independently.
+Both models perform
+best at default. Tripling the key-loss weight reduces accu-
+racy by at most 1.13%, whereas a tenfold increase causes
+an 11.01%-12.93% drop. Reducing the readout weight to
+1/5 of its default also lowers accuracy by 12.49%-19.45%.
+These trends suggest that insufficient reasoning supervision
+and excessive key reconstruction regularization can both
+impair performance, supporting a balanced weighting of re-
+construction and predictive alignment.
+0.1
+0.2
+0.5
+1
+2
+5
+10
+Relative loss weight λ/λ0
+64
+72
+80
+88
+96
+Accuracy (%)
+(a) Qwen2-VL-2B-Instruct
+0.1
+0.2
+0.5
+1
+2
+5
+10
+Relative loss weight λ/λ0
+(b) Qwen2.5-VL-7B-Instruct
+ScienceQA-IMG / 4-bit
+λkey
+λroll
+λread
+Figure 6. Loss-weight sensitivity on ScienceQA-IMG at 4-bit.
+Each curve varies one coefficient while fixing the others.
+The
+horizontal axis shows the ratio to its default: λkey = 0.001,
+λroll = 0.05, and λread = 0.05. Dashed lines denote default.
+Latent budget and compression trade-off. Tab. 5 shows
+that insufficient latent budgets degrade both full-precision
+and quantized reasoning, with QL-VLM improving sub-
+stantially as T increases from 4 to 6. Beyond 6 thoughts, ac-
+curacy gains diminish: increasing T from 6 to 12 improves
+QL-VLM by only 1.22% , while reducing compression ratio
+from 4.75× to 3.15×. QL-VLM outperforms the baseline at
+every budget. We therefore adopt 6 thoughts as a practical
+balance between accuracy and reasoning compression.
+
+
+Table 5. Latent-budget trade-off on ScienceQA with Qwen2-VL-
+2B-Instruct. Steps and CR denote decoding length and compres-
+sion ratio of QL-VLM relative to explicit CoT.
+T
+Latent CoT
+Baseline
+QL-VLM
+Steps
+CR
+2
+63.21
+18.17
+45.15
+6.0 + 2
+7.04
+4
+68.12
+22.46
+53.61
+6.03 + 4
+5.61
+6
+79.97
+50.10
+90.43
+5.86 + 6
+4.75
+8
+81.26
+55.23
+91.01
+5.93 + 8
+4.04
+12
+82.94
+56.79
+91.65
+5.86 + 12
+3.15
+5. Conclusion
+We introduced QL-VLM for efficient latent reasoning,
+addressing both reasoning length and the cost of low-
+precision execution. Our diagnosis identifies key sensitivity
+and direction-dependent predictive effects of continuous-
+thought errors. Therefore, DGQ preserves rotary-key struc-
+ture through nonuniform quantization, while DPD aligns
+continuous thoughts, latent-query readouts, and predictions
+with a full-precision teacher. Experiments across VLMs
+and tasks show improved low-bit accuracy and cross-dataset
+generalization, alongside compact reasoning, lower theoret-
+ical storage, and less measured inference time.
+References
+[1] Lin Chen, Jinsong Li, Xiaoyi Dong, Pan Zhang, Yuhang
+Zang, Zehui Chen, Haodong Duan, Jiaqi Wang, Yu Qiao,
+Dahua Lin, et al. Are we on the right way for evaluating
+large vision-language models? In Proc. of NeurIPS, pages
+27056–27087, 2024. 1, 6, 7
+[2] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang
+Lin, Chang Zhou, and Baobao Chang. An image is worth 1/2
+tokens after layer 2: Plug-and-play inference acceleration for
+large vision-language models. In Proc. of ECCV, pages 19–
+35, 2024. 1, 2
+[3] Qiguang Chen, Libo Qin, Jin Zhang, Zhi Chen, Xiao Xu,
+and Wanxiang Che. M3cot: A novel benchmark for multi-
+domain multi-step multi-modal chain-of-thought. In Proc. of
+ACL, pages 8199–8221, 2024. 6
+[4] Zhe Chen, Weiyun Wang, Yue Cao, Yangzhou Liu, Zhang-
+wei Gao, Erfei Cui, Jinguo Zhu, Shenglong Ye, Hao Tian,
+Zhaoyang Liu, et al. Expanding performance boundaries of
+open-source multimodal models with model, data, and test-
+time scaling. arXiv preprint arXiv:2412.05271, 2024. 6
+[5] Yuntian Deng, Yejin Choi, and Stuart Shieber. From explicit
+cot to implicit cot: Learning to internalize cot step by step.
+arXiv preprint arXiv:2405.14838, 2024. 2
+[6] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan
+Alistarh.
+Gptq:
+Accurate post-training quantization
+for generative pre-trained transformers.
+arXiv preprint
+arXiv:2210.17323, 2022. 1, 3
+[7] Insu Han, Praneeth Kacham, Amin Karbasi, Vahab Mir-
+rokni, and Amir Zandieh. Polarquant: Quantizing kv caches
+with polar transformation. arXiv preprint arXiv:2502.02617,
+2025. 3
+[8] Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhit-
+ing Hu, Jason Weston, and Yuandong Tian. Training large
+language models to reason in a continuous latent space. In
+Proc. of COLM, pages 1–20, 2024. 1, 2
+[9] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+Distill-
+ing the knowledge in a neural network.
+arXiv preprint
+arXiv:1503.02531, 2015. 6
+[10] Lianyu Hu, Shengqian Qin, Zeqin Liao, Qing Guo, Liang
+Wan, Wei Feng, and Yang Liu. Colt: Teaching multi-modal
+models to think with chain of latent thoughts. In Proc. of
+ECCV, pages 526–544, 2026. 1, 2
+[11] Huiqiang Jiang, Qianhui Wu, Chin-Yew Lin, Yuqing Yang,
+and Lili Qiu. Llmlingua: Compressing prompts for acceler-
+ated inference of large language models. In Proc. of EMNLP,
+pages 13358–13376, 2023. 2
+[12] Shiyao Li, Yingchun Hu, Xuefei Ning, Xihui Liu, Ke Hong,
+Xiaotao Jia, Xiuhong Li, Yaqi Yan, Pei Ran, Guohao Dai,
+et al. Mbq: Modality-balanced quantization for large vision-
+language models. In Proc. of CVPR, pages 4167–4177, 2025.
+3
+[13] Zechun Liu, Barlas Oguz, Changsheng Zhao, Ernie Chang,
+Pierre Stock, Yashar Mehdad, Yangyang Shi, Raghuraman
+Krishnamoorthi, and Vikas Chandra.
+Llm-qat: Data-free
+quantization aware training for large language models. In
+Proc. of ACL, pages 467–484, 2024. 1, 3, 7
+[14] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong,
+Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia
+Hu. Kivi: A tuning-free asymmetric 2bit quantization for
+kv cache. In Proc. of ICML, pages 1–15, 2024. 3
+[15] Pan Lu, Swaroop Mishra, Tanglin Xia, Liang Qiu, Kai-Wei
+Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and
+Ashwin Kalyan. Learn to explain: Multimodal reasoning via
+thought chains for science question answering. In Proc. of
+NeurIPS, pages 2507–2521, 2022. 1, 6
+[16] Haotian Luo, Haiying He, Yibo Wang, Shiwei Liu, Wei Li,
+Xiaochun Cao, Dacheng Tao, Naiqiang Tan, and Li Shen.
+O1-pruner: Length-harmonizing fine-tuning for o1-like rea-
+soning pruning. In Proc. of ACL, pages 14242–14257, 2026.
+2
+[17] James Martens. New insights and perspectives on the natural
+gradient method. Journal of Machine Learning Research, 21
+(146):1–76, 2020. 4
+[18] Yi Peng, Peiyu Wang, Xiaokun Wang, Yichen Wei, Jiangbo
+Pei, Weijie Qiu, Ai Jian, Yunzhuo Hao, Jiachun Pan, Tianyi-
+dan Xie, et al. Skywork r1v: Pioneering multimodal reason-
+ing with chain-of-thought. arXiv preprint arXiv:2504.05599,
+2025. 2
+[19] Dustin Schwenk, Apoorv Khandelwal, Christopher Clark,
+Kenneth Marino, and Roozbeh Mottaghi.
+A-okvqa:
+A
+benchmark for visual question answering using world knowl-
+edge. In Proc. of ECCV, pages 146–162, 2022. 6
+[20] Xuan Shen, Yizhou Wang, Yufa Zhou, Xiangxi Shi, Pu Zhao,
+Yanzhi Wang, and Jiuxiang Gu. Efficient reasoning with hid-
+den thinking. In Proc. of ICML, pages 1–16, 2025. 2
+[21] Zhenyi Shen, Hanqi Yan, Linhai Zhang, Zhanghao Hu, Yali
+Du, and Yulan He. Codi: Compressing chain-of-thought into
+
+
+continuous space via self-distillation. In Proc. of EMNLP,
+pages 677–693, 2025. 1, 2, 3, 5, 6, 7
+[22] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen
+Bo, and Yunfeng Liu. Roformer: Enhanced transformer with
+rotary position embedding. Neurocomputing, 568:127063,
+2024. 2
+[23] Yang Sui, Yu-Neng Chuang, Guanchu Wang, Jiamu Zhang,
+Tianyi Zhang, Jiayi Yuan, Hongyi Liu, Andrew Wen,
+Shaochen Zhong, Na Zou, et al. Stop overthinking: A sur-
+vey on efficient reasoning for large language models. arXiv
+preprint arXiv:2503.16419, 2025. 2
+[24] Kimi Team, Angang Du, Bohong Yin, Bowei Xing, Bowen
+Qu, Bowen Wang, Cheng Chen, Chenlin Zhang, Chen-
+zhuang Du, Chu Wei, et al. Kimi-vl technical report. arXiv
+preprint arXiv:2504.07491, 2025. 1
+[25] Changyuan Wang, Ziwei Wang, Xiuwei Xu, Yansong Tang,
+Jie Zhou, and Jiwen Lu. Q-vlm: Post-training quantization
+for large vision-language models. In Proc. of NeurIPS, pages
+114553–114573, 2024. 3, 7
+[26] Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhihao Fan,
+Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin
+Ge, et al. Qwen2-vl: Enhancing vision-language model’s
+perception of the world at any resolution.
+arXiv preprint
+arXiv:2409.12191, 2024. 2, 5, 6
+[27] Xilin Wei, Xiaoran Liu, Yuhang Zang, Xiaoyi Dong, Yuhang
+Cao, Jiaqi Wang, Xipeng Qiu, and Dahua Lin. Sim-cot: Su-
+pervised implicit chain-of-thought. In Proc. of ICLR, pages
+56721–56742, 2026. 2
+[28] Chenfei Wu, Jiahao Li, Jingren Zhou, Junyang Lin, Kaiyuan
+Gao, Kun Yan, Sheng-ming Yin, Shuai Bai, Xiao Xu, Yilei
+Chen, et al. Qwen-image technical report. arXiv preprint
+arXiv:2508.02324, 2025. 6
+[29] Songhao Wu, Ang Lv, Xun Zhang, Guojun Yin, Wei Lin, Rui
+Yan, et al. Polarquant: Leveraging polar transformation for
+key cache quantization and decoding acceleration. In Proc.
+of NeurIPS, pages 50584–50607, 2026. 3
+[30] Zhiping Wu, Dongdong Ren, Yangchengyu Zhou, Zhengjie
+Zhang, Wenbin Li, Hongbing Pan, and Yang Gao. Rgsq: Rie-
+mannian geometry-sensitive quantization for large vision-
+language models. arXiv preprint arXiv:2609.25492, 2026.
+3
+[31] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien
+Demouth, and Song Han. Smoothquant: Accurate and ef-
+ficient post-training quantization for large language models.
+In Proc. of ICML, pages 38087–38099, 2023. 1, 3
+[32] Meng Xin, Sweta Priyadarshi, Jingyu Xin, Bilal Kar-
+tal, Aditya Vavre, Asma Kuriparambil Thekkumpate, Zi-
+jia Chen, Ameya Sunil Mahabaleshwarkar, Ido Shahaf,
+Akhiad Bercovich, et al.
+Quantization-aware distillation
+for nvfp4 inference accuracy recovery.
+arXiv preprint
+arXiv:2601.20088, 2026. 3
+[33] Guowei Xu, Peng Jin, Ziang Wu, Hao Li, Yibing Song,
+Lichao Sun, and Li Yuan. Llava-cot: Let vision language
+models reason step-by-step. In Proc. of ICCV, pages 2087–
+2098. IEEE, 2025. 1
+[34] Silei Xu, Wenhao Xie, Lingxiao Zhao, and Pengcheng He.
+Chain of draft:
+Thinking faster by writing less.
+arXiv
+preprint arXiv:2502.18600, 2025. 1, 2
+[35] Yige Xu, Xu Guo, Zhiwei Zeng, and Chunyan Miao. Softcot:
+Soft chain-of-thought for efficient reasoning with llms. In
+Proc. of ACL, pages 23336–23351, 2025. 2
+[36] JiangYong Yu, Sifan Zhou, Dawei Yang, Shuoyu Li, Shuo
+Wang, Xing Hu, Chen Xu, Zukang Xu, Changyong Shu, and
+Zhihang Yuan. Mquant: Unleashing the inference potential
+of multimodal large language models via static quantization.
+In Proc. of ACMMM, pages 1783–1792, 2025. 3
+[37] Xiang Yue, Yuansheng Ni, Kai Zhang, Tianyu Zheng, Ruoqi
+Liu, Ge Zhang, Samuel Stevens, Dongfu Jiang, Weiming
+Ren, Yuxuan Sun, et al. Mmmu: A massive multi-discipline
+multimodal understanding and reasoning benchmark for ex-
+pert agi. In Proc. of CVPR, pages 9556–9567, 2024. 6, 7
+[38] Zhuosheng Zhang,
+Aston Zhang,
+Mu Li,
+Hai Zhao,
+George Karypis, and Alex Smola.
+Multimodal chain-of-
+thought reasoning in language models.
+arXiv preprint
+arXiv:2302.00923, 2023. 1
