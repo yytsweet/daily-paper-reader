@@ -1,0 +1,4538 @@
+Progress Predicts Policy
+Licheng Zhong
+Gim Hee Lee
+Department of Computer Science, National University of Singapore
+zlicheng@u.nus.edu, gimhee.lee@nus.edu.sg
+(a) Direct policy
+One learned mapping
+Task and embodiment
+entangled in one map
+(b) PPP: task as a field
+Action space
+Latent task field
+Dynamics
+Pullback
+Continuous: local derivative
+Discrete: finite difference
+(c) Learning actionable geometry
+Measured action-space potential
+Progress only
++ Action loss
+Black: expert command · Colour: field direction
+Action supervision aligns the local field differential.
+Figure 1. Learning a field through its induced actions. (a) A direct policy maps observations and instructions to actions. (b) PPP
+reads commands from a scalar field’s differential, using a shared world model for action conditioning. (c) Measured action-space potential
+slices at a demonstration state show that progress supervision alone yields a gradient misaligned with the expert command (black). Action
+supervision aligns the gradient with that command. Project page: https://zlicheng.com/ppp_page/
+Abstract
+A task specifies how the world should change, while a
+policy specifies what the robot should do.
+We introduce
+Progress Predicts Policy (PPP), which learns a language-
+conditioned scalar field through the commands induced by
+its differential. We obtain action conditioning by compos-
+ing a latent progress field with a shared world model and
+read its action gradient at a fixed reference command. Con-
+tinuous commands scale this gradient by a learned posi-
+tive gain, while discrete commands use finite differences
+of the same scalar. This yields a hybrid policy without a
+separate action head or iterative search. Fitting demon-
+stration progress values alone does not ensure that action
+gradients align with expert commands. PPP trains the in-
+duced commands by imitation and uses double backprop-
+agation for the continuous gradient readout to shape the
+field’s local control geometry. Demonstration timing cali-
+brates field values on observed states without additional an-
+notation. The continuous readout remains learnable with-
+out progress labels but these timing-derived targets support
+progress monitoring during execution. Experiments in sim-
+ulated and real robot manipulation show that PPP outper-
+forms behavioral cloning under a shared architecture.
+1. Introduction
+Imitation learning has produced capable visuomotor poli-
+cies. Diffusion policies model expressive action distribu-
+tions [7] and vision-language-action (VLA) models bring
+web-scale visual and linguistic knowledge to control [5,
+19].
+These methods learn a map from observations and
+instructions to actions. A task and a policy play different
+roles, however. A task states what should change in the
+world: the bowl should end up on the plate. The robot
+dynamics determine which changes its commands can pro-
+duce. We ask whether a learned scalar task evaluator can
+provide progress estimates and a differential from which a
+policy reads its commands.
+We represent a task as a field: a language-conditioned
+scalar progress field pθ(z, ℓ) over learned latent states z.
+Timing labels supervise its values on observations while
+expert commands supervise its differential-induced actions.
+Reading an action derivative requires dependence on a can-
+didate command.
+We obtain this dependence by com-
+posing the field with a shared world model, Qz,ℓ(a) =
+pθ(f(z, a), ℓ). The chain rule at a fixed reference a0 gives:
+ga = ∇aQz,ℓ(a0) = J⊤
+f ∇zpθ(¯z, ℓ),
+(1)
+arXiv:2611.22491v1  [cs.RO]  17 Nov 2026
+
+
+where ¯z = f(z, a0) and Jf is the action Jacobian of the
+learned control-query map at a0. Fig. 1 illustrates the pair-
+ing of task sensitivity with the local latent response of the
+query map. Imitation trains both factors through the in-
+duced command.
+Continuous commands scale ga by a
+learned positive gain while discrete commands use finite
+differences of Q. One gradient evaluation supplies contin-
+uous commands without a separate action generator or it-
+erative search. The same field provides progress estimates
+on observations and control readouts on action-conditioned
+latents. Sec. 4.3 shows that a directly action-conditioned
+scalar yields an effective continuous gradient policy.
+Fitting progress values alone does not ensure that this
+differential yields useful commands. Progress labels con-
+strain pθ only at demonstrated states. Functions agreeing
+on those values can have different nearby derivatives, which
+ga reads. Fig. 4 shows that progress-only fields rank train-
+ing demonstration states almost perfectly but produce action
+gradients that align only weakly with expert commands.
+A second gap separates local from global use of the field.
+Searching for finite commands that maximize Q need not
+recover the demonstrated behavior and almost never suc-
+ceeds in our experiments.
+The central learning problem
+is therefore to learn a control-aligned progress field with
+actionable local geometry rather than merely an accurate
+progress estimator.
+We introduce Progress Predicts Policy (PPP), which
+trains a task field through the behavior it induces. Demon-
+strations supervise the field in two complementary ways:
+expert commands supervise the action produced by ga while
+demonstration-relative progress labels calibrate its values
+without extra annotation. Imitation jointly shapes the field
+geometry and the action response of the query model.
+Under a shared architecture, PPP outperforms behavioral
+cloning (BC) on LIBERO [21] and real robots.
+Auxil-
+iary progress prediction leaves BC essentially unchanged.
+Sec. 4.4 shows that progress labels are optional for con-
+tinuous control and useful for execution monitoring. Our
+contributions are:
+(i) a scalar-field policy that reads continuous commands
+from action gradients and discrete commands from finite
+differences of the same scalar;
+(ii) a training formulation that supervises induced com-
+mands by imitation and calibrates values on observed states
+using annotation-free demonstration timing;
+(iii) an empirical study that separates progress-value
+fit from action-gradient alignment and closed-loop perfor-
+mance and characterizes the local scope of the learned read-
+out.
+2. Related Work
+Visuomotor policies and world models.
+Most visuomo-
+tor policies predict actions from observations [10, 45]. Dif-
+fusion policies model multimodal action distributions [7,
+42] while VLA models add action outputs to pretrained
+vision-language backbones [5, 19, 49]. World models sup-
+port planning through visual features in DINO-WM [47]
+and action-conditioned video prediction in V-JEPA 2 [3].
+LeWorldModel learns latent dynamics from pixels [25].
+Other predictive models couple prediction with action gen-
+eration [22, 36, 39, 41]. Model-based policy learning dif-
+ferentiates through learned dynamics to train a separate
+actor [11, 14]. PPP reads commands from a scalar field
+through the world model without a separate action head.
+Reward, value, and progress representations.
+Visual
+and
+language-conditioned
+representations
+can
+induce
+reusable rewards [23, 24, 34]. GOMP uses a graspability
+field for reward shaping and termination in non-prehensile
+manipulation [46]. VLAC and Robometer scale progress
+and preference estimation across robot data [20, 43].
+Progress estimates inform action generation through rein-
+forcement learning feedback in VLAC [43] and verification
+of policy-proposed candidates in TapSampling [44]. The
+closest work is ProgressVLA, which backpropagates
+progress through a world model to guide a latent-action dif-
+fusion policy [40]. This parallels reward-gradient guidance
+of trajectory diffusion in Diffuser [15].
+These methods
+guide an independent action generator. In PPP, the scaled
+pulled-back progress differential defines the continuous
+command and is trained by imitation. Inverse reinforce-
+ment learning learns objectives to match demonstrated
+behavior [1, 48] but recovers actions by optimization.
+Potential-based control and differentiable planning.
+Classical robotics generates motion from scalar potential
+gradients. Artificial potential fields steer manipulators away
+from obstacles and toward goals [18] while navigation
+functions remove spurious minima by construction [32].
+These potentials are designed in configuration space for a
+known goal. Learning-from-demonstration methods fit sta-
+ble dynamical systems [16, 30] or potential functions [17]
+to demonstrated motion in robot state space.
+Geometric
+policy frameworks compose task-space controllers via
+pullbacks [6, 27]. PPP extends this perspective to hybrid
+control through a language-conditioned perceptual latent
+potential and learned,
+rather than known,
+dynamics.
+Implicit behavioral cloning selects actions by minimizing
+a learned energy at inference [9]. Differentiable planners
+learn through action optimization [2, 35, 37] and GRASP
+improves gradient-based planning with visual world mod-
+els [29]. TD-MPC methods use latent models and learned
+values for sampling-based planning [12, 13].
+PPP reads
+continuous commands with one gradient evaluation and no
+inference-time optimization. Supervising the induced com-
+mand connects PPP to Sobolev training, which supervises
+network derivatives alongside values [8].
+
+
+(a) Shared task-field query
+(b) Hybrid action readout
+Instruction
+language enters only through the field
+Front
+Wrist
+Observation history
+Encoder
+Dynamics
+Task field
+Command query
+Differentiate to obtain the action
+Continuous pose · derivative
+Gradient direction
+Positive gain
+Pose command
+×
+=
+Discrete gripper · finite difference
+Held (open)
+Alternative (close)
+Switch if yes; else hold
+(c) Joint training
+Progress calibration
+Action imitation
+Gripper switching
+World-model prediction
+Forward query
+Control derivative
+Loss updates
+Figure 2. Progress Predicts Policy. (a) The language-independent control branch of the world model supplies latent queries that the
+language-conditioned task field scores through Q(u, c) = pθ(f(z, (u, c)), ℓ). (b) At the held-gripper reference, pose commands scale the
+pulled-back gradient by a learned positive gain while gripper switches use finite differences of the same Q. (c) Training combines progress
+supervision, pose imitation, gripper switching, and world model prediction. Pose imitation differentiates through the gradient readout while
+gripper supervision updates only pθ.
+3. Method
+PPP learns a scalar task field through the commands in-
+duced by its action-conditioned differential (Fig. 2).
+3.1. Representing Tasks as Progress Fields
+A visual encoder E maps an observation o to a latent state
+z = E(o) ∈Rd. The instruction is encoded separately as
+an embedding ℓ. A world model learns latent transitions un-
+der continuous commands a ∈Rm and supplies the control
+representation through its action-conditioned query f(z, a).
+We instantiate E and f with LeWM [25] and suppress the
+latent and action history of f in the notation. We represent
+the task as a language-conditioned scalar potential:
+pθ : Rd × L →R,
+(z, ℓ) 7→pθ(z, ℓ),
+(2)
+We call pθ(·, ℓ) the task field of instruction ℓ. Action su-
+pervision shapes its local differential into a control sig-
+nal while timing labels calibrate values on observations to
+demonstration-relative progress
+Demonstration-relative progress. For a demonstrated ob-
+servation oi, we denote its elapsed time by ti and the
+terminal time on the world model transition grid by T.
+We consider two progress targets. Normalized phase uses
+p⋆
+i = ρi −1, where ρi ∈[0, 1] is the normalized time
+within the demonstration. Absolute time-to-go uses p⋆
+i =
+−(T −ti)/Tu, with a fixed time unit Tu > 0 shared across
+demonstrations. Both targets are zero at completion but dif-
+fer in how they represent duration. Normalized phase starts
+at −1 for every demonstration while time-to-go retains dif-
+ferences in remaining duration across demonstrations. For
+either form we fit values and increments for pairs i < j
+from the same demonstration:
+Lval = 1
+2
+P
+x∈{i,j}
+ px −p⋆
+x
+2,
+Linc =
+
+(pj −pi) −(p⋆
+j −p⋆
+i )
+2,
+(3)
+with px = pθ(E(ox), ℓ). We also use a temporal rank-
+ing loss, a terminal boundary loss, and a contrast loss
+that scores the true instruction above a mismatched one.
+Their weighted sum defines Lp.
+These losses calibrate
+demonstration-relative progress but do not guarantee phys-
+ical progress. Sec. 5 discusses this limitation.
+Values do not determine the differential.
+Lp constrains
+pθ only at states the demonstrations visit. Adding a smooth
+function that vanishes on those states preserves the fit-
+ted values while allowing derivatives in unconstrained di-
+rections to differ.
+Composition with the world model
+transfers this freedom to the action gradient.
+Even if
+f(z, aE) matches the next demonstrated state, the labels
+constrain only the progress difference along the expert
+query: pθ(f(z, aE), ℓ)−pθ(z, ℓ) ≈p⋆
+t+k −p⋆
+t . They do not
+determine values at other candidate commands or the direc-
+tion of fastest increase in the composed scalar. Progress su-
+pervision can therefore calibrate values without producing
+a useful control direction. Sec. 4.3 measures this gap.
+3.2. Action Conditioning and Local Control
+To define the action-dependent scalar used for control, we
+compose the field with the control-query branch of the
+world model:
+Qz,ℓ(a) = pθ
+ f(z, a), ℓ
+
+.
+(4)
+Control queries share predictor weights but use separate
+normalization statistics, fixed with respect to candidate ac-
+tions to avoid BatchNorm coupling between samples. Thus
+Q is trained for action readout; its values need not be cali-
+brated forecasts of candidate outcomes.
+Action conditioning with a world model. The readout re-
+quires dependence on a candidate command.
+A world
+model provides a natural interface by mapping commands
+
+
+into the latent space on which the task field is defined. We
+reuse this interface to construct Q = pθ ◦f and expose
+the chain-rule structure of the readout. Sec. 4.3 evaluates
+Direct-AP as an alternative that retains the world model
+backbone but supplies the command directly to the scalar.
+Local control geometry. We use a fixed reference com-
+mand a0 at normalized zero, which corresponds to the
+corpus median command.
+Let ¯z = f(z, a0) and Jf =
+∂f/∂a|a0 denote the reference latent and action Jacobian.
+The chain rule gives:
+ga := ∇aQz,ℓ(a0) = J⊤
+f ∇zpθ(¯z, ℓ).
+(5)
+J⊤
+f pulls the task differential back through the query map
+under the Euclidean metric of normalized action coordi-
+nates. The product g⊤
+a δa = ∇zp⊤
+θ (Jfδa) pairs task sen-
+sitivity with the first-order latent response of that map. One
+reverse-mode pass computes this gradient exactly without
+forming Jf. For a perturbation δa, the Taylor expansion is:
+Qz,ℓ(a0 + δa) −Qz,ℓ(a0) = g⊤
+a δa + O(∥δa∥2),
+(6)
+For a fixed direction v with g⊤
+a v > 0, sufficiently small
+positive steps δa = αv increase Q. This also holds for
+smooth direct action-conditioned scalars, which learn the
+combined dependence implicitly. Factorization exposes the
+geometry but is not required for local ascent. This local
+argument does not guarantee physical progress or improve-
+ment at the deployed step. Sec. 4.5 examines the scope of
+the local readout.
+3.3. Reading Actions from a Task Field
+Continuous commands from the differential.
+The con-
+tinuous policy follows the pulled-back gradient:
+π(z, ℓ) = a0 + ηϕ(¯z) ga,
+ηϕ = softplus
+ sϕ(sg ¯z)
+
++ εη.
+(7)
+A small MLP computes the positive mobility ηϕ from the
+reference query with a stop-gradient on its input and no lan-
+guage input. This positive scalar sets the magnitude of the
+displacement from a0 but cannot rotate it. The displacement
+therefore follows the field gradient and has a first-order
+change in Q of ηϕ∥ga∥2 ≥0. The language instruction
+enters only through pθ. This readout is a scalar-mobility
+instance of a generalized gradient field [26].
+Hybrid actions from one potential. Consider a hybrid ac-
+tion a = (u, c) consisting of a continuous pose increment
+u ∈R6 and a discrete gripper command c ∈{open, close}.
+The action-conditioned potential becomes Qz,ℓ(u, c) =
+pθ(f(z, (u, c)), ℓ). At the reference (u0, ch) we set u0 = 0
+and hold the current gripper command ch. The pose follows
+the derivative:
+u = u0 + ηϕ(¯z) ∇uQz,ℓ(u0, ch),
+(8)
+the gripper decision uses a finite difference of the same
+function:
+b = Qz,ℓ(u0, calt) −Qz,ℓ(u0, ch),
+c =
+(
+calt,
+b > εg,
+ch,
+otherwise,
+(9)
+where calt is the other gripper command. The threshold
+εg ≥0 sets the minimum difference required to switch.
+Both readouts use the same reference and define a local
+hybrid controller rather than a joint maximizer over (u, c).
+Each decision requires one gradient evaluation and two po-
+tential evaluations without sampling or iterative search.
+3.4. Learning Control-Aligned Task Fields
+Supervising the induced behavior. Let ¯uE be the normal-
+ized expert pose command. The action loss compares the
+induced pose command with this expert command:
+Lact = λvec
+6 ∥u −¯uE∥2 + λdir
+ 1 −cos(u, ¯uE)
+
+.
+(10)
+We retain the computation graph of ∇uQ and differen-
+tiate Lact through the gradient readout by double back-
+propagation. The resulting gradient reaches the potential
+through ∇zpθ(¯z, ℓ) and reshapes the local field geometry
+at the query latent. It reaches the world model and encoder
+through Jf and ¯z to reshape the latent action response of the
+query map. The same loss trains the mobility that scales the
+continuous command. Binary labels y mark short windows
+ending at expert gripper switches. A temperature-scaled lo-
+gistic loss on (2y −1)b trains the finite difference in Eq. (9)
+and updates only pθ.
+Two kinds of supervision, one field. Lact supervises the
+field differential through the actions it induces. Lp super-
+vises its values using timing targets available without addi-
+tional annotation. Sec. 4.4 shows that the continuous read-
+out remains learnable without Lp. Replacing pθ by c pθ + b
+and ηϕ by ηϕ/c for c > 0 leaves the command in Eq. (7)
+unchanged. Continuous action supervision alone therefore
+does not fix the level or scale of the field.
+Progress la-
+bels anchor values on observations while gripper supervi-
+sion shapes query differences.
+Joint training. E and f are initialized from a world model
+pretrained on the demonstrations with latent prediction and
+the SIGReg regularizer [4].
+During an initial warm-up
+phase we train pθ with Lp while E and f remain frozen.
+This stage produces the progress-only fields analyzed in
+Sec. 4.3. We then jointly optimize the progress, action, grip-
+per, and world model objectives:
+L = Lp + λactLact + λgripLgrip + λWMLWM,
+(11)
+where LWM is the predictive objective of the world model
+on recorded transitions.
+The world model uses a lower
+learning rate than the potential and mobility.
+
+
+4. Experiments
+We evaluate PPP on simulated and real robot manipulation,
+examining policy performance, the role of progress super-
+vision, the locality of learned guidance, and hybrid action
+readouts.
+4.1. Experimental Setup
+Shared architecture.
+All methods share encoder, world
+model, and MLP-trunk architectures but use method-
+specific readouts and supervision. A shared LeWM [25]
+ViT encodes third-person and wrist images (128 × 128)
+into one 384-dimensional latent.
+A transformer predicts
+the next latent from three past observations and their ac-
+tion chunks.
+Each prediction spans k = 4 raw ticks.
+Both PPP and BC regress the mean expert pose command
+and execute one tick before replanning.
+LIBERO uses
+all-MiniLM-L6-v2 [31, 38] instruction embeddings.
+Real-robot tasks use one-hot vectors that remain constant in
+the single-task doll and bimanual experiments. The poten-
+tial and BC head are FiLM-conditioned residual MLPs [28]
+and the mobility in PPP is a small MLP.
+Compared methods. BC predicts pose from the reference
+latent and uses a gripper-switching head with the same con-
+text and action loss as PPP. BC+Progress adds a progress
+output and the progress losses used by PPP to the same
+trunk.
+BC-MH predicts four pose candidates and trains
+progress to favor the candidate closest to the expert com-
+mand. We compare its learned selector with progress rank-
+ing at the same checkpoint [44]. CEM replaces the pose
+readout of PPP with cross-entropy-method search [33] to
+maximize Q within the training action range. CEM-Goal
+uses goal-reaching planning in latent world models [25, 47].
+PPP-GH keeps the pose readout of PPP but uses the BC
+gripper-switching head.
+Direct-AP uses a direct action-
+space scalar potential Q(u) = Φ(¯z, u, ℓ) and retains the
+world model reference prediction ¯z = f(z, a0) and gripper
+head of PPP-GH. No Lp removes all progress losses and
+trains the field of PPP-GH solely through its action readout.
+Seer-PPP reads the task field through a small world model
+added to the action-free network of Seer [36]. Both Seer-
+PPP and Seer train from scratch with the Seer architecture
+and training recipe to test the field readout against a strong
+baseline.
+LIBERO protocol. The world model first trains alone for
+100 epochs on all 6,500 demonstrations from 130 LIBERO
+tasks, including LIBERO-90 [21].
+Each method then
+trains one multitask policy from this checkpoint on the
+same demonstrations and is compared at matched epochs.
+Progress supervision uses the normalized-phase targets of
+Sec. 3.1.
+We evaluate Spatial, Object, Goal, and Long
+across 40 tasks with 50 initial states per task shared across
+methods.
+All controllers replan end-effector pose incre-
+ments and binary gripper commands at 20 Hz. Success-rate
+differences use task-level sign-flip tests (ptask).
+Gradient diagnostics. We measure progress MAE, rank-
+ing,
+and gradient–expert alignment on fixed training
+demonstration states with the deployed queries.
+Closed-
+loop success on evaluation initial states separately measures
+control performance. Progress-only fields train with the en-
+coder and dynamics frozen. The frozen-WM control uses
+the losses of PPP-GH under the same freezing constraint.
+Real robot. A Franka arm uses wrist and front RGB cam-
+eras with the same input resolution, context, and control
+rate as LIBERO. Both methods start from the same world
+model pretrained for 100 epochs on the demonstrations for
+each task. Bun picking requires placing the bun of the in-
+structed color in a steamer. This task uses normalized-phase
+supervision and 400 demonstrations with evaluation on ten
+layouts under all four instructions. Single-instruction doll
+straightening requires flipping and orienting a randomly
+posed doll.
+This task uses absolute time-to-go supervi-
+sion and 150 demonstrations with 12 evaluation trials per
+method. Sec. 4.6 describes an additional bimanual task with
+two xArm7 arms.
+4.2. Task Fields as Policies
+Table 1. LIBERO success rates (%) at epoch 120 under the origi-
+nal protocol with 500 rollouts per suite. PPP and PPP w/o settling
+differ only in deployment-time gripper settling (Sec. 4.6). Bottom
+rows use the Seer backbone at epoch 50 under its training recipe.
+Method
+Spatial
+Object
+Goal
+Long
+Avg.
+BC
+31.4
+53.6
+47.0
+20.2
+38.1
+BC+Progress
+33.8
+52.2
+49.0
+20.0
+38.8
+Direct-AP
+45.0
+50.8
+53.0
+30.4
+44.8
+PPP-GH
+46.8
+64.6
+53.0
+27.4
+48.0
+PPP w/o settling
+40.4
+76.2
+52.4
+37.0
+51.5
+PPP
+46.0
+75.4
+53.6
+42.2
+54.3
+Seer
+98.8
+99.0
+97.8
+93.6
+97.3
+Seer-PPP
+99.4
+99.8
+98.2
+91.0
+97.1
+Tab. 1 shows that PPP improves on BC in every LIBERO
+suite at epoch 120 with the largest gains on Object and
+Long. These comparisons omit the gripper-settling proce-
+dure described in Sec. 4.6. The stronger BC-branch nar-
+rows the gap but PPP retains higher average success without
+settling under both schedules. The supplementary material
+reports these comparisons and strong performance with a
+SEER [36] backbone. Tab. 2 shows that PPP reduces every
+failure type relative to BC on bun picking. Wrong-target
+picks remain the most common failure for both methods.
+Doll straightening requires no instruction grounding and
+tests control under a single instruction. Tab. 3 shows that
+PPP achieves two more successes in 12 trials per method
+and completes successful trials faster on average. Fig. 3
+shows successful rollouts and field predictions.
+
+
+1
+2
+3
+4
+5
+0
+2
+4
+6
+8
+10
+0.0
+0.5
+1.0
+Predicted
+phase
+terminal label
+1
+2
+3
+4
+5
+1
+2
+3
+4
+5
+0
+5
+10
+15
+20
+25
+30
+33
+0
+20
+40
+Time-to-go
+(s)
+terminal label
+1
+2
+3
+4
+5
+1
+2
+3
+4
+5
+0
+2
+4
+6
+8
+10
+12
+14
+16
+Elapsed time (s)
+0.0
+0.5
+1.0
+Predicted
+phase
+terminal label
+1
+2
+3
+4
+5
+(a) Bun picking
+Target: green bun
+Initial scene  |  0.0 s
+Grasp  |  4.1 s
+Lift  |  7.2 s
+Transport  |  9.2 s
+Place  |  11.3 s
+(b) Doll straightening
+Goal: belly up, head toward robot
+Face down  |  0.0 s
+Grasp  |  6.8 s
+Lift / turn  |  12.0 s
+Reorient  |  26.0 s
+Belly up  |  33.0 s
+(c) Bimanual egg pouring
+Goal: pour egg from bowl onto plate
+Initial scene  |  0.0 s
+Grasp  |  6.0 s
+Lift  |  9.5 s
+Pour  |  13.1 s
+Egg on plate  |  16.4 s
+Figure 3. Real-robot execution. Successful PPP rollouts for (a) green-bun picking, (b) doll straightening, and (c) bimanual egg pouring.
+Numbered frames correspond to samples on the curves, which show predicted demonstration phase in (a,c) and absolute time-to-go in
+seconds in (b). Predictions are unsmoothed and unclipped. Dashed lines indicate terminal training labels rather than measured completion.
+Table 2. Real-robot bun picking. Failure columns count the pri-
+mary observed failure mode and sum to the number of failed trials.
+Method
+Success
+Success
+rate
+Wrong
+target
+Pose
+inaccuracy
+Gripper
+inaccuracy
+PPP
+21/40
+52.5%
+10
+8
+1
+BC
+5/40
+12.5%
+13
+13
+9
+Table 3. Real-robot doll straightening. Time: mean time to success
+over successful trials.
+Method
+Success
+Success rate
+Time (s)
+PPP
+9/12
+75.0%
+31.8
+BC
+7/12
+58.3%
+46.0
+4.3. Predicting Progress Is Not Enough
+Success in Tab. 4 is pooled over epochs 70–120 unless oth-
+erwise specified. BC+Progress matches PPP’s progress fit
+but has no significant success gain over BC.
+Value accuracy versus action alignment.
+Fig. 4 shows
+that progress-only fields rank demonstration states almost
+perfectly but have action gradients that align weakly with
+expert commands. Longer progress training improves value
+fit without improving alignment and the progress gradients
+of BC+Progress drift toward orthogonality. Action imita-
+tion yields near-perfect training-state alignment for PPP and
+PPP-GH across all 40 tasks without degrading progress fit.
+A positive gain cannot correct a misaligned direction. Tab. 4
+shows that the progress-only field with a trained gain barely
+moves and succeeds in only 1 of 2,000 episodes.
+Potential or dynamics? Fig. 4 shows that action supervi-
+sion can align gradients even with the encoder and dynam-
+ics frozen.
+At epoch 120 the mean cosine reaches 0.95
+compared with 0.22 for progress supervision alone. How-
+ever, Tab. 4 reports only 5.0% success for this frozen-WM
+control compared with 43.5% for PPP-GH. Training-state
+alignment alone therefore does not ensure closed-loop con-
+trol. Exact dynamics also does not resolve the gap: ascend-
+
+
+0.04
+0.05
+0.06
+Progress MAE ↓
+PPP
+ρ = 0.9998
+PPP-GH
+ρ = 0.9998
+Frozen WM
+ρ = 0.9984
+BC+Progress
+ρ = 0.9997
+Progress-only
+ρ = 0.9992
+(a) Progress fit
+−1
+0
+1
+cos(ga,̄ aE)
+0
+0.5
+1
+Fraction of states
+(b) Direction
+−1
+0
+1
+2
+log10 ‖ga‖ (steps / unit)
+0
+0.5
+1
+Fraction of states
+(c) Magnitude
+0.07
+0.06
+0.05
+Progress MAE ( → better)
+0
+0.5
+1
+Mean cos(ga,̄ aE)
+ep. 10
+ep. 120
+ep. 20
+ep. 120
+(d) Training trajectory
+Progress-only
+BC+Progress
+PPP-GH (frozen WM)
+PPP-GH
+PPP
+Figure 4. Accurate progress values do not ensure aligned action gradients. All panels measure fit using deployment queries on the
+same LIBERO training states. Progress-only uses only progress losses. Frozen WM trains PPP-GH with the encoder and dynamics frozen.
+BC+Progress evaluates the progress output of the BC trunk. At epoch 120, (a) shows progress MAE and per-trajectory Spearman ρ, and
+(b,c) show cumulative distributions of gradient–expert cosine similarity and gradient norm. (d) tracks fit and alignment across checkpoints.
+Table 4. Progress fit and control without settling. At epoch 120,
+ρ measures task-averaged progress correlation (130 tasks) and cos
+measures gradient–expert alignment (40 tasks). Succ. is closed-
+loop success (%) pooled over epochs 70–120, except progress,
+gain and the last two blocks (epoch 120). No Lp omits progress
+supervision. ∆is the paired gain in percentage points over the
+preceding row at matched epochs. References are PPP-GH for
+Direct-AP, No Lp, and frozen-WM PPP-GH, and gradient for
+CEM/CEM-Goal. ptask uses task-level sign flips. True-dyn. as-
+cent differentiates through the simulator and compares with PPP
+in the same harness (66.0%, supplementary material).
+Method
+From Q
+ρ
+cos
+Succ.
+∆
+ptask
+BC
+–
+–
+–
+36.2
+–
+–
+BC+Progress
+–
+0.9973
+0.08
+36.5
++0.3
+0.86
+PPP-GH
+pose
+0.9974
+0.995
+43.5
++6.9
+0.0002
+PPP w/o settling
+both
+0.9970
+0.995
+50.5
++7.1
+0.0075
+Direct-AP
+pose
+0.9975
+–
+41.6
+−1.9
+0.351
+PPP-GH without progress labels:
+No Lp
+pose
+0.6863
+0.996
+38.6
+−4.9
+0.011
+World model frozen:
+PPP-GH
+pose
+0.9880
+0.947
+5.0
+−38.5
+<10−5
+progress, gain
+pose
+0.9929
+0.225
+0.05
+−4.4
+0.0001
+BC-MH, same checkpoints:
+own pick
+–
+0.9923
+–
+31.2
+–
+–
+progress pick
+selection
+0.9923
+–
+30.7
+−0.4
+0.66
+PPP w/o settling, epoch 120:
+gradient
+both
+0.9970
+0.995
+51.5
+–
+–
+true-dyn. ascent
+gripper
+0.9970
+0.26
+1.5
+−64.5
+<10−5
+CEM
+search
+0.9970
+–
+0.0
+−51.5
+<10−5
+World model only:
+CEM-Goal
+–
+–
+–
+6.2
+−45.4
+<10−5
+ing the learned field through the simulator succeeds in 1.5%
+of episodes compared with 66.0% for the command pro-
+duced by PPP. That command raises the field at a similar
+rate to the expert direction (72% versus 74%).
+Direct or factorized action conditioning.
+Direct-AP
+reaches 41.6% pooled success compared with 43.5%
+for PPP-GH with no significant difference
+detected
+(ptask = 0.351). This result shows that a directly action-
+conditioned scalar also supports an effective continuous
+gradient readout in this setting.
+Direct-AP retains the
+reference representation from the world model and adds
+action-value supervision.
+This comparison does not
+establish a performance advantage for explicit composition.
+Instruction conditioning. At episode start we test whether
+the command under each instruction points closest to the
+demonstrated motion among tasks that share a scene. PPP
+matches the instructed task about twice as often as chance
+on the real robot and three times as often on LIBERO-Goal.
+These results are comparable to BC readouts and measure
+instruction sensitivity of the initial command rather than
+generalization to unseen instructions. Progress-only gradi-
+ents remain at chance on LIBERO-Goal.
+4.4. What Progress Labels Add
+Acting without progress labels. Tab. 4 shows that remov-
+ing all progress losses from PPP-GH leaves an effective
+policy (No Lp) with comparable expert alignment and lo-
+cal action-space structure. This comparison also changes
+when action learning begins. Matched branch runs account
+for this difference and show no consistent control bene-
+fit from progress supervision. Despite comparable action
+alignment, the scalar trained without progress labels corre-
+lates less strongly with demonstration progress. Progress
+labels are unnecessary for continuous control in this setting
+but provide a clearer demonstration-relative ordering.
+What calibration adds. Fig. 5 shows the field predicted
+by PPP on its 2,000 closed-loop rollouts. On successful
+rollouts the predictions track elapsed fraction with a median
+per-rollout Spearman correlation of 1.00 and MAE of 0.08.
+They also end near the terminal label with a median phase
+of 0.97 while failures tend to end lower. Without tuning,
+final and 5 s values yield success AUROCs of 0.84 and 0.78
+compared with 0.73 and 0.56 without progress labels. Each
+model is evaluated on its rollout distribution. Fig. 5c shows
+the label-free field tracks elapsed fraction less closely even
+after an affine fit on demonstrations. These results support
+
+
+0
+10
+20
+Elapsed time (s)
+0.0
+0.5
+1.0
+Predicted phase 1 + pt
+terminal label
+(a) Three rollouts of one task
+1.03
+0.68
+0.10
+0
+0.5
+1
+Elapsed fraction
+0.0
+0.5
+1.0
+(b) PPP, all rollouts
+0
+0.5
+1
+Elapsed fraction
+(c) No p, affine fit
+0.50
+0.75
+1.00
+AUROC for success
+PPP
+BC+Progress
+No p
+(d) Monitoring
+success
+failure
+elapsed fraction (label)
+at rollout end
+at 5 s (eventual)
+Figure 5. Progress predictions during closed-loop rollouts. (a) Predicted phase 1 + pt for three PPP rollouts of one LIBERO-Long task
+with final frames and phases. (b,c) Median predictions and interquartile bands over normalized elapsed time for 2,000 rollouts each of PPP
+and No Lp. The latter uses affine calibration on demonstration states. Dotted lines indicate normalized elapsed time. (d) Success AUROC
+at rollout end (filled) and at 5 s for ongoing rollouts (hollow) with 95% task-bootstrap intervals. Results use epoch 120 without settling.
+0.03
+0.1
+1
+4
+0
+0.5
+1
+ΔQ / (r‖ga‖)
+‖̄aE‖
+(a) First-order fit
+0.03
+0.1
+1
+4
+−0.5
+0
+0.5
+1
+Gradient cosine
+(b) Gradient stability
+Step size r (normalized units)
+Progress-only
+BC+Progress
+PPP-GH (frozen WM)
+PPP-GH
+PPP
+Figure 6. Local scope of learned field guidance. (a) Median ratio
+of Q(a0 + rˆga) −Q(a0) to its first-order prediction r∥ga∥across
+diagnostic states. Step size r is measured in normalized command
+units. (b) Cosine similarity between gradients at a0 and a0 +rˆuE.
+Dashed lines mark the median expert command norm (2.3).
+demonstration-relative progress monitoring but the AUROC
+comparison reflects differences in rollout distributions. The
+monitor remains imperfect: 30% of failures reach within a
+tenth of the terminal label during execution.
+4.5. Locality of the Learned Field
+Fig. 6 measures first-order fit and gradient stability around
+the reference command. For PPP and PPP-GH the first-
+order approximation holds only within a small fraction of
+a typical expert command.
+Gradient directions change
+sharply farther from the reference. Despite this local scope,
+Q still ranks equal-size commands toward the expert direc-
+tion. For PPP-GH, this holds on 98% of states when com-
+mands have the same norm as the expert command. Such
+directional ranking does not establish calibrated progress
+forecasts for arbitrary finite commands.
+Tab. 4 further
+shows that progress-based ranking does not significantly
+improve BC-MH and that CEM on the PPP checkpoint fails
+in all 2,000 rollouts. These findings are limited to the tested
+search procedures and action ranges.
+4.6. One Field, Two Action Types
+Gripper readout and settling.
+Tab. 4 shows that finite-
+difference switching on Q improves average success over
+the gripper head of PPP-GH with the same pose-readout
+architecture (ptask < 0.01). Tab. 1 reports gains on Ob-
+ject and Long but lower success on Spatial and Goal. We
+also test a settling procedure to reduce premature post-
+grasp motion. Settling keeps pose queries conditioned on
+an open gripper until finger feedback indicates that closure
+has stopped. This procedure modestly improves epoch-120
+success without retraining or changing switching decisions.
+The comparisons above omit settling.
+Multiple discrete readouts.
+In egg pouring with two
+xArm7 arms, one field supplies a joint gradient over 12 pose
+coordinates and a finite difference for each gripper. A sin-
+gle mobility scales the joint pose gradient. The controller
+succeeds in 1 of 5 trials as shown in Fig. 3(c).
+5. Conclusion
+PPP learns a scalar task field through the commands it in-
+duces: continuous commands from action gradients and
+gripper switches from finite differences.
+Composing the
+field with a shared world model supplies action condition-
+ing and an explicit chain-rule interpretation; direct action
+conditioning is also effective. Progress labels are optional
+for learning continuous control, but calibrate the field for
+execution monitoring.
+Under a shared architecture, PPP
+outperforms BC in simulation and on real robots.
+Limitations.
+Demonstration-relative progress may admit
+“arm clock” shortcuts based on arm motion rather than
+task-relevant scene changes. The field has no Lyapunov
+guarantee, and its differential does not guarantee physical
+progress. Progress-based recovery and sharing the task field
+across embodiments remain future work.
+
+
+LLM Usage Statement
+ChatGPT, Codex, and Claude Code were used to assist with
+code development, manuscript drafting and editing, and fig-
+ure design feedback. These tools were not used to gener-
+ate or alter experimental data, results, or figures. The au-
+thors reviewed all scientific content and take full responsi-
+bility.
+References
+[1] Pieter Abbeel and Andrew Y. Ng. Apprenticeship learning
+via inverse reinforcement learning. In ICML, 2004. 2
+[2] Brandon Amos, Ivan Jimenez, Jacob Sacks, Byron Boots,
+and J. Zico Kolter. Differentiable MPC for end-to-end plan-
+ning and control. In NeurIPS, 2018. 2
+[3] Mahmoud Assran, Adrien Bardes, David Fan, Quentin Gar-
+rido, Russell Howes, Mojtaba Komeili, Matthew Muck-
+ley, Ammar Rizvi, Claire Roberts, Koustuv Sinha, Artem
+Zholus, Sergio Arnaud, Abha Gejji, Ada Martin, Francois
+Robert Hogan, Daniel Dugas, Piotr Bojanowski, Vasil Khali-
+dov, Patrick Labatut, Francisco Massa, Marc Szafraniec,
+Kapil Krishnakumar, Yong Li, Xiaodong Ma, Sarath Chan-
+dar, Franziska Meier, Yann LeCun, Michael Rabbat, and
+Nicolas Ballas. V-JEPA 2: Self-supervised video models en-
+able understanding, prediction and planning. arXiv preprint
+arXiv:2506.09985, 2025. 2
+[4] Randall Balestriero and Yann LeCun.
+LeJEPA: Provable
+and scalable self-supervised learning without the heuristics.
+arXiv preprint arXiv:2511.08544, 2025. 4
+[5] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy
+Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak,
+Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell,
+Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-
+aoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna
+Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-
+language-action flow model for general robot control.
+In
+RSS, 2025. 1, 2
+[6] Ching-An Cheng, Mustafa Mukadam, Jan Issac, Stan
+Birchfield, Dieter Fox, Byron Boots, and Nathan Ratliff.
+RMPflow: A computational graph for automatic motion pol-
+icy generation. In Algorithmic Foundations of Robotics XIII,
+pages 441–457, 2020. 2
+[7] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric
+Cousineau, Benjamin CM Burchfiel, and Shuran Song. Dif-
+fusion Policy: Visuomotor policy learning via action diffu-
+sion. In RSS, 2023. 1, 2
+[8] Wojciech M. Czarnecki, Simon Osindero, Max Jaderberg,
+Grzegorz ´Swirszcz, and Razvan Pascanu. Sobolev training
+for neural networks. In NeurIPS, 2017. 2
+[9] Pete Florence, Corey Lynch, Andy Zeng, Oscar A. Ramirez,
+Ayzaan Wahid, Laura Downs, Adrian Wong, Johnny Lee,
+Igor Mordatch, and Jonathan Tompson. Implicit Behavioral
+Cloning. In CoRL, 2022. 2
+[10] Dibya Ghosh, Homer Rich Walke, Karl Pertsch, Kevin
+Black, Oier Mees, Sudeep Dasari, Joey Hejna, Tobias
+Kreiman,
+Charles Xu,
+Jianlan Luo,
+You Liang Tan,
+Lawrence Yunliang Chen, Quan Vuong, Ted Xiao, Pannag R.
+Sanketi, Dorsa Sadigh, Chelsea Finn, and Sergey Levine.
+Octo: An open-source generalist robot policy. In RSS, 2024.
+2
+[11] Danijar Hafner, Timothy Lillicrap, Jimmy Ba, and Moham-
+mad Norouzi. Dream to control: Learning behaviors by la-
+tent imagination. In ICLR, 2020. 2
+[12] Nick Hansen, Hao Su, and Xiaolong Wang.
+TD-MPC2:
+Scalable, robust world models for continuous control.
+In
+ICLR, 2024. 2
+[13] Nicklas A. Hansen, Hao Su, and Xiaolong Wang. Temporal
+difference learning for model predictive control. In ICML,
+2022. 2
+[14] Nicolas Heess, Gregory Wayne, David Silver, Timothy Lill-
+icrap, Tom Erez, and Yuval Tassa. Learning continuous con-
+trol policies by stochastic value gradients. In NeurIPS, 2015.
+2
+[15] Michael Janner, Yilun Du, Joshua B. Tenenbaum, and Sergey
+Levine. Planning with diffusion for flexible behavior synthe-
+sis. In ICML, 2022. 2
+[16] Seyed Mohammad Khansari-Zadeh and Aude Billard.
+Learning stable nonlinear dynamical systems with Gaussian
+mixture models. IEEE Transactions on Robotics, 27(5):943–
+957, 2011. 2
+[17] Seyed Mohammad Khansari-Zadeh and Oussama Khatib.
+Learning potential functions from human demonstrations
+with encapsulated dynamic and compliant behaviors.
+Au-
+tonomous Robots, 41(1):45–69, 2017. 2
+[18] Oussama Khatib. Real-time obstacle avoidance for manip-
+ulators and mobile robots.
+The International Journal of
+Robotics Research, 5(1):90–98, 1986. 2
+[19] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P.
+Foster, Pannag R. Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-
+source vision-language-action model. In CoRL, 2025. 1, 2
+[20] Anthony Liang, Yigit Korkmaz, Jiahui Zhang, Minyoung
+Hwang, Abrar Anwar, Sidhant Kaushik, Aditya Shah,
+Alex S. Huang, Luke Zettlemoyer, Dieter Fox, Yu Xiang,
+Anqi Li, Andreea Bobu, Abhishek Gupta, Stephen Tu, Er-
+dem Bıyık, and Jesse Zhang. Robometer: Scaling general-
+purpose robotic reward models via trajectory comparisons.
+In RSS, 2026. 2
+[21] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-
+edge transfer for lifelong robot learning. In NeurIPS, 2023.
+2, 5
+[22] Jiangran Lyu, Ziming Li, Xuesong Shi, Chaoyi Xu, Yizhou
+Wang, and He Wang. DyWA: Dynamics-adaptive world ac-
+tion model for generalizable non-prehensile manipulation. In
+ICCV, 2025. 2
+[23] Yecheng Jason Ma, Vikash Kumar, Amy Zhang, Osbert Bas-
+tani, and Dinesh Jayaraman. LIV: Language-image repre-
+sentations and rewards for robotic control. In ICML, 2023.
+2
+[24] Yecheng Jason Ma, Shagun Sodhani, Dinesh Jayaraman, Os-
+bert Bastani, Vikash Kumar, and Amy Zhang. VIP: Towards
+
+
+universal visual reward and representation via value-implicit
+pre-training. In ICLR, 2023. 2
+[25] Lucas Maes, Quentin Le Lidec, Damien Scieur, Yann Le-
+Cun, and Randall Balestriero. LeWorldModel: Stable end-
+to-end joint-embedding predictive architecture from pixels.
+In NeurIPS, 2026. 2, 3, 5, 16
+[26] Robert I. McLachlan, G. R. W. Quispel, and Nicolas Ro-
+bidoux.
+Unified approach to Hamiltonian systems, Pois-
+son systems, gradient systems, and systems with Lyapunov
+functions or first integrals. Physical Review Letters, 81(12):
+2399–2403, 1998. 4, 11
+[27] Mustafa Mukadam, Ching-An Cheng, Dieter Fox, Byron
+Boots, and Nathan Ratliff. Riemannian motion policy fusion
+through learnable Lyapunov function reshaping. In CoRL,
+2020. 2
+[28] Ethan Perez, Florian Strub, Harm de Vries, Vincent Du-
+moulin, and Aaron Courville. FiLM: Visual reasoning with
+a general conditioning layer. In AAAI, 2018. 5
+[29] Michael Psenka, Michael Rabbat, Aditi S. Krishnapriyan,
+Yann LeCun, and Amir Bar.
+Parallel stochastic gradient-
+based planning for world models. In ICML, 2026. 2
+[30] Muhammad Asif Rana, Anqi Li, Dieter Fox, Byron Boots,
+Fabio Ramos, and Nathan Ratliff. Euclideanizing flows: Dif-
+feomorphic reduction for learning stable dynamical systems.
+In L4DC, 2020. 2
+[31] Nils Reimers and Iryna Gurevych.
+Sentence-BERT: Sen-
+tence embeddings using siamese BERT-networks.
+In
+EMNLP-IJCNLP, 2019. 5
+[32] Elon Rimon and Daniel E. Koditschek. Exact robot naviga-
+tion using artificial potential functions. IEEE Transactions
+on Robotics and Automation, 8(5):501–518, 1992. 2
+[33] Reuven Rubinstein. The cross-entropy method for combina-
+torial and continuous optimization. Methodology and Com-
+puting in Applied Probability, 1(2):127–190, 1999. 5, 19
+[34] Sumedh Sontakke, Jesse Zhang, S´eb Arnold, Karl Pertsch,
+Erdem Bıyık, Dorsa Sadigh, Chelsea Finn, and Laurent Itti.
+RoboCLIP: One demonstration is enough to learn robot poli-
+cies. In NeurIPS, 2023. 2
+[35] Aravind Srinivas, Allan Jabri, Pieter Abbeel, Sergey Levine,
+and Chelsea Finn.
+Universal Planning Networks: Learn-
+ing generalizable representations for visuomotor control. In
+ICML, 2018. 2
+[36] Yang Tian, Sizhe Yang, Jia Zeng, Ping Wang, Dahua Lin,
+Hao Dong, and Jiangmiao Pang. Predictive inverse dynam-
+ics models are scalable learners for robotic manipulation. In
+ICLR, 2025. 2, 5, 16
+[37] Weikang Wan, Ziyu Wang, Yufei Wang, Zackory Erickson,
+and David Held. DiffTORI: Differentiable trajectory opti-
+mization for deep reinforcement and imitation learning. In
+NeurIPS, 2024. 2
+[38] Wenhui Wang, Furu Wei, Li Dong, Hangbo Bao, Nan Yang,
+and Ming Zhou.
+MiniLM: Deep self-attention distillation
+for task-agnostic compression of pre-trained transformers. In
+NeurIPS, 2020. 5
+[39] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen,
+Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and Tao
+Kong. Unleashing large-scale video generative pre-training
+for visual robot manipulation. In ICLR, 2024. 2
+[40] Hongyu Yan,
+Qiwei Li,
+Jiaolong Yang,
+and Yadong
+Mu.
+ProgressVLA: Progress-guided diffusion policy for
+vision-language robotic manipulation.
+arXiv preprint
+arXiv:2603.27670, 2026. 2
+[41] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan
+Gao,
+Sihyun
+Yu,
+George
+Kurian,
+Suneel
+Indupuru,
+You Liang Tan, Chuning Zhu, Jiannan Xiang, Ayaan Malik,
+Kyungmin Lee, William Liang, Nadun Ranawaka, Jiasheng
+Gu, Yinzhen Xu, Guanzhi Wang, Fengyuan Hu, Avnish
+Narayan, Johan Bjorck, Jing Wang, Gwanghyun Kim, Dan-
+tong Niu, Ruijie Zheng, Yuqi Xie, Jimmy Wu, Qi Wang,
+Ryan Julian, Danfei Xu, Yilun Du, Yevgen Chebotar, Scott
+Reed, Jan Kautz, Yuke Zhu, Linxi “Jim” Fan, and Joel Jang.
+World action models are zero-shot policies. arXiv preprint
+arXiv:2602.15922, 2026. 2
+[42] Yanjie Ze, Gu Zhang, Kangning Zhang, Chenyuan Hu,
+Muhan Wang, and Huazhe Xu. 3D Diffusion Policy: Gener-
+alizable visuomotor policy learning via simple 3D represen-
+tations. In RSS, 2024. 2
+[43] Qi Zhang, Shaopeng Zhai, Shengzhe Zhang, Litao Liu,
+Tianyi Zhang, Fuxian Huang, and Ming Zhou. A general-
+ist pair-wise progress critic model for vision-language-action
+robots. In ICML, 2026. 2
+[44] Sizhe Zhao, Shengping Zhang, Shuo Yang, Weiyu Zhao,
+Shuigen Wang, and Xiangyang Ji. TapSampling: Inference-
+time sampling with a task-progress-understanding verifier
+for robotic manipulation. In ICML, 2026. 2, 5
+[45] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. In RSS, 2023. 2
+[46] Licheng Zhong and Gim Hee Lee.
+Grasp-oriented non-
+prehensile manipulation via learning a graspability field. In
+ECCV, 2026. 2
+[47] Gaoyue Zhou, Hengkai Pan, Yann LeCun, and Lerrel Pinto.
+DINO-WM: World models on pre-trained visual features en-
+able zero-shot planning. In ICML, 2025. 2, 5
+[48] Brian D. Ziebart, Andrew Maas, J. Andrew Bagnell, and
+Anind K. Dey.
+Maximum entropy inverse reinforcement
+learning. In AAAI, 2008. 2
+[49] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted
+Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker,
+Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong
+Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre
+Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S.
+Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor
+Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine,
+Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng
+Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi,
+Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog,
+Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu,
+Pete Florence, Chelsea Finn, Kumar Avinava Dubey, Danny
+Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi
+Chen, Yevgen Chebotar, Justice Carbajal, Noah Brown, An-
+thony Brohan, Montserrat Gonzalez Arenas, and Kehang
+Han.
+RT-2: Vision-language-action models transfer web
+knowledge to robotic control. In CoRL, 2023. 2
+
+
+Appendix
+A. Implementation Details
+A.1. General Mobility and Local Improvement
+Latent geometry and the exact pullback. Fix the obser-
+vation history, instruction, and query-normalization statis-
+tics, and let Q(a) = pθ(f(z, a), ℓ). Write ¯z = f(z, a0) and
+J0 = ∂f(z, a)/∂a|a0. Suppose f and pθ are twice contin-
+uously differentiable near the reference query and its latent
+output. For a small action perturbation, the query’s latent
+displacement is
+∆z = f(z, a0 + δa) −¯z
+= J0δa + O(∥δa∥2).
+(12)
+Taylor expansion of the potential at ¯z gives
+Q(a0 + δa) −Q(a0) = ∇zpθ(¯z, ℓ)⊤∆z + Rp,
+|Rp| ≤Lp
+2 ∥∆z∥2,
+(13)
+when ∥∇2
+zpθ∥op ≤Lp along the latent segment. Substitut-
+ing Eq. (12) yields
+ga = ∇aQ(a0) = J⊤
+0 ∇zpθ(¯z, ℓ),
+Q(a0 + δa) −Q(a0) = g⊤
+a δa + O(∥δa∥2).
+(14)
+The chain-rule identity for ga is exact; the Taylor approxi-
+mation concerns finite changes in Q. The expansion point
+is the reference query ¯z, which need not equal the current
+encoded state z. Subtracting pθ(z, ℓ) instead of Q(a0) adds
+the action-independent offset Q(a0) −pθ(z, ℓ) and leaves
+the derivative unchanged.
+A metric-dependent readout. The pulled-back differen-
+tial J⊤
+f dpθ is a covector on the action space. Turning it
+into a command requires an action-space metric: under a
+positive-definite G, the steepest-ascent direction is G−1ga.
+More generally, any operator whose symmetric part is pos-
+itive semidefinite gives a nonnegative first-order term. The
+generalized gradient field [26] is
+δa =
+ Mϕ(¯z) + Wϕ(¯z)
+
+ga,
+M ⊤
+ϕ = Mϕ ⪰0,
+W ⊤
+ϕ = −Wϕ,
+(15)
+whose first-order effect is g⊤
+a δa = g⊤
+a Mϕga ≥0, since
+g⊤
+a Wϕga = 0. Mϕ rescales the gradient and can redirect
+it, and Wϕ adds motion tangent to the local level set of Q.
+Both depend only on the reference query latent. They could
+be parameterized as Mϕ = CϕC⊤
+ϕ +εI and Wϕ = 1
+2(Kϕ −
+K⊤
+ϕ ). All experiments use the scalar instance Mϕ = ηϕI,
+Wϕ = 0 of Eq. (7). Its command direction is exactly that of
+ga, and only its magnitude is learned.
+Local justification of the control direction.
+Suppose
+∥∇2
+aQ(a)∥op ≤L in a neighborhood of a0, for L ≥0.
+Hold the mobility operators at their reference-state values
+and let
+v = (Mϕ + Wϕ)ga,
+β = g⊤
+a Mϕga.
+(16)
+For aα = a0 + αv whose connecting segment stays in this
+neighborhood, Taylor’s theorem gives
+Q(aα) −Q(a0) ≥αβ −L
+2 α2∥v∥2.
+(17)
+Hence, if β > 0 and L > 0, every step with
+0 < α <
+2β
+L∥v∥2
+(18)
+that stays in the neighborhood strictly improves Q relative
+to the reference command. If L = 0 and β > 0, every
+positive step that stays in the neighborhood improves Q.
+If β = 0, the first-order term gives no strict-improvement
+guarantee; a nonzero skew component can still produce mo-
+tion in this case. For the scalar instance v = ηϕga,
+Q(a0 + αηϕga) −Q(a0) ≥αηϕ
+
+1 −Lαηϕ
+2
+
+∥ga∥2. (19)
+With ηϕ > 0 and ga̸ = 0, a sufficient condition is 0 <
+αηϕ < 2/L when L > 0, together with the neighbor-
+hood condition; when ga = 0, this readout produces no
+perturbation. The deployed controller uses α = 1 and a
+fitted gain without estimating L or enforcing this step-size
+condition. The bound therefore does not certify improve-
+ment of Q for the executed command, and improvement of
+the learned query would itself require separate validation to
+imply physical task progress. Figure 6 shows that in the
+trained models the first-order region is far smaller than a
+deployed command.
+Scope of the conservative-field statement. At fixed z and
+ℓ, the exact action-gradient field is conservative,
+I
+C
+∇aQ(a)⊤da = 0,
+(20)
+for any closed curve C in its smooth domain. This property
+holds in candidate-action space at a fixed query; succes-
+sive control steps use different observations and histories,
+and hence different functions Q. Multiplying by the scalar
+ηϕ(¯z), which is fixed for a given query, preserves this prop-
+erty, whereas Wϕ̸ = 0 need not.
+All the local bounds on Q and the conservative-
+field identity also apply to a twice continuously differen-
+tiable direct action-conditioned scalar, such as Direct-AP’s
+
+
+Φ(¯z, a, ℓ) with ¯z held fixed. An explicit pθ ◦f factorization
+is therefore not required for this gradient readout or its local
+ascent interpretation. A direct scalar can learn the combined
+action dependence implicitly; these statements do not estab-
+lish that it internally recovers dynamics and a task potential.
+A.2. Observations,
+Actions,
+and World-Model
+Queries
+The visual and language encoders and the dynamics archi-
+tecture are described in Sec. 4.1. We suppress the language
+encoder in the notation p(z, ℓ) and make the temporal con-
+ditioning of the world model queries explicit below.
+Action coordinates. The six-dimensional continuous com-
+mand contains a translation delta and an axis-angle rotation
+delta. It is normalized elementwise as
+u = (uraw −µu) ⊘σu,
+(21)
+where µu is the corpus median and σu is the corpus stan-
+dard deviation. Thus, the reference u0 = 0 corresponds to
+the median raw command. The positive scalar gain in the
+policy acts in these normalized coordinates. For execution,
+we compute µu + σu ⊙u and clip the result to the robot’s
+action limits.
+Temporal conditioning. Let τ index raw ticks and define
+Zτ = (zτ−(H−1)k, . . . , zτ). The past action chunks con-
+nect successive observations in this context. A candidate
+(u, c) is repeated k times to form tilek(u, c) ∈R7k. Mak-
+ing the conditioning suppressed in the main text explicit, a
+control query uses
+f(z, (u, c)) := f
+ Zτ, [ ¯Aτ, tilek(u, c)]
+
+,
+(22)
+where ¯Aτ contains the past chunks with their pose channels
+replaced by normalized zero and their gripper channels re-
+tained. This history convention limits direct access to past
+pose commands when computing the policy. It is used for
+the continuous gradient and both gripper queries. The ref-
+erence gripper ch is the currently held command; the refer-
+ence pose contains no expert future command.
+The held-action Jacobian accounts for every repeated
+slot:
+J0 =
+k
+X
+r=1
+∂f
+∂u(r)
+
+u(1)=···=u(k)=u0, c=ch
+.
+(23)
+Autodifferentiation through the tiling operation computes
+this sum automatically. The action gradient is obtained with
+one reverse-mode pass, without materializing the Jacobian.
+World-model training. The predictive training objective
+uses the actual recorded past and future action chunks. With
+Apast
+τ
+denoting the recorded past chunks and Aτ the next
+recorded chunk, it predicts
+ˆzτ+k = f
+ Zτ, [Apast
+τ
+, Aτ]
+
+.
+(24)
+The world model loss combines dimension-normalized la-
+tent prediction error with the SIGReg regularizer introduced
+in Sec. 3.4:
+LWM = E
+1
+d∥ˆzτ+k −zτ+k∥2
+
++ λSIG SIGReg({z}).
+(25)
+We set λSIG = 0.09. The dynamics predictor takes no lan-
+guage input. The same predictive loss is retained during
+joint policy training.
+A.3. Progress Calibration
+For normalized-phase supervision, consider an episode with
+Te raw frames and let Ne = ⌊Te/k⌋be its model-grid
+length and t = τ/k the time in model-transition intervals
+at zero-based raw-frame index τ. We define
+ρt = min
+
+t
+Ne −1, 1
+
+,
+p⋆
+t = ρt −1,
+se =
+1
+Ne −1.
+(26)
+Here Ne −1 is the normalization span of the model grid;
+raw-tick anchors can have fractional t.
+Clipping keeps
+progress at one for final raw frames at or beyond the last
+model-grid timestamp. The potential targets lie in [−1, 0]
+and calibrate normalized temporal progress, with zero at the
+terminal plateau. The quantity se is the progress increment
+of one model transition before clipping.
+Anchors are sampled at raw-tick resolution. A later ob-
+servation is sampled at a valid gap ∆∈{1, 2, 4, 8, 16, 30}
+model transitions, and a mismatched instruction ˜ℓis drawn
+from another task. Using the main text’s pair notation i < j,
+define ˜pj = p(E(oj), ˜ℓ). In addition to the value and incre-
+ment losses in Eq. (3), we use
+Lrank = softplus
+
+−pj −pi
+τr
+
+,
+(27)
+Lbd = Ex:ρx≥ρterm[p2
+x] + Ex:ρx<ρterm[ [px + εnt]2
++ ],
+(28)
+Llang = ρj[ mℓ−(pj −˜pj) ]+,
+(29)
+where [v]+ = max(v, 0) and x ranges over the sampled
+observations. The full progress objective is
+Lp = λvalLval + λincLinc + λrankLrank
++ λbdLbd + λlangLlang.
+(30)
+The ranking term encourages increasing potential along
+demonstrations, the boundary term encourages a near-
+terminal plateau around zero, and the language term encour-
+ages higher scores for the matched instruction, weighted by
+temporal progress. The boundary target is a separate regu-
+larizer and need not coincide with the timestamp target at
+every near-terminal frame.
+
+
+A.4. Continuous and Discrete Policy Supervision
+Continuous target and gain. At raw-tick anchor τ, the
+pose target is
+¯uE,τ = 1
+k
+k−1
+X
+r=0
+uE,τ+r.
+(31)
+For a command held over the query’s k ticks (Eq. (22)), this
+mean is the least-squares target ¯uE in Eq. (10): ¯uE,τ =
+arg minu
+Pk−1
+r=0 ∥u −uE,τ+r∥2.
+On LIBERO the end-
+effector displacement grows linearly with the gap up to five
+ticks, so the motion within a chunk is close to straight, and
+the chunk-constant part carries 97.9% of the variance of the
+expert’s pose commands within a chunk at k = 4 (93.3%
+at k = 8). All LIBERO and real-robot experiments, includ-
+ing BC, use this k = 4 target. Deployment executes the
+predicted chunk mean for one raw tick before recomputing
+both readouts (Sec. A.6). The gain network described in
+Sec. 4.1 uses εη = 10−3 and is initialized so that ηϕ ≈1.
+Its predicted-state input is detached. The default configura-
+tion uses Mϕ = ηϕI and Wϕ = 0, so the action gradient
+determines the command direction and the mobility learns
+its scale.
+Gripper loss. With the switching benefit b of Eq. (9) and
+the switching-region label y defined below, the per-sample
+loss is
+ℓgrip = τe softplus
+
+−(2y −1) b
+τe
+
+,
+τe = ¯τse,
+(32)
+where se is the progress increment of one model transition
+in episode e (Eq. (26)). Predicted latents are detached for
+this term, so it updates only pθ.
+Switching regions and repeated-frame contexts.
+Let
+τ sw be the next expert switch, and let csw be its destination
+command. The switching label is
+yτ = 1[0 ≤τ sw −τ ≤Tcsw] ,
+(33)
+with Tclose = 2 and Topen = 4 raw ticks; anchors without
+a future switch receive yτ = 0. Each anchor also supplies
+a repeated-frame context: the current observation fills all
+H context slots, with a hold-position action history and the
+original label. Both original and repeated-frame contexts
+contribute to Eq. (32). We balance the two classes as
+Lgrip = 1
+2E[ℓgrip | y = 1] + 1
+2E[ℓgrip | y = 0].
+(34)
+With ¯τ = 0.5, the temperature controls the transition width
+around zero switching benefit; the prefactor in Eq. (32)
+bounds the loss derivative with respect to b independently
+of temperature.
+On LIBERO, the deployment switching threshold is
+εg = ¯ε mediane∈Dℓse,
+¯ε = 1,
+(35)
+where Dℓis the demonstration set for the instructed task.
+The real-robot experiments use εg = 0: a gripper switches
+whenever its predicted benefit is positive.
+A shared progress field. Let zo = f(z, (u0, open)), zc =
+f(z, (u0, close)), and δz = zc −zo. If p is continuously
+differentiable along the connecting segment, then
+d := Q(u0, close) −Q(u0, open)
+=
+Z 1
+0
+∇zpθ(zo + sδz, ℓ)⊤δz ds.
+(36)
+This identity relates the finite gripper comparison to the
+same latent progress field used for continuous actions. The
+switching benefit b is d when the held command is open
+and −d when it is closed. The controller computes the two
+endpoint potentials directly; it does not approximate this in-
+tegral with a local gradient.
+A.5. Normalization for Control Queries
+The predictor’s output projection contains BatchNorm.
+With ordinary candidate-dependent batch moments, differ-
+entiating a sum of batched query scores gives
+∇ui
+X
+j
+Qj = ∇uiQi +
+X
+j̸=i
+∇uiQj,
+(37)
+where the second term contains effects through the shared
+moments. We use a separate set of normalization statis-
+tics for control queries. During training, these moments are
+computed from a copy of the reference-query batch whose
+candidate action is detached:
+(µQ, vQ) = momentsi,h φi,h(sg(ui)),
+(38)
+where φi,h denotes the activation before this normalization
+layer for sample i at predictor time position h, conditioned
+on the sample’s observation history and held gripper com-
+mand. The moments are computed over all B × H posi-
+tions in a batch of B samples. The moments retain their
+parameter gradients, but have no derivatives with respect
+to the queried actions. The pose gradient and both grip-
+per candidates use these same moments, held fixed with re-
+spect to each candidate. This removes cross-sample action-
+derivative terms from the batch-normalization path.
+Ac-
+cordingly, the exact derivatives in the main text are deriva-
+tives of the query function with normalization statistics held
+fixed.
+At deployment, we use running estimates of the query-
+population moments. These are maintained separately from
+the normalization statistics used for world-model prediction
+on recorded transitions. Training uses batch query moments
+and inference uses their running estimates; both treat the
+moments as constants with respect to a candidate action.
+Consequence for Q. World-model prediction uses normal-
+ization statistics from recorded transitions; control queries
+
+
+use their own statistics to define the candidate derivatives
+above. The two paths share weights but have different latent
+outputs. On 1,024 demonstration anchors at the recorded
+command (epoch 120), the query branch evaluated with
+the world model’s statistics has median per-anchor squared-
+error ratios of 0.43 (PPP-GH) and 0.54 (PPP). The ratio,
+∥ˆz′ −z′∥2/∥z −z′∥2, compares full-latent prediction er-
+ror with copying the current latent. At the same anchors,
+the median signed difference between the deployed query’s
+scalar value and that on the recorded next frame is +0.13
+(PPP-GH) and +0.89 (PPP) control steps. These signed
+medians summarize scalar offsets, not absolute prediction
+errors. The query branch is optimized through its action-
+gradient and gripper-difference readouts; closed-loop evalu-
+ation measures the resulting control performance separately
+from these prediction diagnostics. On executed counterfac-
+tual branches, the derivatives under the two normalizations
+agree equally with the field under the simulator’s dynamics
+(Sec. C.3).
+A PPP variant from the same branch point changes both
+the query normalization to the world model’s statistics and
+the training objective by adding the world model’s predic-
+tion loss on the query path. Its query prediction-error ratio is
+0.52, against 0.54 for world model prediction, and its equal-
+size preference at r = 2 (Tab. 23) rises from 0.79 to 0.93. Its
+reference-query increment remains Q0 = 6.65 (Sec. C.2),
+and its pooled success is 45.5 versus 50.5% for the deployed
+PPP over epochs 70–120 (ptask = 0.010). This variant has
+similar query and world-model prediction errors but lower
+closed-loop success; the joint intervention does not isolate
+predictive fidelity as the cause of the performance differ-
+ence.
+A.6. Optimization and Execution
+Training schedule. First, the encoder and dynamics train
+alone from random initialization with Eq. (25) for 100
+epochs on all 6,500 LIBERO demonstrations (130 tasks, in-
+cluding LIBERO-90), with AdamW (learning rate 5×10−5,
+weight decay 10−3, batch size 512), five epochs of warmup,
+and cosine decay to zero. The final checkpoint initializes
+the encoder and dynamics of every method. Second, each
+policy is trained on the same demonstrations. For the first
+ten epochs the world model is frozen: PPP calibrates only
+its potential with Lp, and the BC variants train only their
+heads. From epoch 10, the world model is trained jointly
+with the policy, and its predictive loss is retained. PPP’s
+action supervision therefore starts with world model train-
+ing, whereas BC’s starts against the frozen world model.
+The policy learning-rate schedule is configured for 200
+epochs; we evaluate checkpoints up to epoch 120 and com-
+pare methods at matched epochs.
+In PPP’s joint stage,
+Eq. (11) updates the parameter groups according to Table 5.
+In particular, action imitation retains the computation graph
+Table 5. Gradient paths during joint training.
+Loss
+E
+f
+p
+ηϕ
+Lp
+yes
+–
+yes
+–
+Lact
+yes
+yes
+yes
+yes
+Lgrip
+–
+–
+yes
+–
+LWM
+yes
+yes
+–
+–
+through gu and uses double backpropagation. The detached
+gain input prevents an additional action-loss path from the
+gain network into the predicted state; the gradient readout
+remains differentiable with respect to the potential, dynam-
+ics, and encoder.
+Policy training uses AdamW with batch size 512 and
+weight decay 10−3. The learning rates are 3 × 10−4 for
+the potential and gain networks and 5 × 10−5 for the world
+model, with five epochs of warmup followed by cosine de-
+cay. Full hyperparameters are listed in Table 17. Progress-
+fit and candidate-selection metrics use a fixed diagnostic
+subset of the training demonstrations.
+Execution. The execution rate and prediction horizon are
+specified in Sec. 4.1. Each decision uses one action-gradient
+evaluation and a gripper progress comparison, without ac-
+tion sampling or iterative search. Pose commands are de-
+normalized and clipped to the robot’s action limits. After
+one raw tick of execution, both readouts are recomputed
+from the next observation. The pose gradient is not recom-
+puted after a gripper switch within the same decision. At
+episode start, missing context is filled with the first obser-
+vation and median-pose, open-gripper history.
+Gripper settling: motivation.
+In an earlier LIBERO-
+Spatial run without query normalization, conditioning the
+pose query on a close command reduced descent before the
+grasp had settled. This motivated delaying closed-gripper
+conditioning until physical closure settles; Tabs. 1 and 6 re-
+port settling comparisons for the final models.
+Gripper settling: implementation. For the LIBERO set-
+tling variant, the pose query uses a separate gripper com-
+mand history that remains open during physical closure.
+Finger opening is measured as the sum of the absolute fin-
+ger joint positions. Starting three raw ticks after a close
+command, closure is considered settled when this opening
+decreases by less than 2 mm in one tick, with a maximum
+wait of 15 ticks. Subsequent pose queries use the closed ref-
+erence command and record closed commands in their his-
+tory. The gripper readout continues to use the actual com-
+mand history throughout; reopening resets the settling state.
+This adjustment changes only the pose query’s gripper con-
+ditioning and requires no retraining.
+
+
+A.7. Training Trends
+Table 6 reports average success at every evaluated epoch.
+PPP without settling exceeds BC and BC+Progress at each
+of them.
+After epoch 40 its success fluctuates between
+checkpoints (43.4% to 52.2%), motivating comparisons
+pooled over epochs 70–120. With success rates pooled over
+these epochs, PPP without settling outperforms BC on 36
+of the 40 tasks (ptask < 10−5).
+Task-level comparisons. For each comparison, we aggre-
+gate evaluation outcomes within each task and compute one
+success-rate difference per task between the two methods,
+pooling across checkpoints where specified. The sign-flip
+test operates on these task-level differences and does not re-
+quire episodes within a task to be independent. It assumes
+that, under the null hypothesis, the joint distribution of task-
+level differences is invariant to independent sign flips.
+Table 6.
+Average LIBERO success rates (%) across training
+epochs, evaluated on the same 2,000 initial states at each check-
+point. The two PPP rows share a checkpoint at each epoch and
+differ only in whether gripper settling is enabled during deploy-
+ment (Sec. 4.6); all other rows use no deployment adjustment. No
+Lp: PPP-GH without progress losses (Sec. A.8). Bold denotes the
+best result per column.
+Training epoch
+Method
+20
+30
+40
+50
+70
+80 100 120
+BC
+20.5 20.6 26.3 27.4 33.7 35.3 37.8 38.1
+BC+Progress
+20.9 24.0 26.2 30.4 34.1 34.0 39.4 38.8
+Direct-AP
+26.5 32.2 31.5 37.5 39.4 41.6 40.5 44.8
+No Lp
+26.2 26.6 31.6 35.2 37.7 36.9 37.8 41.8
+PPP-GH
+29.7 32.8 34.8 36.3 41.9 38.9 45.1 48.0
+PPP w/o settling 28.9 39.1 48.1 43.4 49.0 52.2 49.5 51.5
+PPP
+31.5 41.0 50.0 45.7 50.0 53.6 50.6 54.3
+A.8. Training Without Progress Labels
+Configuration. No Lp sets the weights of all five progress
+losses (Lval, Linc, Lrank, Lbd, Llang) to zero. The poten-
+tial is therefore trained only by Lact through the gradient
+readout; the switching head, LWM, the query normaliza-
+tion, the data and the optimizer are PPP-GH’s, and the run is
+deployed as PPP-GH. Language reaches the potential only
+through the action loss, as in BC. It trains from initialization
+on BC’s schedule: action loss from epoch 0 with five epochs
+of learning-rate warmup, and the world model frozen in
+epochs 0–9. It differs from BC only in the readout. Sec-
+tion A.9 compares BC, No Lp, and PPP-GH under an alter-
+native schedule that aligns the onset of action learning with
+world model updates.
+Results. Table 7 gives success by suite, pooled over epochs
+70–120, and Tab. 6 gives every epoch. The pooled com-
+parisons in Tab. 7 are paired on the same 8,000 episodes.
+Table 7. Training without progress labels: success (%) on each
+suite, pooled over epochs 70–120 (2,000 rollouts per suite). Lp:
+progress losses used; Act.: first epoch of action supervision; the
+world model trains from epoch 10 in every run. Below: paired
+differences in points, task-level sign-flip ptask, and the number of
+tasks on which the first run is better and worse.
+Run
+Lp Act. Spatial Object Goal Long Avg.
+BC
+–
+0
+28.7
+53.8
+45.4
+17.0 36.2
+No Lp
+no
+0
+43.8
+40.5
+47.7
+22.3 38.6
+PPP-GH
+yes
+10
+45.1
+53.4
+49.9
+25.5 43.5
+PPP w/o settling yes
+10
+39.1
+74.4
+50.0
+38.6 50.5
+Comparison
+∆
+ptask Tasks +/−
+No Lp −BC
++2.34
+0.38
+26/12
+PPP-GH −No Lp +4.90 0.011
+27/12
+Without labels, No Lp beats BC early (by 5.3–7.8 points
+at epochs 20–50, ptask ≤0.025 at three of the four), but
+their pooled difference over epochs 70–120 is not statisti-
+cally significant.
+The potential without labels. On the training-log diag-
+nostic subset (650 training demonstrations, five per task
+across all 130 tasks), the label-free scalar’s task-averaged
+Spearman correlation with progress is 0.68–0.71 across
+evaluated checkpoints, against 0.988–0.997 for PPP-GH.
+This statistic pools later-frame predictions within each task
+before averaging correlations across tasks. On the sepa-
+rate 40-task field-analysis subset, its mean per-trajectory
+correlation is 0.5822 at epoch 120 (Tab. 22). The gauge
+of Sec. 3.4 is visible in the trained weights. The mobility
+stays near its initialization (ηϕ = 1.01 at epoch 120, me-
+dian over the diagnostic states), whereas PPP-GH’s grows
+to 12.9. The potential’s gradient grows to 13 times PPP-
+GH’s, and its values remain uncalibrated (median −7.9 at
+the start of a rollout, against −1.18 for PPP).
+A.9. Sensitivity to Policy Training Schedule
+Original protocol. The main LIBERO comparison retains
+the protocol of Sec. A.6: a common pretrained world model,
+training data, learning-rate schedule, and world model un-
+freezing epoch.
+During the first ten policy epochs, PPP
+and PPP-GH calibrate their potentials with Lp, whereas BC
+trains its action head and No Lp trains its gradient read-
+out by action imitation. From epoch 10, all jointly train the
+world model; action supervision begins at this point for PPP
+and PPP-GH. This compares complete training procedures,
+including their early objectives, but does not isolate policy
+structure from the conditions at the onset of action learning.
+Branch protocol. We compare BC-branch, No Lp-branch,
+PPP-GH-branch, and PPP-branch.
+The first three use a
+learned gripper-switching head and inherit the same epoch-
+10 world model state used to initialize PPP-GH’s joint
+
+
+stage. PPP-branch uses field-based switching and inherits
+the epoch-10 checkpoint used to initialize full PPP’s joint
+stage, from a separate initial-stage run. In each case, the en-
+coder and dynamics retain their pretrained weights, which
+were frozen during the initial stage, and inherit their source
+checkpoint’s BatchNorm running statistics.
+BC’s action
+and switching heads use their original epoch-0 initializa-
+tion. For all field variants, the potential is reset to its origi-
+nal epoch-0 weights; the gain and, where present, switching
+head retain their initial weights, having received no updates
+in the initial stage. Thus no progress-trained potential is
+transferred to a branch run. The field variants initialize their
+query-normalization statistics from the inherited prediction-
+normalization statistics, as in their original runs.
+All four runs start with empty AdamW moment states,
+restore their source checkpoint’s random state, and retain
+the epoch-10 learning-rate schedule and epoch-indexed data
+sampling.
+The first update therefore uses the near-peak
+learning rates, without repeating warmup, and jointly trains
+the policy and world model. The data, batch size, loss defi-
+nitions, and deployment rules remain those of each method.
+PPP-GH-branch applies Lp and action supervision together
+from this first update; No Lp-branch differs only by set-
+ting all progress-loss weights to zero.
+PPP-branch like-
+wise applies progress, pose, and field-based gripper super-
+vision from the first update. Its two deployment variants
+evaluate the same checkpoints with and without gripper set-
+tling, using the original PPP deployment settings (Sec. A.6).
+Epoch labels retain the original counter: checkpoint e con-
+tains e −10 epochs of action supervision in every branch
+run, versus e for original BC and No Lp. Original PPP and
+PPP-GH also receive e −10 action-supervised epochs, pre-
+ceded by ten epochs of progress calibration. Equal check-
+point labels therefore match action-update budgets within
+the branch comparison, but not across every original and
+branch pair.
+Results and scope. Table 8 reports the checkpoint trajec-
+tories, and Tab. 9 gives the final per-suite breakdown, using
+the same evaluation initial states as the main comparison.
+Relative to their original runs (Tab. 6), BC and No Lp both
+improve under the branch protocol, including late in train-
+ing. BC-branch is therefore a stronger direct-policy base-
+line than the original BC. No Lp-branch leads BC-branch
+at several intermediate checkpoints, while their final aver-
+age success rates are close; this does not establish equiva-
+lence. Adding progress supervision to the branch gradient
+policy with a learned gripper head does not yield a consis-
+tent success-rate benefit across checkpoints. No Lp-branch
+removes progress losses from PPP-GH, not from full PPP.
+These results support learning an effective continuous read-
+out without progress labels; the evidence for value calibra-
+tion and progress monitoring is separate (Secs. C.5 and 4.4).
+Full PPP retains higher final average success than BC-
+Table 8. Branch-schedule LIBERO success rates (%), averaged
+over the same 2,000 evaluation initial states at each checkpoint.
+Epoch labels retain the original counter; action supervision starts
+at epoch 10 in every row. The two PPP-branch rows use field-
+based gripper switching, share a checkpoint at each epoch, and dif-
+fer only in settling at deployment; the other methods use a learned
+gripper-switching head. No Lp-branch is PPP-GH-branch without
+progress losses (Sec. A.9).
+Training epoch
+Method
+20
+30
+40
+50
+70
+80 100 120
+BC-branch
+27.4 35.8 40.5 34.6 43.2 40.2 47.0 46.8
+No Lp-branch
+27.2 30.8 39.3 42.8 49.8 46.6 50.9 46.3
+PPP-GH-branch 32.0 34.7 38.0 41.0 38.9 44.0 45.7 44.4
+PPP-branch
+w/o settling
+37.0 42.8 49.2 47.8 49.7 52.5 55.1 55.0
+PPP-branch
+36.8 44.0 48.8 46.9 51.0 55.5 55.5 56.3
+Table 9. Branch-schedule LIBERO success rates (%) by suite at
+epoch 120, with 500 evaluation rollouts per suite on the same ini-
+tial states as Tab. 1. The two PPP-branch rows share a checkpoint
+and differ only in settling at deployment.
+Method
+Spatial
+Object
+Goal
+Long
+Avg.
+BC-branch
+46.2
+54.2
+57.0
+30.0
+46.8
+No Lp-branch
+54.4
+43.2
+51.0
+36.6
+46.3
+PPP-GH-branch
+46.8
+55.2
+47.8
+27.8
+44.4
+PPP-branch
+w/o settling
+45.6
+88.0
+48.6
+37.6
+55.0
+PPP-branch
+50.2
+86.2
+49.8
+39.0
+56.3
+branch and No Lp-branch under both its original and branch
+protocols, including without settling (Tabs. 1 and 9). PPP-
+branch also improves over PPP-GH-branch and its own
+counterpart under the original protocol in final average suc-
+cess. Settling improves the final average for PPP-branch,
+but its effect varies across checkpoints. The comparison be-
+tween PPP-branch and PPP-GH-branch matches the train-
+ing schedule but inherits normalization statistics and ran-
+dom states from different source runs, so it does not iso-
+late the gripper readout alone.
+The schedule interven-
+tions change multiple training conditions together, includ-
+ing action-learning onset, learning-rate warmup, normaliza-
+tion state, potential initialization, optimizer state, and data
+order, so the performance changes cannot be attributed to
+any one factor alone.
+A.10. Evaluation with a Seer Backbone
+We additionally evaluate PPP with a Seer [36] backbone to
+examine its applicability beyond the LeWM-based [25] ar-
+chitecture used in our main experiments. Seer is a predictive
+inverse dynamics model: a 24-layer transformer forecasts
+future frames from past observations and the instruction,
+
+
+and action queries read that foresight to predict the next
+commands. Its network never receives a candidate com-
+mand, so PPP’s readout needs an action-conditioned query
+added to it. We compare four variants:
+• Seer, the original policy with its direct action head;
+• Seer-AC, which feeds the candidate command into Seer’s
+network, so that the whole network forecasts under the
+command, and reads the action with Seer’s head at the
+reference command;
+• Seer-AC-PPP, the same action-conditioned network with
+PPP’s field-based readout through it in place of Seer’s
+head;
+• Seer-PPP, which keeps Seer’s network action-free and
+unchanged and adds a small world model for PPP’s read-
+out, mirroring the encoder, world model, and potential of
+the main experiments.
+All four train on the demonstrations of all 130 LIBERO
+tasks and are evaluated on the four LIBERO suites with the
+same 50 initial states per task across 40 tasks. Seer and
+Seer-PPP at C50 are the Seer rows of Tab. 1.
+Seer-PPP. The state s is the output of Seer’s three action
+queries (3×384), computed by Seer’s unmodified network.
+A world model f(s, u) = s + ∆(s, u) of four pre-norm
+transformer blocks (7.5M parameters) reads s and the com-
+mand of a 3-tick chunk. It is trained to predict the action-
+query state of the window shifted by three frames, with the
+target under a stop-gradient. The potential pθ(f(s, u), ℓ)
+is PPP’s FiLM-conditioned MLP on Seer’s CLIP instruc-
+tion embedding, and the pose and gripper follow Eqs. (8)
+and (9) at u0 = 0 (no motion) in raw LIBERO command
+units. Each tick of the chunk is read from its own derivative,
+and the chunks are executed with Seer’s temporal ensem-
+bling. The switching threshold εg is one control step of pre-
+dicted progress, and gripper settling is not used. Lp trains
+pθ on Seer’s states of real frames. Lact and Lgrip reach f
+with their gradient scaled by 0.3 and Seer’s network with it
+scaled by 0.03, so that each module’s action gradient stays a
+few times the gradient of its own predictive loss; Seer’s net-
+work keeps its image-forecast loss. Seer-PPP trains from
+scratch with Seer’s recipe: 50 epochs, batch 512, AdamW
+at learning rate 10−3 (3 × 10−4 for pθ, the mobility, and f)
+with warm-up and cosine decay, and Seer’s global gradient
+clipping. The action and gripper losses start after the first
+epoch.
+Seer-AC and Seer-AC-PPP. Both add command-input to-
+kens to Seer’s network, so that its forecast at each step de-
+pends on that step’s candidate command chunk. Seer-AC’s
+action queries read the forecast at the reference command;
+Seer-AC-PPP’s potential reads the action queries’ state un-
+der the candidate command, and its action and progress gra-
+dients into the network are scaled by 0.03 to protect the
+forecast. Following the protocol of the main experiments,
+both start from Seer’s network pretrained for 50 epochs as
+Table 10. Success rates (%) with a Seer backbone, averaged over
+40 LIBERO tasks with 50 evaluation episodes per task. Ck denotes
+the checkpoint at training epoch k; for Seer-AC and Seer-AC-PPP,
+after 50 epochs of world-model pretraining.
+Method
+C10
+C20
+C30
+C40
+C50
+Seer
+70.30 89.10 93.30 96.35 97.30
+Seer-AC
+71.15 86.90 92.35 94.35 94.70
+Seer-AC-PPP 81.75 89.10 91.70 93.00 92.35
+Seer-PPP
+54.45 80.65 91.15 96.00 97.10
+Table 11. Success rates (%) with a Seer backbone at C50 on each
+LIBERO suite (500 rollouts per suite).
+Method
+Spatial Object Goal Long Avg.
+Seer
+98.8
+99.0
+97.8
+93.6
+97.3
+Seer-AC
+96.6
+99.8
+94.6
+87.8
+94.7
+Seer-AC-PPP
+95.0
+96.4
+93.4
+84.6
+92.4
+Seer-PPP
+99.4
+99.8
+98.2
+91.0
+97.1
+an action-conditioned world model and then train for 50
+epochs at learning rate 3×10−4. Their checkpoint Ck there-
+fore follows 50 epochs of world-model pretraining, whereas
+Seer and Seer-PPP train from scratch.
+Results. Seer-PPP learns more slowly than Seer early in
+training but reaches similar success at C40–C50 (Tab. 10).
+At C50 it achieves 97.10% against Seer’s 97.30%, with
+no significant difference detected (ptask = 0.83); Tab. 11
+gives the suite breakdown.
+It exceeds Seer-AC by 2.40
+points (ptask = 0.007) and Seer-AC-PPP by 4.75 (ptask <
+10−5). Second runs of these two variants reach 95.40% and
+92.40%; Seer-PPP remains higher by 1.70 and 4.70 points,
+respectively (ptask = 0.01 and < 10−5). At C50, Seer-AC
+trails Seer by 2.60 points (ptask = 0.003), and Seer-AC-
+PPP trails Seer-AC by 2.35 (ptask = 0.007).
+These results support the field readout’s applicability to
+a second backbone. The comparison evaluates complete
+training recipes: Seer-PPP and Seer share network, data,
+and training schedule and differ in the readout and the added
+world model; the action-conditioned variants also differ in
+schedule. Seer and Seer-PPP are each a single training run.
+A.11. Direct Action-Space Scalar Potential
+Model and training. Direct-AP replaces PPP-GH’s com-
+posed scalar query with
+Q(u) = Φ(¯z, u, ℓ),
+¯z = f(z, a0),
+u = ηϕ(¯z) ∇uΦ(¯z, u, ℓ)|u=0 .
+(39)
+The same FiLM-MLP trunk receives the six normalized
+pose channels concatenated to its latent input.
+The ref-
+erence prediction ¯z is independent of the candidate u, so
+
+
+the dynamics’ action Jacobian is absent from the readout.
+Action imitation differentiates through ∇uΦ and still up-
+dates the encoder and dynamics through ¯z. The mobility,
+gripper-switching head, world model loss, query normal-
+ization, data, optimizer, and stage schedule are PPP-GH’s.
+The potential and policy heads train from initialization on
+four GPUs to epoch 120, starting from the shared pretrained
+world model. This is a comparison of action-conditioning
+constructions with a retained world model backbone, not an
+ablation of that backbone.
+The state potential p(z, ℓ) := Φ(z, 0, ℓ) receives the orig-
+inal progress losses. An additional action-value loss LQ,
+with weight 1, applies the same loss terms and weights to
+the pair
+ sg Φ(zt, 0, ℓ), Φ(¯z, ¯uE, ℓ)
+
+, with targets p⋆
+t and
+p⋆
+t+1, where t + 1 denotes the next model-grid frame
+and ¯uE is the expert’s chunk-mean pose command. The
+mismatched-instruction term uses Φ(¯z, ¯uE, ˜ℓ).
+This loss
+follows the progress-supervision schedule, including the
+initial ten epochs with the world model frozen; action imi-
+tation and world model co-training start at epoch 10. This
+tests an alternative scalar parameterization with additional
+action-value supervision.
+Results and scope. Tables 1 and 6 report the final check-
+point and training trajectory. Pooled over epochs 70, 80,
+100, and 120, success is 41.2/51.2/51.3/22.5% on Spa-
+tial/Object/Goal/Long, or 41.6% overall. On the diagnostic
+subset of training demonstrations at epoch 120, Φ(·, 0, ℓ)
+has progress correlation ρ = 0.9975; the mean absolute er-
+ror of Φ(¯z, ¯uE, ℓ) against next-frame progress is 0.099. The
+pooled advantage over BC is 5.34 points (ptask = 0.036),
+while PPP-GH’s advantage over Direct-AP is 1.90 points
+(ptask = 0.351).
+Direct-AP retains a co-trained world
+model for its reference-state representation. Both construc-
+tions support the same local ascent argument (Sec. A.1).
+The explicit pθ ◦f construction exposes the latent action
+response and task differential; the direct scalar learns their
+combined action dependence through its values and gradi-
+ent, without requiring an identifiable internal decomposi-
+tion. The comparison supports either parameterization for
+the gradient readout and does not establish a performance
+advantage for explicit factorization.
+A.12. Pose from an Action Head
+Configuration. PPP-AH is the converse of PPP-GH: it
+takes the gripper from the field and the pose from an action
+head. The pose is predicted by BC’s policy head from the
+reference latent ¯z = f(z, a0), with BC’s architecture and
+the action loss of Eq. (10); the mobility is not used. The
+gripper follows PPP’s finite-difference switching (Eq. (9))
+and is trained with Lgrip as in PPP. The potential, Lp, the
+query normalization, LWM, the data, and the optimizer are
+PPP’s. The pose loss reaches the encoder and dynamics
+through ¯z but not the potential, which is trained only by Lp
+Table 12. PPP-AH: LIBERO success rates (%) by suite at epoch
+120 (500 rollouts per suite), on the same initial states as Tab. 1.
+The two rows share a checkpoint and differ only in gripper settling
+at deployment.
+Method
+Spatial
+Object
+Goal
+Long
+Avg.
+PPP-AH w/o settling
+31.6
+76.2
+50.6
+30.6
+47.3
+PPP-AH
+35.8
+73.2
+52.0
+31.6
+48.2
+Table 13. PPP-AH: average LIBERO success rates (%) across
+training epochs, on the same 2,000 initial states at each check-
+point as Tab. 6. The two rows share a checkpoint at each epoch
+and differ only in gripper settling at deployment.
+Training epoch
+Method
+20
+30
+40
+50
+70
+80 100 120
+PPP-AH
+w/o settling 29.8 30.2 31.1 38.8 44.5 39.9 43.1 47.3
+PPP-AH
+31.4 32.9 32.2 39.5 46.9 42.4 45.6 48.2
+and Lgrip. PPP-AH trains from initialization under the orig-
+inal protocol of the main comparison, on BC’s schedule:
+pose and gripper supervision from epoch 0 with five epochs
+of learning-rate warmup, Lp from epoch 0 as in PPP, and
+the world model frozen in epochs 0–9. It thus differs from
+BC in the gripper readout and in the added potential with
+its progress losses, and from PPP in the pose readout and in
+the onset of action supervision (epoch 0 instead of 10). De-
+ployment uses PPP’s switching threshold (Eq. (35)); as for
+PPP, the same checkpoints are evaluated with and without
+gripper settling.
+Results. Table 12 gives the epoch-120 success by suite
+and Tab. 13 gives every evaluated epoch; the other meth-
+ods are in Tabs. 1 and 6. Pooled over epochs 70–120 with-
+out settling, PPP-AH reaches 43.7%, 7.44 points above BC
+(ptask = 0.0012), level with PPP-GH (43.5%; ptask =
+0.95), and 6.87 points below PPP (ptask = 0.0018).
+It
+exceeds BC at every evaluated checkpoint, by 4.6 to 11.4
+points (ptask < 0.05 at five of the eight), and trails PPP
+without settling at every checkpoint from epoch 30 on. Its
+potential fits progress as closely as PPP’s (task-averaged
+Spearman ρ = 0.996, versus 0.997 for PPP), and its pooled
+advantage over BC+Progress, which also trains progress
+losses but switches with a head, is 7.13 points (ptask =
+0.0081). Settling raises PPP-AH’s pooled success by 2.11
+points (ptask = 0.016), and PPP keeps its lead when both
+use it (+6.34, ptask = 0.0053).
+Where each readout helps. The two field readouts im-
+prove on BC in different suites. At epoch 120, PPP-AH,
+with the field’s gripper and a head’s pose, matches PPP
+on Object (76.2% for both without settling; BC 53.6%)
+but stays at BC’s level on Spatial (31.6% versus 31.4%).
+
+
+PPP-GH, with the field’s pose and a head’s gripper, reaches
+46.8% on Spatial and 64.6% on Object (Tab. 1). Pooled
+over epochs 70–120, the same pattern holds:
+PPP-AH
+reaches 73.9% on Object and 29.0% on Spatial, against
+53.4% and 45.1% for PPP-GH (Tab. 7). The gains of PPP-
+AH and PPP-GH over BC are of similar size (7.4 and 7.2
+points pooled), and PPP, which reads both commands from
+the field, exceeds each of them by about as much again.
+Scope. PPP-AH shares BC’s schedule, so PPP-AH −BC
+compares the gripper readout together with the added po-
+tential and its progress losses; the BC+Progress comparison
+indicates that progress losses on a head-based policy do not
+account for the gain (Tab. 4). These results indicate that the
+field-based gripper and the field-based pose readout each
+contribute to PPP’s success under this schedule, mainly on
+different suites.
+A.13. Progress-Selection Baseline
+Model and training.
+BC-MH has the architecture and
+losses of BC+Progress, except that its policy network out-
+puts K = 4 pose hypotheses u1, . . . , uK and K mode logits
+in addition to the progress estimate; the gripper head is un-
+changed. Let kE index the hypothesis nearest the expert
+command. The continuous-action loss of BC is applied to
+every hypothesis, with weight 0.95 for kE and 0.05/(K−1)
+for each of the others (a relaxed winner-takes-all loss), and
+the mode logits are trained by cross-entropy toward kE.
+The selection loss generalizes the gripper loss of Eq. (32)
+from two candidates to K. With Qk = p(f(z, (uk, ch)), ℓ),
+the scalar value assigned to hypothesis k under PPP’s query
+construction,
+Lsel = τe CE(softmaxk(Qk/τe), kE) ,
+τe = ¯τse,
+(40)
+with ¯τ = 0.5 and weight 10, as for the gripper loss. As
+there, the loss updates only the policy network: the encoder,
+the dynamics and the hypotheses uk are detached inside it.
+BC-MH is trained from scratch for 120 epochs on 4 GPUs,
+as BC and BC+Progress. Training and deployment use the
+same candidate query.
+Deployment rules. At every decision, the same checkpoint
+executes one hypothesis chosen by one of four rules: the
+highest mode logit (own pick); the highest Qk (progress
+pick); the highest Qk only if it exceeds the own pick’s by
+more than half a control step of progress, and the own pick
+otherwise (margin 0.5); or a uniformly random hypothesis
+(random pick).
+Results. Table 14 compares the four rules at epoch 120;
+none differs significantly from the own pick. Over all eight
+evaluated checkpoints, the progress pick trails the own pick
+by 1.1 points (ptask = 0.06). BC-MH’s own pick trails
+BC by 5.1 points pooled (ptask = 0.007). On the diagnostic
+subset of training demonstrations, from epoch 70 to 120, the
+Table 14. BC-MH at epoch 120 under four rules for choosing
+which pose hypothesis to execute, on the same 2,000 episodes.
+Succ. is the success rate, ∆its paired difference from the own pick
+in points, and override the fraction of decisions whose executed
+hypothesis differs from the own pick, both in percent.
+Rule
+Succ.
+∆ptask
+Override
+Own pick
+36.3
+–
+–
+0.0
+Progress pick
+35.8 −0.45
+0.75
+72.8
+Progress, margin 0.5
+36.6 +0.30
+0.61
+9.7
+Random pick
+37.1 +0.80
+0.69
+75.0
+progress pick is the hypothesis nearest the expert in 29–31%
+of samples (chance 25%), the mode logits in 58–68%, and
+the median gap between the two highest Qk is 0.050–0.052
+control steps of progress. One world model step thus sepa-
+rates the candidates by far less than the one-step threshold
+of progress-based switching, whose trained switching ben-
+efit has a median magnitude of 1.3 to 3.6 control steps in
+PPP from epoch 20 to 120.
+A.14. World-Model Search Baselines
+Search on query values. CEM deploys PPP’s epoch-120
+checkpoint and replaces only how the pose command is
+read out. Let QH(u0:H−1) = p(zH, ℓ), where zh+1 =
+f(z≤h, (uh, ch)) is PPP’s query (Sec. A.2) and each query
+output is fed back as the newest context frame.
+CEM
+searches H pose commands to maximize QH by the cross-
+entropy method [33], with:
+• 300 Gaussian samples in normalized action units, with
+initial standard deviation 1 (the standard deviation of the
+training actions);
+• 30 elites, refit momentum 0.1, and a floor of 0.1 on the
+standard deviation;
+• every sample clipped per dimension to the 0.5–99.5th
+percentiles of the normalized training commands, and its
+norm to their 99th percentile (5.36);
+• the current mean always among the candidates, and the
+first command of the refit mean executed.
+Like PPP, CEM replans at every tick. It warm-starts from
+the previous solution, shifted by one control step every k
+ticks, with four refits at the first tick of each control step
+and one at each of the three ticks between. The gripper is
+handled in one of two ways:
+• switch:
+PPP’s progress-based switch, with the same
+threshold;
+• search: searched as one Bernoulli command per step,
+whose probability is refit to the fraction of elites that
+close, clipped to [0.05, 0.95].
+At H = 1 and u = 0 the objective equals PPP’s query
+value at the reference command. Candidates do not inter-
+act, because at deployment the query normalization uses its
+
+
+running statistics.
+Goal-reaching search. CEM-Goal uses the encoder and
+world model from PPP’s epoch-120 checkpoint and mini-
+mizes ∥z4−zgoal∥2. Here z4 is the world model’s own four-
+step prediction from the executed action history, with its
+own normalization statistics and without the progress model
+or the instruction. It searches pose and gripper commands
+as above. The benchmark’s initial states have no demon-
+strations, so the subgoal comes from training data:
+• at the start of an episode, it retrieves the training demon-
+stration of the same task whose first-frame latent is near-
+est the current one;
+• at every tick, it matches the current latent to that demon-
+stration within a forward window of eight control steps,
+and aims four control steps past the match.
+Results. Table 15 varies the horizon and the gripper rule.
+The four progress searches produce one success in 8,000
+rollouts.
+• Command size. In failed episodes their commands stay
+near the norm cap, with a median norm of 4.4–4.9 against
+1.2 for PPP. The hand travels 3.1–3.4 m against 0.95 m.
+• Local gradient alignment. The first-order change in Q of
+their commands, g⊤a, is at most a third of PPP’s. Their
+larger query values come from its response to large com-
+mands, not from the local slope.
+• Horizon and gripper. Imagining four steps does not help.
+Searching the gripper adds switching: 18 flips per failed
+episode with the four-step horizon.
+CEM-Goal succeeds in 6.2% of rollouts, most often on Goal
+tasks (15.4%), while its searched gripper flips 11 times
+per failed episode. On an otherwise idle RTX A5000, the
+one-step searches take 16 ms per decision and the four-step
+searches 56 ms.
+Where query values can be maximized. Table 16 replays
+five training demonstrations of one task per suite (385 deci-
+sions) through the same planner, teacher-forced, and com-
+pares the progress search under smaller norm caps with
+PPP’s readout and the expert’s command.
+• At every cap, the search finds commands with higher
+query values than the expert’s own in 96–100% of states.
+• At the training-data cap, those commands are nearly or-
+thogonal to the expert’s.
+• Shrinking the cap turns the search toward the expert, but
+its refit mean then averages elites that lie on the cap in
+different directions, and the command shrinks far below
+the expert’s.
+These probes support reading the gradient near the ref-
+erence command, where the search direction aligns more
+closely with the expert’s. PPP’s readout also sets the com-
+mand size.
+A.15. Parameter Counts and Arithmetic Cost
+Counting convention. Table 18 reports registered model
+parameters and executed matrix-multiplication and convo-
+lution FLOPs for the LIBERO models, counting a multiply–
+accumulate as two operations.
+We trace the deployed
+planner and joint-training computation with PyTorch 2.11’s
+operator-level FLOP counter, including the action-gradient
+backward pass and the outer loss backward pass during
+training. Attention uses its mathematical implementation
+so that its matrix products are counted explicitly. These are
+dense-arithmetic counts: elementwise operations, activa-
+tions, normalization, softmax, reductions, data movement,
+optimizer updates, and distributed communication are ex-
+cluded. The counts are obtained in FP32 on CPU without
+timing measurements and do not depend on GPU load or
+clock speed.
+Deployment. Each decision has batch size one, two new
+128 × 128 RGB images, and three cached observation la-
+tents. The deployed planner encodes only the newest pair of
+images; it reuses the historical latents. The readout count in-
+cludes the reference dynamics prediction, the pose readout,
+and the gripper decision. For PPP it includes one action-
+gradient evaluation and both gripper potential evaluations
+as executed by the implementation; for BC it includes the
+direct pose and switching heads. Instruction embeddings
+are computed before control, so the shared text encoder
+is excluded from both parameter and per-decision FLOP
+counts. Optional progress logging is also excluded. Shared
+visual-encoder weights are counted once despite processing
+both views. Parameter totals include all registered network
+weights, including the ViT pooler whose output the down-
+stream model does not use.
+Joint training.
+Training counts include all configured
+losses and their backward passes after world model un-
+freezing, using seeded synthetic tensors with the train-
+ing input shapes.
+The per-sample count includes con-
+text encoding and the next-frame world-model target.
+Progress-supervised methods additionally encode the later
+frame used for progress pairs.
+It also includes query-
+normalization passes and the original and repeated-frame
+gripper contexts where applicable. Thus, the training com-
+parison measures each complete objective; its difference
+includes these additional evaluations as well as differen-
+tiation through the action gradient.
+Under this counting
+convention, PPP uses 1.09× BC’s per-decision arithmetic
+and 1.28× its per-sample training arithmetic. Relative to
+BC+Progress, which also encodes progress pairs, the train-
+ing ratio is 1.02×.
+B. Real-Robot Evaluation
+Training. The two Franka tasks follow the LIBERO recipe
+(Sec. A.6) with the following changes. Each task has its
+
+
+Table 15. World-model search on PPP’s epoch-120 checkpoint (2,000 rollouts per row, the same initial states). H is the imagined horizon
+in control steps. Gripper: PPP’s progress-based switch, or searched (Bernoulli). Success in %. ∥a∥(the normalized pose command), path
+(the end-effector path length) and flips (gripper switches) are medians over failed episodes.
+Method
+H
+Gripper
+Spatial
+Object
+Goal
+Long
+Avg.
+∥a∥
+Path (m)
+Flips
+PPP w/o settling
+–
+switch
+40.4
+76.2
+52.4
+37.0
+51.5
+1.16
+0.95
+2
+CEM
+1
+switch
+0.0
+0.0
+0.0
+0.0
+0.0
+4.87
+3.28
+3
+CEM
+1
+search
+0.0
+0.0
+0.2
+0.0
+0.05
+4.87
+3.34
+6
+CEM
+4
+switch
+0.0
+0.0
+0.0
+0.0
+0.0
+4.39
+3.13
+3
+CEM
+4
+search
+0.0
+0.0
+0.0
+0.0
+0.0
+4.44
+3.42
+18
+CEM-Goal
+4
+search
+4.6
+1.4
+15.4
+3.2
+6.2
+3.89
+2.35
+11
+Table 16. Teacher-forced replays of training demonstrations: the
+progress search under norm caps, against PPP’s readout.
+For
+H = 4 the whole four-command plan is compared with the ex-
+pert’s next four commands.
+Cos. is the cosine to the expert’s
+command, ∥a∥the median command norm (expert: 2.39), and
+>Expert the fraction of states where the command’s predicted
+progress exceeds that of the expert’s command.
+Readout
+Cap
+Cos.
+∥a∥
+>Expert
+PPP (gradient)
+–
+0.97
+2.39
+52%
+CEM, H = 1
+5.36
+0.17
+4.57
+96%
+CEM, H = 1
+2.0
+0.59
+0.54
+98%
+CEM, H = 1
+1.0
+0.78
+0.38
+100%
+CEM, H = 4
+5.36
+0.15
+4.88
+100%
+CEM, H = 4
+2.0
+0.24
+1.54
+100%
+CEM, H = 4
+1.0
+0.46
+0.68
+99%
+own world model, trained from random initialization for
+100 epochs on that task’s demonstrations; PPP and BC both
+start from its final checkpoint. The policies are trained for
+300 epochs, with the world model frozen for the first 15
+and eight epochs of warmup, and the final checkpoint is de-
+ployed. To limit overfitting to the small demonstration sets,
+every training image of the world model and of both policies
+is augmented per camera view with a random shift of up to
+±6 pixels, a brightness gain in [0.9, 1.1], and per-channel
+gains in [0.95, 1.05]; evaluation and deployment images are
+not augmented. Rotation is not teleoperated, so the rotation
+channels of the command are zero.
+B.1. Bun Picking
+Data and conditioning. The 400 demonstrations contain
+101, 101, 99, and 99 episodes for green, purple, white, and
+yellow, respectively. They comprise 73,500 synchronized
+observation/action samples at 20 Hz, or approximately 1 h
+of processed demonstration data. The two camera streams
+observe the same trajectories and are counted once when
+computing duration. Each color is represented by a dis-
+tinct one-hot vector in the first four coordinates of the 384-
+dimensional instruction input, with the remaining coordi-
+Table 17. Architecture and optimization settings.
+Component
+Setting
+Latent and context
+d = 384, H = 3, k = 4 raw ticks
+Dynamics predictor
+6 layers, 16 heads, MLP width 2048,
+dropout 0.1
+SIGReg weight
+λSIG = 0.09
+Potential
+4 residual FiLM blocks, width 1024,
+FiLM hidden width 256
+Scalar gain
+2 hidden layers of width 256, scalar
+output, εη = 10−3
+Progress weights
+λval = λinc = λbd = 1; λrank =
+λlang = 0.5
+Progress settings
+τr = 0.05, ρterm = 0.95, εnt = 0.05,
+mℓ= 0.2
+Action weights
+λact = λvec = λdir = 1
+Gripper settings
+λgrip = 10, ¯τ = 0.5, ¯ε = 1
+Prediction weight
+λWM = 1
+Optimizer
+AdamW, batch size 512, weight decay
+10−3, gradient-norm clipping at 1
+Learning rates
+3 × 10−4 for potential and gain; 5 ×
+10−5 for encoder and dynamics
+World-model pretrain-
+ing
+100 epochs, learning rate 5 × 10−5, 5-
+epoch warmup, cosine decay to 0
+Schedule
+5-epoch warmup, cosine decay over
+200 configured epochs to 3 × 10−5;
+evaluated to epoch 120; world model
+frozen for epochs 0–9
+Deployment
+20 Hz replanning; 4-tick prediction, 1-
+tick execution
+nates set to zero.
+Evaluation and annotation. Tables 19 and 20 give all 80
+trial annotations. A successful trial places the bun of the
+instructed color in the steamer. For each failure, the re-
+viewer records one primary observed mode: approaching or
+attempting to manipulate the wrong target, inaccurate end-
+effector positioning, or inaccurate gripper operation. Each
+label summarizes the dominant visible outcome; multiple
+errors can contribute to the same trial.
+All trials are retained in the denominator, including
+
+
+Table 18. Network size and dense-arithmetic cost of the LIBERO implementations. Parameters are in millions; costs are in GFLOPs, with
+two operations per multiply–accumulate. Inference includes the new two-camera observation and the complete action readout, with cached
+history latents. Training includes all losses and their backward passes, normalized per sample; see Sec. A.15 for the counting scope.
+Inference per decision
+Training per sample
+Method
+Parameters (M)
+Encoder
+Readout
+Total
+Forward + backward
+BC
+61.816
+5.757
+0.181
+5.938
+69.805
+BC+Progress
+61.817
+5.757
+0.181
+5.938
+87.197
+PPP-GH
+61.976
+5.757
+0.357
+6.115
+88.188
+PPP
+61.712
+5.757
+0.718
+6.475
+89.079
+Table 19. Bun picking: PPP annotations by layout and instructed
+color. Each cell is one trial; failure labels indicate the primary
+observed failure mode: Target = wrong target, Pose = pose inac-
+curacy, and Gripper = gripper inaccuracy.
+Layout
+green
+purple
+white
+yellow
+0
+Success
+Success
+Pose
+Target
+1
+Success
+Success
+Target
+Success
+2
+Pose
+Success
+Pose
+Success
+3
+Target
+Success
+Pose
+Success
+4
+Success
+Success
+Pose
+Success
+5
+Success
+Success
+Target
+Success
+6
+Success
+Target
+Pose
+Pose
+7
+Success
+Success
+Target
+Target
+8
+Target
+Success
+Success
+Target
+9
+Pose
+Gripper
+Success
+Target
+six failures that ended with runtime errors. Arm motion
+stopped with a cartesian reflex error in PPP layout
+1/white and 4/white, and BC layout 1/yellow, 8/white, and
+9/purple. BC layout 5/yellow ended with a gripper timeout.
+Their primary video-review labels are retained in the tables;
+the logged termination event is distinct from the observed
+failure mode.
+B.2. Doll Straightening
+Task and data. A plush doll is dropped on the table in a
+random pose. The task is to leave it lying on its back, belly
+up and centered, with its head toward the robot base; every
+demonstration ends in this state. The 150 demonstrations
+were recorded in three sessions, with starting poses spread
+across the table. In 40 of them, the doll starts belly up or
+face up and is only pushed into place. In the other 110, it
+starts face down or on its side, and the operator grasps and
+lifts it so that it rolls over before pushing it into place; 17
+of these retry a failed flip. The demonstrations comprise
+74,895 synchronized samples at 20 Hz, approximately 1 h,
+and last 5.9 to 53.0 s (median 24.9 s). The task has a single
+Table 20. Bun picking: BC annotations by layout and instructed
+color. Each cell is one trial; failure labels indicate the primary
+observed failure mode: Target = wrong target, Pose = pose inac-
+curacy, and Gripper = gripper inaccuracy.
+Layout
+green
+purple
+white
+yellow
+0
+Target
+Pose
+Pose
+Success
+1
+Success
+Target
+Gripper
+Pose
+2
+Target
+Pose
+Success
+Target
+3
+Gripper
+Gripper
+Target
+Target
+4
+Target
+Success
+Pose
+Target
+5
+Gripper
+Gripper
+Target
+Gripper
+6
+Pose
+Pose
+Pose
+Pose
+7
+Pose
+Gripper
+Pose
+Pose
+8
+Target
+Gripper
+Target
+Target
+9
+Gripper
+Pose
+Target
+Success
+instruction, so the instruction input is one constant one-hot
+vector and the instruction contrast loss is disabled (λlang =
+0).
+Progress labels. Demonstration length here is set mostly
+by the starting pose: push-only demonstrations last about
+17 s on average and those with a flip about 28 s. Normalized
+time (Eq. (26)) would therefore give the same doll pose dif-
+ferent labels in different demonstrations. For this task, PPP
+instead regresses absolute time-to-go,
+p⋆
+t = −max(Ne −1 −t, 0)
+Tu
+,
+se = 1
+Tu
+,
+(41)
+with Tu = 123 model transitions, the span of the me-
+dian demonstration. A demonstration of median length thus
+keeps its normalized-time labels, and targets range from
+−2.14 at the start of the longest demonstration to 0 at the
+end. The boundary loss treats the last 6 transitions (1.2 s,
+⌊(1 −ρterm)Tu⌋) as terminal. All other settings match bun
+picking. BC has no progress output, so the labels affect only
+PPP.
+In Fig. 3, pt = pθ(E(ot), ℓ) is converted to predicted
+time-to-go as −0.2 Tupt seconds; the normalized-phase
+
+
+Table 21. Doll straightening: all 12 trials per method, with time to
+success for successful trials. The final row gives success rates and
+mean times over successes.
+PPP
+BC
+Trial
+Outcome
+Time (s)
+Outcome
+Time (s)
+0
+Success
+13
+Success
+8
+1
+Failure
+–
+Failure
+–
+2
+Success
+55
+Failure
+–
+3
+Success
+33
+Success
+52
+4
+Success
+19
+Success
+51
+5
+Failure
+–
+Failure
+–
+6
+Success
+18
+Success
+14
+7
+Failure
+–
+Failure
+–
+8
+Success
+43
+Success
+46
+9
+Success
+43
+Success
+115
+10
+Success
+10
+Success
+36
+11
+Success
+52
+Failure
+–
+Total
+9/12 (75.0%)
+31.8
+7/12 (58.3%)
+46.0
+tasks plot 1 + pt. Numbered images match curve samples
+by camera frame ID.
+Evaluation. Each method is evaluated in 12 trials, all of
+which are retained in the denominator. Table 21 lists every
+trial. The time to success is averaged over successful trials
+only, so the two averages in Tab. 3 are taken over differ-
+ent sets of trials. The success-count difference is two trials
+(9/12 versus 7/12), so we treat the success-rate compari-
+son as preliminary. The individual timings also favor PPP
+beyond the mean: successful-trial medians are 33 s versus
+46 s, and 9/12 versus 6/12 recorded trials finish within 60 s.
+Figure 10 visualizes PPP’s field on this task.
+B.3. Bimanual Egg Pouring
+This experiment tests whether one scalar field can supply
+multiple discrete control signals, using two grippers along-
+side a joint continuous command for both arms.
+Task, data, and training. Two xArm7 arms grasp a steel
+bowl containing an egg and a white plate, respectively.
+The left arm tilts the bowl over the plate held by the right
+arm; the demonstrations then set down and release both
+objects. We collect 150 successful teleoperated episodes,
+comprising 46,619 synchronized samples at 20 Hz. A front
+camera and one wrist camera per arm supply three RGB
+views, encoded with the same shared ViT and projected
+to one 384-dimensional latent.
+Each arm has six pose
+coordinates and a binary gripper command; both transla-
+tion and rotation are teleoperated.
+The action layout is
+(uL, uR, cL, cR) ∈R12 × {open, close}2. This single-task
+model uses a constant one-hot instruction and no instruc-
+tion contrast loss.
+Progress supervision uses normalized
+phase, as in bun picking. We retain the image augmenta-
+tion and 100-epoch world-model pretraining followed by
+300-epoch policy training described above, with co-training
+from epoch 15; the final checkpoint is deployed.
+Multiple discrete coordinates.
+For G binary grippers,
+write the held-command vector as ch = (ch
+1, . . . , ch
+G) and
+let cflip(j) change only its jth entry. The same scalar query
+Q(u, c) supplies
+gu = ∇uQ(u0, ch),
+u = u0 + ηϕ(¯z)gu,
+bj = Q(u0, cflip(j)) −Q(u0, ch),
+cj =
+(
+cflip(j)
+j
+,
+bj > εg,j,
+ch
+j ,
+otherwise.
+(42)
+Here u0 = 0 ∈R6G and ¯z = f(z, (u0, ch)). For two
+arms, one gradient covers all 12 pose coordinates and one
+positive scalar mobility scales it. Each gripper comparison
+holds the other command fixed at the same reference. The
+resulting switches are applied together, without sequential
+updates or scoring joint flips; thus the discrete query count
+grows linearly with G. The shared world model and field
+still condition on the full scene and both arms.
+Switching-region labels (Eq. (33)) are computed from
+each gripper’s own next expert switch. The loss in Eq. (34)
+pools sample–gripper pairs and balances switching versus
+holding across this pool. Repeated-frame contexts retain
+both held commands, and this loss still updates only the po-
+tential. Pose supervision uses the joint command, with the
+mean-squared term averaged over 12 coordinates.
+Deployment. The controller replans both arms at 20 Hz
+and uses εg,j = 0 for both grippers, as in the Franka exper-
+iments. The policy completes the egg transfer in one of five
+attempts (20%). Figure 3(c) uses a successful checkpoint-
+300 rollout, with recorded camera frames synchronized
+to the unsmoothed prediction 1 + pθ(E(ot), ℓ) by camera
+frame ID.
+C. Task-Field Analysis
+C.1. Diagnostic Protocol
+States. For each of the 40 benchmark tasks we draw ten
+demonstrations with a fixed seed.
+We take every sec-
+ond model-grid anchor in the training anchor range, giving
+7,849 states from 400 trajectories. States are built by the
+training sampler’s own code at phase zero. All LIBERO
+demonstrations are used for training, so these are training
+states.
+Queries.
+Every quantity is computed with the de-
+ployed query in evaluation mode, as Qz,ℓ(u, ch)
+=
+
+
+-4
+0
+4
+Spatial
+uy
+cos -0.30
+rg 0.44  rE 0.98
+Progress-only
+cos -0.76
+rg 0.82  rE 0.98
+BC+Progress
+cos +1.00
+rg 0.98  rE 0.98
+No p
+cos +1.00
+rg 0.98  rE 0.98
+PPP-GH
+cos +1.00
+rg 0.97  rE 0.98
+PPP
+-4
+0
+4
+Object
+uy
+cos +0.65
+rg 0.69  rE 0.97
+cos -0.10
+rg 0.78  rE 0.97
+cos +1.00
+rg 0.97  rE 0.97
+cos +1.00
+rg 0.97  rE 0.97
+cos +1.00
+rg 0.97  rE 0.97
+-4
+0
+4
+Goal
+uy
+cos +0.42
+rg 0.55  rE 0.97
+cos -0.50
+rg 0.78  rE 0.97
+cos +1.00
+rg 0.96  rE 0.97
+cos +1.00
+rg 0.98  rE 0.97
+cos +1.00
+rg 0.97  rE 0.97
+-4
+0
+4
+ux
+-4
+0
+4
+Long
+uy
+cos +0.93
+rg 0.87  rE 0.97
+-4
+0
+4
+ux
+cos -0.28
+rg 0.17  rE 0.97
+-1.5
+0
+1.5
+ux
+cos +0.99
+rg 0.98  rE 0.97
+-4
+0
+4
+ux
+cos +1.00
+rg 0.97  rE 0.97
+-1.5
+0
+1.5
+ux
+cos +1.00
+rg 0.96  rE 0.97
+-4
+-1
+0
+1
+4
+ΔQ (steps)
+-8
+-1
+0
+1
+8
+ΔQ (steps)
+-4
+-1
+0
+1
+4
+ΔQ (steps)
+-8
+-1
+0
+1
+8
+ΔQ (steps)
+Figure 7. Action-space slices of Q in the (ux, uy) plane at one rule-selected state per suite (rows), for the progress-only field, BC+Progress,
+No Lp, PPP-GH, and PPP (columns; epoch 10, then 120). No Lp is trained without progress labels, so its scale is free; its ∆Q is multiplied
+by one constant (0.078), chosen so that its median ∥ga∥over the diagnostic states equals PPP-GH’s, which leaves shapes, directions and
+signs unchanged. Black: the expert command. Solid colour: the deployed command (No Lp, PPP-GH and PPP). Dashed colour: the
+gradient direction scaled to the expert’s norm (progress-only and BC+Progress; BC+Progress’s own BC command in dark brown). cos
+is the six-dimensional cosine between ga and ¯uE. Colour: ∆Q = Q(u) −Q(u0) in control steps, symmetric-log scale shared within
+a row; for PPP, the elevated Q(u0) is associated with gripper-margin training (Sec. C.2). The No Lp and PPP columns are zoomed to
+[−1.5, 1.5]2, and their arrows are shortened by a common factor (Sec. C.4).
+pθ(f(Zτ, [ ¯Aτ, tilek(u, ch)]), ℓ) (Eq. (22)). The context con-
+sists of three frames four ticks apart, the history’s pose chan-
+nels are at the corpus median, its gripper channels are the
+recorded commands, and ch is the held gripper command.
+ga is one reverse-mode derivative of Q with respect to u at
+u0 = 0. The expert target is the mean of the four normal-
+ized expert commands that the query’s held chunk replaces,
+exactly the target of Eq. (10). For BC+Progress, the poten-
+tial is the trunk’s progress channel, composed with its own
+world model in the same query.
+Validation. Autograd gradients agree with central finite
+differences of Q (step sizes 10−2 and 3 × 10−3; median
+relative error below 10−3 at the better step). For a field run,
+the command computed here equals the deployed planner’s
+output for the same context to a relative 2 × 10−6, and for
+BC+Progress the planner’s BC command matches as well.
+Statistics. Neighbouring anchors of a demonstration are
+correlated, so each statistic is a mean of per-trajectory
+means. Progress correlation is computed within each tra-
+jectory and then averaged; this differs from the 130-task
+training-log diagnostic, which pools sampled predictions
+within each task before averaging correlations (Sec. A.8).
+Intervals are percentile bootstraps over the 400 trajectories,
+and paired differences are tested with a sign-flip test over
+the 40 per-task differences.
+Directional metrics exclude
+states whose expert command is near zero (∥¯uE∥< 0.25,
+about a tenth of the median; 0.23% of states).
+Frozen-world-model runs.
+Two runs hold the dynamics
+
+
+Table 22. Task-field diagnostics on 7,849 LIBERO training states from 400 trajectories (Sec. C.1). Progress-only (a)/(b): the epoch-10
+fields that initialize PPP-GH/PPP; (a) continues with progress losses alone. Frozen WM uses PPP-GH’s losses with pretrained encoder
+and dynamics fixed (Sec. C.1). ρ: mean per-trajectory Spearman correlation with progress; MAE: mean absolute error against ρt −1.
+cos: mean of per-trajectory mean cos(ga, ¯uE), with a 95% bootstrap interval over trajectories; > 0: fraction with g⊤
+a ¯uE > 0. Orth.:
+expert-command energy fraction orthogonal to ga, 1 −cos2. ∥ga∥: median gradient norm in control steps per normalized command unit.
+Q0, QE: median increments Q(u0)−pθ(zt, ℓ) and Q(¯uE)−pθ(zt, ℓ) in control steps; these are query values, not observed progress gains
+(Sec. C.2). Scale-dependent columns are dashed for No Lp. States with ∥¯uE∥< 0.25 (0.23%) are excluded from directional and value
+columns. Paired comparisons are reported in Sec. C.2.
+Field
+Epoch
+ρ
+MAE
+cos
+95% CI
+> 0
+Orth.
+∥ga∥
+Q0
+QE
+Progress-only (a)
+10
+0.9897
+0.069
+0.249
+[0.238, 0.260]
+0.75
+0.80
+0.51
+0.45
+1.11
+Progress-only (a)
+20
+0.9925
+0.062
+0.245
+[0.233, 0.257]
+0.75
+0.80
+0.50
+0.45
+1.08
+Progress-only (a)
+40
+0.9969
+0.058
+0.242
+[0.229, 0.255]
+0.75
+0.80
+0.51
+0.47
+1.11
+Progress-only (a)
+70
+0.9952
+0.061
+0.235
+[0.221, 0.248]
+0.74
+0.81
+0.52
+0.48
+1.12
+Progress-only (a)
+120
+0.9992
+0.051
+0.225
+[0.211, 0.238]
+0.73
+0.81
+0.54
+0.50
+1.13
+Progress-only (b)
+10
+0.9894
+0.075
+0.246
+[0.234, 0.258]
+0.75
+0.80
+0.51
+0.44
+1.12
+BC+Progress
+10
+0.9939
+0.069
+0.218
+[0.205, 0.231]
+0.73
+0.80
+0.60
+0.48
+1.13
+BC+Progress
+20
+0.9994
+0.059
+0.070
+[0.058, 0.083]
+0.55
+0.80
+1.78
+0.16
+1.05
+BC+Progress
+40
+0.9999
+0.051
+0.064
+[0.053, 0.076]
+0.56
+0.81
+3.01
+0.11
+0.98
+BC+Progress
+70
+1.0000
+0.048
+0.081
+[0.068, 0.094]
+0.58
+0.82
+3.46
+0.10
+0.92
+BC+Progress
+120
+0.9997
+0.047
+0.080
+[0.068, 0.093]
+0.58
+0.82
+4.18
+0.05
+0.77
+PPP-GH, frozen WM
+20
+0.9900
+0.069
+0.822
+[0.814, 0.830]
+0.98
+0.27
+0.83
+0.19
+1.08
+PPP-GH, frozen WM
+40
+0.9956
+0.062
+0.875
+[0.869, 0.881]
+0.99
+0.20
+0.82
+0.21
+1.12
+PPP-GH, frozen WM
+70
+0.9970
+0.062
+0.910
+[0.905, 0.915]
+0.99
+0.15
+0.84
+0.24
+1.19
+PPP-GH, frozen WM
+120
+0.9984
+0.055
+0.947
+[0.944, 0.950]
+1.00
+0.09
+0.83
+0.26
+1.23
+No Lp
+20
+0.6098
+–
+0.955
+[0.953, 0.957]
+1.00
+0.08
+–
+–
+–
+No Lp
+40
+0.5933
+–
+0.983
+[0.983, 0.984]
+1.00
+0.03
+–
+–
+–
+No Lp
+70
+0.5878
+–
+0.992
+[0.992, 0.992]
+1.00
+0.02
+–
+–
+–
+No Lp
+120
+0.5822
+–
+0.996
+[0.996, 0.996]
+1.00
+0.01
+–
+–
+–
+PPP-GH
+20
+0.9994
+0.053
+0.950
+[0.948, 0.952]
+1.00
+0.09
+3.07
+0.30
+1.24
+PPP-GH
+40
+0.9999
+0.054
+0.983
+[0.982, 0.983]
+1.00
+0.03
+4.32
+0.29
+1.24
+PPP-GH
+70
+1.0000
+0.048
+0.992
+[0.991, 0.992]
+1.00
+0.02
+5.70
+0.38
+1.27
+PPP-GH
+120
+0.9998
+0.044
+0.995
+[0.995, 0.996]
+1.00
+0.01
+7.25
+0.40
+1.14
+PPP
+20
+0.9991
+0.073
+0.950
+[0.948, 0.952]
+1.00
+0.09
+4.37
+0.94
+1.93
+PPP
+40
+0.9998
+0.056
+0.981
+[0.980, 0.982]
+1.00
+0.04
+8.11
+2.26
+1.89
+PPP
+70
+1.0000
+0.051
+0.991
+[0.991, 0.991]
+1.00
+0.02
+13.40
+4.61
+1.04
+PPP
+120
+0.9998
+0.043
+0.995
+[0.995, 0.995]
+1.00
+0.01
+17.29
+6.92
+0.57
+fixed. Both continue from PPP-GH’s own epoch-10 check-
+point, the end of its progress-only stage (progress-only (a)
+in Tab. 22), with PPP-GH’s data, batch size, optimizer state,
+and learning-rate schedule. Both keep pretrained encoder
+and dynamics weights fixed and omit the world model loss.
+The progress-only run continues the progress losses alone to
+epoch 120; its gain and switching head are never trained, so
+it is measured only through ga. The frozen-WM run adds
+PPP-GH’s action loss and switching head from epoch 10.
+Its action loss can therefore change only the potential and
+the mobility, not Jf. A third run deploys the progress-only
+field: it freezes the epoch-120 progress-only potential and
+trains only the scalar gain and a switching head, with PPP-
+GH’s action and switching losses, for 20 epochs. Its com-
+mand direction is thus exactly the progress-only gradient.
+C.2. Results in Detail
+Values and directions. Table 22 reports value fit and gra-
+dient alignment across training; brackets below give 95%
+trajectory-bootstrap intervals for paired differences.
+The
+two independent progress-only fields have mean cosine
+0.25 with the expert, positive on three quarters of states;
+BC+Progress’s gradient drifts toward orthogonality as its
+value fit improves. At epoch 120, PPP and PPP-GH reach
+cosine 0.995.
+Their paired gains over progress-only (b)
+and BC+Progress, respectively, are 0.749 [0.738, 0.760]
+and 0.915 [0.903, 0.927], positive on all 40 tasks with
+ptask < 10−4 in both comparisons. The PPP −PPP-GH
+difference is −0.0001 (ptask = 0.61).
+Continuing progress-only training to epoch 120 lowers
+value error (0.069 →0.051) but changes cosine by −0.024
+[−0.034, −0.014] (lower on 25/40 tasks, ptask = 0.037).
+With the world model frozen, PPP-GH’s losses raise co-
+sine to 0.947, a gain of 0.722 [0.708, 0.736] over the
+frozen progress-only field. Joint training adds 0.048 [0.045,
+0.052]; both gains hold on all 40 tasks with ptask < 10−4.
+The jointly trained model reaches 0.95 within ten action-
+supervised epochs, a level the frozen run approaches only
+at epoch 120. The orthogonal-energy column shows what a
+scalar gain cannot express: about 80% of expert-command
+
+
+energy for progress-only fields, against 1% for PPP. Neigh-
+bouring states two grid steps apart have gradient-direction
+similarity 0.78 for both PPP and the expert commands.
+Without progress losses, epoch-120 cosine reaches
+0.996, compared with PPP-GH’s 0.995 (PPP-GH −No Lp:
+−0.0008, positive on 10/40 tasks, ptask = 0.0004). Its
+per-trajectory progress correlation is 0.58, illustrating the
+separate role of value calibration.
+Closed loop.
+Both deployable frozen-world-model runs
+use the protocol of Tab. 1. With PPP-GH’s losses, success is
+5.6, 5.1, 4.9, and 4.4% at epochs 70, 80, 100, and 120 (5.0%
+pooled, against 43.5% for PPP-GH; lower on 39 of the 40
+tasks, ptask < 10−5). At epoch 120, median hand paths
+are similar (0.96 versus 0.91 m for PPP-GH), but the grip-
+per closes in only 62% of episodes (PPP-GH: 84%), with
+success in 6.9% of episodes with a close (PPP-GH: 54.1%).
+The progress-only field with a trained gain succeeds in 0
+and 1 of 2,000 episodes after 10 and 20 epochs of gain train-
+ing. Table 4 (progress, gain) compares the latter with the
+frozen-WM epoch-120 checkpoint (4.4% success). Its me-
+dian command norm is 0.24, against 1.71 for PPP-GH, and
+the hand travels a median 0.33 m.
+Finite query values and their reference.
+Table 22 re-
+ports scalar increments relative to the current observation:
+Q0 = Q(u0) −pθ(z, ℓ) and QE = Q(¯uE) −pθ(z, ℓ),
+summarized by their medians. In PPP, query values are
+supervised differently from recorded-state potentials: pose
+imitation trains the derivative at u0, and Lgrip trains the
+difference between Q(u0, open) and Q(u0, close), updat-
+ing only pθ. The logistic gripper loss increases the correct
+switch/hold margin without fixing absolute query values;
+reference queries lack direct progress-value targets. The
+reference u0 = 0 is the normalized corpus median com-
+mand, not necessarily a physical no-op, and is used for read-
+out rather than execution.
+Under every calibrated field, the demonstrated next state
+lies 1.1–1.2 control steps above the current one. PPP-GH
+stays on this scale throughout training (Q0 = 0.40 and
+QE = 1.14 at epoch 120, and 1.14 for its deployed com-
+mand). For PPP, QE stays positive (0.57 at epoch 120; 0.55
+for its deployed command), while Q0 rises from 0.94 at
+epoch 20 to 6.92 at epoch 120, higher than PPP-GH’s on all
+40 tasks. These query-latent values differ from the observed
+increment pθ(E(ot+k), ℓ) −pθ(E(ot), ℓ), which the simu-
+lator measures as 0.00 control steps for the reference com-
+mand and 0.99 for PPP’s deployed command (Sec. C.3).
+The median per-state difference Q(¯uE) −Q(u0) is −5.8
+control steps, comparing the expert query with the elevated
+reference rather than a decrease along the observed trajec-
+tory; it is not the difference of the Q0 and QE medians.
+Reference values are highest on hold states: +11.4 con-
+trol steps with the hand open and no switch within eight
+steps, +5.4 with the hand closed under the same condition,
+Table 23. Finite-step structure of Q at epoch 120, with obser-
+vations fixed (medians over diagnostic states unless noted). Ra-
+tio: [Q(a0 + rˆga) −Q(a0)]/(r∥ga∥); 1 for linear Q, negative
+when Q < Q(a0).
+cos: cos(ga(a0), ga(a0 + rˆuE)); nega-
+tive means a rotation > 90◦. Expert alignment at a0 is sepa-
+rate (0.995 for PPP; Tab. 22). Q−p: Q(a0 + rˆga) −pθ(zt, ℓ)
+in control steps (demonstrated increment ≈1.2; dashed for No
+Lp, whose units are free). pref.: mean per-trajectory fraction with
+Q(a0 + rˆuE) > Q(a0 −rˆuE), comparing equal-size commands.
+r: normalized command units; median expert norm 2.3.
+Field
+step size r
+0.03
+0.1
+0.3
+1
+2
+4
+Progress-only (a)
+ratio 1.01 1.02
+1.04
+0.99
+0.83
+0.55
+cos
+1.00 1.00
+0.98
+0.84
+0.67
+0.44
+Q−p 0.51 0.56
+0.68
+1.07
+1.43
+1.71
+pref. 0.73 0.73
+0.74
+0.77
+0.83
+0.85
+BC+Progress
+ratio 1.31 1.29
+0.32
+0.11
+0.07
+0.04
+cos
+0.91 0.51
+0.02
+0.12
+0.14
+0.08
+Q−p 0.19 0.53
+0.32
+0.36
+0.48
+0.54
+pref. 0.58 0.60
+0.70
+0.86
+0.90
+0.91
+PPP-GH, frozen WM ratio 1.00 1.00
+0.98
+0.81
+0.57
+0.37
+cos
+1.00 1.00
+0.99
+0.77
+0.37
+0.16
+Q−p 0.29 0.35
+0.51
+0.94
+1.22
+1.50
+pref. 1.00 1.00
+1.00
+1.00
+0.98
+0.93
+No Lp
+ratio 1.00 0.98
+0.85
+0.23
+0.06
+0.03
+cos
+1.00 1.00
+0.96 −0.66 −0.13 −0.15
+Q−p
+–
+–
+–
+–
+–
+–
+pref. 1.00 1.00
+1.00
+0.99
+0.93
+0.85
+PPP-GH
+ratio 1.00 0.98
+0.81
+0.16
+0.05
+0.03
+cos
+1.00 1.00
+0.92 −0.66
+0.22 −0.09
+Q−p 0.61 1.12
+2.11
+1.50
+1.09
+1.14
+pref. 1.00 1.00
+1.00
+1.00
+0.98
+0.96
+PPP
+ratio 0.99 0.94
+0.49 −0.27 −0.15 −0.08
+cos
+1.00 0.99 −0.43 −0.58
+0.03 −0.26
+Q−p 7.44 8.65
+8.39
+1.13
+0.54
+0.30
+pref. 1.00 1.00
+0.99
+0.89
+0.79
+0.71
+and −4.7 within eight steps before an opening (PPP-GH:
++0.8, +0.1, −0.1). Continuing PPP from epoch 40 with a
+label-smoothed Lgrip, whose minimizer is a margin of two
+control steps, reduces Q0 at epoch 120 to 3.66, with sim-
+ilar measured closed-loop success (50.2% against 50.5%
+pooled over epochs 70–120, ptask = 0.76). This interven-
+tion supports an association with gripper-margin training;
+the logistic objective alone does not require the absolute ref-
+erence value to rise. A positive local derivative can coexist
+with lower finite-command values outside the Taylor neigh-
+borhood below.
+Local linearity. Table 23 gives the data of Fig. 6. For PPP
+and PPP-GH, Q is close to linear up to r ≈0.1 (about
+4% of a median expert command). At r = 1, PPP’s me-
+dian ratio −0.27 indicates a finite query below Q(a0) along
+ˆga, while its median cosine −0.58 compares gradients at a0
+and a0 + ˆuE. These fixed-observation diagnostics measure
+candidate-action curvature; the supervised readout recom-
+putes the reference gradient (expert alignment 0.995) after
+
+
+-1.5
+0
+1.5
+PPP
+uy
+cos +0.99
+open the middle drawer of
+the cabinet
+cos +0.90
+put the bowl on the plate
+cos +0.95
+put the wine bottle on the
+rack
+cos +0.90
+turn on the stove
+-4
+0
+4
+ux
+-4
+0
+4
+Progress-only
+uy
+cos +0.18
+-4
+0
+4
+ux
+cos +0.23
+-4
+0
+4
+ux
+cos -0.63
+-4
+0
+4
+ux
+cos +0.98
+-4
+-1
+0
+1
+4
+ΔQ (steps)
+-1
+0
+1
+ΔQ (steps)
+Figure 8. One LIBERO-Goal scene, at the planner’s episode-start state, under four of its ten instructions. Top: PPP (epoch 120) and its
+command (blue), zoomed to [−1.5, 1.5]2 with arrows shortened by a common factor. Bottom: the progress-only field (epoch 10) and its
+gradient direction (green, dashed). Black dashed: the instructed task’s mean initial hand motion over its 50 demonstrations, drawn as a
+direction. cos is computed in three-dimensional translation.
+layout 12 (front view)
+-2
+0
+2
+ux
+-2
+0
+2
+uy
+cosxy +0.92
+"green"
+-2
+0
+2
+ux
+cosxy +0.83  (closest)
+"purple"
+-2
+0
+2
+ux
+cosxy -0.23
+"white"
+-2
+0
+2
+ux
+cosxy +0.60
+"yellow"
+-8
+-1
+0
+1
+8
+ΔQ (steps)
+Figure 9. Real robot: one shared layout at the episode-start state, under the four color instructions (PPP, epoch 300, (ux, uy) table plane
+in the robot base frame, normalized units, zoomed to [−2, 2]2). Blue: the direction of PPP’s command (drawn at a fixed length, since
+commands are small at the first decision). Black dashed: the direction of the same layout’s demonstration for that color over its first 2 s.
+“closest”: the command is closer to this color’s demonstration than to the other three.
+each observation.
+With the world model frozen, the aligned field stays
+much closer to linear (ratio 0.81 and gradient cosine 0.77
+at r = 1), and its gradient is about nine times less steep
+(Tab. 22). In these runs, jointly trained fields have a shorter
+linear range. The label-free field has the same local profile
+as PPP-GH (ratio 0.85 at r = 0.3 and 0.23 at r = 1, where
+its gradient reverses, cos −0.66). BC+Progress’s progress
+channel is trained on values, and its Q varies irregularly
+even at small r. The progress-only field is the most linear,
+but its gradient is misaligned.
+The Q−p rows show PPP-GH’s Q rising along the gra-
+dient to 2.1 control steps at r = 0.3, then returning to 1.1
+at the expert’s norm and beyond: small commands yield
+larger increments than expert-sized commands. With the
+world model frozen, it rises monotonically (0.29 to 1.50).
+PPP’s Q starts from its elevated reference value and falls to
+1.1 by r = 1. Comparing two commands of equal size
+removes the level at a0.
+At r = 2, about the expert’s
+norm, Q prefers the expert direction to its opposite on 98%
+of states for PPP-GH and the frozen-WM field, 90% for
+BC+Progress, 83% for the progress-only field, and 79% for
+PPP (pref. rows). Reference values and directional prefer-
+ence vary separately: world model normalization with an
+added query prediction loss retains the high Q0 but raises
+expert-direction preference to 93% (Sec. A.5). Away from
+
+
+ρ = 0.2, t = 5.4 s
+hand open
+ρ = 0.4, t = 10.8 s
+hand open
+ρ = 0.6, t = 16.2 s
+hand closed
+ρ = 0.8, t = 21.6 s
+hand open
+-1
+0
+1
+ux
+-1
+0
+1
+uy
+cos +1.00
+rg 0.89  rE 0.90
+-1
+0
+1
+ux
+cos +1.00
+rg 0.99  rE 0.98
+-1
+0
+1
+ux
+cos +1.00
+rg 0.89  rE 0.86
+-1
+0
+1
+ux
+cos +1.00
+rg 0.84  rE 0.81
+-8
+-1
+0
+1
+8
+ΔQ (steps)
+Figure 10. Real robot, doll straightening (single instruction): PPP’s field (epoch 300) at four phases of one seeded single-grasp demon-
+stration (training states). Top: the front view at each state. Bottom: (ux, uy) slices in the robot base frame, normalized units, zoomed to
+[−1, 1]2. Black: the expert command; blue: PPP’s deployed command (projections, shortened by a common factor in each panel). cos is
+the six-dimensional cosine between ga and ¯uE. Colour: ∆Q in time-to-go control steps; shared symmetric-log scale.
+Table 24. Instruction conditioning at episode start (first frame re-
+peated across context, open hand), under all instructions trained in
+the scene; epoch 120 unless noted. Hit: fraction of (state, instruc-
+tion) queries whose command/gradient direction is closest to the
+instructed reference. References: the instructed color’s demon-
+stration in the same layout (2-s hand displacement, table plane;
+robot), or the task’s mean 1-s hand displacement over 50 demon-
+strations (LIBERO-Goal; pairwise reference cosine 0.63). Swap
+cos: mean cosine between readouts for swapped and original in-
+structions; lower indicates greater directional change.
+Setting
+Readout
+Hit Chance Swap cos
+Robot
+PPP (300), command
+0.52
+0.25
+0.40
+BC (300), cmd.
+0.51
+0.25
+0.15
+LIBERO-Goal Progress-only (10), grad.
+0.13
+0.10
+0.31
+Progress-only, grad.
+0.10
+0.10
+0.57
+BC+Progress, grad.
+0.10
+0.10
+0.33
+BC+Progress, BC cmd.
+0.33
+0.10
+0.71
+PPP-GH, frozen WM, cmd. 0.21
+0.10
+0.59
+PPP-GH, command
+0.33
+0.10
+0.68
+PPP, command
+0.29
+0.10
+0.71
+a0, jointly trained Q ranks directions and, for PPP-GH,
+matches the demonstrated step at the expert’s norm, but
+does not calibrate progress for arbitrary finite commands.
+Instruction conditioning. Table 24 tests instruction de-
+pendence before task-specific motion, using the planner’s
+episode-start state: the first frame in every context slot
+and padded history. Robot queries use 25 shared layouts
+recorded from the home pose, each with one demonstra-
+tion per color; LIBERO-Goal uses ten demonstrations per
+task across ten tasks sharing one initial layout. Both PPP
+and BC turn their commands toward the instructed target
+about twice as often as chance on the robot, and about three
+times as often as chance on LIBERO-Goal. Progress gradi-
+ents without action supervision are at chance, also after 120
+epochs of progress training. With the world model frozen,
+PPP-GH’s command reaches the instructed target twice as
+often as chance, less often than the co-trained fields.
+C.3. The Field Under the True Dynamics
+We now evaluate the same field on simulator-reached states
+instead of the control query’s predicted latents.
+Protocol. From a restored simulator state, each candidate
+command is held for the world model’s horizon (one con-
+trol step, four ticks). The field’s own encoder and potential
+score the reached frame: Qreal(a) = pθ(E(osim
+t+k(a)), ℓ).
+The candidates are: the reference command a0 and its
+gripper alternative; a0 ± ϵei on the six pose axes (ϵ ∈
+{0.1, 0.3, 1}); a0 ± r ˆd for r ∈{0.3, 1, 2.3}, along the ˆga
+of PPP and PPP-GH, the expert direction, and two ran-
+dom directions; and each field’s deployed command. All
+fields score the same executed branches, also rendered
+after a second control step.
+Restoration re-synchronizes
+the operational-space controller and internal gripper com-
+mand, reproducing uninterrupted simulation (state differ-
+ence 2 × 10−15, identical frames); repeated branches are
+bit-identical. Demonstration states are 600 training anchors
+in recorded layouts, with contexts rendered from recorded
+
+
+Table 25. Predicted progress along the 2,000 closed-loop rollouts of each epoch-120 model. ρt: median per-rollout Spearman correlation
+of pt with time, on successful (S) and failed (F) rollouts. End: median p at the last tick (No Lp: after the affine fit, marked ∗). AUROC for
+success from the value at the last tick, and for eventual success from the value at 5 s, with 95% task-bootstrap intervals.
+ρt
+End
+AUROC
+Scalar
+Succ.
+S
+F
+S
+F
+end
+5 s
+PPP
+51.5
+1.00
+0.67
+−0.03
+−0.45
+0.84 [.78,.90]
+0.78 [.71,.84]
+BC+Progress
+38.8
+1.00
+0.69
+−0.04
+−0.48
+0.89 [.84,.93]
+0.75 [.69,.81]
+No Lp
+41.8
+0.68
+0.30
+−0.38∗
+−0.50∗
+0.73 [.66,.79]
+0.56 [.49,.63]
+Table 26. The field under true dynamics, epoch 120 (Sec. C.3). Qreal(a) = pθ(E(osim
+t+k(a)), ℓ) scores the frame reached by holding a
+for k = 4 ticks (world-model horizon) from the restored state, using the field’s encoder and potential. Demo: 600 training states (40
+tasks, 3 demonstrations, 5 anchors); rollouts: 800 states per policy (40 tasks, 5 initial states, 4 decisions). pref.: fraction of states with
+Qreal(a0 + r ˆd) > Qreal(a0 −r ˆd) at r = 1, along ˆd = ˆga, expert ˆuE, or a random unit direction. cos: cos(ga, greal) and cos(¯uE, greal);
+greal is the least-squares slope of Qreal over executed commands with ∥a −a0∥≤1. Q0, Qˆa: query-predicted / realized increments over
+pθ(zt, ℓ) (control steps) at a0 and the deployed command, respectively. Means over 40 tasks; “–”: not executed for that field.
+Field
+States
+pref. ˆga
+pref. ˆuE
+pref. random cos ga
+cos ¯uE
+Q0
+Qˆa
+PPP
+demo
+0.72
+0.74
+0.49
+0.26
+0.26
+6.25 / 0.00
+1.29 / 0.99
+own rollouts
+0.72
+–
+0.50
+0.26
+–
+6.54 / −0.08 2.18 / 0.86
+PPP-GH
+demo
+0.75
+0.76
+0.49
+0.28
+0.29
+0.23 / −0.15 1.18 / 1.06
+own rollouts
+0.68
+–
+0.50
+0.23
+–
+0.70 / −0.21 1.29 / 0.79
+PPP-GH, frozen WM
+demo
+–
+–
+–
+0.31
+0.30
+0.29 / −0.05
+–
+PPP’s rollouts
+–
+–
+–
+0.39
+–
+0.45 / −0.45
+–
+Progress-only, frozen WM demo
+–
+–
+–
+0.30
+0.26
+0.75 / −0.19
+–
+PPP’s rollouts
+–
+–
+–
+0.30
+–
+0.80 / −0.59
+–
+states. Rollout states are four decisions per episode from
+each policy’s own evaluation-protocol rollouts on five offi-
+cial initial states per task, branched after the episode. Statis-
+tics are task means over the 40 tasks, with sign-flip tests.
+Direction. Qreal(a0 + ˆga) > Qreal(a0 −ˆga) holds on
+72% of demonstration states for PPP and 75% for PPP-GH
+(Tab. 26). These rates are similar to the expert’s (74% and
+76%; ptask = 0.16 and 0.36), and exceed random directions
+(49%; ptask < 10−5). Rates remain similar on own-policy
+rollouts (72% and 68%) and at the expert’s norm (r = 2.3:
+75% and 77%), rising to 81% and 82% after two control
+steps (ptask < 10−3), consistent with a short-horizon ef-
+fect.
+Values. PPP’s deployed command is predicted to advance
+1.29 control steps and realizes 0.99 (PPP-GH: 1.18 and
+1.06; neither difference is significant). For the expert com-
+mand the values are 1.24 and 0.94 (1.15 and 1.04). Ex-
+ecuting a0 realizes 0.00 control steps against the query’s
+6.25 (Sec. C.2). Its realized value stays within ±1.2 in ev-
+ery gripper state and checkpoint, whereas the query value
+grows with training: the elevation belongs to the query. The
+realized gripper contrast selects the expert’s switch at 83%
+of switch moments but favors switching on most hold states
+(44% correct).
+Hold decisions therefore come from the
+trained margin (95% correct), not from the realized field.
+Gradient and magnitude.
+Imitation
+aligns
+ga
+with
+demonstrations,
+not
+the
+realized
+steepest
+ascent.
+cos(ga, greal) is 0.26 for PPP and 0.28 for PPP-GH,
+equal to the expert direction’s agreement with the same
+greal (0.26 and 0.29; ptask = 0.87 and 0.33). The realized
+slope is reproducible: finite differences at ϵ = 0.3 and
+1 agree at cosine 0.70.
+The co-trained gradient is also
+steeper than the realized one: within ∥a −a0∥≤0.3,
+PPP has 12.1 control steps per normalized unit against
+a realized 1.8.
+The frozen-WM field is not steeper (0.9
+against 2.4), consistent with the shorter linear range of
+jointly trained fields (Tab. 23). On these executed branches,
+PPP’s deployed query is 101 times worse than copying zt
+at its command, and 0.97 times under the world model’s
+statistics, yet the two derivatives agree with greal equally
+(0.26 and 0.27; Sec. A.5). Such agreement does not require
+action supervision: the progress-only field also agrees with
+its realized slope (0.30), despite expert misalignment and
+closed-loop failure (Tab. 4).
+Consistency and outcome.
+On successful versus failed
+rollout states, PPP’s cos(ga, greal) is 0.38 versus 0.14 (PPP-
+GH: 0.38 versus 0.12), finite-step preference is 0.82 versus
+0.63 (PPP-GH: 0.81 versus 0.58), and its deployed com-
+mand realizes 1.29 versus 0.29 control steps. The realized
+field is steeper on failed states (2.3 versus 1.3 control steps
+per unit), rather than flat. These observational comparisons
+do not establish that disagreement causes failure.
+
+
+Ascending the realized field. A controller estimates greal
+at every decision from the twelve axis branches (ϵ = 0.5)
+and executes it at PPP’s command norm, with PPP’s gripper
+decision. A matched PPP arm runs and discards the same
+branches, differing only in executed pose direction. Both
+use five official initial states per task and replan every con-
+trol step instead of every tick; their rates are therefore not
+comparable with Tab. 1. Realized ascent succeeds in 1.5%
+of 200 episodes and PPP in 66.0% (better on 38 of 40 tasks,
+worse on none, ptask < 10−5). Exact dynamics alone do
+not yield a policy: imitation selects the demonstrated ascent
+direction.
+C.4. Field Visualizations
+Slices.
+For a fixed state and instruction, we evaluate
+∆Q(δui, δuj) = Q(u0 + δuiei + δujej) −Q(u0) on a
+61×61 grid over [−4, 4]2 normalized units, with other pose
+coordinates and the gripper fixed at the reference. The slice
+shows pθ ◦f, combining the field and learned dynamics, in
+control steps of progress of the state’s demonstration. Ar-
+rows project full six-dimensional vectors onto the plotted
+plane; rg = ∥Pga∥/∥ga∥and rE = ∥P ¯uE∥/∥¯uE∥report
+the captured norm fractions. Each row shares a symmetric-
+log color scale, linear within ±0.5 steps, so PPP’s large
+negative query values away from the reference do not ob-
+scure other fields. PPP’s query potential rises only within
+about one normalized unit of the reference; we therefore
+recompute its panels on 81 × 81 grids over smaller win-
+dows: [−1.5, 1.5]2 on LIBERO, [−2, 2]2 for bun picking,
+and [−1, 1]2 for doll straightening. The equally local label-
+free field uses PPP’s LIBERO zoom. Zoomed panels retain
+the full-range color scale and shorten all arrows by a com-
+mon factor to fit the longest, preserving relative lengths.
+Selection rule. For Figs. 1 and 7, a rule fixed before draw-
+ing any slices takes one seeded draw per suite from states
+with ρ ∈[0.15, 0.75], expert-command norm at least the
+suite median, and at least 80% of that norm in the plotted
+plane.
+The instruction figures use one seeded LIBERO-
+Goal demonstration and one seeded shared robot layout.
+The doll-straightening figure uses one seeded demonstra-
+tion among the 93 with a single grasp, at fractions ρ = 0.2,
+0.4, 0.6, and 0.8 of its length.
+Doll straightening. Figure 10 shows PPP’s field across
+states of the second real-robot task, which has a single in-
+struction. At all four training states, the deployed command
+aligns with the expert’s (cos ≥0.996) and is within 8% of
+its norm. As on LIBERO, the query potential rises only near
+the reference, except when holding the lifted doll (ρ = 0.6),
+where it rises broadly along the expert’s direction. Here ∆Q
+is in time-to-go control steps, 1/Tu (Sec. B.2).
+C.5. Progress Along Closed-Loop Rollouts
+Protocol. Each closed-loop LIBERO evaluation records
+pt = pθ(E(ot), ℓ) after every executed tick, using the plan-
+ner’s own context. Figure 5 and Tab. 25 use the epoch-
+120 evaluations of PPP without settling, BC+Progress (its
+progress output, which its actions do not use), and No Lp,
+on the same 2,000 initial states. Each model follows its own
+closed-loop trajectories, ending at first success or the suite’s
+time budget (300 ticks, 520 on Long). Panel (a) shows un-
+smoothed traces from different initial states of put both the
+alphabet soup and the tomato sauce in the basket: a success,
+a failure with the first item placed and the second held, and a
+failure after dropping the first item. For the population pan-
+els, each trace is resampled to 101 points over its duration.
+The affine map for the label-free scalar is the least-squares
+fit of the label ρ −1 on its values over the 7,849 diagnostic
+states; it explains 24% of the label variance, against 99%
+for PPP. The 5 s value averages the five ticks ending at tick
+100; early AUROC uses only rollouts still running then. Of
+PPP’s 1,691 such rollouts, 43% later succeed. AUROC in-
+tervals are percentile bootstraps over the 40 tasks (2,000 re-
+samples).
+Results. On successful rollouts, both calibrated scalars
+tend to rise and end near the terminal label; failed rollouts
+tend to end below it (Tab. 25). PPP’s observed-state values
+yield success AUROCs of 0.84 at rollout end and 0.78 at 5 s;
+BC+Progress scores 0.89 and 0.75 on its own rollouts. With
+the untuned threshold p ≥−0.1 (five-tick running mean; a
+tenth of a demonstration), 70% of PPP’s successful rollouts
+register completion, a median 0.3 s before the simulator’s
+success check ends the episode, and 30% of its failed roll-
+outs register it at some point (BC+Progress: 70%, 0.35 s,
+30%). The calibrated field thus measures demonstration-
+relative progress, which is informative about success but
+does not verify it. Both calibrated fields have higher out-
+come AUROCs than No Lp on their respective rollouts;
+these metrics are invariant to positive affine rescaling.

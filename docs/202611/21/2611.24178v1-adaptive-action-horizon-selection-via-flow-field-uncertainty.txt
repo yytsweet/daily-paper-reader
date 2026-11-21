@@ -1,0 +1,919 @@
+Adaptive Action Horizon Selection via Flow-Field Uncertainty
+Idan Ben-Ami1, Arnon Netzer1, Sarah Keren2, Idit Diamant1
+1Arm AI Research (AAIR), Arm Ltd
+2Technion Israel Institute of Technology
+Abstract—Reliable uncertainty estimates are important for
+adaptive execution in vision-language-action (VLA) models. Ex-
+isting approaches such as Adaptive Action Chunking (AAC)
+estimate action entropy from multiple sampled action chunks,
+introducing additional inference cost and capturing both uncer-
+tainty within an action trajectory and diversity across alternative
+strategies. We introduce Divergence-based Uncertainty-aware
+Adaptive Action Chunking (DUAC), a post-hoc method that
+extracts trajectory-conditioned predictive uncertainty from the
+vector field of a pretrained VLA. Building on a closed-form
+flow-posterior covariance formulation, DUAC derives action-level
+uncertainty scores from a single generated chunk using Jacobian–
+vector products, without retraining or multiple endpoint samples.
+DUAC strongly correlates with AAC, while capturing distinct
+information: AAC measures global dispersion across sampled
+chunks, whereas DUAC measures local uncertainty around the
+trajectory selected for execution. Consequently, DUAC is less
+sensitive to diversity among distinct but valid action strate-
+gies. Across LIBERO, LIBERO-Pro, LIBERO-Plus, and Robo-
+Casa, DUAC-based adaptive horizon selection performs favorably
+among the evaluated methods, combining strong task success
+with low uncertainty-estimation latency. These results establish
+the flow vector field as an efficient, trajectory-conditioned source
+of predictive uncertainty for robot decision making.
+I. INTRODUCTION
+Vision-language-action (VLA) models have emerged as a
+general approach to robotic manipulation, mapping visual
+observations, language instructions, and robot state into ex-
+ecutable actions [1]–[6]. Many recent VLAs generate con-
+tinuous action chunks with diffusion or flow-matching ac-
+tion heads [4], [7]–[13]. Starting from noise, these policies
+repeatedly evaluate a learned vector field to transform a
+latent variable into a coherent action trajectory. Despite the
+inherently iterative nature of this computation, the internal flow
+trajectory is usually treated only as a mechanism for producing
+the final action, rather than as a source of information about
+the reliability of that action.
+Reliable estimates of predictive action uncertainty are par-
+ticularly useful when action chunks are executed in closed
+loop [14]–[16]. Longer execution horizons preserve temporal
+consistency and reduce the frequency of policy inference,
+but limit the policy’s responsiveness to new observations.
+Shorter horizons permit frequent replanning, but can produce
+discontinuous or overly reactive behavior. Adaptive Action
+Chunking (AAC) [15] addresses this trade-off by sampling
+multiple candidate action chunks, estimating the entropy of
+the resulting action distribution at each predicted step, and
+shortening the execution horizon when this entropy increases.
+While effective, the quality and stability of its estimate depend
+Idan Ben-Ami1, Arnon Netzer1, Sarah Keren2, Idit Diamant1; 1Arm
+AI Research (AAIR), Arm Ltd; 2Technion Israel Institute of Technology,
+idit.diamant@arm.com
+Fig. 1.
+Uncertainty over task progress for successful and failed LIBERO-
+10 rollouts. Curves show mean ±1 standard deviation. Frame rows show
+representative outcomes.
+on the number of sampled chunks, and obtaining multiple
+complete action trajectories introduces additional inference-
+time computation and memory.
+These limitations motivate using the local geometry of a
+flow-matching policy to estimate predictive action uncertainty
+without sampling multiple terminal action chunks. Xing et
+al. [17] derive a closed-form expression that relates the condi-
+tional posterior covariance of a flow-matching model to the di-
+vergence of its learned vector field. However, the utility of this
+formulation for VLA action generation remains unexplored,
+including whether it can provide uncertainty for individual
+actions within a predicted chunk and support adaptive action
+horizon execution.
+We introduce Divergence-based Uncertainty-aware Adap-
+tive Action Chunking, DUAC , a post-hoc method that extracts
+predictive uncertainty from the vector field of a pretrained
+flow-matching VLA. We adapt the flow-posterior covariance
+formulation to VLA policies and derive an action-wise uncer-
+tainty signal for generated action chunks. At an intermediate
+state of the flow process, DUAC estimates the dispersion of
+terminal actions associated with that local flow state. When
+nearby action trajectories converge toward similar terminal
+actions, the prediction is more certain. When they remain dis-
+persed, the terminal action is less determined. Unlike entropy-
+based uncertainty in AAC [15], which summarizes variability
+across independently sampled action chunks, our score is
+conditioned on the intermediate state of the specific trajectory
+being generated. It therefore provides a local, trajectory-
+specific uncertainty estimate for the action chunk selected
+arXiv:2611.24178v1  [cs.LG]  18 Nov 2026
+
+
+for execution. Figure 1 illustrates this signal, showing higher
+uncertainty during later stages of unsuccessful rollouts.
+We compare DUAC with the sampling-based action entropy
+used by AAC [15] and observe strong correlations in both their
+per-action uncertainty profiles and selected execution horizons.
+Nevertheless, the two methods capture different informa-
+tion: AAC measures global dispersion across sampled action
+chunks, whereas DUAC measures local uncertainty around
+the particular trajectory selected for execution. Consequently,
+DUAC is less sensitive to variability among distinct but valid
+action strategies and avoids treating such diversity as uncer-
+tainty in the selected trajectory. Across LIBERO, LIBERO-
+Plus, LIBERO-Pro, and RoboCasa, DUAC improves per-
+formance while substantially reducing uncertainty-estimation
+latency relative to entropy-based AAC. Our contributions are
+summarized as follows:
+• We introduce Divergence-based Uncertainty-aware Adap-
+tive Action Chunking (DUAC), which adapts the closed-
+form flow-posterior covariance to VLA action generation
+and derives per-action uncertainty scores from one gen-
+erated action chunk using Jacobian–vector products.
+• We provide a sampling-efficient alternative to entropy-
+based AAC that requires one generated action chunk
+and achieves substantially lower uncertainty-estimation
+latency in our implementation.
+• Since DUAC captures local uncertainty around the se-
+lected action trajectory, we show that it is less sensitive
+than AAC’s entropy to variability among distinct but valid
+action strategies, reducing unnecessary replanning.
+• We apply DUAC to adaptive horizon selection, achieving
+improved performance over the evaluated methods.
+II. METHOD
+Our method extracts predictive uncertainty from an action
+chunk generated by a flow-matching policy. We build on
+the recent work of Xing et al. [17], who show that the
+predictive uncertainty of a flow-matching model is encoded in
+the local geometry of its learned velocity field. We adapt this
+formulation to derive per-action uncertainty scores, yielding
+an uncertainty profile over the prediction horizon. We use
+this profile to determine how many actions to execute before
+replanning. Figure 2 summarizes the uncertainty estimation
+and its use for adaptive action execution. The method requires
+no additional training or multiple action samples.
+A. Action-Chunk Divergence-Based Uncertainty
+At robot decision n, the policy predicts an action chunk
+an = [an,1, . . . , an,H] ∈RH×Da,
+(1)
+where H is the prediction horizon and Da is the action
+dimension. Under the standard linear flow-matching path [18],
+an,τ = (1 −τ)ϵn + τan, where ϵn ∼N(0, I) and τ ∈[0, 1].
+Thus, τ
+= 0 corresponds to noise and τ
+= 1 to the
+generated action chunk; additional background is provided in
+Appendix C. The vector field vθ(an,τ, τ, cn) is conditioned
+on the observation, instruction, and robot state cn. After
+vectorizing the chunk in RHDa, we apply the closed-form
+posterior-covariance identity of Xing et al. [17]:
+Cov (an | an,τ, cn) = (1 −τ)2
+τ
+[IHDa + (1 −τ)Jvθ] ,
+(2)
+where IHDa is the identity matrix, and Jvθ = ∂vθ/∂an,τ.
+For the learned vector field, we treat this expression as a
+model-implied covariance estimate. Taking the trace yields the
+following chunk-level uncertainty:
+Uchunk(τ) = (1 −τ)2
+τ
+[HDa + (1 −τ) div vθ] .
+(3)
+where div vθ = Tr(Jvθ).
+B. Per-Action Divergence-Based Uncertainty
+Adaptive horizon selection requires an uncertainty score for
+each future action rather than a single score for the complete
+action chunk. Each predicted action an,i ∈RDa contains Da
+action dimensions. Accordingly, the conditional covariance
+Cov(an | an,τ, cn) can be viewed as consisting of H × H
+blocks, where each block is Σij = Cov (an,i, an,j | an,τ, cn) .
+The diagonal block associated with action i, Σii, contains the
+conditional variances and within-action covariances of the Da
+components of an,i. To connect these covariance blocks to
+the vector field, we similarly partition its Jacobian according
+to action positions:
+Jij = ∂v(i)
+θ
+∂a(j)
+n,τ
+∈RDa×Da,
+(4)
+where v(i)
+θ
+is the vector-field output associated with the i-th
+future action, and a(j)
+n,τ is the intermediate action at position j.
+The block Jij measures how the vector-field output for action
+i changes when the j-th intermediate action is perturbed.
+Applying the closed-form covariance identity to the i-th
+diagonal block gives
+Σii(τ) = (1 −τ)2
+τ
+"
+IDa + (1 −τ) ∂v(i)
+θ
+∂a(i)
+n,τ
+#
+.
+(5)
+We obtain a scalar uncertainty score for action i by taking the
+trace of this block:
+Ui(τ) = Tr [Σii(τ)]
+= (1 −τ)2
+τ
+"
+Da + (1 −τ) Tr
+ 
+∂v(i)
+θ
+∂a(i)
+n,τ
+!#
+.
+(6)
+Thus, Ui(τ) sums the conditional variances of the Da com-
+ponents of action an,i. Given the intermediate chunk an,τ
+and context cn, the posterior p(an | an,τ, cn) represents the
+possible terminal action chunks that remain compatible with
+the current flow state. The block Σii captures the variability
+of the i-th action across these possible chunks, providing the
+per-action predictive uncertainty used to determine how many
+actions can be executed before replanning.
+The trace of the full action-chunk covariance decomposes
+into the traces of its diagonal action blocks. Consequently, the
+
+
+Fig. 2. Method overview of divergence-based uncertainty estimation for flow-based action generation and its use in adaptive execution-horizon selection.
+per-action uncertainty scores recover the chunk-level uncer-
+tainty:
+Uchunk(τ) = Tr[Cov (an | an,τ, cn)] =
+H
+X
+i=1
+Ui(τ).
+(7)
+The resulting sequence [U1(τ), . . . , UH(τ)] provides an un-
+certainty profile over the predicted horizon. Because horizon
+selection requires uncertainty estimates for the actions that are
+close to execution, we use τ = 0.9 in all experiments.
+We estimate each divergence term using Hutchinson’s
+trace estimator [19] with K Rademacher probes. Jacobian-
+vector products are computed through automatic differentia-
+tion, avoiding explicit construction of the full action Jacobian.
+The method can therefore be applied post hoc to a pretrained
+policy without retraining.
+C. Adaptive Execution Horizon
+Following AAC [15], for each prefix length h ∈{1, . . . , H},
+we compute the mean uncertainty U h = 1
+h
+Ph
+i=1 Ui. Then we
+select the point at which the prefix uncertainty increases most
+sharply:
+h∗= max
+
+arg max
+1≤h<H
+ U h+1 −U h
+
+, ξ
+
+,
+(8)
+where ξ is the AAC lower bound that enforces a minimum
+execution horizon. The policy executes the first h∗actions
+and then replans from a new observation.
+D. Relation to sampling-based uncertainty
+DUAC and AAC measure related but distinct uncertainty
+quantities. AAC estimates marginal action entropy from
+the sample covariance of multiple generated action chunks,
+whereas DUAC estimates predictive covariance conditioned
+on an intermediate state of one generated trajectory. Under the
+linear Gaussian flow interpolation, the law of total covariance
+decomposes the marginal action covariance into the expected
+trajectory-conditioned covariance and the variability of the
+conditional means across trajectories. DUAC captures the
+former component and is therefore less sensitive to diversity
+among distinct but valid action strategies. We provide the
+complete derivation in Appendix C.
+Method
+x0.1
+x0.2
+x0.3
+x0.4
+Overall
+Fixed-10
+89.8%
+54.7%
+34.0%
+10.2%
+47.2%
+AutoHorizon
+89.4%
+54.4%
+34.9%
+10.4%
+47.3%
+AAC
+90.1%
+57.8%
+36.3%
+10.6%
+48.7%
+DUAC (ours)
+90.3%
+57.8%
+37.1%
+11.7%
+49.2%
+TABLE I
+LIBERO-PRO RESULTS: SUCCESS RATE (%) UNDER INCREASING
+X-POSITION PERTURBATIONS.
+III. EXPERIMENTS
+Our experiments address the following questions: (i) Can
+DUAC achieve competitive or improved task success while
+reducing the latency and computational cost of adaptive ac-
+tion execution? (ii) What information does DUAC which is
+local, trajectory-specific divergence capture compared with the
+global, distribution-level uncertainty measured by AAC [15],
+particularly under distribution shift?
+A. Experimental Setup
+We evaluate publicly available π0.5 policies [11] on stan-
+dard LIBERO, LIBERO-Pro, LIBERO-Plus, and RoboCasa
+Kitchen-24. We compare DUAC with fixed-horizon execu-
+tion, AutoHorizon [16], and entropy-based AAC [15]. All
+uncertainty estimates are computed from pretrained policies
+at inference time, without retraining. Appendix A provides
+complete benchmark and evaluation details.
+B. Performance comparison
+We investigate whether divergence-based uncertainty pro-
+vides a signal for adaptive action execution. Following
+AAC [15], the execution horizon is selected from the per-step
+uncertainty profile. The action prefix is executed before the
+policy replans from a new observation. Because this decision
+applies to the specific actions about to be executed, we
+evaluate the profile at a late flow time, when the trajectory is
+largely formed but retains nonzero residual uncertainty. We use
+τ = 0.9, which shows the strongest agreement with entropy-
+based uncertainty in supplementary Figure 6.
+
+
+Control Performance
+Action chunk generation
+Method
+Success Sim. steps Decisions Latency (ms) Rel. cost
+Fixed-10
+47.20%
+230.20
+22.24
+68.26
+1.0×
+AAC
+48.70%
+229.91
+30.60
+582.56
+8.5×
+DUAC (ours) 49.20%
+228.86
+27.75
+204.09
+3.0×
+TABLE II
+PERFORMANCE AND COMPUTATIONAL EFFICIENCY COMPARISON ON
+LIBERO-PRO.
+Method
+Reloc. Contact
+Rot.
+Button Overall Mean H Dec./ep.
+Fixed-25
+58.80% 65.33% 26.80% 43.00% 51.79%
+25.00
+18.98
+Fixed-50
+54.90% 65.83% 30.80% 32.33% 49.79%
+50.00
+9.67
+AutoHorizon 51.60% 68.83% 27.80% 37.67% 49.21%
+34.96
+13.84
+Entropy AAC 51.20% 59.83% 25.80% 43.67% 47.12%
+26.80
+18.43
+DUAC (ours) 57.20% 66.67% 31.00% 43.00% 52.33%
+29.58
+16.17
+TABLE III
+ROBOCASA KITCHEN-24 RESULTS: SUCCESS RATE (%), MEAN
+EXECUTION HORIZON (MEAN H), AND MEAN POLICY DECISIONS PER
+EPISODE (DEC./EP.).
+Standard LIBERO. We evaluate LIBERO, where fixed-
+horizon performance is already near saturation. Supplementary
+Table VI shows that DUAC achieves similar (slightly higher)
+average success rate and the best results on LIBERO-10.
+Performance under distribution shift. Table I shows that
+DUAC achieves the highest overall success under LIBERO-Pro
+perturbations. Its advantage is small under mild shifts but be-
+comes clearer under moderate and strong perturbations, where
+both uncertainty-based methods outperform fixed-horizon ex-
+ecution. This suggests that adaptive replanning becomes most
+useful once the shift meaningfully affects action prediction.
+Across LIBERO-Plus categories (Table VII), DUAC achieves
+the highest average, with its clearest gain under camera
+perturbations.
+RoboCasa Kitchen-24. RoboCasa exposes task-dependent
+horizon preferences (Table III): Fixed-25 performs well on
+precision-sensitive relocation and button tasks, whereas Fixed-
+50 improves rotation but lowers overall success. DUAC ac-
+commodates these different control requirements, achieving
+the highest overall and rotation success rates while remaining
+competitive across the other task categories. Moreover, DUAC
+requires ∼15% fewer policy decisions per episode than Fixed-
+25 while achieving a higher overall success rate.
+Estimator efficiency. AAC [15] approach requires multiple
+candidate action chunks, whereas DUAC estimates uncertainty
+along a single generated trajectory. Table II summarizes both
+computational and control-level efficiency on LIBERO-Pro. In
+our JAX/OpenPI implementation on an NVIDIA A100 with
+10 denoising steps, AAC uses 20 candidate action chunks,
+while DUAC uses 40 Hutchinson probes, reducing uncertainty-
+estimation latency by ∼2.9×. At the control level, DUAC
+achieves the highest success rate and lowest mean simulator
+steps with fewer policy decisions than AAC approach.
+C. Uncertainty information captured by DUAC
+Uncertainty under multiple valid strategies. AAC esti-
+mates marginal entropy across sampled chunks and therefore
+Fig. 3.
+Multiple valid strategies increase marginal entropy more strongly
+than trajectory-conditioned divergence. The illustrations contrast alternative
+sampled trajectories with uncertainty around one selected trajectory; the right
+panel reports normalized uncertainty over the first three chunks.
+Fig. 4. Mean policy decisions over task progress.
+responds to variation among valid action strategies, whereas
+DUAC estimates uncertainty around the trajectory selected
+by the flow. In the “put both moka pots on the stove” task,
+samples may choose different pots or approaches, increasing
+entropy even when each trajectory is internally concentrated.
+As shown in Figure 3, AAC entropy increases substantially
+relative to other LIBERO-10 tasks, whereas DUAC changes
+only modestly. This suggests that AAC captures both local dis-
+persion and strategy diversity, while DUAC more selectively
+characterizes the chosen trajectory.
+Effect on adaptive execution. On the two-moka-pot task,
+DUAC replans less frequently while matching AAC’s 75%
+success rate. It increases the mean horizon from 7.53 to 8.83
+actions and reduces policy decisions by 14.7%, suggesting that
+trajectory-conditioned uncertainty avoids unnecessary replan-
+ning caused by valid strategy diversity. Figure 4 shows this
+trend over task progress; Supplementary Table IV provides
+the aggregate results.
+IV. DISCUSSION AND CONCLUSION
+Our results show that the vector field of a pretrained flow-
+matching VLA provides a useful trajectory-conditioned uncer-
+tainty signal. Unlike AAC method, which measures dispersion
+across multiple sampled action chunks, DUAC estimates the
+uncertainty remaining around the particular trajectory selected
+for execution. The two measures exhibit strong agreement at
+late flow times, but differ when multiple valid strategies exist:
+marginal entropy increases with diversity across strategies,
+whereas DUAC more selectively characterizes the chosen
+trajectory. When used for adaptive horizon selection, DUAC
+achieves the highest observed aggregate success rates in our
+evaluation and reduces uncertainty-estimation latency relative
+to Entropy AAC.
+
+
+REFERENCES
+[1] A. Brohan, N. Brown, J. Carbajal et al., “RT-1: Robotics transformer
+for real-world control at scale,” in Robotics: Science and Systems XIX,
+2023.
+[2] B. Zitkovich, T. Yu, S. Xu et al., “RT-2: Vision-language-action models
+transfer web knowledge to robotic control,” in Proceedings of the 7th
+Conference on Robot Learning, ser. Proceedings of Machine Learning
+Research, vol. 229.
+PMLR, 2023, pp. 2165–2183.
+[3] M. J. Kim, K. Pertsch, S. Karamcheti et al., “OpenVLA: An open-source
+vision-language-action model,” in Proceedings of the 8th Conference on
+Robot Learning, ser. Proceedings of Machine Learning Research, vol.
+270.
+PMLR, 2025, pp. 2679–2713.
+[4] D. Ghosh, H. R. Walke, K. Pertsch et al., “Octo: An open-source
+generalist robot policy,” in Robotics: Science and Systems, 2024.
+[5] M. J. Kim, C. Finn, and P. Liang, “Fine-tuning vision-language-action
+models: Optimizing speed and success,” in Robotics: Science and
+Systems, 2025.
+[6] Q. Bu, Y. Yang, J. Cai et al., “UniVLA: Learning to act anywhere with
+task-centric latent actions,” in Robotics: Science and Systems, 2025.
+[7] Q. Li, Y. Liang, Z. Wang et al., “CogACT: A foundational vision-
+language-action model for synergizing cognition and action in robotic
+manipulation,” arXiv preprint arXiv:2411.19650, 2024.
+[8] S. Liu, L. Wu, B. Li et al., “RDT-1B: A diffusion foundation model
+for bimanual manipulation,” in International Conference on Learning
+Representations, 2025.
+[9] Z. Hou, T. Zhang, Y. Xiong et al., “Dita: Scaling diffusion transformer
+for generalist vision-language-action policy,” in Proceedings of the
+IEEE/CVF International Conference on Computer Vision, 2025, pp.
+7686–7697.
+[10] K. Black, N. Brown, D. Driess et al., “π0: A vision-language-action
+flow model for general robot control,” arXiv preprint arXiv:2410.24164,
+2024.
+[11] Physical Intelligence, K. Black, N. Brown et al., “π0.5: A vision-
+language-action model with open-world generalization,” arXiv preprint
+arXiv:2504.16054, 2025.
+[12] NVIDIA, J. Bjorck, F. Casta˜neda et al., “GR00T N1: An open
+foundation model for generalist humanoid robots,” arXiv preprint
+arXiv:2503.14734, 2025.
+[13] M. Shukor, D. Aubakirova, F. Capuano et al., “SmolVLA: A vision-
+language-action model for affordable and efficient robotics,” arXiv
+preprint arXiv:2506.01844, 2025.
+[14] L. Chen, Z. Lyu, and W. J. Beksi, “Reconvla: An uncertainty-guided
+and failure-aware vision-language-action framework for robotic control,”
+arXiv preprint arXiv:2604.16677, 2026.
+[15] Y. Liang, X. Wang, K. Wang et al., “Adaptive action chunking at
+inference-time for vision-language-action models,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2026.
+[16] H. Wang, G. Zhang, Y. Yan et al., “Vla knows its limits: Adaptive
+execution horizons for robot policies,” arXiv preprint arXiv:2602.21445,
+2026.
+[17] J. Xing, S. Wang, and J. Wang, “Divergence is uncertainty: A
+closed-form posterior covariance for flow matching,” arXiv preprint
+arXiv:2605.00941, 2026.
+[18] Y. Lipman, R. T. Q. Chen, H. Ben-Hamu et al., “Flow matching
+for generative modeling,” in International Conference on Learning
+Representations, 2023.
+[19] M. F. Hutchinson, “A stochastic estimator of the trace of the influence
+matrix for laplacian smoothing splines,” Communications in Statistics—
+Simulation and Computation, vol. 19, no. 2, pp. 433–450, 1990.
+[20] B. Liu, Y. Zhu, C. Gao et al., “LIBERO: Benchmarking knowledge
+transfer for lifelong robot learning,” in Advances in Neural Information
+Processing Systems, Datasets and Benchmarks Track, 2023.
+[21] X. Zhou, Y. Xu, G. Tie et al., “LIBERO-PRO: Towards robust and
+fair evaluation of vision-language-action models beyond memorization,”
+arXiv preprint arXiv:2510.03827, 2025.
+[22] S. Fei, S. Wang, J. Shi et al., “LIBERO-Plus: A progressive robustness
+benchmark for visual-language-action models,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2026, pp. 38 574–38 583.
+[23] S. Nasiriany, A. Maddukuri, L. Zhang et al., “RoboCasa: Large-scale
+simulation of everyday tasks for generalist robots,” in Robotics: Science
+and Systems, 2024.
+[24] Physical Intelligence, “OpenPI LIBERO Evaluation and pi05 libero
+Checkpoint,”
+OpenPI
+repository,
+2026,
+checkpoint:
+gs://openpi-
+assets/checkpoints/pi05 libero. [Online]. Available: https://github.com/
+Physical-Intelligence/openpi/blob/main/examples/libero/README.md
+[25] LeRobot Team, “pi05 robocasa model checkpoint,” Hugging Face
+model repository, 2026. [Online]. Available: https://huggingface.co/
+lerobot/pi05 robocasa
+[26] R. R¨omer, M. Seeliger, S. Liu et al., “Uncertainty quantification for flow-
+based vision-language-action models,” arXiv preprint arXiv:2606.18043,
+2026.
+[27] D. Huang, A. Gu, C. Zhang et al., “VLAConf: Calibrated task-
+success confidence for vision-language-action models,” arXiv preprint
+arXiv:2605.29605, 2026.
+[28] T. P. Zollo and R. Zemel, “Confidence calibration in vision-language-
+action models,” arXiv preprint arXiv:2507.17383, 2025.
+
+
+APPENDIX
+A. Experimental Setup
+Benchmarks. We evaluate on four simulation settings.
+Standard LIBERO [20] contains the Spatial, Object, Goal, and
+LIBERO-10 suites and serves as our in-distribution bench-
+mark. LIBERO-Pro [21] introduces controlled position per-
+turbations of increasing severity. LIBERO-Plus
+[22] covers
+camera viewpoint, robot initialization, sensor noise, language,
+lighting, background, and object-layout perturbations. Robo-
+Casa Kitchen-24 [23] contains 24 manipulation tasks in di-
+verse simulated kitchens and uses substantially longer action
+horizons than LIBERO.
+Evaluation
+Protocol.
+We
+evaluate
+publicly
+available
+π0.5 policies [11] without modifying their architecture or
+training. We use Physical Intelligence’s official OpenPI
+pi05_libero checkpoint [24] for all LIBERO evaluations
+and the public RoboCasa checkpoint released by LeRobot [25]
+for Kitchen-24. We conduct 50 rollouts per task on LIBERO
+and 100 rollouts per task on RoboCasa. We compare DUAC
+with three baselines: fixed-horizon execution, AutoHorizon
+[16], which adapts the horizon using action similarity, and
+AAC [15], which uses the entropy of 20 independently sam-
+pled action chunks. Unless stated otherwise, DUAC estimates
+the vector-field Jacobian trace using 40 Hutchinson probes. All
+uncertainty estimates are computed at inference time without
+retraining or auxiliary confidence modules.
+B. Related Work
+Flow-Based Action Generation in VLAs. Recent VLAs
+[10]–[12] use conditional generative action heads to jointly
+synthesize continuous action chunks rather than predicting
+each action independently. π0 [10] and π0.5
+[11] couples
+a pretrained vision-language backbone with a flow-matching
+action expert that transforms noise into a multi-step motor
+trajectory conditioned on visual observations, language in-
+structions, and robot state. Similarly, GR00T
+[12] uses a
+diffusion-transformer action module, conditioned on a vision-
+language representation, to generate chunked controls for
+heterogeneous robot embodiments. By modeling the future
+actions jointly, these generative heads capture cross-timestep
+dependencies and multimodal action distributions, yielding
+temporally coherent trajectories suitable for dexterous control.
+Uncertainty-Guided VLA. Recent work estimates VLA
+uncertainty to anticipate failures, detect distribution shift,
+guide data acquisition, and support runtime control
+[14]–
+[16], [26]–[28]. R¨omer et al. [26] quantify epistemic un-
+certainty through velocity-field disagreement across an en-
+semble of flow-matching policies, using the resulting signal
+for deployment-time failure detection and uncertainty-guided
+active fine-tuning. ReconVLA [14] applies anomaly detec-
+tion in the robot state space to identify unsafe or out-of-
+distribution states before failure. Beyond failure awareness,
+uncertainty has also been used to determine how long a
+predicted action chunk should be executed before replanning.
+AutoHorizon [16] avoids probabilistic uncertainty estimation
+and instead uses action self-attention as a proxy for the policy’s
+predictive limit. AAC [15] estimates per-step action entropy
+from multiple sampled chunks and selects the execution hori-
+zon at the sharpest increase in uncertainty. Existing approaches
+provide actionable reliability signals but often require repeated
+sampling, policy ensembles, or auxiliary learned components.
+Our method instead derives uncertainty directly from the local
+geometry of the learned vector field along a single generated
+trajectory, requiring neither additional training nor multiple
+models or action samples.
+C. Background and Derivations
+Flow Matching. Flow matching learns how to transform a
+simple noise distribution into a data distribution. We use the
+standard linear interpolation [18]
+xτ = (1 −τ)x0 + τx1,
+(9)
+where x0 ∼N(0, I) is Gaussian noise, x1 ∼pdata(· | c) is
+a data sample, and τ ∈[0, 1] denotes flow time. The variable
+c contains the conditioning information, such as the robot’s
+observations and task instruction. Thus, xτ moves from noise
+at τ = 0 to the data sample at τ = 1.
+A flow-matching model learns a velocity field vθ(xτ, τ, c)
+that predicts the direction from x0 to x1. At inference time,
+the model begins with a noise sample and follows the learned
+velocity field from τ = 0 to τ = 1. In an action policy, the
+resulting sample x1 represents a predicted action or action
+sequence.
+Uncertainty from Flow-Field Geometry. Xing et al. [17]
+show that the predictive uncertainty of a flow-matching model
+is encoded in the local geometry of its learned velocity field.
+Under the Gaussian interpolation assumptions, the conditional
+covariance of the terminal sample is
+Cov(x1 | xτ, c) = (1 −τ)2
+τ
+[I + (1 −τ)Jvθ] ,
+(10)
+where Jvθ is the Jacobian of the vector field with respect to
+xτ. With a learned vector field, we treat this expression as
+a model-implied estimate of the terminal-sample covariance.
+Taking its trace gives the scalar predictive uncertainty:
+U(xτ, τ) = (1 −τ)2
+τ
+[d + (1 −τ) div vθ] ,
+(11)
+where d is the dimensionality of the generated sample and
+div vθ = Tr(Jvθ). This score measures local flow contrac-
+tion or expansion, with stronger contraction indicating lower
+predictive uncertainty.
+Divergence and Sampled-Based Uncertainty Relation-
+ship. We relate the proposed local covariance to the covariance
+underlying AAC’s continuous-action entropy estimator. The
+divergence-based and sampled-based [15] estimators measure
+related but distinct notions of uncertainty. The divergence
+estimator measures uncertainty conditioned on a particular
+intermediate state aτ, while sampled-based estimator measures
+
+
+the total uncertainty of the endpoint action. For the linear
+interpolant:
+aτ = τa + (1 −τ)ε,
+ε ∼N(0, I),
+(12)
+the likelihood of aτ given an endpoint action a is
+p(aτ | a, c) = N
+ aτ; τa, (1 −τ)2I
+
+.
+(13)
+Hence, by Bayes’ rule,
+p(a | aτ, c) =
+N
+ aτ; τa, (1 −τ)2I
+
+p(a | c)
+R
+N(a′τ; τa′, (1 −τ)2I) p(a′ | c) da′ .
+(14)
+Thus, the local posterior is the global action distribution p(a |
+c) reweighted according to compatibility with the current noisy
+state aτ. Marginalizing over intermediate states recovers the
+global distribution,
+p(a | c) =
+Z
+p(a | aτ, c) p(aτ | c) daτ.
+(15)
+Therefore, applying the law of total covariance gives
+Σ(c) = Eaτ |c [Σdiv(aτ, τ, c)] + Covaτ |c (µτ(aτ, c)) ,
+where
+µτ(aτ, c) = E[a | aτ, c],
+Σdiv(aτ, τ, c) = Cov(a | aτ, c).
+(16)
+Equation (16) establishes a relationship at the covariance level,
+not a direct decomposition of AAC entropy. The equation
+shows that DUAC estimates the trajectory-conditioned covari-
+ance component that contributes to the marginal covariance
+underlying AAC’s continuous action entropy.
+The first term captures within-state uncertainty, i.e., the
+ambiguity among actions remaining for a fixed aτ, while
+the second captures between-state uncertainty, i.e., variation
+of the posterior mean across noisy trajectories. Sampled-
+based (distribution-level) uncertainty therefore summarizes the
+overall diversity of possible actions, whereas divergence-based
+(local) uncertainty isolates the ambiguity associated with the
+particular trajectory being generated. This local characteri-
+zation is particularly useful because trajectories under the
+same context c can exhibit different levels of uncertainty.
+Rather than assigning a single uncertainty value to the entire
+conditional action distribution, Σdiv allows uncertainty to be
+evaluated along individual trajectories, revealing where the
+model encounters locally ambiguous decisions.
+D. Analysis and Ablations
+Sensitivity to Distribution-Shift Severity. We evaluate
+all 10 LIBERO-Object tasks under LIBERO-Pro position
+perturbations at multiple flow times. Figure 5 shows that
+uncertainty increases monotonically from the clean condition
+through perturbation level x0.4 at every evaluated flow time.
+Sensitivity is greater at earlier, noisier flow states, with the
+strongest separation at the earliest evaluated time, τ = 0.5.
+At this stage, the latent contains less information about the
+final action, so the vector field depends more strongly on
+the observation and instruction; mismatches in the condi-
+tioning are therefore more visible. Concurrently, success rate
+decreases from 99.6% in the clean condition to 54.7%, 34.0%,
+and 10.2% under progressively stronger perturbations. Thus,
+divergence uncertainty tracks the severity of this controlled
+position shift together with the associated degradation in policy
+performance.
+Fig. 5. Divergence uncertainty under increasing LIBERO-Pro position pertur-
+bations. Curves show mean uncertainty at different flow times, error bars show
+95% confidence intervals, and success rates are shown below the perturbation
+levels.
+Agreement with Action Entropy. We compare divergence
+uncertainty with the sampling-based action entropy used by
+AAC [15]. Figure 6 reports the Pearson correlation between
+chunk-level scores over task progress and between per-action-
+step uncertainty profiles. At τ = 0.9, the mean correlations
+reach 0.88 and 0.80, respectively. At this later flow time, the
+latent is close to the generated action trajectory, and the per-
+step uncertainty profile is smoother and less dominated by
+the initial latent noise. Divergence therefore broadly recovers
+the uncertainty structure captured by action entropy once the
+trajectory has largely formed.
+Fig. 6.
+Pearson correlation between entropy and divergence across task
+progress and per-action-step uncertainty profiles. Boxes show the mean ±1
+standard deviation.
+Adaptive Execution under Multiple Valid Strategies.
+Table IV compares AAC and DUAC on the two-moka-pot
+task, where multiple valid execution orders are available.
+
+
+Method
+SR
+Decisions
+Mean H
+Entropy AAC
+75%
+58.01
+7.53
+DUAC
+75%
+49.48
+8.83
+TABLE IV
+EXECUTION STATISTICS ON THE TWO-MOKA-POT TASK OVER 100
+ROLLOUTS.
+Table V compares success and the mean number of policy
+decisions made by AAC and DUAC on matched single-
+and double-door RoboCasa tasks. DUAC improves success
+on all four tasks while reducing the number of decisions
+by 1.48–5.66 per episode. The largest differences occur on
+OpenDoubleDoor, where DUAC improves success by 26
+percentage points and uses 5.66 fewer decisions. This result
+is consistent with DUAC avoiding some of the additional
+replanning induced by variation among valid strategies.
+Task
+SR–AAC SR–DUAC Decisions–AAC Decisions–DUAC Decisions vs. AAC
+OpenSingleDoor
+50%
+52%
+16.13
+14.65
+−1.48
+OpenDoubleDoor
+36%
+62%
+30.54
+24.88
+−5.66
+CloseSingleDoor
+73%
+83%
+13.08
+11.43
+−1.65
+CloseDoubleDoor
+35%
+37%
+19.84
+17.02
+−2.82
+TABLE V
+SUCCESS RATES AND MEAN POLICY DECISIONS PER EPISODE ON
+MATCHED ROBOCASA DOOR TASKS. DECISION DIFFERENCES ARE
+COMPUTED AS DUAC MINUS AAC.
+E. Additional Control Results
+Standard LIBERO. Table VI reports suite-level success
+rates on standard LIBERO. Performance is near saturation for
+all methods, while DUAC obtains the highest average and the
+strongest result on LIBERO-10.
+Method
+Spatial
+Object
+Goal
+LIBERO-10
+Average
+Fixed-10
+99.4%
+99.6%
+97.8%
+92.8%
+97.4%
+AutoHorizon
+98.1%
+98.3%
+97.8%
+93.7%
+96.98%
+AAC
+98.8%
+99.8%
+98.2%
+93.0%
+97.5%
+DUAC (ours)
+99.4%
+99.2%
+98.4%
+94.8%
+98.0%
+TABLE VI
+SUCCESS RATES (%) WITH A π0.5 BACKBONE ON LIBERO.
+LIBERO-Plus. Table VII compares adaptive control across
+perturbation categories. DUAC achieves the highest average
+success and performs best in most categories, with its largest
+gain under camera shifts.
+Perturbation
+Fixed-10 AutoHorizon
+AAC
+DUAC (ours)
+Background
+97.00%
+96.75%
+96.45%
+96.50%
+Camera
+60.70%
+60.75%
+63.30%
+63.85%
+Language
+85.20%
+84.65%
+84.95%
+85.35%
+Light
+95.50%
+95.70%
+95.70%
+96.15%
+Objects layout 85.20%
+85.15%
+85.70%
+85.75%
+Robot init.
+83.15%
+82.85%
+80.90%
+81.70%
+Sensor noise
+85.85%
+85.55%
+85.15%
+86.20%
+Average
+84.66%
+84.49%
+84.59%
+85.07%
+TABLE VII
+SUCCESS RATES (%) WITH A π0.5 BACKBONE ACROSS LIBERO-PLUS
+PERTURBATION CATEGORIES.

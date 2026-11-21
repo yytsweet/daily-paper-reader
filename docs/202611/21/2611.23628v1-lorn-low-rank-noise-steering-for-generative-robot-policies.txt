@@ -1,0 +1,3516 @@
+LoRN: Low-Rank Noise Steering for
+Generative Robot Policies
+Wei Liu1*, Abrar Anwar1*, Huihua Zhao1, Soha Pouya1 and Yan Chang1
+1NVIDIA, *Equal contribution
+Noise steering improves pretrained generative robot policies by learning to select their initial noise
+without updating model weights. We find that actions in the evaluated world-action models are
+more sensitive to video noise than action noise, making video noise an expressive input for steering.
+However, the noise-steering methods we evaluate, in their published forms, struggle to scale to the
+high-dimensional noise inputs of large policy classes such as world-action models. We introduce
+Low-Rank Noise Steering (LoRN), a reinforcement learning method that scales noise steering to
+world-action models. A small steering actor selects a direction through a fixed low-rank random
+projection, while our norm-controlled construction keeps the resulting noise near the typical scale of a
+Gaussian sample. This separates the actor’s control dimension from the full noise dimension, enabling
+steering of both video and action inputs. Across three world-action models and ten model–task pairs,
+video steering improves average success by 26.2 percentage points over the base policy, compared
+with 7.1 points for DSRL action steering. For smaller action policies, the same construction achieves
+comparable final success while generally improving early-training success. Steering actors trained
+in simulation also transfer to three physical bimanual manipulation tasks across two base policies,
+without additional real-world training.
+Project page: https://nvidia-isaac.github.io/isaac-rlpt/lorn/
+Steer noise in a low-rank subspace
+o
+LoRN Steering Actor
+u
+LoRN enables steering high-dimensional 
+action and video noise
+LoRN outperforms existing 
+noise steering methods
+frozen generative 
+robot policy
+flow matching denoising
+P
+latent C × F × H × W
+video noise
+and / or
+Base policy
+77
+64
+45 50
+40
+36
+Cosmos3- DreamZero-
+Edge
+14B
+DSRL (action)
+Action policies
+94 93
+46
+43
+26
+16
+LoRN
+99
+98
+57
+Diffusion
+Policy
+Mean success 
+(%)
+World-action models
+horizon × action dim
+action noise
+action chunk
+π0
+π0.5
+Figure 1:
+LoRN enables low-rank noise steering of large generative robot policies. Existing
+noise steering methods improve frozen policies by steering the initial noise used to generate an action chunk.
+However, extending noise steering to the much higher-dimensional outputs of vision-language-action models
+and world-action models is challenging. Left: LoRN learns a small set of coefficients that selects a noise
+direction within a fixed low-rank subspace, keeping the actor’s output dimension small regardless of the
+full noise dimension. Middle: This formulation allows LoRN to steer either action noise or video noise in
+world-action models. We find that steering the video noise is surprisingly expressive for denoising actions, thus
+LoRN enables a new way to steer a world-action model’s actions. Right: Mean final success per policy family,
+averaged over its tasks, for the base policy, DSRL action-noise steering, and LoRN. Video-noise steering
+produces large gains on the evaluated world-action models; on action policies, LoRN achieves comparable
+final success to DSRL while generally improving early-training success (Table 11). The DSRL bars use the
+same variants as Figure 6, with its full-dimensional form on Cosmos3-Edge.
+© 2026 NVIDIA. All rights reserved.
+1
+arXiv:2611.23628v1  [cs.RO]  17 Nov 2026
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+1. Introduction
+Large robot foundation models, such as vision-
+language-action models (VLAs) and world-action
+models (WAMs), can perform a wide range of be-
+haviors. For these models to reliably succeed on a
+particular task, they must learn to improve via interac-
+tion with their environment. Reinforcement learning
+(RL) offers a way to improve their task performance
+through interaction, but updating large policies can
+be computationally expensive.
+Noise steering has
+emerged as an approach to guide the denoising process
+of diffusion and flow-matching policies by replacing
+the initial noise samples. However, these methods
+struggle to scale to high-dimensional noise inputs that
+are common in large policy classes such as VLAs and
+WAMs. This work develops a noise steering method
+that addresses this challenge, focusing primarily on
+WAMs.
+World-action models couple visual dynamics pre-
+diction with action generation. Their sampling inputs
+include initial source distribution noise associated
+with both video and actions, and changing the video
+noise can also change the actions the model produces.
+Existing action-noise steering methods do not exploit
+this input, and in the implementations and settings we
+evaluate they give no consistent improvement when
+applied to the substantially larger video-noise space.
+In this work, we find that WAMs’ decoded actions
+are more sensitive to video noise than action noise,
+implying video noise may serve as a strong steering
+modality.
+We introduce Low-Rank Noise Steering (LoRN),
+a method to efficiently train noise steering policies
+for world-action models. Recent work has found that
+selecting the initial noise samples of diffusion or flow
+matching heads can effectively steer robot policies
+in a sample efficient manner without requiring any
+updates to the full model [26]. We find that extending
+noise steering to large robot foundation models often
+fails, primarily because their noise inputs are high-
+dimensional and their sensitivity to it differs sharply
+between the video and action inputs.
+LoRN overcomes these challenges by steering a low-
+rank projection of the noise distribution. A steering
+actor outputs a low-dimensional vector that a fixed
+random projection lifts to the full noise dimension,
+which is then rescaled to resemble a Gaussian sample’s
+norm. The frozen policy denoises this noise, and the
+actor is trained with reinforcement learning. This
+formulation scales to high-dimensional action spaces
+and, most surprisingly, enables the steerability of the
+video noise to improve denoised actions.
+Two design choices underlie our approach. First,
+the actor controls only a small, low-rank subspace of
+the noise regardless of the input dimension. We show
+that such a low-rank subspace contains directions
+that improve on the base policy with high probability.
+Second, mixing the actor’s direction with a fresh
+Gaussian sample preserves the expected squared norm
+of the noise, so the steered noise stays near the typical
+norm that diffusion and flow-matching policies are
+trained to denoise. Because neither choice depends
+on the structure of the noise input, LoRN can be
+applied to either the video or the action noise of a
+WAM. This flexibility matters in practice: we find
+that a WAM’s actions are far more sensitive to one
+noise input than the other, and a probe that needs
+no reward identifies that input before training. On
+the three models we evaluate, it is the video noise,
+which existing methods do not steer.
+We evaluate LoRN on three world-action models,
+on action-noise steering with 𝜋0, 𝜋0.5, and Diffusion
+Policy, and on a physical bimanual robot station. In
+aggregate across three WAMs and ten model–task
+pairs, DSRL on the action noise improves the base
+policies by 7.1 percentage points, while LoRN steers
+the more expressive video noise and improves them
+by 26.2 percentage points. We also evaluate LoRN on
+twelve action-policy simulation tasks, where it gen-
+erally achieves higher early-training success against
+DSRL [26] and LP-DS [24]. Finally, we demonstrate
+that LoRN trained in simulation transfers to three
+physical bimanual manipulation tasks on two base
+policies, the released GR00T N1.7 and a 𝜋0.5 fine-
+tuned in simulation, without additional training on
+hardware.
+Our contributions are fourfold:
+1. We introduce LoRN, low-rank noise steering for
+robot foundation models: a fixed random sub-
+space of the noise, mixed with a fresh Gaussian
+sample, independent of the actor’s output, so that
+the expected squared noise norm is preserved.
+2. We identify noise-norm preservation as a key
+requirement for reliable steering, and measure the
+band of norms that each frozen policy tolerates.
+3. We prove that a random subspace of rank 𝑟misses
+the high-advantage noise of a state with probabil-
+ity at most (1 −𝑝)𝑟, where 𝑝is that noise’s share
+of the sphere, and that a policy which selects an
+improving direction in that subspace whenever
+one exists improves on the base policy.
+4. We provide a practical recipe for steering world-
+action models, with a reward-free probe that
+finds which noise input to steer, and evaluate
+it on three world-action models, twelve action-
+policy tasks, and a bimanual robot station with
+two base policies.
+2
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+2. Related Work
+Reinforcement learning for generative robot
+policies.
+Diffusion and flow-matching policies [3, 1,
+11] generate action chunks by iteratively denoising a
+Gaussian sample. The same principle underlies gen-
+eralist models [19] and world-action models, which
+jointly denoise future video and actions [20, 29]. These
+policies are commonly improved by fine-tuning their
+weights with policy gradients [22, 31] or by learning
+residual corrections to their actions [30]. For models
+with billions of parameters, however, online weight
+updates are computationally expensive and risk erod-
+ing pretrained capabilities. In contrast, LoRN keeps
+the policy frozen and adapts only its initial noise.
+Steering frozen generative policies.
+DSRL [26]
+showed that a frozen diffusion or flow policy can be
+adapted by training an RL agent in its noise space.
+Concurrent work [13] likewise trains a Gaussian ac-
+tor over the action noise of a frozen flow-matching
+VLA. Subsequent work regularizes the learned noise
+with a budget on its deviation from a Gaussian sam-
+ple [24], or restricts the actor to the noise directions
+to which the decoder is most sensitive [17]. Golden-
+ticket search [21] instead finds a single fixed noise
+that improves a policy across states. Latent policy
+steering [8] fixes the norm of the steered noise at its
+typical value and trains the actor offline with gradients
+through a one-step policy. These methods were de-
+veloped for policies with low-dimensional noise. They
+either do not explicitly control the norm of the steered
+noise [26, 17, 13], control it only on average [24], or
+require a sensitivity probe whose cost grows linearly
+with the noise dimension [17]. Fixing the norm ex-
+actly [8] still leaves the full noise dimension as the
+search space and requires a policy that is differen-
+tiable in one step. In contrast, LoRN steers a random
+low-rank slice that requires no probing or gradients
+through the policy and preserves the expected squared
+norm of the noise by construction, which allows it to
+scale to the video noise of world-action models.
+Noise
+geometry
+and
+low-rank
+adaptation.
+High-dimensional Gaussian noise concentrates near
+a fixed norm. Image generative models exploit this
+property by interpolating along the corresponding
+sphere [27, 25] and regularizing the norm during noise
+optimization [4, 23], and their outputs degrade when
+sampling drifts from it [18]. Separately, LoRA [7] and
+studies of intrinsic dimension [10] show that large
+networks can be adapted within low-rank or ran-
+dom subspaces of their parameters. Outside robotics,
+active-subspace noise steering [14] searches the initial
+noise of a frozen flow model along a few objective-
+sensitive directions estimated from objective values
+alone. LoRN brings both ideas to policy adaptation:
+it applies a random low-rank subspace to the input of
+a frozen model rather than its weights, and keeps the
+result concentrated near the typical Gaussian norm.
+3. Preliminaries and Problem State-
+ment
+We consider adapting a pretrained robot policy to a
+target task through online interaction. Let 𝐹(𝑜, 𝑧)
+denote a frozen diffusion or flow-matching policy that
+maps an observation 𝑜and an initial noise 𝑧∈R𝑁
+to an action chunk 𝑎. Typically, during training of a
+policy 𝐹, 𝑧is always drawn from the Gaussian source
+distribution, 𝑧∼𝒩(0, 𝐼𝑁).
+We model the target task as a Markov decision pro-
+cess with observations 𝑜∈𝒪, action chunks 𝑎∈𝒜,
+transition dynamics 𝑃, reward function 𝑟, and dis-
+count factor 𝛾. DSRL noise steering [26] replaces
+the input Gaussian sample 𝑧with the output of a
+learned actor 𝜋𝜃(𝑧| 𝑜) and executes 𝑎= 𝐹(𝑜, 𝑧).
+Because 𝐹is fixed, it can be absorbed into the envi-
+ronment, which produces an MDP whose action space
+is the noise space R𝑁. The objective is to find an
+actor that maximizes the expected discounted return
+𝐽(𝜃) = E
+[︀∑︀
+𝑡𝛾𝑡𝑟(𝑜𝑡, 𝐹(𝑜𝑡, 𝑧𝑡))
+]︀
+, where 𝑧𝑡∼𝜋𝜃(· | 𝑜𝑡).
+DSRL instantiates this formulation with SAC [5],
+whose bounded output replaces the noise; for action-
+chunk policies such as 𝜋0, it tiles a low-dimensional
+output across the steps of the chunk.
+A standard Gaussian sample 𝑧∈R𝑁has norm ‖𝑧‖
+close to
+√
+𝑁, and by the Gaussian annulus theorem [2]
+nearly all samples lie in a thin shell around the sphere
+of that radius, whose width relative to the radius
+shrinks as 𝑁grows. We express norms as multiples
+of the typical norm
+√
+𝑁. On this scale, the norms
+of Gaussian samples vary by approximately 1/
+√
+2𝑁:
+about 13% for the 28-dimensional action noise of a
+small diffusion policy, but only 0.1% for the 506,880-
+dimensional video noise of Cosmos3-Edge. A large
+policy is therefore pretrained only on noise from a
+very narrow range of norms. Section 4 examines how
+it behaves outside this range.
+4. Why
+Noise
+Steering
+Fails
+on
+Large Policies
+Before introducing LoRN, we examine why noise steer-
+ing, which is effective on small diffusion policies [26],
+fails on large robot foundation models. We study four
+frozen policies: a Robomimic diffusion policy [3, 15],
+𝜋0 [1], and two world-action models, Cosmos3-Edge
+and DreamZero-14B [29].
+Their noise dimensions
+3
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0.02
+0.1
+0.5
+1
+2
+Noise scale c
+0
+0.5
+1
+1.5
+Success / success at c=1
+0.95–1.05
+Cosmos3-Edge
+Video noise · N = 506,880
+DreamZero-14B
+Video noise · N = 112,640
+ 
+Action noise · N = 1,600
+Diffusion Policy
+Action noise · N = 28
+π0
+Figure 2: Frozen policies tolerate only a band
+of noise norms. Success when Gaussian samples
+are scaled by 𝑐, relative to 𝑐= 1. The shaded region
+marks the narrow band of Cosmos3-Edge.
+range from 28 for the Robomimic action noise to
+506,880 for the Cosmos3-Edge video noise. We iden-
+tify two failure modes.
+Failure mode 1: the search space grows with
+the noise dimension.
+The action noise of a gener-
+alist policy spans an entire chunk of padded action
+channels, and the video noise of a world-action model
+spans every latent pixel of every predicted frame. A
+noise steering actor that sets each entry independently
+must search a space of dimension 𝑁, which reaches
+around 5 × 105 for the Cosmos video noise. Steering
+such large policies therefore motivates the need for a
+search space whose dimension is independent of 𝑁.
+Failure mode 2: the tolerated band of noise
+norms is policy-dependent and can be very
+narrow.
+We analyze how different input noise sam-
+ples change policy performance by scaling Gaussian
+samples by a factor 𝑐and measure each policy’s suc-
+cess (Figure 2). This scaling also scales the norm
+of the sample. Every policy fails once 𝑐moves far
+enough from 𝑐= 1.
+Cosmos3-Edge fails outside
+0.95 ≤𝑐≤1.05, whereas DreamZero-14B holds its
+success from 𝑐= 0.1 to 1.2 and fails only by 𝑐= 1.5.
+The noise-steering methods we compare against leave
+the norm uncontrolled or constrain it only on average,
+and often fall outside this band. For example, we find
+that DSRL’s noise sampling applied to the Cosmos3-
+Edge video noise produces noise at 0.003 times the
+typical norm and achieves zero success.
+These findings yield two design objectives: a search
+space whose dimension is independent of 𝑁, and
+preservation of the expected noise scale regardless
+of the actor’s output. Section 5 describes how LoRN
+meets both.
+5. LoRN: Low-Rank Noise Steering
+The previous section identified two design objectives
+for steering large policies: a search space whose di-
+mension is independent of the noise dimension 𝑁, and
+preservation of the expected squared noise norm re-
+gardless of the actor’s output, under a fresh Gaussian
+sample independent of that output. We construct the
+steered noise 𝑧in four steps that meet these objectives
+(Section 5.1), show that the resulting search space
+contains improving noise (Section 5.2), and describe
+how to choose which noise input of a world-action
+model to steer (Section 5.3). Algorithm 1 summarizes
+the procedure.
+5.1. LoRN Construction
+By the Gaussian annulus theorem (Section 3), samples
+from a high-dimensional Gaussian, which is used as
+the source distribution for training flow matching and
+diffusion policies, lie on a thin shell with a magnitude
+of
+√
+𝑁: 𝒮= {𝑧∈R𝑁: ‖𝑧‖ =
+√
+𝑁}. We find it useful
+to view the space of valid initial noise as this sphere.
+A low-rank subspace through the origin intersects the
+sphere in a lower-dimensional great sphere, analogous
+to how a plane through the center of a ball cuts its
+surface in a great circle. We depict this method in
+Figure 3.
+Thus, RL steering with LoRN restricts
+the coefficients selected by the actor to this low-rank
+subspace.
+Concretely, let 𝑃∈R𝑁×𝑟be a matrix with or-
+thonormal columns, sampled once from the QR decom-
+position of a Gaussian matrix and fixed throughout
+training. Its columns span an 𝑟-dimensional subspace,
+whose intersection with 𝒮is
+𝒮𝑃= {
+√
+𝑁𝑃^𝑢: ^𝑢∈R𝑟, ‖^𝑢‖ = 1}.
+(1)
+At each decision, an actor observes 𝑜and outputs
+𝑟coefficients 𝑢, which select the unit direction 𝑑=
+𝑃𝑢/‖𝑢‖ and hence the point
+√
+𝑁𝑑∈𝒮𝑃. Each col-
+umn of 𝑃is a full-size noise pattern, so the actor can
+change every entry of the noise while outputting only
+𝑟numbers, regardless of 𝑁.
+Rather than using the actor’s point directly, we
+combine it with a Gaussian sample 𝜀∼𝒩(0, 𝐼𝑁):
+𝑧=
+√︀
+1 −𝑠2 𝜀+ 𝑠
+√
+𝑁𝑑,
+(2)
+4
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+(a) High-dimensional noise
+lives on a thin shell
+initial N-dimensional 
+Gaussian distribution 
+used during denoising
+action chunk
+obs o
+frozen
+policy
+inside
+on the shell
+outside
+Noise sampled on the shell performs 
+well during denoising
+P
+(b) Slice the shell with a 
+low-rank projection P
+o
+(c) Learn a vector u via RL to steer 
+in the low-dimensional subspace
+(d) LoRN enables high-dimensional 
+steering of world-action models
+LoRN Steering Actor
+u
+frozen world-action model
+video tokens
+no video 
+decoding
+latent C × F × H × W
+video noise
+shared layers
+action tokens
+flow matching denoising
+and / or
+horizon × action dim
+action noise
+all N directly
+r through P
+Noise space is large; reduce dimensionality
+ via a low-rank projection
+better
+advantage
+worse
+execute
+action chunk
+Figure 3: LoRN steers frozen generative robot policies through a low-dimensional noise subspace.
+(a) High-dimensional Gaussian noise concentrates near a thin shell. We find that moving far from its typical
+norm can degrade the policy’s actions. (b) A fixed random orthonormal projection 𝑃maps 𝑟actor coefficients
+into the full 𝑁-dimensional noise space, with 𝑟≪𝑁. The plane and its intersection with the sphere illustrate
+the low-rank subspace. (c) Given observation 𝑜, the actor learns coefficients 𝑢through reinforcement learning
+to produce noise inputs that improve the policy’s actions. The projected output 𝑃𝑢is normalized to
+√
+𝑁
+and mixed with an independent Gaussian sample 𝜀at strength 𝑠, using weights that preserve the expected
+squared noise norm. The colors illustrate advantage relative to the base policy, implying that our low-rank
+subspace captures high-advantage regions for policy improvement. The projection 𝑃and pretrained model
+remain fixed while the steering actor is trained. (d) This construction enables LoRN to steer video or action
+noise in a world-action model. Algorithm 1 provides more details about LoRN.
+where 𝑠∈[0, 1] is the steering strength. The Gaussian
+sample 𝜀and the actor’s unit direction 𝑑contribute
+expected squared norms of (1 −𝑠2)𝑁and 𝑠2𝑁, re-
+spectively. Because they are independent and 𝜀has
+zero mean, their cross term averages to zero, giving
+E‖𝑧‖2 = 𝑁for any steering strength 𝑠. In high dimen-
+sions, the two vectors are also nearly perpendicular
+and ‖𝜀‖ is close to
+√
+𝑁, so individual samples of 𝑧stay
+near this norm. By contrast, using the actor’s output
+directly, as in DSRL, leaves the norm unconstrained,
+and methods that add a correction to a Gaussian
+sample push the noise off the sphere.
+This Gaussian term also serves as exploration. It
+spreads the steered noise around the actor’s point, so
+that each action explores a neighborhood around that
+point, near the sphere, rather than a single point in
+𝒮𝑃. The strength 𝑠controls the width of this neigh-
+borhood, much as the entropy temperature controls
+exploration in SAC: 𝑠= 1 returns exactly the actor’s
+point, and 𝑠= 0 returns an unsteered Gaussian sam-
+ple. We set 𝑠through the length of 𝑢with a cap 𝛼
+(Algorithm 1). Section B.1 discusses this choice.
+5.2. Why a Fixed Random Low-Rank Sub-
+space Suffices
+We set a projection 𝑃at random and keep it fixed for
+the entirety of RL training. We investigate whether
+a randomly chosen low-rank subspace can contain
+improving noise even when its rank is small relative
+to the full noise dimension. We show that, for a fixed
+fraction of noise inputs that improve on the base pol-
+icy, the probability that this subspace contains none
+decreases exponentially with rank, with a bound inde-
+pendent of 𝑁. The same projection 𝑃is then shared
+across states and held fixed throughout training.
+We analyze the case 𝑠= 1, where the actor can se-
+lect any point on 𝒮𝑃. This idealizes the implemented
+actor, whose bounded outputs reach 𝑠= 1 only for
+directions with ‖𝑢‖ ≥𝜌√𝑟(Section B.1), and the
+propositions assume the random projection of Sec-
+tion 5.1 rather than the tiled variants used in some
+experiments. We also adopt a spherical-noise model
+Algorithm 1 LoRN
+Require: Frozen policy 𝐹, orthonormal 𝑃, cap 𝛼, scale
+𝜌
+1: Initialize SAC actor 𝜋𝜃, critics 𝑄𝜑, buffer 𝒟
+2: For WAMs, select the noise input using Section 5.3
+3: for each decision do
+4:
+Observe 𝑜; sample 𝑢∼𝜋𝜃(· | 𝑜)
+5:
+𝑠←𝛼min(︀
+1, ‖𝑢‖/(𝜌√𝑟))︀
+; 𝜀∼𝒩(0, 𝐼𝑁)
+6:
+𝑑←𝑃𝑢/‖𝑢‖ (any unit vector if 𝑢= 0)
+7:
+𝑧←
+√
+1 −𝑠2 𝜀+ 𝑠
+√
+𝑁𝑑
+8:
+Execute action chunk 𝐹(𝑜, 𝑧); observe 𝑅, 𝑜′
+9:
+Store (𝑜, 𝑢, 𝑅, 𝑜′) in 𝒟
+10:
+Update 𝜃, 𝜑with SAC using 𝒟
+11: end for
+5
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+16
+32
+48
+64
+Slice rank r
+10
+0
+10
+−2
+10
+−4
+10
+−6
+Miss probability bound
+(1−pτ)
+r
+(a) One state
+pτ =.05
+pτ =.22
+pτ =.50
+1
+2
+4
+8
+16
+32
+64
+Slice rank r
+10
+0
+10
+−2
+10
+−4
+10
+−5
+Fraction of states missed
+(b) One slice across states
+τ=1.0
+τ=1.6
+τ=2.4
+Simulation
+Upper bound
+1
+2
+4
+8
+16
+32
+64
+Slice rank r
+0
+3
+6
+9
+Advantage (toy units)
+Best on slice
+Slice mean
+(c) Reachable advantage
+Figure 4: A fixed random low-rank subspace misses the good region with probability that decays
+exponentially in rank. (a) The bound (1 −𝑝𝜏)𝑟on the probability that a random subspace misses the
+good region at one state, for three shares 𝑝𝜏; the dashed line marks rank 32. (b) Simulation in which a single
+fixed subspace serves 4,000 states, each with its own linear advantage field. Solid: fraction of states whose
+normalized noise set 𝒮𝑃contains no noise with advantage at least 𝜏; dashed: the bound 𝜖𝑟(𝜏). (c) The best
+advantage reachable in 𝒮𝑃grows with rank, while its average advantage remains zero.
+in which unsteered noise is drawn uniformly from 𝒮,
+both for the base policy and for the fallback 𝑢= 0.
+This approximates the Gaussian source by fixing its
+norm at
+√
+𝑁, motivated by the concentration of Gaus-
+sian norms in high dimensions. Let 𝜋𝑆denote the
+base policy under this model.
+Define 𝐴(𝑜, 𝑧) = 𝑄𝜋𝑆(𝑜, 𝑧) −𝑉𝜋𝑆(𝑜) as the advan-
+tage of using noise 𝑧at the current decision and fol-
+lowing 𝜋𝑆thereafter. Here, 𝑉𝜋𝑆(𝑜) averages 𝑄𝜋𝑆(𝑜, 𝑧)
+over noise sampled uniformly from 𝒮. We use this
+formulation to define improving regions on the sphere,
+where for a threshold 𝜏> 0, we can define the im-
+proving region 𝐺𝜏(𝑜) and its fraction on the sphere
+𝑝𝜏(𝑜) as
+𝐺𝜏(𝑜) = {𝑧∈𝒮: 𝐴(𝑜, 𝑧) ≥𝜏},
+𝑝𝜏(𝑜) =
+Pr
+𝑧∼Unif(𝒮)
+[︀
+𝑧∈𝐺𝜏(𝑜)
+]︀
+.
+(3)
+We say that the subspace misses a state 𝑜if 𝒮𝑃∩
+𝐺𝜏(𝑜) = ∅.
+The key observation is that the Gaussian matrix
+used to construct 𝑃has the same column span as 𝑃.
+Scaling each of its columns to norm
+√
+𝑁therefore
+gives 𝑟independent uniform samples from 𝒮, all lying
+in 𝒮𝑃. For the subspace to miss the improving region,
+all 𝑟samples must miss it. This yields the following
+guarantees; proofs are in Section A.1.
+Proposition 1 (One state). Fix a state 𝑜and sample
+a uniformly random 𝑟-dimensional subspace. Then:
+(a) the expected advantage of a uniformly sampled
+point in 𝒮𝑃is zero, where the expectation is over both
+the subspace and the sampled point; (b) the probability
+that the subspace misses 𝐺𝜏(𝑜) is at most (1−𝑝𝜏(𝑜))𝑟;
+and (c) the expected best advantage in 𝒮𝑃is at least
+that of the best of 𝑟independent uniform samples from
+𝒮.
+Proposition 2 (One fixed subspace across states).
+Let 𝜇be a state distribution independent of 𝑃, such
+as the state distribution of the base policy, and define
+𝜖𝑟(𝜏) = E𝑜∼𝜇
+[︀
+(1 −𝑝𝜏(𝑜))𝑟]︀
+.
+The expected fraction of states under 𝜇that the sub-
+space misses is at most 𝜖𝑟(𝜏). Moreover, with prob-
+ability at least 1 −𝛿over 𝑃, this fraction is at most
+𝜖𝑟(𝜏)/𝛿, for any 𝛿∈(0, 1).
+Proposition 3 (Improvement within the subspace).
+Let 𝜋′
+𝑃select a noise in 𝒮𝑃∩𝐺𝜏(𝑜) whenever this
+intersection is nonempty, and otherwise use an un-
+steered sample (𝑢= 0). For every 𝑃,
+𝐽(𝜋′
+𝑃) −𝐽(𝜋𝑆) ≥
+𝜏
+1 −𝛾
+(︁
+1 −𝑑𝜋′
+𝑃(𝑀𝑃)
+)︁
+≥0,
+(4)
+where 𝑀𝑃is the set of missed states and 𝑑𝜋′
+𝑃is the
+normalized discounted state distribution of 𝜋′
+𝑃. For
+𝜇= 𝑑𝜋𝑆, the expected one-step advantage, averaged
+over 𝑃and states drawn from 𝜇, is at least 𝜏(1 −
+𝜖𝑟(𝜏)).
+The coverage bound depends on rank and the frac-
+tion of improving noise samples, with no explicit de-
+pendence on 𝑁. For example, if at least 20% of noise
+samples at every state have advantage at least 𝜏, a
+rank-32 subspace misses at most 0.832 ≈0.08% of
+6
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+states under the base policy’s distribution, in expec-
+tation over 𝑃(Figure 4). These guarantees establish
+the existence of improving choices within a fixed sub-
+space under the spherical-noise model at 𝑠= 1. How
+efficiently a trained actor can discover these choices
+is a separate question, discussed in Section A.2.
+5.3. Choosing Which Noise to Steer
+A world-action model exposes both video and action
+noise, but these inputs need not have equal influence
+on the generated actions. Changing the video noise
+can also change the action chunk because the model
+denoises the two inputs jointly. We therefore choose
+which input to steer by measuring its effect on the
+actions before training a steering actor.
+For a fixed observation, we first generate a ref-
+erence action chunk using the model’s usual noise
+inputs. We then redraw the video noise while holding
+the action noise fixed, and repeat the experiment by
+redrawing only the action noise. For each redraw,
+we compute the root-mean-square (RMS) difference
+from the reference action chunk across its time steps
+and action coordinates. We average these responses
+over the probe observations and repeated draws, and
+select the input with the larger response. The probe
+requires only forward evaluations of the frozen model,
+without rewards or actor training.
+Surprisingly, resampling video noise produces sub-
+stantially more variation in the generated actions
+than resampling action noise: approximately 6.1×,
+5.5×, and 3.3× larger changes on Cosmos3-Edge,
+DreamZero-14B, and DreamZero-5B, respectively
+(Figure 5). Although it is associated with visual pre-
+diction, video noise may offer a more expressive input
+for modifying the policy’s behavior. This motivates
+our choice to steer video noise in the main WAM ex-
+periments. We evaluate whether this greater influence
+translates into improved task success in Section 6.
+6. Experiments
+We evaluate LoRN as a way to improve frozen robot
+policies through noise steering. We first study video-
+noise steering across three world-action models, then
+evaluate action-noise steering on 𝜋0, 𝜋0.5, and Diffu-
+sion Policy. Controlled experiments examine the roles
+of the steering rule, projection rank, and initializa-
+tion, followed by deployment of simulation-trained
+steering actors on a physical bimanual robot with
+two base policies, GR00T N1.7 and a fine-tuned 𝜋0.5.
+Throughout, the base policy denotes the frozen model
+without a learned steering actor.
+a) Cosmos3-Edge
+RoboLab MarkerInMug
+Resample
+video noise
+Resample
+action noise
+Action change
+(RMS)
+0.179
+0.029
+b) DreamZero-14B
+RoboLab MarkerInMug
+Resample
+video noise
+Resample
+action noise
+Action change
+(RMS)
+0.138
+0.025
+c) DreamZero-5B
+LIBERO Moka Pot
+Resample
+video noise
+Resample
+action noise
+Action change
+(RMS)
+0.051
+0.015
+Figure 5: Video noise has a larger effect on
+the generated actions. For the same observation,
+we redraw either video noise (green) or action noise
+(gray), holding the other input fixed. Arrow labels
+show the average root-mean-square (RMS) change
+from the reference action chunk; arrow widths show
+relative sensitivity within each model. Values are
+in each model’s native action units and should be
+compared within a model. The larger response to
+video noise motivates choosing it for steering before
+actor training.
+6.1. Video-Noise
+Steering
+Across
+World-
+Action Models
+World-action models generate actions jointly with
+visual predictions, giving the steering actor access to
+both video and action noise. The sensitivity probe
+presented earlier identifies video noise as the more
+influential input on all three evaluated models. Here,
+we test whether learning to steer that input improves
+task success, and compare it with steering the action
+noise instead.
+We
+evaluate
+Cosmos3-Edge
+and
+DreamZero-
+14B [29] on four RoboLab tasks [28]: MustardInLeft-
+Bin, MarkerInMug, ButterAboveRaisin, and Stack-
+YellowOnRed.
+We also evaluate DreamZero-5B
+on the cream-cheese-box and moka-pot tasks from
+LIBERO [12]. For each model, we compare the base
+policy, DSRL action-noise steering [26], and LoRN
+applied to either action or video noise. Comparing
+the two LoRN variants tests the choice of input un-
+der the same steering rule; comparing with DSRL
+7
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+MustardInLeftBin
+MarkerInMug
+ButterAboveRaisin
+StackYellowOnRed
+0
+50
+100
+Success (%)
+26
+3
+52
+63
+27
+5
+59
+70
+22
+6
+51
+67
+58
+43
+71
+82
+Cosmos3-Edge
+RoboLab
+MustardInLeftBin
+MarkerInMug
+ButterAboveRaisin
+StackYellowOnRed
+66
+25
+42
+49
+69
+31
+46
+55
+66
+32
+57
+51
+84
+70
+83
+72
+DreamZero-14B
+RoboLab
+CreamCheeseBox
+MokaPot
+48
+56
+70
+69
+59
+60
+79
+48
+DreamZero-5B
+LIBERO
+Base policy
+DSRL (action)
+LoRN (action)
+LoRN (video)
+Figure 6: Video-noise steering improves success across world-action models. Base-policy success,
+DSRL action-noise steering, and LoRN action- or video-noise steering on RoboLab and LIBERO. DSRL steers
+all 256 action-noise entries on Cosmos3-Edge, the stronger of its two forms there (Table 7); on DreamZero-14B
+it tiles a 32-dimensional latent over the chunk, and on DreamZero-5B it replaces the action noise with its
+latent. Bars show means; error bars show standard errors over three training seeds. Base-policy references
+have no training-seed error bars. Labels round means to whole percentages. Video steering achieves the
+highest mean on nine of ten model–task pairs; DSRL performs best on DreamZero-5B Moka pot. Evaluation
+protocols and retained training budgets differ across models and some configurations; see the appendix.
+tests against an existing action-noise steering method.
+Video steering uses a rank-32 random projection.
+Results are means and standard errors over three
+training seeds. Cosmos3-Edge uses 240 evaluation
+episodes per controller; DreamZero-14B uses 120
+paired episodes per controller near 200k environ-
+ment steps; and DreamZero-5B uses its last-three-
+evaluation summaries. Base-policy references are the
+released policies with their own noise samplers, which
+LoRN recovers at 𝑢= 0 (Section B.4). Training bud-
+gets, retained checkpoints, and model-specific DSRL
+implementations are given in Sections B.3 and B.4.
+Figure 6 shows that video steering achieves the
+highest mean success on nine of ten model–task pairs,
+including all four tasks for both Cosmos3-Edge and
+DreamZero-14B. Across the ten pairs, average success
+increases from 43.0% for the base policy to 50.1%
+with DSRL and 69.2% with LoRN video steering:
+gains of 7.1 and 26.2 percentage points, respectively,
+computed from the per-pair means of Tables 7, 9
+and 10. The DSRL comparator is the stronger of its
+two Cosmos3-Edge variants; with the tiled variant its
+average gain is 6.4 points. These averages weight each
+model–task pair equally and summarize results under
+the model-specific evaluation and training protocols.
+On Cosmos3-Edge, every video-steering seed exceeds
+the base policy.
+Action-noise steering with LoRN produces smaller
+gains than video steering, showing that the input
+choice matters alongside the steering rule. The excep-
+tion is DreamZero-5B Moka pot, where DSRL action
+steering achieves the highest success. Thus, the sensi-
+tivity probe identifies a promising input for learning,
+but does not guarantee the best learned performance
+on every task.
+6.2. Action-Noise Steering Across Robot Poli-
+cies
+We next evaluate action-noise steering beyond world-
+action models, comparing LoRN with DSRL and LP-
+DS [24] across 𝜋0, 𝜋0.5, and Diffusion Policy. Our eval-
+uation spans twelve tasks across LIBERO, ALOHA,
+YAM, and Robomimic, with five training seeds per
+method [12, 32]. LP-DS uses its released implementa-
+tion on Robomimic and our adaptations of its steering
+rule on 𝜋0 and 𝜋0.5; the Cosmos3-Edge adaptation
+of Section 6.4 is a third, separate construction (Sec-
+tions B.3 and B.5).
+As Figure 7 and Table 11 show, LoRN has the high-
+est early-window mean on nine of the twelve tasks,
+including ties with LP-DS on cream cheese and Pack
+container; DSRL leads on alphabet soup, and LP-DS
+on butter and Load dishwasher. On 𝜋0 and Diffu-
+sion Policy, its final success is within three points of
+DSRL on every task. The strongest final-performance
+gains appear on 𝜋0.5, where LoRN achieves higher
+success than both baselines on both tasks. These
+8
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+0.1
+0.2
+Gradient updates (M)
+0
+50
+100
+Success (%)
+π0 · Cream cheese
+0
+0.1
+0.2
+Gradient updates (M)
+π0 · Moka pot
+0
+0.1
+0.2
+Gradient updates (M)
+π0 · Cream-cheese box
+0
+0.1
+0.2
+Gradient updates (M)
+π0 · Black bowl on plate
+0
+0.1
+0.2
+Gradient updates (M)
+0
+50
+100
+Success (%)
+π0 · Alphabet soup
+0
+0.1
+0.2
+Gradient updates (M)
+π0 · Butter
+0
+1
+2
+Gradient updates (M)
+π0 · Transfer Cube
+0
+0.5
+1
+Environment steps (M)
+π0.5 · Load dishwasher
+0
+0.5
+1
+Environment steps (M)
+0
+50
+100
+Success (%)
+π0.5 · Pack container
+0
+0.2
+0.4
+Environment steps (M)
+DP · Lift
+0
+0.3
+0.6
+Environment steps (M)
+DP · Can
+0
+0.75
+1.5
+Environment steps (M)
+DP · Square
+DSRL
+LP-DS
+LoRN
+Base policy
+Figure 7: Action-noise steering across robot policies. Learning curves of LoRN (green), DSRL (gray
+dashed), and LP-DS (dark gray dash-dotted) on twelve tasks: the mean over five seeds with a band of one
+standard deviation across seeds. Dotted horizontal lines mark base-policy success. The 𝜋0 tasks use LIBERO
+and ALOHA, 𝜋0.5 uses YAM, and Diffusion Policy uses Robomimic. Horizontal axes show gradient updates
+for 𝜋0 and environment steps for the other policies, in millions; several panels end before the full training
+budgets of Table 4 to show the phase in which the methods separate, so training budgets should be compared
+within each task. The 𝜋0 and 𝜋0.5 curves are five-evaluation running means of 10- and 16-episode evaluations;
+the Robomimic curves are raw 200-episode evaluations. Diffusion Policy uses full-rank LoRN (𝑟= 𝑁= 28).
+results demonstrate that the same steering construc-
+tion applies across policy families, improving action
+generation as well as enabling video-noise steering in
+world-action models.
+6.3. Sim-to-Real
+Transfer
+on
+a
+Bimanual
+Robot Station
+We test whether steering learned in simulation trans-
+fers to a physical robot without additional training
+on the real robot. We use a bimanual YAM station
+on three tasks (Figure 8): cube to bowl and marker
+to cup with the released GR00T N1.7 base policy,
+and cube handover, in which the left arm picks up
+the cube and hands it to the right arm, which places
+it in a bowl. For the first two tasks we use the base
+policy without task-specific fine-tuning; it succeeds
+on neither task across ten physical trials each.
+We reconstruct the YAM setup in Isaac Lab [16]
+using a real2sim pipeline with GPT-6 Astra. We then
+train LoRN and DSRL with randomized object poses
+in this simulation. Cube positions and orientations
+vary by ±5 cm and ±45∘, while marker poses vary
+by ±3 cm and ±29∘. For each method and task, we
+select one actor from three simulation-training seeds
+and deploy it directly on the robot. We report means
+and standard errors over three training seeds in simu-
+lation and ten trials for real world evaluations. Actor
+selection and evaluation details appear in Section B.6.
+In simulation, LoRN raises success from 19.2% to
+43.8% on Cube to bowl and from 3.8% to 39.6%
+on Marker to cup. DSRL reaches 29.7% and 28.2%,
+respectively (Table 1). On the physical station, LoRN
+succeeds in 6 of 10 cube trials, compared with 4 of 10
+for DSRL. Both methods succeed in 4 of 10 marker
+trials.
+The released 𝜋0.5 succeeds in none of 120 simula-
+tion episodes and none of ten physical trials of the
+handover task, so we first fine-tune it by supervised
+fine-tuning (SFT) on 50 scripted simulation demon-
+strations and then train LoRN on the action noise of
+the frozen fine-tuned policy (Section B.6). In simula-
+tion, LoRN raises success from 43.6% to 73.6%; on the
+station, the fine-tuned policy places the cube in 3 of
+10 trials and LoRN in 8 of 10 (Table 1). Noise steering
+therefore composes with supervised fine-tuning: the
+9
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+(a) Cube to bowl
+(b) Marker to cup
+(c) Cube handover
+Figure 8: The three YAM station tasks. One successful LoRN trial per task from the overhead camera,
+rendered as in Figure 17: the initial frame as background, six intermediate arm poses translucent, and the
+final pose solid. (a) “Pick up the cube and place it in the bowl.” (b) “Pick up the black marker and put it
+into the red cup.” (c) “Pick up the black cube with the left arm, hand it to the right arm, and place it in the
+blue bowl.” The steering actors are trained only in an Isaac Lab reconstruction of the station and deployed
+unchanged.
+fine-tuned weights stay frozen, and the additional gain
+comes from the learned noise alone. These results
+show that steering learned entirely in simulation can
+improve real world performance without hardware
+training. Notably, the frozen GR00T N1.7 base pol-
+icy produces successful behavior with noise steering
+despite failing every unsteered physical trial. This
+suggests that the policy already represents behaviors
+capable of solving these tasks, but its default noise
+sampling does not reliably elicit them. LoRN learns
+to access these behaviors through the noise input, and
+this control transfers from simulation to the physical
+robot. All LoRN physical trials appear in Section C.6.
+6.4. Analysis of the Steering Construction
+The previous sections establish that LoRN can im-
+prove both video- and action-noise steering in simu-
+lation and for the real world. We now examine the
+design choices behind these results. In particular,
+we investigate how much steering is possible without
+disrupting the noise norm, what is an ideal low-rank
+subspace, and how the construction of noise sampling
+changes the policy before learning.
+The first two
+experiments use Cosmos3-Edge video steering while
+the latter experiment on noise initialization uses 𝜋0
+action steering.
+Steering rule and strength.
+The noise scale
+probes in Figure 2 show how changing the noise norm
+affects a frozen policy. We next examine how the steer-
+ing rule affects learning. On Cosmos3-Edge, we com-
+pare four rules for steering video noise on RoboLab’s
+MustardInLeftBin and MarkerInMug tasks. We use
+the same rank-32 projection and SAC training proce-
+dure, retraining the actor for each rule.
+Table 1: Simulation-trained steering transfers
+to the robot station. Simulation success (%):
+mean ± s.e. over three training seeds, each evaluated
+on 240 seeded episodes (120 for the handover task);
+base policies are evaluated once on the same
+episodes, and the fine-tuned (SFT) 𝜋0.5 three times,
+so its spread reflects evaluation rather than training
+variability. Robot results are placements in ten trials
+per policy using one selected actor. Bold marks the
+highest value per task; ties are both bold.
+Task
+Policy
+Simulation
+Robot
+Cube to bowl
+Base policy
+19.2
+0/10
+DSRL
+29.7 ± 10.4
+4/10
+LoRN
+43.8 ± 3.7
+6/10
+Marker to cup
+Base policy
+3.8
+0/10
+DSRL
+28.2 ± 7.6
+4/10
+LoRN
+39.6 ± 3.5
+4/10
+Cube handover
+Base 𝜋0.5
+0.0
+0/10
+SFT 𝜋0.5
+43.6 ± 2.6
+3/10
+LoRN on SFT
+73.6 ± 3.3
+8/10
+We compare the following methods:
+• LoRN: projects the actor’s output into the full
+noise space and normalizes it, then mixes it with
+Gaussian noise while preserving the expected
+squared noise norm.
+• Additive steering: adds the mapped actor out-
+put to Gaussian noise without adjusting for the
+resulting increase in noise norm.
+• LP-DS [24]: adds an observation-dependent off-
+set to Gaussian noise, using an adaptive penalty
+to constrain the offset’s average squared norm.
+• PSS-related control:
+applies LoRN’s mix-
+10
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+30
+60
+Success (%)
+26.5
+22.8
+46.4
+0.0
+25.4
+20.7
+25.2
+LoRN
+α=0.3
+Additive
+α=0.3
+LoRN
+α=0.9
+Additive
+α=0.9
+LP-DS
+β=0.03
+LP-DS
+β=0.10
+PSS-related
+control
+—
+Method
+Setting
+MustardInLeftBin
+0
+30
+60
+Success (%)
+6.2
+3.2
+36.9
+0.0
+4.7
+1.4
+4.0
+≈1
+≈1.05
+≈1
+≈1.7
+≈1.03
+≈1.05
+≈1
+Relative
+noise norm
+MarkerInMug
+Cosmos3 Edge base policy
+Figure 9: LoRN enables stronger steering while maintaining the noise norm.
+Steering-rule
+comparisons on Cosmos3-Edge using a rank-32 video projection. Bars show mean success with standard errors
+over three training seeds; dotted lines mark base-policy success. Increasing the steering strength 𝛼improves
+LoRN’s performance, whereas additive steering increases the noise norm and loses task success. The LP-DS
+adaptation [24] and the PSS-related control [17] retain approximately the original noise norm but yield limited
+gains. Here, 𝛼caps the steering strength while 𝛽sets the LP-DS correction’s target norm limit √𝛽𝑁. The
+relative noise norms are measured in units of
+√
+𝑁. Both use our adaptations of the published steering rules
+within the shared setup, rather than reproductions of the complete methods.
+ture at the fixed strength 𝑠=
+√︀
+𝑟/𝑁≈0.008,
+a dimension-based proxy that gives 𝑟of the
+𝑁noise coordinates to the actor, without the
+response-based subspace selection or orthogonal-
+complement reconstruction of PSS [17].
+The LP-DS adaptation and the PSS-related control
+apply the respective steering rules within the same
+fixed random projection and SAC learner, rather than
+reproducing the complete methods. PSS itself selects
+its subspace by measuring how noise perturbations
+affect decoded actions, then lets the actor control
+that subspace while independently sampling Gaussian
+noise in its orthogonal complement; the control keeps
+only its dimension-based allocation of actor control,
+so the comparison isolates the steering rule rather
+than evaluating the full method. In contrast, LoRN
+uses a random subspace and explicitly balances the
+actor-selected noise with Gaussian noise to preserve
+the expected squared norm. We examine the resulting
+performance differences below; implementation details
+and training budgets appear in Section B.3.
+LoRN separates the actor’s choice of noise from its
+overall scale (Figure 9). It normalizes the projected
+actor output and reduces the Gaussian component
+as steering strength increases, allowing substantial
+changes to the noise while preserving its expected
+squared norm. Additive steering retains the full Gaus-
+sian sample, so stronger steering increases the noise
+norm and leads to failure on both tasks. Our LP-DS
+adaptation constrains the size of this additive adjust-
+ment, while the PSS-related control assigns only a
+small fraction of the noise to actor control, leaving the
+input almost unchanged. These comparisons suggest
+that effective steering requires both control over the
+noise norm and sufficient freedom to modify the noise.
+Projection rank.
+We next examine what rank we
+should use to steer high-dimensional video noise. We
+train Cosmos3-Edge LoRN actors at ranks 4, 8, 16, 32,
+and 256 on four RoboLab tasks. Each setting uses
+three training seeds with independent random projec-
+tions and is evaluated on 240 episodes.
+Increasing rank generally improves success before
+performance levels off (Figure 10). On Mustard, suc-
+cess rises from 41.0 ± 5.5% at rank 4 to 56.7 ± 1.3%
+at rank 16, with little further change at higher ranks.
+Marker benefits from additional capacity, improving
+from 32.6% at rank 16 to 43.3% at rank 32. Across all
+four tasks, increasing rank eightfold from 32 to 256
+provides no consistent further gain. As such, we use
+rank 32 as the default for steering Cosmos3-Edge’s
+506k-dimensional video noise.
+Variability across seeds also decreases with rank
+on certain tasks, suggesting that additional capacity
+can make steering more reliable. Because each seed
+11
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+25
+50
+75
+Success (%)
+(a) Mustard
+0
+25
+50
+75
+(b) Marker
+4
+8
+16
+32
+256
+Projection rank r
+0
+25
+50
+75
+Success (%)
+(c) Butter
+4
+8
+16
+32
+256
+Projection rank r
+0
+25
+50
+75
+(d) Stack
+LoRN
+Cosmos3 Edge base policy
+Figure 10: A low-rank actor is sufficient for
+Cosmos3-Edge video steering. Success generally
+improves with projection rank before leveling off; in-
+creasing rank from 32 to 256 provides no consistent
+further gain. Pale dots show three training seeds,
+each with an independent random projection and 240
+evaluation episodes. Green lines show means with
+standard-error bars; dashed lines mark Cosmos3 Edge
+base-policy success. Rank settings are evenly spaced,
+with seed dots offset for visibility.
+changes both the projection and actor training, this
+experiment measures their combined effect on learned
+performance. This result complements the coverage
+analysis in Proposition 1, which focuses on the exis-
+tence of improving noise inputs within the subspace.
+Table 8 lists these results.
+Initialization and noise structure.
+Before any
+learning takes place, initial performance depends on
+the noise structure that is first supplied. We examine
+how the initial noise structure affects starting perfor-
+mance using untrained DSRL and LoRN actors with
+𝜋0 on LIBERO CreamCheese and ALOHA Transfer
+Cube. The DSRL implementation repeats a single
+actor-generated noise vector across the action horizon.
+For LoRN, we compare this tiled structure with a ran-
+dom projection that maps the actor’s output across
+the full noise tensor. We also vary steering strength
+to examine how retaining more Gaussian noise affects
+starting performance.
+DSRL reduces initial success from 29% to 5% on
+cream cheese and from 71% to 22% on ALOHA (Fig-
+ure 11). Tiled LoRN at steering strength 𝛼= 0.5
+retains more of the base policy’s performance, reach-
+ing 20% and 62%, respectively, but falls to 4% and
+24% at 𝛼= 1. This drop implies that tiling is out of
+distribution for the denoising step of a flow matching
+policy, but when we set 𝛼= 0.5, we retain perfor-
+mance as we are closer to a Gaussian sample. LoRN
+with a random projection instead achieves 28.6% and
+69% at 𝛼= 1, where the strength saturates at 𝑠= 1,
+remaining close to the base policy despite using no
+fresh Gaussian component. Together, these results
+suggest that random projections provide a better
+starting point for steering: they allow the actor to
+control the entire noise input while retaining the base
+policy’s initial success.
+These results highlight initialization as a poten-
+tial contributor to learning efficiency.
+Across our
+experiments, DSRL exhibits varied starting behav-
+ior: some runs begin well below the base policy and
+recover slowly, while others start near base-policy
+performance and improve quickly, or begin near max-
+imum success with little room for further improve-
+ment. LoRN’s random projection preserves starting
+performance in these probes while giving the actor a
+compact space in which to learn. This combination of-
+fers a possible explanation for the rapid improvement
+observed in several learning curves. Additional con-
+trols on observation dependence, projection structure,
+rank, and additive steering appear in Section C.4.
+Section C.5 shows how this observation dependence
+develops during training, from a nearly fixed noise
+choice to one that varies with the observation (Fig-
+ure 16).
+7. Limitations
+Noise steering relies on behaviors that the frozen
+policy can already produce. Video noise provides a
+potentially expressive way to access these behaviors,
+but greater action variation does not necessarily trans-
+late into greater task success. The sensitivity probe
+(Figure 5) measures how much the actions change,
+rather than whether those changes help solve the task.
+Learning useful control over this variation still re-
+quires interaction, and steering cannot directly teach
+the frozen model a missing skill.
+Our analysis shows why a low-rank subspace can
+contain noise inputs that improve the policy, but
+does not establish how easily the actor can discover
+them. The rank and training required for effective
+steering therefore remain empirical choices. Similarly,
+preserving the native expected energy is a design
+choice, not a guarantee of the optimal noise scale for
+every policy: the identity holds for a fresh Gaussian
+sample independent of the actor’s output, which the
+fixed-draw DreamZero configurations do not satisfy
+(Section B.4), and the evaluated Robomimic policies
+12
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Base policy
+DSRL
+LoRN, tiled (α=0.5)
+LoRN, tiled (α=1)
+LoRN, random (α=1)
+29
+5
+20
+4
+28.6
+(a) LIBERO cream cheese
+0
+50
+100
+Base policy
+DSRL
+LoRN, tiled (α=0.5)
+LoRN, tiled (α=1)
+LoRN, random (α=1)
+71
+22
+62
+24
+69
+(b) ALOHA Transfer Cube
+Initial success (%)
+Figure 11: Random projections preserve start-
+ing performance at full steering strength. Suc-
+cess before actor training with frozen 𝜋0 on two tasks.
+Tiled projections repeat noise patterns across the ac-
+tion chunk. Reducing steering strength from 𝛼= 1 to
+0.5 improves their initial performance, while random-
+projection LoRN remains near the base policy at
+𝛼= 1, without fresh Gaussian noise. The cream-
+cheese tiled configuration at 𝛼= 0.5 uses rank 16;
+all other LoRN configurations use rank 32.
+Each
+bar is the success of the warm-up episodes before
+the first gradient update, averaged over five training
+seeds, with latents drawn from a standard normal;
+their norm saturates the strength mapping of Algo-
+rithm 1, so 𝑠= 𝛼and the 𝛼= 1 bars use no fresh
+Gaussian noise. Standard errors are 1.5 to 3.5 points
+(Section B.5).
+reach their highest success at smaller norms in the
+amplitude probes of Figure 2.
+8. Conclusion
+We introduced LoRN, a method for improving frozen
+generative robot policies by steering their initial noise
+through a low-rank subspace. A small actor controls
+the noise through a fixed random projection, while
+normalization and Gaussian mixing allow strong steer-
+ing at a stable noise scale. This enables steering of
+high-dimensional video noise in world-action models,
+giving the actor access to an input that can substan-
+tially influence the generated actions.
+Across three world-action models and ten model–
+task pairs, video steering improves average success by
+26.2 percentage points over the base policy, compared
+with 7.1 points for DSRL action steering. The same
+approach supports action-noise steering across several
+policy families and transfers from simulation to a
+physical robot without hardware training. Together,
+these results establish low-rank noise steering as a
+practical way to control high-dimensional generative
+robot policies, including through video noise that
+provides an expressive input for shaping their actions.
+References
+[1] Kevin Black et al. 𝜋0: A vision-language-action
+flow model for general robot control.
+arXiv
+preprint arXiv:2410.24164, 2024.
+[2] Avrim Blum, John Hopcroft, and Ravindran Kan-
+nan. Foundations of Data Science. Cambridge
+University Press, 2020. ISBN 9781108485067.
+doi: 10.1017/9781108755528.
+[3] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu,
+Eric Cousineau, Benjamin Burchfiel, and Shuran
+Song. Diffusion policy: Visuomotor policy learn-
+ing via action diffusion. In Robotics: Science and
+Systems (RSS), 2023.
+[4] Luca Eyring, Shyamgopal Karthik, Karsten
+Roth, Alexey Dosovitskiy, and Zeynep Akata.
+ReNO: Enhancing one-step text-to-image mod-
+els through reward-based noise optimization. In
+Advances in Neural Information Processing Sys-
+tems (NeurIPS), 2024.
+[5] Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel,
+and Sergey Levine. Soft actor-critic: Off-policy
+maximum entropy deep reinforcement learning
+with a stochastic actor. In International Confer-
+ence on Machine Learning (ICML), 2018.
+[6] Jonathan Ho, Ajay Jain, and Pieter Abbeel. De-
+noising diffusion probabilistic models. In Ad-
+vances in Neural Information Processing Systems
+(NeurIPS), 2020.
+[7] Edward J. Hu, Yelong Shen, Phillip Wallis,
+Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang,
+Lu Wang, and Weizhu Chen. LoRA: Low-rank
+adaptation of large language models. In Interna-
+tional Conference on Learning Representations
+(ICLR), 2022.
+[8] Hokyun Im, Andrey Kolobov, Jianlong Fu, and
+Youngwoon Lee. Latent policy steering through
+one-step flow policies. In Robotics: Science and
+Systems (RSS), 2026. arXiv:2603.05296.
+[9] Sham Kakade and John Langford.
+Approxi-
+mately optimal approximate reinforcement learn-
+ing. In International Conference on Machine
+Learning (ICML), 2002.
+13
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+[10] Chunyuan Li, Heerad Farkhoor, Rosanne Liu,
+and Jason Yosinski. Measuring the intrinsic di-
+mension of objective landscapes. In International
+Conference on Learning Representations (ICLR),
+2018.
+[11] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-
+Hamu, Maximilian Nickel, and Matt Le. Flow
+matching for generative modeling. In Interna-
+tional Conference on Learning Representations
+(ICLR), 2023.
+[12] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng,
+Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO:
+Benchmarking knowledge transfer for lifelong
+robot learning. In Advances in Neural Informa-
+tion Processing Systems (NeurIPS) Datasets and
+Benchmarks Track, 2023.
+[13] Junjie Lu, Chuheng Zhang, Yucen Wang, Yuhua
+Jiang, Xinyao Qin, Min Xu, and Li Zhao. Noise
+space learning for VLA adaptation.
+arXiv
+preprint arXiv:2610.13943, 2026.
+[14] Yuan Lu, Esha Singh, Yi-An Ma, and Yusu
+Wang.
+Learning where to steer: Noise-space
+geometry for efficient offline multi-objective opti-
+mization with generative models. arXiv preprint
+arXiv:2609.38920, 2026.
+[15] Ajay Mandlekar, Danfei Xu, Josiah Wong,
+Soroush Nasiriany, Chen Wang, Rohun Kulka-
+rni, Li Fei-Fei, Silvio Savarese, Yuke Zhu, and
+Roberto Martín-Martín. What matters in learn-
+ing from offline human demonstrations for robot
+manipulation. In Conference on Robot Learning
+(CoRL), 2021.
+[16] Mayank Mittal, Pascal Roth, James Tigue,
+Antoine Richard, Octi Zhang, Peter Du, An-
+tonio Serrano-Muñoz, Xinjie Yao, René Zur-
+brügg, Nikita Rudin, Lukasz Wawrzyniak, Mi-
+lad Rakhsha, Alain Denzler, Eric Heiden, Ales
+Borovicka, Ossama Ahmed, Iretiayo Akinola,
+Abrar Anwar,
+Mark T. Carlson,
+Ji Yuan
+Feng, Animesh Garg, Renato Gasoto, Lionel
+Gulich, Yijie Guo, M. Gussert, Alex Hansen,
+Mihir Kulkarni, Chenran Li, Wei Liu, Vik-
+tor Makoviychuk, Grzegorz Malczyk, Hammad
+Mazhar, Masoud Moghani, Adithyavairavan Mu-
+rali, Michael Noseworthy, Alexander Poddubny,
+Nathan Ratliff, Welf Rehberg, Clemens Schwarke,
+Ritvik Singh, James Latham Smith, Bingjie
+Tang, Ruchik Thaker, Matthew Trepte, Karl Van
+Wyk, Fangzhou Yu, Alex Millane, Vikram Ra-
+masamy, Remo Steiner, Sangeeta Subrama-
+nian, Clemens Volk, CY Chen, Neel Jawale,
+Ashwin Varghese Kuruttukulam, Michael A.
+Lin, Ajay Mandlekar, Karsten Patzwaldt, John
+Welsh, Huihua Zhao, Fatima Anes, Jean-Francois
+Lafleche, Nicolas Moënne-Loccoz, Soowan Park,
+Rob Stepinski, Dirk Van Gelder, Chris Amevor,
+Jan Carius, Jumyung Chang, Anka He Chen,
+Pablo de Heras Ciechomski, Gilles Daviet, Mo-
+hammad Mohajerani, Julia von Muralt, Vik-
+tor Reutskyy, Michael Sauter, Simon Schirm,
+Eric L. Shi, Pierre Terdiman, Kenny Vilella, To-
+bias Widmer, Gordon Yeoman, Tiffany Chen,
+Sergey Grizan, Cathy Li, Lotus Li, Connor
+Smith, Rafael Wiltz, Kostas Alexis, Yan Chang,
+David Chu, Linxi "Jim" Fan, Farbod Farshid-
+ian, Ankur Handa, Spencer Huang, Marco Hut-
+ter, Yashraj Narang, Soha Pouya, Shiwei Sheng,
+Yuke Zhu, Miles Macklin, Adam Moravanszky,
+Philipp Reist, Yunrong Guo, David Hoeller, and
+Gavriel State. Isaac lab: A gpu-accelerated simu-
+lation framework for multi-modal robot learning.
+arXiv preprint arXiv:2511.04831, 2025.
+URL
+https://arxiv.org/abs/2511.04831.
+[17] Jialeng Ni, Nathan Zhao, and Kunpeng Song.
+Principal steering subspaces for online adapta-
+tion of frozen generative robot policies. arXiv
+preprint arXiv:2609.33765, 2026.
+[18] Mang Ning, Mingxiao Li, Jianlin Su, Albert Ali
+Salah, and Itir Onal Ertugrul. Elucidating the
+exposure bias in diffusion models. In Interna-
+tional Conference on Learning Representations
+(ICLR), 2024.
+[19] NVIDIA. GR00T N1: An open foundation model
+for generalist humanoid robots. arXiv preprint
+arXiv:2503.14734, 2025.
+[20] NVIDIA. Cosmos3-Edge-Policy-DROID, 2026.
+Model release, https://huggingface.co/nvi
+dia/Cosmos3-Edge-Policy-DROID.
+[21] Omkar Patil et al. You’ve got a golden ticket:
+Improving generative robot policies with a single
+noise vector. arXiv preprint arXiv:2603.15757,
+2026.
+[22] Allen Z. Ren, Justin Lidard, Lars L. Ankile, An-
+thony Simeonov, Pulkit Agrawal, Anirudha Ma-
+jumdar, Benjamin Burchfiel, Hongkai Dai, and
+Max Simchowitz. Diffusion policy policy opti-
+mization. arXiv preprint arXiv:2409.00588, 2024.
+[23] Dvir Samuel, Rami Ben-Ari, Nir Darshan, Hag-
+gai Maron, and Gal Chechik. Norm-guided latent
+space exploration for text-to-image generation.
+In Advances in Neural Information Processing
+Systems (NeurIPS), 2023.
+14
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+[24] Hikmet Simsir and Ozgur S. Oguz. Lagrangian
+perturbation diffusion steering: Latent reinforce-
+ment learning for generative policies. In Interna-
+tional Conference on Machine Learning (ICML),
+2026. arXiv:2606.01151.
+[25] Jiaming Song, Chenlin Meng, and Stefano Er-
+mon. Denoising diffusion implicit models. In
+International Conference on Learning Represen-
+tations (ICLR), 2021.
+[26] Andrew Wagenmaker, Mitsuhiko Nakamoto,
+Yunchu Zhang, Seohong Park, Waleed Yagoub,
+Anusha Nagabandi, Abhishek Gupta, and Sergey
+Levine. Steering your diffusion policy with latent
+space reinforcement learning. In Conference on
+Robot Learning (CoRL), 2025. arXiv:2506.15799.
+[27] Tom White.
+Sampling generative networks.
+arXiv preprint arXiv:1609.04468, 2016.
+[28] Xuning Yang, Rishit Dagli, Alex Zook, Hugo
+Hadfield, Ankit Goyal, Stan Birchfield, Fabio
+Ramos, and Jonathan Tremblay. RoboLab: A
+high-fidelity simulation benchmark for analysis
+of task generalist policies. In Robotics: Science
+and Systems (RSS), 2026.
+[29] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng,
+Shenyuan Gao, Sihyun Yu, George Kurian,
+Suneel Indupuru, You Liang Tan, Chuning
+Zhu, Jiannan Xiang, Ayaan Malik, Kyungmin
+Lee, William Liang, Nadun Ranawaka, Jiasheng
+Gu, Yinzhen Xu, Guanzhi Wang, Fengyuan
+Hu, Avnish Narayan, Johan Bjorck, Jing Wang,
+Gwanghyun Kim, Dantong Niu, Ruijie Zheng,
+Yuqi Xie, Jimmy Wu, Qi Wang, Ryan Julian,
+Danfei Xu, Yilun Du, Yevgen Chebotar, Scott
+Reed, Jan Kautz, Yuke Zhu, Linxi Fan, and Joel
+Jang. World action models are zero-shot policies.
+arXiv preprint arXiv:2602.15922, 2026.
+[30] Xiu Yuan, Tongzhou Mu, Stone Tao, Yunhao
+Fang, Mengke Zhang, and Hao Su. Policy deco-
+rator: Model-agnostic online refinement for large
+policy model. arXiv preprint arXiv:2412.13630,
+2024.
+[31] Tonghe Zhang et al.
+ReinFlow: Fine-tuning
+flow matching policy with online reinforcement
+learning.
+In Advances in Neural Information
+Processing Systems (NeurIPS), 2025.
+[32] Tony Z. Zhao, Vikash Kumar, Sergey Levine,
+and Chelsea Finn. Learning fine-grained biman-
+ual manipulation with low-cost hardware.
+In
+Robotics: Science and Systems (RSS), 2023.
+15
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+A. Theoretical Analysis and Proofs
+This appendix provides the proofs behind our coverage analysis, additional experiments, and implementation
+details. The illustrations in Figures 4 and 12 describe the geometry of steering and do not report robot
+evaluations.
+A.1. Proofs of the Main Propositions
+The proofs use two properties of the spherical-noise model in Section 5.2. First, 𝑃is obtained by QR
+decomposition of a Gaussian matrix, so its span contains that matrix’s normalized columns 𝑔1, . . . , 𝑔𝑟. These
+are 𝑟independent noise vectors distributed uniformly on 𝒮. Second, setting 𝑢= 0 gives 𝑠= 0 and recovers an
+unsteered sample uniform on 𝒮. Its expected advantage relative to 𝜋𝑆is zero by the definition of 𝑉𝜋𝑆.
+Proof of Proposition 1. By rotational invariance, sampling uniformly from 𝒮𝑃and averaging over the random
+projection gives a uniform sample on 𝒮. The advantage relative to 𝜋𝑆therefore averages to zero, establishing
+(a). If 𝒮𝑃contains no point in 𝐺𝜏(𝑜), then all 𝑔1, . . . , 𝑔𝑟must lie outside 𝐺𝜏(𝑜). Their independence gives (b).
+Furthermore, max𝑧∈𝒮𝑃𝐴(𝑜, 𝑧) ≥max𝑖𝐴(𝑜, 𝑔𝑖). Since the 𝑔𝑖are independent uniform samples from 𝒮, this
+establishes (c).
+Proof of Proposition 2. Because 𝜇is independent of 𝑃, we can exchange the expectations over projections
+and states. Applying Proposition 1(b) at each state gives the expected fraction of states for which the
+subspace contains no qualifying noise input. Markov’s inequality gives the corresponding probability bound
+over projections.
+Proof of Proposition 3. At a state where 𝒮𝑃intersects 𝐺𝜏(𝑜), the expected advantage of 𝜋′
+𝑃is at least 𝜏. At
+a state where it does not, the policy uses an unsteered sample and has expected advantage zero. Substituting
+this bound into the performance difference lemma [9], 𝐽(𝜋′) −𝐽(𝜋𝑆) =
+1
+1−𝛾E𝑜∼𝑑𝜋′E𝑧∼𝜋′𝐴(𝑜, 𝑧), gives the first
+statement. Averaging over 𝜇= 𝑑𝜋𝑆and applying Proposition 2 gives the second.
+A.2. Interpreting the Coverage Bounds
+Higher rank makes useful noise easier to reach.
+The lower bound on one-step improvement is
+𝜏(1 −𝜖𝑟(𝜏)), which can be maximized over 𝜏. A smaller threshold includes more noise inputs in the qualifying
+region, while a larger rank reduces the probability of missing that region. For example, if 20% of noise inputs
+on the sphere meet the threshold at every state, rank 32 misses at most approximately 0.8% of states with
+probability at least 0.9 over the random projection. This follows from Markov’s inequality and is ten times
+the expected miss rate in Section 5.2. If 5% of noise inputs meet a stricter threshold 𝜏′, ranks 32 and 64 give
+expected one-step improvements of at least approximately 0.81𝜏′ and 0.96𝜏′, respectively. These examples
+illustrate the bounds; the corresponding fractions have not been measured on the robot tasks.
+Finding useful noise is a separate learning problem.
+The propositions characterize the availability of
+improving noise inputs within a random subspace. Learning additionally depends on the critic and on the
+states visited under the trained actor, whose distribution can depend on 𝑃. The state-averaged coverage
+guarantee applies to a projection-independent state distribution; the projection and rank studies examine
+learned performance empirically.
+A.3. A Fixed Subspace Across an Episode
+The projection remains fixed throughout an episode, so the same coefficient vector 𝑢always maps to the
+same noise input at full steering strength. Which coefficients are useful can still change with the observation
+(Figure 12). The actor therefore learns in a reparameterized MDP whose actions are coefficients in the fixed
+subspace. Changing the projection after training changes the noise associated with those coefficients.
+16
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+decision 1
+decision 5
+decision 10
+decision 15
+decision 20
+decision 24
+5
+10
+15
+20
+decision t
+−π
+−π/2
+0
+π/2
+π
+position in the slice
+worse
+native
+better
+(a) the value sphere at each decision, cut by the same fixed slice P
+(b) the slice at every decision, unrolled: advantage along the slice, and the actor's choice at each decision
+Figure 12: A fixed low-rank subspace can support different noise choices throughout an episode.
+This schematic illustrates noise steering, rather than measured robot results. The sphere represents noise
+inputs at a fixed norm, and its color indicates advantage: expected return relative to the base policy, with
+blue higher and red lower. A fixed projection 𝑃restricts the actor to the same subspace at every decision; its
+intersection with the sphere is shown here as a great circle. (a) Six decisions illustrate how the useful noise
+inputs change with the observation, while green points mark the actor’s choices. (b) Great circles from 24
+decisions are unrolled into columns to show how the actor can track changing high-advantage regions without
+changing the projection.
+17
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+B. Experimental Setup and Training
+We describe the shared training setup, followed by the environments, policies, and evaluation used for each
+experiment. Section B.1 introduces the shared steering parameterization and reporting conventions. Tables 2
+to 4 summarize settings across policy families. The remaining subsections provide the details specific to each
+experiment.
+B.1. Shared Protocol
+LoRN parameterization.
+For actor output 𝑢∈R𝑟and a fixed projection 𝑃with 𝑃⊤𝑃= 𝐼𝑟, we use
+𝑣= 𝑃𝑢/‖𝑢‖,
+𝑠= 𝛼min
+(︂
+1, ‖𝑢‖
+𝜌√𝑟
+)︂
+,
+𝑧=
+√︀
+1 −𝑠2 𝜀+ 𝑠
+√
+𝑁𝑣.
+(5)
+When 𝑢= 0, the implementation returns 𝜀exactly. We do not apply a further correction to the norm of each
+generated sample. For fresh Gaussian noise 𝜀independent of (𝑠, 𝑣), the construction preserves the conditional
+expected squared norm, E[‖𝑧‖2 | 𝑠, 𝑣] = 𝑁. This identity does not require every sample to have the same
+norm. The DreamZero variants use the fixed-draw convention described in Section B.4.
+The parameter 𝛼sets the maximum steering strength, while 𝜌determines the actor output norm at which
+this maximum is reached. Increasing 𝜌reduces strength for a fixed output 𝑢. We distinguish these parameter
+settings from the strengths measured during training; the empirical sweep appears in Section C.3.
+Projection and Gaussian noise.
+We construct 𝑃by QR decomposition of a Gaussian matrix, giving fixed
+orthonormal columns. For tiled projections, we construct a basis for one row and repeat it over 𝑇rows with a
+factor of 1/
+√
+𝑇to preserve orthonormality. The DreamZero-5B video basis repeats across its two generated
+frames in the same way. Table 2 summarizes the noise dimension, projection rank and structure, and steering
+strength for each policy family. The Gaussian component is resampled at each decision except in the two
+DreamZero variants.
+Table 2: A small actor controls high-dimensional noise across policy families. Settings for LoRN,
+which maps 𝑟actor outputs through a fixed projection into an 𝑁-dimensional noise input while keeping the
+base-policy weights frozen. 𝛼sets the maximum steering strength 𝑠: 𝑠= 0 uses the original noise and 𝑠= 1
+uses only the normalized projected actor output. Random bases have orthonormal columns; tiled bases repeat
+across action-chunk steps; frame-constant bases repeat across generated video frames. Output-dependent
+strengths use 𝑠= 𝛼min(1, ‖𝑢‖/(𝜌√𝑟)) with 𝜌= 0.3 and actor output 𝑢. The two YAM station actors instead
+use fixed 𝑠= 1. Diffusion Policy uses 𝑟= 𝑁, corresponding to a random rotation of the full noise space.
+Projection seeds are separate from the learner seeds.
+Policy / noise input
+𝑁
+𝑟
+Basis
+𝛼
+Projection seed(s)
+Cosmos3-Edge video
+506,880
+32
+Random
+1
+1234–1236, one per learner seed
+DreamZero-14B video
+112,640
+32
+Random
+1
+1234; action 4321
+DreamZero-5B video
+25,600
+32
+Frame-constant
+1
+1234; action 4321
+𝜋0 LIBERO / ALOHA
+1,600
+16
+Tiled
+0.5
+4321, all learner seeds
+𝜋0.5
+960
+32
+Random
+1
+4321, all learner seeds
+Diffusion Policy
+28
+28
+Random
+0.5
+4321, all learner seeds
+GR00T N1.7 action (YAM station)
+1,280
+32
+Random
+1 (fixed 𝑠)
+4321, all learner seeds
+Fine-tuned 𝜋0.5 action (YAM station)
+420
+32
+Random
+1 (fixed 𝑠)
+4321, all learner seeds
+Learner.
+Steering actors use SAC [5]; Table 3 summarizes the implementations, architectures, and hy-
+perparameters. The model-specific subsections describe the observations supplied to each actor and critic.
+Actor and critic inputs are shared, without privileged state information, except on the handover task, where
+the critics additionally receive the simulator’s object poses during training; the deployed actor never does
+18
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 3: Soft Actor-Critic settings for training noise-steering actors. The generative robot policy
+remains frozen while the actor and critics learn from environment interaction. Each steering decision
+produces one action chunk and one replay transition; replay capacities count these transitions. Robomimic
+denotes the Diffusion Policy experiments, and GR00T N1.7 denotes the YAM station experiments. Hidden
+layers are listed as number of layers × width. Learning rates are ordered actor / critic / entropy temperature;
+critic aggregation is ordered temporal-difference target / actor objective. 𝑑𝑢is the actor output dimension,
+and the temperature weights the entropy term in SAC. Slash-separated task settings mean LIBERO /
+ALOHA for 𝜋0 and Cosmos3-Edge / DreamZero-14B in their shared column. All optimizers use Adam with
+target-network update rate 0.005; “Auto” denotes learned temperature and dashes denote inapplicable
+settings. The YAM station’s DSRL baseline uses a transformer actor rather than the listed LoRN MLP.
+Setting
+𝜋0
+Robomimic
+Cosmos /
+DreamZero-
+14B
+DreamZero-5B 𝜋0.5
+GR00T N1.7
+(YAM station)
+Implementation
+jaxrl2 SAC
+SB3 DSRL-NA PyTorch SAC
+PyTorch SAC
+PyTorch SAC
+PyTorch SAC
+Hidden layers
+3 × 128
+3 × 2048
+3 × 512
+3 × 128
+2 × 256
+2 × 256
+Critics;
+aggregation
+10; mean /
+mean
+2; min / min
+10; mean /
+mean
+10; mean /
+mean
+4; mean of 2 /
+min
+4; mean of 2 /
+min
+Learning rates
+10−4 / 3×10−4
+/ 3×10−4
+3×10−4 for all 10−4 / 3×10−4
+/ 3×10−4
+10−4 / 3×10−4
+/ 3×10−4
+5×10−5 /
+10−4 / 10−4
+5×10−5 /
+10−4 / –
+Batch size
+256
+256
+768
+512
+64
+64
+Replay capacity
+25k / 150k
+107
+1,900 (recent
+decisions only)
+48,000
+200,000
+200,000
+Discount per
+decision
+0.99920 /
+0.99950
+0.99; Square
+0.999
+0.99
+0.99916
+0.99530
+0.997540
+Entropy target
+−𝑑𝑢/2 / 0
+0
+0
+−16
+0
+–
+Temperature
+Auto; init. 1
+Auto
+Softplus; init.
+0.008, floor
+0.005
+Softplus; init.
+1
+Log; automatic Fixed 0.05
+Actor output
+bound
+±1 / ±2
+±1.5
+±1
+±1
+±1
+±1
+Warmup
+500 / 1,000
+decisions
+1,501 / 2,001
+vector steps𝑎
+48k env. steps
+19,200 env.
+steps
+450 env. steps
+450 env. steps
+Updates per
+collection unit
+20 / decision
+20 / vector
+step; Lift 30
+2 / decision
+2 / decision
+2 / decision
+2 / decision
+Parallel train envs. 1
+4
+12 / 8
+1
+8
+8
+Slash-separated settings refer to LIBERO / ALOHA or Cosmos3-Edge / DreamZero-14B, as appropriate. 𝑎Robomimic warmup
+counts vector steps, each collecting from four environments, and uses frozen-policy data. The YAM station uses a fixed temperature
+and a transformer actor for DSRL’s action-noise outputs.
+(Section B.6). The frozen policy receives the language instruction, but the steering actor does not receive
+it as a separate input. Each replay transition corresponds to one executed action chunk. Rewards and
+bootstrapping conventions follow the task setups described below.
+Frozen policies and success.
+All base-policy weights remain frozen, and methods within a comparison
+use the same checkpoint. Evaluation success follows the simulator’s task predicate at the end of an episode.
+An evaluation timeout counts as failure.
+Reported checkpoints and estimates.
+Training progress is recorded as gradient updates for 𝜋0 and
+environment steps for the other policy families. We compare learning curves within each task. Table 4
+summarizes the training budgets and the evaluations used for reported success. Results use the specified
+checkpoints or trailing windows; the physical deployment separately selects one actor per method and task
+from the simulation-trained seeds. DSRL and LoRN use sampled actor outputs during evaluation, except on
+DreamZero-5B, which uses deterministic outputs. LP-DS uses the actor mode for 𝜋0 and the Polyak-averaged
+19
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 4: Training budgets and the evaluations used to summarize success. Each row identifies a
+policy family, its nominal training budget, the number of independent training seeds, and how success is
+calculated for each seed. Reported means and standard errors are computed across these seed-level estimates.
+Environment steps count executed low-level actions; 𝜋0 progress instead counts gradient updates, and
+Diffusion Policy uses wall-clock budgets. A trailing-window estimate averages distinct checkpoint evaluations,
+rather than evaluating one final controller on all pooled episodes. Paired evaluations share initial conditions
+across methods. Some Cosmos3-Edge runs use earlier checkpoints near 0.9–1.0M steps, and two
+DreamZero-5B video runs use checkpoints near 0.46–0.48M steps. The YAM station rows describe simulation
+evaluation; physical deployment separately evaluates one simulation-selected actor per method and task on
+ten trials.
+Policy
+Training budget
+Seeds
+Reported evaluation per seed
+Cosmos3-Edge
+1.5M env. steps; Marker 1.0M
+3
+240 episodes at the specified
+checkpoint
+DreamZero-14B
+200k env. steps
+3
+120 paired episodes near the end of
+training
+DreamZero-5B
+614,400 env. steps
+3
+Mean of the last three 25-episode
+evaluations
+𝜋0
+500k gradient updates (LIBERO);
+3M (ALOHA)
+5
+Mean of the last ten smoothed
+evaluations (Section B.5)
+𝜋0.5
+1M env. steps
+5
+Mean of the last ten evaluations
+Diffusion Policy
+12 h (Lift/Can); 30 h (Square)
+5
+Mean of the last ten 200-episode
+evaluations
+GR00T N1.7 (YAM station)
+1M env. steps
+3
+240 simulation episodes at the final
+checkpoint
+Fine-tuned 𝜋0.5 (YAM station)
+3M env. steps
+3
+120 simulation episodes at the final
+checkpoint
+actor in the released Robomimic implementation.
+Tasks, episodes, and rewards.
+Table 5 lists, for every policy family, the task identifiers, episode limits,
+reset randomization, reward, and in-training evaluation cadence. Projection seeds are in Table 2; learner seeds
+are numbered from 0, with the seed count 𝐾of Table 4.
+Success estimates and uncertainty.
+Success rate is the fraction of evaluation episodes that succeed. We
+first calculate an estimate for each training seed, then report the mean and standard error across seeds, with
+standard error equal to the sample standard deviation divided by
+√
+𝐾. For a single checkpoint evaluated on 𝑀
+episodes, the binomial standard error
+√︀
+^𝑝(1 −^𝑝)/𝑀instead measures episode-sampling uncertainty. These two
+sources of uncertainty should not be interpreted interchangeably. Table values use the aggregation specified
+in Table 4; for 𝜋0, whose evaluations contain ten episodes, the last-ten mean is taken on the five-evaluation
+running mean defined in Section B.5.
+Compute.
+Experiments use NVIDIA L40 and L40S GPUs. Runs on 𝜋0, Robomimic, DreamZero-5B, 𝜋0.5,
+and the YAM station tasks use one GPU each. Cosmos3-Edge and DreamZero-14B use two GPUs, with the
+model and simulator on separate devices. Run times are reported below for each policy family.
+B.2. Amplitude and Sensitivity Probes
+Amplitude probes.
+We multiply the frozen policy’s Gaussian noise by an amplitude 𝑐and compare success
+across amplitudes on matched initial states (Figure 2). The grid contains 17 amplitudes from 0.02 to 2.3,
+except for DreamZero-14B, which uses 14 amplitudes up to 2.0. Cosmos3-Edge is evaluated on Mustard using
+100 trajectories per amplitude: 50 initial contexts with two samples each. DreamZero-14B is evaluated on
+Marker using 100 episodes per amplitude, with the same seeded initial conditions across amplitudes. The 𝜋0
+20
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 5: Task configuration. Episode limits count environment steps. In-training evaluation gives the
+number of episodes and the cadence at which they run, in gradient updates for 𝜋0 and environment steps
+otherwise. Rewards are per decision unless stated.
+Policy
+Tasks
+Episode
+limit
+Reset
+randomization
+Reward
+In-training
+evaluation
+Cosmos3-Edge
+RoboLab MustardInLeftBin,
+MarkerInMug,
+ButterAboveRaisin,
+StackYellowOnRed
+448, 600,
+576, 896
+Object positions
+uniform within
+±5 cm, 0.25 m
+separation floor
++1 on the
+success
+transition, 0
+otherwise; time
+limits
+bootstrap
+24 episodes /
+15k env. steps
+DreamZero-
+14B
+The same four RoboLab tasks
+Same
+Same
+Same
+16–20
+episodes /
+20–40k env.
+steps
+DreamZero-5B
+LIBERO-90 cream-cheese box
+(LIVING_ROOM_SCENE1, index
+47) and moka pot
+(KITCHEN_SCENE3, index 19)
+600
+LIBERO initial
+states
+Same
+25 episodes /
+38,400 env.
+steps
+𝜋0
+LIBERO-90 cream cheese (57),
+moka pot (19), cream-cheese
+box (47), black bowl (9),
+alphabet soup (55), butter (56);
+ALOHA Transfer Cube
+400
+LIBERO: the
+benchmark’s 50
+initial states;
+ALOHA: default
+environment resets
+−1 per
+decision, 0 on
+success; only
+success disables
+bootstrapping
+10 episodes /
+10k gradient
+updates
+𝜋0.5
+YAM Load dishwasher; Pack
+container
+300; 450
+Dishwasher:
+recorded scene;
+Pack: bottles
+±6–8 cm, box
+±2 cm
+Terminal: 0 on
+success, −1 on
+failure or
+timeout
+16 episodes /
+18k env. steps
+Diffusion
+Policy
+Robomimic Lift, Can, Square
+300, 300,
+400
+Standard resets
+Sparse reward
+minus one,
+summed over
+the chunk;
+time limits
+terminal
+200 episodes /
+≈48k env.
+steps (64k on
+Square)
+GR00T N1.7
+(YAM station)
+Cube to bowl; Marker to cup
+900
+Cube ±5 cm and
+±45∘; marker
+±3 cm and ±29∘
+§B.6
+32 episodes /
+50k env. steps
+Fine-tuned 𝜋0.5
+(YAM station)
+Cube handover
+1,350
+Cube
+𝑥∈[0.28, 0.44], 𝑦∈
+[−0.21, −0.05] m,
+yaw ±45∘; bowl
+𝑥∈[0.36, 0.50], 𝑦∈
+[−0.56, −0.40] m
+Staged: 0.02
+hold, 0.05 lift,
+0.15 handover,
+0.30 place; +1
+on success
+120 episodes
+at the final
+checkpoint
+probe uses Cream cheese with 100 paired episodes per amplitude, and Diffusion Policy uses Can with 200.
+We define the empirical tolerated range in Figure 2 as the tested amplitudes whose success is no more than
+one standard error below the fresh-noise reference. This range summarizes the measured grid; it is not a
+confidence interval for an underlying threshold. Squared-norm ratios, where reported, are the squares of the
+corresponding amplitude ratios.
+Noise-input sensitivity probe.
+The sensitivity probe follows Section 5.3 and reports the root-mean-square
+change in decoded actions in each model’s own action units (Figure 5). For Cosmos3-Edge and DreamZero-14B,
+we use 12 Marker states from two base-policy episodes and four fresh noise draws per state. DreamZero-5B is
+probed on LIBERO Moka pot. For DreamZero-14B, the ratios of action changes from resampling video versus
+21
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+action noise are 7.5, 4.3, 5.5, and 3.0 on Mustard, Butter, Marker, and Stack, respectively. The probe requires
+no reward and selects video noise for all three evaluated models.
+B.3. Cosmos3-Edge Training and Evaluation
+Environment and policy.
+We use the Cosmos3-Edge-Policy-DROID checkpoint on MustardInLeftBin,
+MarkerInMug, ButterAboveRaisin, and StackYellowOnRed in RoboLab. The model generates eight video
+frames per decision, and we execute 32 actions. Object poses are randomized within each task, and methods
+are evaluated on the same initial placements.
+Steering and training.
+Video LoRN uses a rank-32 random projection of the 506,880 noise entries at
+𝛼= 1 and 𝜌= 0.3, giving a measured strength of approximately 0.98. Action LoRN uses a rank-32 projection
+of the 256 action-noise entries. The DSRL variants either repeat eight actor outputs across the action horizon
+or control all 256 entries directly. The actor and critics receive a trainable encoding of the previous decision’s
+conditioning-frame latent and eight joint/gripper coordinates. The reward is +1 on success and zero otherwise;
+time-limit transitions retain bootstrapping.
+Evaluation.
+We evaluate three training seeds per configuration on 240 paired episodes. Per-seed success
+rates are rounded to one decimal before the mean and standard error across seeds are computed, which can
+move a reported mean by up to 0.05 points relative to the pooled counts. The nominal budgets appear in
+Table 4. Some Stack runs use available checkpoints near 1.0M steps, and one Butter video-steering run uses
+its 0.9M-step checkpoint; the corresponding curves had remained flat for at least 400k steps. These are the
+checkpoints used for the reported comparison.
+Steering-rule controls.
+The controls in Table 7b use the same rank-32 video projection and learner, with
+a separately trained actor for each steering rule. Replacement steering directly maps actor outputs to noise as
+𝑧= 𝑐𝑃𝑢. We compare unscaled replacement, fixed rescaling by
+√︀
+𝑁/𝑟, and a scale calibrated at initialization
+to match the Gaussian expected squared norm. The calibrated scale remains fixed during training. These are
+projected-replacement controls rather than reproductions of DSRL’s complete method. The additive control
+adds the normalized projected actor output to the full Gaussian sample,
+𝑧add = 𝜀+
+𝑠
+√
+1 −𝑠2
+√
+𝑁𝑃𝑢
+‖𝑢‖,
+(6)
+which, for the same 𝑢, 𝜀, and 𝑠< 1, equals LoRN’s noise divided by
+√
+1 −𝑠2. It therefore preserves the
+resulting vector’s orientation but raises its expected squared norm to 𝑁/(1 −𝑠2) under independent fresh
+Gaussian noise. The same maximum steering strength does not imply the same measured strength after
+training. At 𝛼= 0.9, Mustard runs average 𝑠= 0.88 with LoRN and 𝑠= 0.82 with additive steering. Our
+LP-DS adaptation adds a projected actor output to Gaussian noise and uses a dual variable to constrain its
+mean squared norm,
+𝑧= 𝜀+
+√︀
+𝑁/𝑟𝑃𝑢,
+mean(𝑢2) ≤𝑏,
+where 𝑏∈{0.03, 0.10} is the target mean squared coefficient magnitude. In table labels we denote this
+setting by 𝛽= 𝑏. The corresponding correction has target root-mean-square norm
+√
+𝑏𝑁. The constraint is
+optimized using projected dual ascent. The PSS-related control instead uses LoRN’s mixture at fixed strength
+𝑠=
+√︀
+𝑟/𝑁= 0.0080. It matches a dimension-based allocation of actor control but does not implement PSS’s
+response-based projection selection or its Gaussian orthogonal-complement reconstruction. These comparisons
+therefore evaluate adapted mechanisms under a shared projection, rather than the complete LP-DS or PSS
+methods. The lower-strength and norm-constrained controls use available checkpoints after their learning
+curves level off, between 0.86M and 1.0M steps; the 𝛼= 0.9 comparison uses the full 1.5M-step budget.
+Rank, projection, and steering strength.
+The rank sweep compares 𝑟∈{4, 8, 16, 32, 256} using three
+training seeds with independent random projections (Table 8). Stack evaluations use checkpoints near 1.0M
+steps, consistent with the main comparison. The projection study uses nine actors across five projections,
+22
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+with three independently trained actors on each of two projections and one on each of the remaining three.
+Projection-swap tests change only 𝑃, keeping the actor and evaluation initial states fixed. The strength study
+varies 𝜌∈{0.3, 0.6, 1} under a shared projection and training seed, together with an 𝛼= 0.5 comparison
+(Section C.3).
+Compute.
+Each run uses two GPUs and takes 36–64 h.
+B.4. DreamZero Training and Evaluation
+Both DreamZero variants reuse the sampler’s original Gaussian draw as 𝜀in Eq. (5). Setting 𝑢= 0 therefore
+recovers the released sampler exactly. Because this draw is fixed, the fresh-Gaussian expected squared-norm
+identity in Section B.1 does not apply. The DreamZero base-policy references are therefore the released
+policies with their fixed draws, evaluated on the same paired initial states as the trained actors, as for every
+other model.
+B.4.1. DreamZero-14B on RoboLab
+Environment and policy.
+We use the DreamZero-DROID checkpoint on the same four RoboLab tasks as
+Cosmos3-Edge. The model predicts 24-step action chunks using its default denoising schedule, and we execute
+each chunk in full. Video and action LoRN use rank-32 random projections at 𝛼= 1. DSRL repeats its
+32-dimensional actor output across the action horizon. The observation encoders, reward, and learner follow
+the Cosmos3-Edge setup.
+Training and evaluation.
+We train three seeds per configuration for 200k environment steps and evaluate
+the resulting checkpoints on 120 paired episodes per seed. Initial states are shared across methods, including
+the base-policy reference. Each run uses two GPUs and takes approximately 20 h.
+B.4.2. DreamZero-5B on LIBERO
+Environment and policy.
+We use the RLinf 5B LIBERO SFT checkpoint (RLinf-DreamZero-WAN2.2-
+5B-LIBERO-SFT-Step26000) on Cream-cheese box and Moka pot from LIBERO-90. The model executes
+16-action chunks using eight DiT evaluations per decision. Video LoRN uses a rank-32 basis repeated across
+the generated frames at 𝛼= 1. Action LoRN uses a tiled rank-16 basis at 𝛼= 0.5. The actor and critics
+receive image features from trainable convolutional encoders together with joint/gripper coordinates. Rewards
+and bootstrapping follow the Cosmos3-Edge setup.
+Training and evaluation.
+We train three seeds per configuration with a nominal budget of approximately
+0.61M environment steps. Results average each seed’s last three 25-episode evaluations, using deterministic
+actor outputs. Two Moka-pot video-steering runs ended earlier, at approximately 0.46M and 0.48M steps,
+and use their last available evaluations. The base-policy reference uses the released fixed noise draw on 25
+episodes. Each run uses one GPU and takes 20–27 h.
+B.5. Action-Policy Training and Evaluation
+Early and final success.
+The appendix’s early-window mean is each seed’s average success over the
+window [0, 𝐵]. For 𝜋0, whose evaluations contain only 10 episodes, we first smooth the curve with a trailing
+five-evaluation running mean, in which each evaluation is averaged with the four preceding ones, or with all
+preceding ones during the first four evaluations; the smoothed curve is resampled on a grid of 10k gradient
+updates by holding the latest evaluation, integrated by the trapezoid rule over the grid from the first evaluation,
+at step 0, to 𝐵, and divided by 𝐵. For Robomimic, the same trapezoid is taken over the raw 200-episode
+evaluations on a 50k-step grid. For 𝜋0.5, whose 16-episode evaluations are evenly spaced about 18k environment
+steps apart, the early-window mean is the plain average of the raw evaluations up to 𝐵. The endpoint 𝐵
+is 200k gradient updates for LIBERO, 1M gradient updates for ALOHA, 500k environment steps for Lift
+and both 𝜋0.5 tasks, and 1M environment steps for Can and Square. Seeds that do not reach 𝐵have no
+23
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 6: LP-DS variants used to compare action-noise steering across policy families. LP-DS adds
+an observation-dependent offset to Gaussian noise and constrains its magnitude. We use its released
+implementation on Diffusion Policy and compare adaptations of the released steering rule and the paper’s
+Algorithm 1 on 𝜋0 and 𝜋0.5. A “broadcast row” is a 32-dimensional offset repeated across action-chunk steps;
+“box” denotes the bound on each offset coordinate. The target 𝛿constrains the offset magnitude, with
+row-wise and per-coordinate definitions distinguished in the variant descriptions. Slash-separated values give
+final success (%), calculated as each seed’s mean over its last ten evaluations (smoothed for 𝜋0 as in
+Section B.5) and then averaged over five seeds unless a row specifies one seed. Task order is 𝜋0: LIBERO
+Cream cheese / Moka pot / Cream-cheese box / Black bowl / ALOHA Transfer Cube; 𝜋0.5: YAM Load
+dishwasher / Pack container; Diffusion Policy: Robomimic Lift / Can / Square. “Reported” marks the
+variant selected for the main comparisons; rows without numerical success describe stopped runs.
+Policy
+Variant
+Final success (%)
+Reported
+𝜋0
+Release rule in the DSRL recipe:
+per-coordinate target 0.35, box 5
+97.0 / 78.0 / 64.7 / 64.5 / 94.1
+yes
+Same, target 0.10
+92.8 (cream cheese only)
+Algorithm 1, 𝛿= 0.35 on the broadcast row
+(one seed)
+62 / 92 / 58 / 0 / 85
+Algorithm 1 with the release’s per-coordinate
+target, 0.35 per coordinate or 11.2 on the 32-d
+row (one seed)
+100 / 88 / 54 / 1 / 81
+𝜋0.5
+Algorithm 1, 𝛿= 0.35 on the broadcast row
+39.8 / 18.9
+yes
+Algorithm 1 with the release’s per-coordinate
+target, 11.2 on the 32-d row
+13.4 / 3.6
+Release rule, deterministic shift, box 5
+5.5 / 5.4
+Release rule, deterministic shift, box 1
+at zero from 75k steps; stopped at
+0.6M
+Diffusion Policy
+Released implementation: 𝛿= 0.35 on Can and
+Square, 0.05 on Lift
+99.2 / 98.0 / 98.3
+yes
+early-window estimate. Final success is the mean of each seed’s last ten evaluations (Table 4); for 𝜋0 these are
+the last ten values of the same five-evaluation running mean, so each seed’s estimate is a weighted mean of its
+last 14 raw evaluations. We distinguish the released LP-DS implementation used on Robomimic from our
+adaptations to 𝜋0 and 𝜋0.5. The 𝜋0 and 𝜋0.5 learning curves of Figure 7 are drawn with the five-evaluation
+running mean; the Robomimic curves are raw.
+LP-DS variants.
+We use the released LP-DS implementation on Robomimic and evaluate several adaptations
+for 𝜋0 and 𝜋0.5 (Table 6). The variant comparison covers the original five 𝜋0 tasks; alphabet soup and butter
+were added later and run with the reported variant only. We report the best-performing tested variant for
+each policy family. On Robomimic, we use the released per-task targets. On 𝜋0, the strongest variant places
+the release’s residual steering rule within the DSRL training setup: a 32-dimensional offset repeated across
+the action chunk, a per-coordinate mean-square target of 0.35, an output bound of 5, and DSRL’s latent
+critic. This variant reproduces the cream-cheese performance reported by LP-DS. A target of 0.10 and the
+two Algorithm 1 variants perform less well on most tested tasks. On 𝜋0.5, the release-rule adaptation fails
+with an output bound of 1 and remains below the base policy with a bound of 5. Our Algorithm 1 adaptation
+with 𝛿= 0.35 on the repeated row improves both tasks and is the reported variant. Using the release’s
+per-coordinate target in that adaptation leads to failure on most seeds. An initial adaptation with a stochastic
+offset was stopped early because LP-DS specifies a deterministic offset.
+B.5.1. 𝜋0 on LIBERO and ALOHA
+Environment and policy.
+We use openpi’s pi0_libero checkpoint on six LIBERO tasks and
+pi0_aloha_sim on ALOHA Transfer Cube. Both use their default flow sampler and predict 50 actions
+per decision; we execute 20 on LIBERO and 50 on ALOHA. LoRN controls the 1,600 action-noise entries
+24
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+through a tiled rank-16 projection at 𝛼= 0.5. Actor and critic encoders process a camera image together
+with proprioception. The reward is −1 per decision and zero on success; only success disables bootstrapping.
+Training uses jaxrl2 SAC with the budgets and five-seed evaluation protocol in Table 4. A run takes 5–6 h on
+LIBERO or 28 h on ALOHA using one GPU.
+Baselines and ablations.
+The LP-DS adaptation repeats a 32-dimensional offset across the action horizon,
+using the release’s per-coordinate mean-square target of 0.35 and output bound of 5. Its critic is trained
+directly on (𝑜, Δ) without distillation, and collection and evaluation use the actor mode. The Cream-cheese
+target ablation uses 0.10 instead of 0.35. For additive steering, we compare maximum strengths 𝛼of 0.5, 0.75,
+and 0.9; the actor’s output norm stays above 𝜌√𝑟throughout these runs, so the delivered strength equals 𝛼.
+The observation-free control zeros the actor inputs while keeping the critic observations unchanged. Tiled and
+random projections are compared at matched rank and strength, and the rank study uses tiled projections of
+rank 4, 8, 16, and 32 at strength 0.5. Initialization probes are the warm-up round before any learning: latents
+are drawn from a standard normal, whose norm exceeds 𝜌√𝑟, so the strength mapping saturates at 𝑠= 𝛼
+under the corresponding projections.
+B.5.2. 𝜋0.5 on the YAM Tasks
+Environment and policy.
+We use the LeRobot pi05-MolmoAct2-YAM checkpoint on Load dishwasher and
+Pack container. The policy uses ten flow steps and executes 30-action chunks in full. Load dishwasher uses
+a recorded scene, while Pack container randomizes object placements. LoRN controls the 960 action-noise
+entries through a rank-32 random projection at 𝛼= 1. Actor and critics receive frozen DINOv2-small features
+from three cameras and 14 joint coordinates. The terminal reward is zero on success and −1 on failure or
+timeout. Training uses PyTorch SAC with five seeds and a 1M-environment-step budget. Each run uses one
+GPU and takes 20–24 h.
+LP-DS adaptation.
+Our adaptation follows Algorithm 1 of LP-DS with a deterministic 32-dimensional
+offset repeated across the action horizon. It trains an action critic through temporal-difference learning and
+distills a noise critic from the stored decoded actions. A dual variable targets a squared offset-row norm of
+𝛿= 0.35. The implementation conditions the offset on the observation, bootstraps from the stored successor
+chunk, and has no target actor.
+B.5.3. Diffusion Policy on Robomimic
+Environment and policy.
+We use the DPPO Robomimic MLP checkpoints on Lift, Can, and Square, with
+eight DDIM steps and four-action chunks. LoRN controls all 28 action-noise entries through a rank-28 random
+rotation at 𝛼= 0.5. Actor and critics receive the standard low-dimensional robot and object observations.
+Rewards sum the sparse reward minus one over the action chunk, and time limits are terminal. We train five
+seeds per method using the wall-clock budgets in Table 4, reaching approximately 1.2M steps on Lift, 1.6M
+on Can, and 3.6–4.0M on Square. Each run uses one GPU.
+Baselines and ablations.
+DSRL uses the SB3 DSRL-NA implementation, which distills a noise critic from
+an action critic and initializes replay with frozen-policy data. LP-DS uses the released implementation with a
+deterministic offset, a zero-initialized output layer, and a Polyak-averaged actor. Its output bound is 1.5, with
+a mean-square offset target of 0.35 on Can and Square and 0.05 on Lift. The Lift target follows the released
+configuration rather than the 0.10 listed in the paper. The additive and observation-free controls follow the
+same definitions as for 𝜋0.
+B.6. Sim-to-Real Transfer on the YAM Station
+Environment and tasks.
+The YAM station has two arms, an overhead camera, and a wrist camera on
+each arm. Its Isaac Lab reconstruction matches the scene assets, arm kinematics, and calibrated camera views.
+Cube to bowl requires placing a cube in a bowl, Marker to cup requires placing a whiteboard marker in the
+target container, and Cube handover requires the left arm to pick up the cube and hand it to the right arm,
+25
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+which places it in a bowl. We randomize object poses during simulation training. Training uses a red cube
+and red cup; the physical YAM station uses a black cube and a pink bowl as the marker target, with task
+instructions unchanged. Figure 8 shows the three tasks on the physical station.
+Policy and steering.
+For Cube to bowl and Marker to cup we use the released GR00T N1.7 policy without
+task-specific fine-tuning. It receives the three camera views, a task instruction, and a 32-dimensional state
+describing both arms. The policy predicts 40-step chunks, with the joint and gripper commands executed
+in full. Both methods steer the 1,280 action-noise entries. LoRN uses a rank-32 random projection at fixed
+strength 𝑠= 1. DSRL generates the full action-noise tensor using a transformer actor across the chunk steps.
+Observations and rewards.
+The steering actor and critics receive frozen DINOv2-base features from the
+overhead camera and the robot state. Wrist images are supplied only to the frozen policy. The LoRN actor
+and critics use two-layer MLPs; shared SAC settings appear in Table 3. Cube to bowl uses a terminal reward
+of 0 on success and −1 on failure or timeout, while Marker to cup pays staged rewards of 0.1 for contact, 0.2
+for grasping, 0.2 for lifting, 0.1 for holding the marker over the cup, and 0.3 for placing it inside, each once
+per episode, plus 1 on success. A trial succeeds when the released object remains inside the target container
+through the final second. Timeouts count as failure.
+Training and evaluation.
+We train three simulation seeds per method and task for 1M environment steps.
+Each final actor is evaluated on 240 episodes with initial poses shared across methods. The base policy is
+evaluated on the same episodes using fresh Gaussian noise. For physical deployment, we select one actor per
+method and task using simulation performance and run ten trials on the YAM station without further training.
+The base policy also runs ten trials per task. Objects are placed by hand near their nominal initial poses, and
+placement success is judged from the camera recordings. All LoRN physical trials appear in Figure 17. Each
+simulation-training run uses one GPU.
+Cube handover with a fine-tuned 𝜋0.5.
+The released 𝜋0.5 completed none of our handover evaluations,
+so we first fine-tune its action expert, with the vision-language backbone frozen, on 50 scripted simulation
+demonstrations for three epochs (4,884 updates, learning rate 2.5 × 10−5, effective batch 32). LoRN then
+steers the action noise of the frozen fine-tuned policy through a rank-32 random projection over the 30-step,
+14-channel action block at fixed strength 𝑠= 1; the padded channels keep their Gaussian noise. The actor and
+critics receive frozen DINOv2 features of the three cameras and the robot state, and the critics additionally
+receive the simulator’s object poses. The reward adds staged bonuses for holding, lifting, handing over, and
+placing the cube, and +1 on success. We train three seeds for 3M environment steps on eight parallel scenes
+with the learner of Table 3 and a discount of 0.997530 per decision, and evaluate each final actor on 120
+episodes with randomized cube and bowl positions (Table 5); the fine-tuned policy is evaluated three times on
+the same episodes. On the station, the fine-tuned policy and one simulation-selected LoRN actor each run ten
+trials; a trial succeeds when the cube rests in the bowl at the end.
+26
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+40
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Cream cheese (80%)
+  n=5
+  n=5
+  n=5
+0
+200
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Moka pot (80%)
+  n=5
+  n=5
+  n=5
+0
+400
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Cream-cheese box (80%)
+  n=5
+  n=2
+  n=5
+0
+250
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Black bowl on plate (80%)
+  n=5
+  n=1
+  n=5
+0
+80
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Alphabet soup (80%)
+  n=5
+  n=5
+  n=5
+0
+250
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Butter (80%)
+  n=5
+  n=5
+  n=5
+0
+200
+Gradient updates (k)
+DSRL
+LP-DS
+LoRN
+π0 · Transfer Cube (80%)
+  n=5
+  n=5
+  n=5
+0
+800
+Environment steps (k)
+DSRL
+LP-DS
+LoRN
+π0.5 · Load dishwasher (50%)
+  n=4
+  n=1
+  n=5
+0
+800
+Environment steps (k)
+DSRL
+LP-DS
+LoRN
+π0.5 · Pack container (20%)
+  Not reached (0/5)
+  n=2
+  n=4
+0
+80
+Environment steps (k)
+DSRL
+LP-DS
+LoRN
+DP · Lift (80%)
+  n=5
+  n=5
+  n=5
+0
+400
+Environment steps (k)
+DSRL
+LP-DS
+LoRN
+DP · Can (80%)
+  n=5
+  n=5
+  n=5
+0
+1000
+Environment steps (k)
+DSRL
+LP-DS
+LoRN
+DP · Square (80%)
+  n=5
+  n=5
+  n=5
+Figure 13: Sample efficiency of action-noise steering across twelve robot tasks. Horizontal bars show
+the mean training steps to sustained target success for DSRL (gray), LP-DS (dark gray), and LoRN (green);
+lower is better. Whiskers show one sample standard deviation across the seeds contributing to each bar. The
+success target is 80% on ten tasks, 50% on Load dishwasher, and 20% on Pack container, as indicated in the
+panel labels. Means and standard deviations are computed over attaining seeds only, out of five training seeds
+per method; the label on each bar gives the number of attaining seeds 𝑛, and bars with different 𝑛are not
+directly comparable. Horizontal axes use thousands of gradient updates for 𝜋0 and thousands of environment
+steps for the other policies, with a separate scale for each task; attainment times use discrete evaluation
+checkpoints without interpolation or smoothing. LoRN reaches the target first on six of the twelve tasks,
+including all three Robomimic tasks; DSRL is first on Moka pot, Alphabet soup, and Butter, and LP-DS on
+Cream cheese, Transfer Cube, and Load dishwasher.
+C. Additional Results and Ablations
+The following results supplement the main experiments. Evaluation protocols and implementation details
+appear in Section B.
+C.1. Cosmos3-Edge Video Steering
+Video steering improves all four Cosmos3-Edge tasks.
+Table 7 gives the numbers behind Figures 6
+and 9.
+Video steering improves on the base policy on every task and training seed, by approximately
+33 percentage points on Mustard, 40 on Marker, and 19 each on Butter and Stack; the stronger DSRL
+action-steering variant gains at most 7.5 points. With initial placements paired across methods, individual
+video-steering seeds improve by 30–35 points on Mustard and 33–45 on Marker, with episode-level standard
+errors of approximately four points. Action and video LoRN share the construction and the actor output
+dimension, so their gap isolates the choice of input.
+Keeping the norm stable makes stronger steering possible.
+Additive steering at 𝛼= 0.9 and
+calibrated replacement move outside the tolerated range of Figure 2 and reach zero success. The LP-DS
+adaptation and the PSS-related control keep the norm near its native value but leave the actor little control,
+and gain little; LoRN keeps the norm and gives the actor control, and gains most. Settings and implementation
+differences are in Section B.3.
+27
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 7: Video steering improves Cosmos3-Edge, and its noise construction supports stronger
+actor control. Success (%) on four RoboLab tasks: MustardInLeftBin (Mustard), MarkerInMug (Marker),
+ButterAboveRaisin (Butter), and StackYellowOnRed (Stack). Values are mean ± standard error over three
+training seeds, each evaluated on 240 episodes; the base policy is the frozen model without steering. (a)
+DSRL replaces action noise with either eight outputs repeated across the horizon or 256 outputs controlling
+every entry. LoRN maps 32 actor outputs into either action or video noise; video steering achieves the highest
+mean on all four tasks. (b) Actors are retrained under different steering rules using the same rank-32 video
+projection. 𝛼limits steering strength, and relative norm is measured against the typical Gaussian norm
+√
+𝑁
+for noise dimension 𝑁. Additive steering retains the full Gaussian sample; calibrated replacement uses a fixed
+scale chosen at initialization. The LP-DS adaptation constrains an additive offset, with 𝛽setting its target
+mean squared coefficient magnitude. The PSS-related control uses LoRN’s mixture at fixed strength
+√︀
+𝑟/𝑁,
+rather than the complete PSS method. The main video configuration delivers strength 𝑠≈0.98 and is
+distinct from the lower-strength controls.
+(a) Which noise to steer
+Method
+Input
+Mustard
+Marker
+Butter
+Stack
+Base policy
+–
+25.8
+3.3
+52.1
+62.9
+DSRL, tiled 8-d latent
+Action
+26.5 ± 2.2
+3.6 ± 0.6
+55.0 ± 0.8
+68.6 ± 1.0
+DSRL, all 256 entries
+Action
+26.7 ± 1.0
+4.6 ± 1.5
+58.6 ± 3.5
+70.4 ± 1.2
+LoRN, rank 32
+Action
+21.7 ± 1.5
+6.1 ± 1.7
+51.4 ± 1.9
+67.2 ± 3.4
+LoRN, rank 32
+Video
+58.3 ± 1.6
+43.3 ± 3.6
+71.4 ± 4.7
+82.0 ± 1.7
+(b) Controls with the rank-32 video projection
+Steering rule
+Strength 𝛼
+Relative norm
+Mustard
+Marker
+LoRN
+0.3
+≈1
+26.5 ± 0.8
+6.2 ± 0.7
+Additive
+0.3
+≈1.05
+22.8 ± 2.8
+3.2 ± 0.9
+LoRN
+0.9
+≈1
+46.4 ± 3.5
+36.9 ± 4.5
+Additive
+0.9
+≈1.7
+0.0 ± 0.0
+0.0 ± 0.0
+Calibrated replacement
+–
+Drifts
+0.0 ± 0.0
+0.0 ± 0.0
+LP-DS, 𝛽= 0.03
+–
+≈1.03
+25.4 ± 2.9
+4.7 ± 1.1
+LP-DS, 𝛽= 0.10
+–
+≈1.05
+20.7 ± 1.6
+1.4 ± 0.2
+PSS-related control
+√︀
+𝑟/𝑁
+≈1
+25.2 ± 2.5
+4.0 ± 1.1
+Panel (b) uses our LP-DS adaptation and a PSS-related control within the shared random projection, rather than reproductions of
+the complete methods. For LP-DS, 𝛽sets the target mean squared coefficient magnitude; the corresponding correction has target
+root-mean-square norm
+√︀
+𝛽𝑁. The PSS-related control uses LoRN’s mixture at fixed 𝑠=
+√︀
+𝑟/𝑁, without PSS’s response-based
+subspace selection or orthogonal-complement reconstruction. Calibrated replacement uses a constant scale while the actor’s
+output norm changes during training. The rank sweep appears in Table 8.
+An eightfold increase beyond rank 32 adds little.
+Table 8 lists the rank sweep of Figure 10. Mustard
+rises from 41.0% at rank 4 to 56.7% at rank 16, Marker from 32.6% at rank 16 to 43.3% at rank 32, and rank
+256 adds no consistent gain on any task at the evaluated budgets. The protocol, including the 1.0M-step
+Marker budget, is in Section B.3.
+Different projections work, but the actor learns to use its own.
+Across nine actors trained on five
+random projections, success ranges from 54% to 63% on Mustard and from 36% to 50% on Marker, so every
+tested projection supports improvement. Replacing the projection of a trained actor without retraining drops
+Mustard success from 57.9% to 29.2% and 35.8% for two replacement projections, and Marker success from
+45.4% to 3.8% and 10.0%. Useful noise is thus available in many subspaces, but the learned coefficients are
+specific to the training projection, which must stay fixed at deployment.
+28
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 8: Rank 32 is sufficient for strong Cosmos3-Edge video steering across four tasks. Success
+(%) after training LoRN with different numbers 𝑟of actor outputs, mapped through fixed random projections
+into the model’s 506,880-dimensional video noise. Task names abbreviate RoboLab MustardInLeftBin
+(Mustard), MarkerInMug (Marker), ButterAboveRaisin (Butter), and StackYellowOnRed (Stack). The
+numbered columns are projection ranks; “Base” is the frozen policy using its original Gaussian noise without
+steering. Values are mean ± standard error across three independently trained actors with independent
+projections, each evaluated on 240 episodes. Success generally increases at lower ranks, while increasing rank
+from 32 to 256 provides no consistent further gain.
+Task
+Base
+4
+8
+16
+32
+256
+Mustard
+25.8
+41.0 ± 5.5
+47.6 ± 4.9
+56.7 ± 1.3
+58.3 ± 1.6
+57.1 ± 1.3
+Marker
+3.3
+9.3 ± 4.7
+15.7 ± 5.1
+32.6 ± 6.5
+43.3 ± 3.6
+38.5 ± 1.8
+Butter
+52.1
+63.3 ± 2.1
+68.7 ± 3.2
+68.1 ± 2.9
+71.4 ± 4.7
+71.5 ± 1.3
+Stack
+62.9
+72.6 ± 2.4
+75.6 ± 1.8
+75.1 ± 1.5
+82.0 ± 1.7
+81.1 ± 0.5
+Table 9: Video steering improves DreamZero-14B on all four RoboLab tasks. Success (%) on
+MustardInLeftBin (Mustard), MarkerInMug (Marker), ButterAboveRaisin (Butter), and StackYellowOnRed
+(Stack). Each trained configuration uses three seeds with checkpoints near 200k environment steps; values are
+mean ± standard error across seeds evaluated on 120 episodes with matched initial conditions across methods.
+The base policy is the released sampler with its fixed draw, which the trained actors recover at 𝑢= 0. DSRL
+replaces action noise with a 32-dimensional output repeated across the 24-step action horizon. LoRN uses 32
+actor outputs projected into either action or video noise at maximum strength 𝛼= 1. Video steering achieves
+the highest mean success on every task; bold entries mark the highest mean per task.
+Method
+Input
+Mustard
+Marker
+Butter
+Stack
+Base policy
+–
+65.8
+25.0
+41.7
+49.2
+DSRL, tiled 32-d latent
+Action
+69.4 ± 0.3
+31.4 ± 1.1
+46.1 ± 2.0
+54.7 ± 5.4
+LoRN, rank 32
+Action
+66.4 ± 2.0
+32.5 ± 1.0
+56.7 ± 3.8
+50.6 ± 1.5
+LoRN, rank 32
+Video
+84.2 ± 1.9
+70.0 ± 6.6
+83.1 ± 4.3
+71.9 ± 3.1
+C.2. DreamZero Video Steering
+Video steering also improves all four tasks on DreamZero-14B.
+Table 9 provides the numerical
+results for DreamZero-14B in Figure 6. Each training seed is evaluated at a checkpoint near 200k environment
+steps and compared with the released frozen policy on the same paired initial states (Section B.4). Video
+steering exceeds this baseline for every seed on all four tasks. With video noise redrawn at every decision
+instead of the released fixed draw, the frozen policy scores 77.5, 41.7, 51.7, and 30.0 on Mustard, Marker,
+Butter, and Stack, and every video-steering seed also exceeds these values. The advantage of video steering is
+particularly clear on Mustard and Marker, where it gains 18 and 45 points over the base policy, while action
+steering gains at most 8 points and does not exceed the fresh-draw reference. Together with Cosmos3-Edge,
+this extends the result across two world-action models on the same tasks. Both models expose action noise
+to steering, yet the larger gains come from controlling their video input. This supports the view that video
+noise is an actionable part of a world-action model’s control interface, even when the task objective concerns
+only the executed actions. The sensitivity probe motivates this choice before training; the success evaluations
+establish that the actor can use that influence to improve behavior.
+The most useful noise input can depend on the task.
+Table 10 reports DreamZero-5B results on
+two LIBERO-90 tasks. On Cream-cheese box, video steering improves success from a base-policy reference of
+48% to approximately 79%, compared with 70% for DSRL. On Moka pot, DSRL action steering achieves
+approximately 69%, while video steering reaches 48%, compared with 56% for the base policy. The task-
+dependent results distinguish sensitivity from useful control: the probe identifies video noise as a promising
+input (Figure 5), while task success also depends on what the actor learns. Greater action variation gives
+the actor more ways to modify behavior, but those changes need not align equally well with every task’s
+29
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 10: Video and action steering provide different benefits on DreamZero-5B. Success (%) on
+the LIBERO-90 Cream-cheese-box and Moka-pot tasks, with the generative policy frozen throughout training.
+DSRL replaces action noise; action LoRN uses a tiled rank-16 projection at steering strength limit 𝛼= 0.5;
+video LoRN uses a rank-32 basis repeated across generated frames at 𝛼= 1. Each trained result first averages
+the last three 25-episode evaluations of one seed, then reports mean ± standard error across three training
+seeds. The nominal budget is approximately 0.61M environment steps, with two Moka-pot video runs ending
+near 0.46M and 0.48M steps. The base policy uses the released fixed noise draw and is evaluated on 25
+episodes. Video steering has the highest mean on Cream-cheese box, while DSRL action steering has the
+highest mean on Moka pot; bold marks the highest mean per task.
+Method
+Input
+Cream-cheese box
+Moka pot
+Base policy
+–
+48.0
+56.0
+DSRL
+Action
+69.8 ± 4.9
+68.9 ± 3.6
+LoRN, tiled rank 16
+Action
+59.1 ± 3.6
+60.0 ± 5.6
+LoRN, rank 32
+Video
+79.1 ± 3.6
+48.4 ± 1.9
+reward. These results motivate using the probe as a starting point for input selection, followed by task-based
+evaluation of the learned controller. They also suggest that the value of an input should be assessed for the
+task and training setting, rather than treated as a fixed ranking of video and action noise. Results use the
+evaluation summaries in Section B.4, including the available checkpoints for two Moka-pot runs that ended
+before the nominal budget.
+C.3. Steering Strength and Noise Structure
+Steering strength stays stable as the actor learns.
+The parameter 𝜌controls how the actor’s output
+norm determines steering strength (Section B.1). In the measured runs, the resulting strength changes little
+during training: approximately 0.35 at 𝜌= 1 and 0.56 at 𝜌= 0.6 from initialization to the final checkpoint
+(Figure 14a); the tanh-Gaussian fit in the caption of Figure 14 gives 0.32 and 0.54. Mustard success increases
+with measured steering strength over the tested range, up to approximately 𝑠= 0.98 (Figure 14b). The
+stable strengths help interpret what changes during learning. At these settings, the actor improves its noise
+choices without a large shift in how much Gaussian noise is retained. Learning therefore need not operate by
+gradually increasing steering strength; it can improve how the available control is used. The success sweep
+complements this observation by showing that giving the actor more control is beneficial on Mustard when
+the noise scale is maintained.
+Retaining Gaussian noise can preserve a useful starting point.
+For a fresh Gaussian draw independent
+of the actor output and 𝑠< 1, the conditional law is
+𝑧| (𝑜, 𝑢) ∼𝒩
+(︁
+𝑠
+√
+𝑁𝑣, (1 −𝑠2)𝐼𝑁
+)︁
+.
+(7)
+This uses the same relative weights on the mean and Gaussian noise as a variance-preserving diffusion step [6].
+In the tiled 𝜋0 configurations, retaining more Gaussian noise improves initial success (Section 6.4). The
+amount of Gaussian noise balances retention of base-policy behavior against the actor’s control, motivating the
+policy-specific settings in Table 2. For tiled projections, mixing in Gaussian noise also weakens the repeated
+structure introduced across the action horizon. This provides a possible explanation for their higher initial
+success at lower steering strength. The random-projection initialization results add an important distinction:
+they retain near-base performance even at full steering strength (𝑠= 1; Section B.5), without fresh Gaussian
+noise. Retaining a Gaussian component is therefore one way to preserve a useful starting point, while the
+structure of the actor-generated noise also matters.
+C.4. Action-Noise Steering
+The gains appear in both learning progress and final success.
+Table 11 gives the numbers behind the
+twelve learning curves of Figure 7, with the early-window and final-success summaries defined in Section B.5.
+30
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+0
+2
+4
+‖u‖
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+strength s (α = 1)
+(a) how s is set
+‖u‖ from SAC
+ρ = 0.3
+ρ = 0.6
+ρ = 1.0
+0.4
+0.6
+0.8
+1.0
+delivered strength s
+0
+20
+40
+60
+success (%)
+native
+(b) Cosmos Mustard
+Figure 14: Steering strength controls how much of the noise is selected by the actor. Cosmos3-Edge
+video steering maps actor output 𝑢∈R𝑟through a fixed rank-𝑟projection and mixes the normalized result
+with Gaussian noise. Strength 𝑠= 0 uses only Gaussian noise, while 𝑠= 1 uses only the actor-selected noise.
+(a) The mapping 𝑠= 𝛼min(1, ‖𝑢‖/(𝜌√𝑟)) is shown at 𝛼= 1 for three values of 𝜌; larger 𝜌gives weaker
+steering for the same output norm. The gray histogram is a tanh-Gaussian fit to recorded actor output norms.
+Under this fit, mean strengths are 0.98, 0.54, and 0.32 for 𝜌= 0.3, 0.6, and 1, respectively. (b) Success
+on RoboLab MustardInLeftBin increases over the tested range of measured steering strengths, while the
+construction maintains the expected squared noise norm.
+1.33
+2.29
+5.26
+energy of the additive noise (×N)
+0
+20
+40
+60
+80
+100
+LoRN − additive (points)
+(a) additive rule
+50
+100
+final success (%)
+Cream ch.
+Moka
+Box
+Bowl
+Aloha
+Can
+Square
+(b) observation
+LoRN
+observation-free
+0.5
+1
+0.5
+1
+strength s
+40
+60
+80
+100
+final success (%)
+Cream cheese
+Aloha
+(c) basis: tiled vs. random
+4
+8
+16
+32
+rank r
+85.0
+87.5
+90.0
+92.5
+95.0
+97.5
+100.0
+final success (%)
+(d) rank, π0
+Figure 15: Noise scale, observation dependence, and projection structure affect action-noise
+steering. Ablations of LoRN with frozen 𝜋0 on LIBERO and ALOHA and Diffusion Policy on Robomimic,
+five training seeds per configuration, with the final-success estimate of Table 11. Steering strength is the
+cap 𝛼, which the actor’s outputs saturate in these runs (Section B.5); full strength uses no fresh Gaussian
+component. (a) LoRN success minus additive-steering success at matched strength, against the additive
+noise’s expected squared norm divided by the Gaussian reference 𝑁; positive values favor LoRN. (b) Success
+for an actor receiving observations (green) or zero inputs (gray), with critic observations unchanged. (c) Tiled
+projections (dark green), which repeat one noise pattern across the action horizon, against random projections
+(light green) at matched rank: rank 16 at strength 0.5 and rank 32 at full strength on Cream cheese, rank 32
+throughout on ALOHA Transfer Cube. (d) Cream-cheese success against tiled projection rank at strength 0.5;
+gains level off beyond rank 16.
+Figure 13 summarizes the same curves as the training steps each method needs to reach a sustained success
+target; LoRN reaches the target first on six of the twelve tasks, including all three Robomimic tasks. LoRN has
+the highest early-window mean on nine tasks, including ties with LP-DS on Cream cheese and Pack container;
+DSRL leads on Alphabet soup, and LP-DS on Butter and Load dishwasher. On 𝜋0 and Diffusion Policy, final
+success is within three percentage points of DSRL on every task; on 𝜋0.5, LoRN exceeds the stronger baseline
+by 19.9 percentage points on Load dishwasher, where it overtakes DSRL near 400k environment steps, and by
+3.7 points on Pack container.
+The following controls examine additive steering, observation dependence, projection structure, and rank
+(Figure 15). Each configuration uses five training seeds and the final-success estimate in Table 11.
+31
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+Table 11: Action-noise steering improves learning progress and final success across robot policies.
+Success (%) for frozen 𝜋0 on six LIBERO tasks and ALOHA Transfer Cube, 𝜋0.5 on two YAM tasks, and
+Diffusion Policy (DP) on Robomimic Lift, Can, and Square. “Base” is success without steering; DSRL
+replaces action noise, LP-DS adds a constrained offset, and LoRN steers noise through a normalized
+projection and Gaussian mixing. Values are mean ± standard error over five training seeds. Early-window
+means summarize success over 0–200k gradient updates for LIBERO, 0–1M for ALOHA, 0–500k environment
+steps for Lift and the YAM tasks, and 0–1M for Can and Square: time-normalized areas under the success
+curves for 𝜋0 (five-evaluation running means) and DP (raw evaluations), and the average of the evenly spaced
+raw evaluations for 𝜋0.5 (Section B.5). Final success averages each seed’s last ten evaluations, taken on the
+five-evaluation running mean for 𝜋0; higher values are better in both groups. Bold marks the highest mean
+among the three methods in each group; ties are both bold. LoRN has the highest early-window mean on
+nine tasks, including ties, and the highest final mean on both 𝜋0.5 tasks. LP-DS uses the released
+implementation for DP and policy-specific adaptations for 𝜋0 and 𝜋0.5.
+Early-window mean (%) ↑
+Final success (%) ↑
+Policy Task
+Base
+DSRL
+LP-DS
+LoRN
+DSRL
+LP-DS
+LoRN
+𝜋0
+Cream cheese
+29.3
+81.1 ± 2.0
+88.2 ± 1.8 88.2 ± 1.0 98.8 ± 0.8
+97.0 ± 1.1
+98.8 ± 0.6
+Moka pot
+80.7
+63.6 ± 2.7
+66.7 ± 3.1
+70.1 ± 2.4 91.1 ± 3.1
+78.0 ± 5.1
+89.7 ± 2.4
+Cream-cheese box
+60.7
+55.3 ± 5.1
+51.6 ± 4.6
+66.1 ± 1.6
+84.3 ± 2.0
+64.7 ± 5.4
+87.2 ± 1.9
+Black bowl
+0.4
+44.7 ± 4.8
+28.7 ± 5.1
+53.0 ± 4.3 93.8 ± 3.0
+64.5 ± 5.6
+92.4 ± 1.5
+Alphabet soup
+51.1
+89.2 ± 0.9
+86.6 ± 1.8
+79.9 ± 2.9
+98.4 ± 0.5
+94.2 ± 1.1
+96.4 ± 0.6
+Butter
+10.0
+58.5 ± 2.3
+65.2 ± 6.4
+60.8 ± 5.1
+91.6 ± 0.9
+87.0 ± 3.4
+93.4 ± 1.0
+Transfer Cube
+71.2
+82.4 ± 0.7
+85.4 ± 1.4
+88.2 ± 0.4 98.4 ± 0.4
+94.1 ± 0.7
+96.0 ± 1.1
+𝜋0.5
+Load dishwasher
+18.8
+15.0 ± 1.3
+28.3 ± 0.9
+12.5 ± 1.1
+49.6 ± 2.5
+39.8 ± 1.9
+69.5 ± 2.9
+Pack container
+13.3
+4.5 ± 0.7
+13.8 ± 1.6 13.8 ± 0.8
+2.8 ± 0.8
+18.9 ± 2.0
+22.6 ± 1.5
+DP
+Lift
+81.0
+86.4 ± 1.2
+94.4 ± 0.2
+94.7 ± 0.6
+99.6 ± 0.1
+99.2 ± 0.1
+99.8 ± 0.1
+Can
+39.0
+79.4 ± 1.2
+80.7 ± 0.8
+86.8 ± 0.6
+96.0 ± 0.4
+98.0 ± 0.2
+98.1 ± 0.2
+Square
+50.5
+59.6 ± 7.8
+69.2 ± 0.9
+79.6 ± 0.6
+97.3 ± 0.5
+98.3 ± 0.2 98.3 ± 0.1
+Larger norm changes can erase the benefit of steering.
+At maximum strengths 𝛼of 0.5, 0.75, and
+0.9, which the actor’s outputs saturate throughout these runs so that the delivered strength equals 𝛼, the
+additive construction of Eq. (6) has expected squared norm approximately 1.33, 2.29, and 5.26 times the
+Gaussian reference (root-mean-square norm 1.15, 1.51, and 2.29 times
+√
+𝑁). At the smallest increase it
+matches LoRN on every task; at the intermediate increase it still matches on five of seven tasks but trails by
+26 and 27 points on Moka pot and Cream-cheese box; at the largest it falls below the base policy on every
+task. Norm preservation therefore matters most when substantial steering is needed, and the task differences
+at intermediate strength agree with the amplitude probes.
+The observation gives the actor useful information for steering.
+Zeroing the actor’s observations
+lowers final success by 2–4 percentage points on Cream cheese and Moka pot and by 21–64 points on the
+other five tasks: a single favorable noise distribution is not enough, and the size of the gap varies by task.
+Section C.5 shows how this observation dependence develops during training.
+Projection structure matters even when rank is matched.
+At steering strength 0.5, tiled projections
+beat random projections of the same rank by 21 percentage points on Cream cheese and 18 on ALOHA
+Transfer Cube; at full strength the gaps narrow to one and six points. Tiling imposes a shared pattern across
+the horizon, which appears to help learning when combined with Gaussian noise, whereas random projections
+preserve the initial success better at full strength (Section 6.4): a good starting structure and a good learning
+structure need not coincide.
+32
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+A compact tiled projection is enough on Cream cheese.
+Tiled ranks 4, 8, 16, and 32 reach 89.7%,
+96.4%, 98.8%, and 99.0%, which motivates rank 16 for 𝜋0; this is the action-policy counterpart of the
+Cosmos3-Edge rank sweep, not a claim that one rank suits every policy.
+C.5. Observation-Dependent Steering
+Analysis protocol.
+We examine how the actor’s use of its subspace develops during Cosmos3-Edge video
+training on Mustard and Marker. For each checkpoint, we evaluate the deterministic normalized output
+^𝑢= 𝑢/‖𝑢‖, with 𝑢= tanh(𝜇(𝑜)), on the observations recorded in one 240-episode evaluation of the final policy:
+2,286 steering decisions on Mustard at 1.5M environment steps and 3,814 on Marker at 966k. The actor receives
+eight joint/gripper coordinates and an encoding of the real conditioning frame from the previous decision.
+We measure how much the output depends on the observation as the spread 1 −𝑐2, where 𝑐= ‖𝑛−1 ∑︀
+𝑖^𝑢𝑖‖
+over the 𝑛recorded observations; zero spread means the actor selects the same normalized output for every
+observation.
+Training turns a nearly fixed noise choice into an observation-dependent one.
+At initialization
+the spread is 0.08 on Mustard: the untrained actor selects nearly the same noise in every situation. It reaches
+0.76 by 77k environment steps and 0.86 at 1.5M; on Marker it rises later, reaching 0.64 at 806k steps and
+0.74 at 966k (Figure 16). Because the observations are fixed and the outputs are deterministic, these changes
+reflect the actor’s learned response to observations rather than new visited states or exploration noise.
+Together with the zero-observation control of Figure 15, the result supports an adaptive use of the fixed
+subspace rather than the selection of one noise input for every situation. The spread measures how much the
+noise choice depends on the observation; whether the learned choices improve behavior is established by the
+success evaluations, not by the spread.
+−0.5 0.0
+0.5
+direction PC 1
+−0.5
+0.0
+0.5
+direction PC 2
+Mustard
+c = 0.96
+(a) untrained
+−0.5 0.0
+0.5
+direction PC 1
+Mustard
+c = 0.38
+(b) 1.5M
+−0.5 0.0
+0.5
+direction PC 1
+Marker
+c = 0.96
+(c) untrained
+−0.5 0.0
+0.5
+direction PC 1
+Marker
+c = 0.51
+(d) 966k
+0.2
+0.4
+0.6
+0.8
+1.0
+Q
+0.0
+0.5
+1.0
+1.5
+training steps (M)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+spread 1−c2
+0.86
+0.74
+(e) direction spread
+Mustard
+Marker
+Figure 16: Training turns a nearly fixed noise choice into an observation-dependent strategy.
+Cosmos3-Edge rank-32 LoRN video steering on RoboLab MustardInLeftBin and MarkerInMug.
+(a–d)
+Normalized actor outputs ^𝑢of the untrained and final actors, evaluated deterministically on the same
+observations from a 240-episode evaluation of the final policy and projected onto the first two principal
+components of the final actor’s centered outputs, fitted separately per task. Point color gives the mean value
+of ten critics; 𝑐is the norm of the mean output. (e) Spread 1 −𝑐2 over training, computed before PCA; zero
+spread means identical normalized outputs for every observation. Final checkpoints are 1.5M environment
+steps for Mustard and 966k for Marker.
+C.6. YAM Station Trials
+Simulation-trained steering transfers directly to the YAM station.
+Figure 8 shows the three tasks
+from the overhead camera. Figure 17 presents all LoRN physical trials reported in Table 1, in recording order.
+The evaluation protocol and outcome definitions appear in Section B.6. The successful physical trials show
+that an actor trained against the simulated policy can select noise that remains useful on the YAM station.
+Because the base-policy weights remain frozen and the actor receives no hardware training, this transfer
+operates through the learned noise input. It suggests that successful behavior is already accessible to the
+frozen model, while the steering actor learns how to elicit it from observations. The complete trial sequence
+shows the observed successes and unsuccessful attempts, providing context for the aggregate placement counts.
+33
+
+
+LoRN : Low-Rank Noise Steering for Generative Robot Policies
+(a) Cube to bowl, LoRN trials: 6 of 10 placed
+Trial 1 · 35 s
+placed
+Trial 2 · 22 s
+placed
+Trial 3 · 36 s
+placed
+Trial 4 · 27 s
+placed
+Trial 5 · 39 s
+not placed
+Trial 6 · 74 s
+not placed
+Trial 7 · 116 s
+not placed
+Trial 8 · 19 s
+placed
+Trial 9 · 71 s
+not placed
+Trial 10 · 22 s
+placed
+(b) Marker to cup, LoRN trials: 4 of 10 placed
+Trial 1 · 19 s
+placed
+Trial 2 · 24 s
+placed
+Trial 3 · 36 s
+not placed
+Trial 4 · 43 s
+not placed
+Trial 5 · 41 s
+placed
+Trial 6 · 71 s
+not placed
+Trial 7 · 42 s
+not placed
+Trial 8 · 76 s
+not placed
+Trial 9 · 25 s
+not placed
+Trial 10 · 29 s
+placed
+(c) Cube handover, LoRN trials: 8 of 10 placed
+Trial 1 · 48 s
+placed
+Trial 2 · 55 s
+placed
+Trial 3 · 45 s
+placed
+Trial 4 · 42 s
+placed
+Trial 5 · 29 s
+not placed
+Trial 6 · 44 s
+placed
+Trial 7 · 54 s
+not placed
+Trial 8 · 43 s
+placed
+Trial 9 · 45 s
+placed
+Trial 10 · 49 s
+placed
+Figure 17: Simulation-trained steering transfers to physical placement tasks on the YAM station.
+All ten trials per task of a simulation-selected LoRN actor steering the action noise of the frozen policy, with
+no actor or policy training on hardware: GR00T N1.7 in (a) Cube to bowl and (b) Marker to cup, and the
+fine-tuned 𝜋0.5 in (c) Cube handover, shown in recording order. Each panel uses the initial overhead frame as
+its background, overlays six intermediate arm poses translucently, and shows the final pose solid; labels give
+trial durations. Green borders mark successful placement, where the released object remains inside the target
+container through the final second; gray borders mark no placement. LoRN succeeds in 6 of 10 cube trials, 4
+of 10 marker trials, and 8 of 10 handover trials.
+34

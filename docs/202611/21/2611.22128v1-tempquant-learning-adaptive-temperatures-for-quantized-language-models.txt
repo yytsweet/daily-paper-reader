@@ -1,0 +1,3942 @@
+TempQuant: Learning Adaptive Temperatures for Quantized
+Language Models
+Mukund Athmaram 1 2 ♣Liang Ma 1 Manoj Rao 1
+1AMD
+2Cornell University
+♣Correspondence to: ma2388@cornell.edu.
+Abstract
+Large language models are increasingly deployed at low precision for applications ranging from reasoning to
+creative writing, yet quantization can degrade their performance. These applications often use different decoding
+settings, such as the sampling temperature and top-p, which control the randomness of token selection. We study
+how quantization interacts with these settings by examining how it distorts the model’s next-token probabilities,
+which can change generated responses and task performance. Measuring entropy during generation across
+deployed temperatures, we find that quantization warms the model on average, and that temperature matters much
+more for the performance of a quantized model than for its full-precision counterpart. Because quantization and
+temperature both shape the next-token distribution, we investigate how much the sampling settings can undo
+what quantization changes, through our method TempQuant, which learns the quantized model’s temperature
+and top-p to bring its next-token probabilities closer to the full-precision model’s. We learn these settings at two
+granularities. The first is a single global setting per requested temperature, which we show finds nearly the same
+temperatures that tuning on labeled answers would, without any labels. This matters in practice because model
+cards typically recommend sampling a quantized model with the same settings as its full-precision counterpart,
+while we find that different settings can substantially improve its accuracy. On 3-bit Qwen3-4B, for example,
+global TempQuant raises MATH accuracy from 34% under the configuration recommended for Qwen’s quantized
+releases to 51%. The second sets the temperature and top-p for every token. It is motivated by our finding that
+tokens whose rankings flip under quantization tend to need warming, while tokens whose rankings are preserved
+tend to need cooling, which one temperature cannot do at once. Finally, we show that when quantization degrades
+accuracy substantially, as at 3 bits, TempQuant recovers much of it, and when degradation is lighter and there is
+little accuracy to recover, it still brings the quantized model’s behavior closer to the full-precision model’s.
+1
+Introduction
+At every step of autoregressive generation, large language models generate a probability distribution over the next token.
+This probability distribution is a function of the prefix, which is the prompt together with any tokens generated so far.
+Based on the chosen decoding method, we select a token from this distribution [43]. When sampling, the randomness of
+token selection is controlled by the temperature τ, a user-chosen deployment setting. The chosen temperature depends
+on the use case: higher temperatures generally lead to more diverse outputs, whereas lower temperatures concentrate
+sampling on the most likely tokens. Changing the temperature changes the entropy of the distribution, that is, how
+spread out it is.
+Quantization is a separate form of compression, where we use fewer bits to represent the weights and, in some
+configurations, activations of the large language model, so it can fit in less memory and run faster on supporting
+hardware [6, 21]. Compressing this information introduces numerical error, so the next-token probability distributions
+Work conducted during an AMD internship.
+arXiv:2611.22128v1  [cs.LG]  17 Nov 2026
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+can diverge from those of the full-precision model. These distortions can also change the distribution’s entropy, affecting
+the sampling randomness that the user controls through temperature.
+Temperature scaling and quantization thus both change the model’s next-token distribution, and we analyze how the
+two interact. How well a decoding setting works depends on the task and on factors such as quantization, and the best
+results often require extensive tuning [43], which motivates learning decoding settings automatically [46]. We study
+how much of quantization’s distortion of the next-token distribution can be corrected by adjusting temperature and
+top-p, and whether doing so recovers accuracy.
+We quantify the difference between the full-precision and quantized probability distributions through Kullback–Leibler
+divergence [14]. We hypothesize that reducing this divergence can help preserve the full-precision model’s behavior.
+This is motivated by Accuracy is Not All You Need, in which Dutta et al. [5] argue that quantization should preserve
+the full-precision model’s behavior, and that similar aggregate benchmark accuracy does not establish behavioral
+preservation, because correct-to-incorrect and incorrect-to-correct “flips” can cancel out. They motivate distance metrics
+such as KL divergence to capture the changes that aggregate accuracy hides, and this divergence is what we reduce.
+Minimizing divergence between probability distributions is not new in quantization: LLM-QAT updates quantized
+model weights to minimize forward KL for fixed teacher targets [21]. However, quantization-aware training (QAT)
+retrains the language-model weights, which can be expensive. We instead reduce this divergence with a lightweight
+method applied after post-training quantization (PTQ). We modify two sampling settings, temperature and top-p,
+rather than the model weights, and call this method TempQuant. We learn these settings at two granularities: global
+TempQuant learns one temperature and top-p to deploy the quantized model at for each temperature requested of
+the full-precision model, and per-step TempQuant chooses them at every decoding step. Global TempQuant is the
+practical version that can be applied today, since it only changes the decoding settings. We also show why changing the
+temperature at every token can recover even more of the quantization error, which motivates per-step TempQuant.
+Figure 1 illustrates how decoding settings change token probabilities. At every token there is a best temperature and
+top-p, and per-step TempQuant aims to choose it.
+TempQuant
+Full precision
+Quantized
+Set temperature
+Set top-p
+(a) Token rankings
+preserved
+“Let’s spend the
+weekend in...”
+“Paris” “Rome” “Oslo”
+(b) Token rankings
+ﬂipped
+“6 × 7 = ...”
+“42”
+“40”
+“48”
+Paris Rome Oslo Paris Rome Oslo
+Paris Rome Oslo
+Paris Rome Oslo
+0
+0.5
+1
+Probability
+80%
+20%
+0%
+30%
+10%
+2.2%
+80%
+0%
+0
+.05
+.10
+.15
+.20
+KL to full precision (nats)
+T= 1, p = 1
+T= 1, p = 1
+T= 0.5, p = 1
+T= 0.5, p = 0.95
+42
+40
+48
+42
+40
+48
+42
+40
+48
+42
+40
+48
+0
+0.5
+1
+Probability
+80%
+20%
+0%
+60%
+10%
+46.6%
+19.9%
+58.2%
+0%
+0
+.2
+.4
+.6
+KL to full precision (nats)
+T= 1, p = 1
+T= 1, p = 1
+T= 2.1, p = 1
+T= 2.1, p = 0.8
+KL to full precision
+0.149
+0.022
+0.000
+KL to full precision
+0.565
+0.527
+0.305
+Figure 1: Illustrative three-token distributions before and after temperature and top-p correction.
+2
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+In practice, existing deployments usually sample a quantized model at the settings chosen for its full-precision counterpart.
+Qwen, for example, recommends temperature 0.6 and top-p 0.95 for the full-precision Qwen3 [35] and repeats the
+same settings for its own 4-bit and GGUF releases [36, 37], and community quantizations down to 3 bits copy these
+settings unchanged [29, 45]. We argue that this leaves much of the quantization error unrecovered, and that choosing
+different sampling settings for the quantized model, whether at a global or a per-token granularity, can recover much of
+it (Section 4.6).
+2
+Related Work
+Adaptive decoding.
+Several methods learn temperatures at a fine granularity: ATS per token for calibration [48],
+TempNet per input for task performance [34], and ReSET per token for quantized reasoning models, with settings
+tuned on labeled data [16]. AutoDeco predicts temperature and top-p at every step with two small heads [46], a design
+we borrow, but trains them to raise the likelihood of reasoning traces that reach correct answers, so as to replace
+hand-tuned decoding. TempQuant instead learns its settings to match the full-precision model, so as to undo the effect
+of quantization.
+Decoding-time fixes.
+Lotfi et al. [22] measure the token-level KL between quantized and full-precision reasoning
+models and reduce overthinking with a logit penalty on a curated set of markers. TempQuant also corrects the quantized
+model at decoding time, but fits the standard temperature and top-p to the full-precision model. Other samplers target
+repetition without a reference model [13, 2, 26, 9, 28], and Braverman et al. [3] correct entropy-rate drift with a single
+temperature-like parameter, a close precedent for global TempQuant.
+Temperature calibration and quantization.
+DACA, Thermometer, and Dual-Align fit temperatures for confidence
+calibration [23, 42, 24], while we fit them to keep a quantized model close to its full-precision version. Aggressive
+quantization can lengthen chains of thought and cause repetition [22, 17, 20], and can flip preferences between candidate
+tokens [47]. We use GPTQ [6], AWQ [19], and the MXFP4 format [41]. Appendix A discusses related work in more
+detail.
+3
+Method
+Matching the full-precision distribution.
+Our goal is to bring the probability distribution the quantized model
+emits at each step as close as possible to what the full-precision model emits under the user’s requested temperature
+and top-p. We compare the two models after the same prefix. Temperature divides the logits before they are turned
+into probabilities, and top-p keeps the most probable tokens until their cumulative probability reaches the cutoff, then
+rescales them to sum to one [12].
+Let ut, zt ∈RV be the full-precision and quantized logits at prefix ct, and let Nr denote top-p filtering with cutoff r.
+With requested temperature τ > 0 and cutoff ρ, the full-precision model emits
+pt = Nρ(softmax
+ut
+τ
+
+),
+(1)
+and we fix ρ = .95 in our experiments. If we instead sample the quantized model with temperature Tt and cutoff ρQ
+t , it
+emits
+qt = NρQ
+t (softmax
+ zt
+Tt
+
+).
+(2)
+We learn Tt and ρQ
+t so that qt is close to pt. Both forms of TempQuant are learned against the full-precision model on
+the same training data, and both need only the quantized model at deployment. We measure how close qt is to pt with
+forward KL, KL(pt∥qt), reverse KL, KL(qt∥pt), or JSD(pt, qt), and Section 4.3 explains why we use all three. Both
+KL losses mix each distribution with a uniform component of weight η = 10−4 so they stay finite when top-p removes a
+token the other model keeps (Appendix F.2). Unless noted, divergences in this paper use these smoothed KLs between
+top-p-filtered distributions.
+3
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Global TempQuant.
+For each requested temperature, global TempQuant searches a grid of temperature and top-p
+values for the pair with the lowest divergence on the training data (Appendix E.3). It is fit separately for each quantized
+model, and is temperature scaling [7] with the full-precision model’s next-token distribution in place of the labels,
+together with top-p. We also learn two smaller versions: global TempQuant (top-p only), which keeps the requested
+temperature, and global TempQuant (T only), which keeps ρQ
+t = .95. Global TempQuant adds no cost at deployment,
+since it only changes the two numbers passed to the sampler.
+Per-step TempQuant.
+Per-step TempQuant chooses the setting at every step. At inference we no longer have the
+full-precision model, so it has to choose from what the quantized model gives us. At each step, it looks at the quantized
+logits after adjusting them for the requested temperature, and summarizes them in 42 features: the 32 largest logits,
+normalized, and ten statistics that describe how spread out the distribution is, such as its entropy and the gaps between
+the leading tokens. Two small MLP heads read these features and predict a correction κt to the requested temperature
+and a new top-p cutoff. The sampler divides the original quantized logits by Tt = τκt and applies the predicted cutoff.
+We borrow this two-head design from AutoDeco [46]. With xt(τ) denoting the features,
+κt = Fθ(xt(τ)),
+ρQ
+t = Gϕ(xt(τ), log κt),
+Tt = τκt.
+(3)
+Appendix Figure 9 shows how the heads control the sampler. We also train per-step TempQuant (T only), which only
+predicts the temperature and keeps ρQ
+t = .95. Where a table lists training losses, “TempQuant” refers to per-step
+TempQuant. Appendix C gives the exact features, output ranges, and training details.
+Training the per-step predictor.
+Both language models remain frozen, and we train only the two heads, comparing
+full next-token distributions at every calibration prefix as in LLM-QAT [21], with the sampler’s settings in place of the
+weights. The calibration prefixes come from responses by both BF16 and the quantized model (Appendix C.5), so the
+loss covers text from both the reference and the quantized model. Each prefix is evaluated at requested temperatures 0.3,
+0.6, and 1.0, with all prefix and temperature pairs weighted equally. Hard top-p gives no gradient for the cutoff, so
+training uses a smooth version of the quantized model’s top-p, as in AutoDeco, while the BF16 reference keeps hard
+filtering. We minimize
+LD = 1
+M
+M
+X
+j=1
+D
+ pj, eqj
+
++ λD R,
+(4)
+where j runs over all M pairs of a training prefix and a requested temperature, D is one of the three divergences, and eqj
+uses the smooth top-p. The penalty R measures how much the predicted temperature and top-p vary from one training
+prefix to the next. We compute it separately at each requested temperature, 0.3, 0.6, and 1.0, and average the three. It
+keeps the heads from overfitting the small calibration set, and it also pulls them toward a single setting (Appendix C).
+4
+Experiments
+We first analyze how quantization changes the next-token distribution (Sections 4.1–4.3), then evaluate both forms of
+TempQuant (Sections 4.4–4.5), their accuracy (Section 4.6), and how well they preserve the full-precision model’s
+behavior (Section 4.7).
+We evaluate Qwen3-4B [51] quantized to 3-bit GPTQ (GPTQ3) and to native 4-bit MXFP4, at requested temperatures
+0.3, 0.6, the setting Qwen recommends, and 1.0, with further models in Section 4.6. Appendix D gives the benchmarks,
+data splits, and statistical tests.
+4.1
+How quantization changes the temperature
+We find that quantized models have higher average entropy than BF16: their next-token probabilities are more spread
+out, as if they were sampled at a higher temperature. GPTQ3 at a requested 0.6 has the same mean entropy as BF16 at
+0.74, and the gap grows with the requested temperature (Figure 2a). Adding random noise of the same size to BF16’s
+4
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+logits leaves its effective temperature where it was, so the heating comes from quantization itself (Appendix E.2).
+MXFP4, which loses much less accuracy, shows a smaller shift in the same direction (Figure 2a).
+Quantization barely changes the near-certain tokens that make up most of the text, and the extra entropy comes from
+tokens where the model is more uncertain (Figure 2b).
+0.3
+0.6
+1.0
+Requested temperature τ
+0.3
+0.6
+1.0
+1.3
+BF16 temperature with
+the same mean entropy
+0.36
+0.74
+1.26
+0.29
+0.58
+0.99
+(a) Quantized model runs hotter
+BF16 (same as requested)
+GPTQ3
+BF16 + random noise
+MXFP4
+0
+50
+share of tokens (%)
+(b) Split by entropy
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+Average entropy of both models (nats)
+0.0
+0.1
+0.2
+GPTQ3 − BF16 entropy (nats)
+τ = 0.6
+Figure 2: Quantized models against BF16: (a) the BF16 temperature with the same mean entropy as GPTQ3, MXFP4,
+and BF16 with random noise added; (b) GPTQ3’s entropy change from BF16 at τ = 0.6, grouped by the average
+entropy of the two models, with each group’s share of tokens above.
+4.2
+Which tokens carry the quantization error
+Since the quantized model runs hotter, it is natural to assume that cooling it would reduce this divergence. However, our
+proxy for quantization error is KL divergence, not entropy, and whether warming or cooling reduces KL divergence
+0
+50
+100
+Share (%)
+Reverse KL
+JSD
+Forward KL
+Tokens
+83%
+17%
+17%
+83%
+20%
+80%
+21%
+79%
+(a) Flipped tokens carry most of the error
+Rankings
+preserved
+Rankings
+flipped
+0.1
+0.2
+0.5
+1
+2
+4
+Best temperature per token
+cooler
+warmer
+requested 0.6
+τ = 0.6
+(b) Flipped tokens need warming,
+preserved tokens need cooling
+1
+2
+3
+2
+1
+3
+1
+2
+3
+1
+2
+3
+Token rankings flipped
+Full precision
+quantize
+Quantized
+Token rankings preserved
+Figure 3: GPTQ3 against BF16 at τ = 0.6, on tokens where the rankings are preserved or flipped: (a) share of tokens
+and of each divergence; (b) the temperature that best matches BF16 for each token under forward KL.
+5
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+depends on what quantization does to the token probabilities. Quantization does two different things to tokens (Figure 3).
+We say a token’s rankings are preserved when the quantized model’s most likely next token is the same as BF16’s, and
+flipped when it is not; less likely tokens may still change order. On most tokens, quantization keeps BF16’s most likely
+token and only spreads the probabilities out. On these tokens, where the rankings are preserved, quantization acts like
+heating, so they tend to be best matched by cooling to a lower temperature. On the rest, however, the rankings flip and
+BF16’s preferred token now ranks lower. Here only a higher temperature gives it back probability, as in Figure 1b, so
+raising the temperature tends to reduce the KL divergence (Figure 3b). These flipped tokens are a small share of tokens,
+but each costs far more, so they carry most of the error under every divergence we use (Figure 3a), at every requested
+temperature (Appendix Table 38).
+A single temperature therefore has to trade off the two, since warming helps the flipped tokens and cooling helps the
+preserved ones. Fitting global TempQuant only on preserved tokens shows this. Its temperature drops close to the
+requested one and fits those tokens slightly better, but the error rises on flipped tokens and over all tokens (Appendix E.3).
+A per-step temperature can instead correct each token on its own.
+4.3
+Choice of divergence
+To see how handling this trade-off differently changes performance, we measure the quantization error with three
+divergences that weigh the two kinds of token differently. TempQuant can be seen as a restricted form of knowledge
+distillation [10], in which the full-precision model is the teacher, its quantized version is the student, and the student can
+lower the divergence only through its sampling settings, without changing its weights. On-policy distillation [1] shows
+that when a student cannot reproduce its teacher, the divergence decides which errors it accepts. Inspired by this, we
+train with three divergences that fail in different ways (Appendix F.1).
+Forward KL is large when the quantized model gives little probability to a token BF16 considers likely. A flipped token
+therefore spikes forward KL, so forward KL prioritizes warming to correct the flipped tokens. Reverse KL, on the other
+hand, is large when the quantized model puts probability where BF16 does not. Warming spreads probability onto tokens
+BF16 gives little probability to, which spikes reverse KL, so reverse KL prefers cooling even for the flipped tokens. JSD
+combines the two, weighs both errors, and lands in between, near the requested temperature. On a typical preserved
+token every divergence favors cooling, so they part ways mainly on the flipped tokens, as Appendix B illustrates. This is
+the familiar contrast between mass-covering and mode-seeking divergences.
+0.25
+0.5
+1
+2
+Temperature T
+0.0
+0.5
+1.0
+1.5
+Divergence from BF16
+best 1.13
+Forward KL
+0.25
+0.5
+1
+2
+Temperature T
+0.0
+0.1
+0.2
+0.3
+best 0.73
+JSD
+0.25
+0.5
+1
+2
+Temperature T
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+best 0.36
+Reverse KL
+Tokens with rankings preserved
+Tokens with rankings flipped
+All tokens
+Figure 4: Divergence from BF16 at τ = 0.6 when one temperature is used for every token, split into the part from tokens
+with preserved and flipped rankings. Dots mark each curve’s minimum, and the dotted line the requested temperature.
+Comparing the three also addresses a question this trade-off raises: whether it is better to correct the flipped tokens,
+which are rare but carry most of the error, or the preserved tokens, which carry less of it but are far more common.
+Figures 4 and 5 show the temperatures each divergence selects for global and per-step TempQuant, and Appendix B
+gives the settings global TempQuant selects at every requested temperature.
+6
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+0.1
+0.3
+0.6
+1
+2
+Chosen temperature
+0
+20
+40
+60
+80
+Tokens (%)
+Requested τ = 0.3
+Forward KL
+JSD
+Reverse KL
+Requested
+0.1
+0.3
+0.6
+1
+2
+Chosen temperature
+0
+20
+40
+60
+Requested τ = 0.6
+0.1
+0.3
+0.6
+1
+2
+Chosen temperature
+0
+20
+40
+60
+Requested τ = 1.0
+Figure 5: Temperatures chosen by per-step TempQuant for GPTQ3 under each training loss, on 768 held-out steps.
+4.4
+Global TempQuant
+BF16 accuracy stays nearly flat across our three temperatures (Table 2), but under 3-bit quantization the deployed
+temperature decides both accuracy and the divergence from BF16 (Figure 4). We first show that the best temperature for
+the quantized model differs from the full-precision one, as temperature tuning finds, and then that global TempQuant,
+which does no sweep and only learns the setting that mimics BF16, finds nearly the same temperature. Native 4-bit
+MXFP4 behaves similarly (Table 29). Global TempQuant turns top-p off at every requested temperature, which by itself
+removes much of the forward KL, and the learned temperature removes more (Appendix Table 36).
+TempQuant versus temperature tuning.
+The usual way to choose a sampler setting is to tune it on labeled data:
+generate and grade responses at every candidate setting and keep the most accurate one [43, 46]. Tuning GPTQ3 this
+way on 200 MATH questions took about 7,800 graded responses and 170 million generated tokens (Figure 6, Appendix
+Figure 12), and has to be repeated for every model and task. Global TempQuant needs no labels or grading, only the
+full-precision model’s next-token probabilities on a few hundred unlabeled responses, and lands close to the setting
+tuning finds. The best setting differs between models, quantization methods, and requested temperatures, so a fixed rule
+such as sampling every quantized model at a higher temperature does not carry over (Appendix E.3).
+TempQuant and the recommended recipe.
+Model providers have noticed that quantized models degrade and loop at
+these temperatures. Qwen’s cards for its quantized models keep the temperature at 0.6 but add a presence penalty of
+1.5 to stop endless repetition [36], the failure that costs GPTQ3 most of its accuracy. Global TempQuant performs
+better than this recipe, and adding the penalty on top of global TempQuant helps a little further, so the two combine
+0.6
+0.8
+1.0
+1.2
+1.4
+1.6
+Fixed temperature T
+0
+20
+40
+60
+80
+MATH accuracy (%)
+Qwen3-4B GPTQ3
+0.6
+0.8
+1.0
+1.2
+1.4
+1.6
+Fixed temperature T
+R1-Distill-Llama-8B GPTQ3
+Fixed temperature
+Global TempQuant
+Figure 6: MATH accuracy at fixed temperatures, and the temperature global TempQuant chooses from BF16 without
+answers for a requested 0.6 (dotted).
+7
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+(Table 1). The penalty pushes the model away from tokens it has already used, while TempQuant moves it toward the
+full-precision model.
+MATH
+GPQA
+Sampler
+Accuracy
+Strict
+At limit
+Accuracy
+Strict
+At limit
+Default (0.6, .95)
+23.7
+9.5
+89.0
+11.1
+1.5
+93.4
+Qwen recipe, presence penalty
+33.8
+26.0
+67.0
+17.7
+11.1
+65.7
+Global TempQuant (1.01, 1)
+51.0
+36.7
+47.5
+23.7
+21.7
+12.1
+Global TempQuant + presence penalty
+53.5
+46.7
+29.0
+23.7
+23.2
+7.1
+Table 1: Qwen3-4B GPTQ3 at τ = 0.6 (%). Qwen’s recipe adds top-k 20 and presence penalty 1.5; strict counts
+responses at the length limit as wrong.
+4.5
+Per-step TempQuant
+Per-step TempQuant chooses the setting for every token to avoid the compromise of Section 4.2. To measure how much
+of the quantization error this could remove, we test an oracle that knows BF16’s distribution at every token and picks the
+quantized model’s temperature and top-p, from the grid global TempQuant searches, to minimize the divergence. The
+oracle removes most of the divergence quantization adds, 84% of the forward KL at the recommended 0.6, almost all of
+it through the temperature alone (Appendix Table 36), and sampling GPTQ3 with its settings brings GSM8K accuracy
+close to BF16’s and lifts MATH well above TempQuant (Appendix F.5). Per-step TempQuant tries to capture this
+headroom from the quantized model alone, so it has to infer from the quantized logits whether the top token changed
+(examples in Appendix E.4).
+4.6
+Downstream accuracy
+Table 2 measures accuracy on each policy’s own responses. At 0.3 and 0.6, TempQuant raises GSM8K, MATH, and
+GPQA accuracy far above raw GPTQ3, lifting mean accuracy from 10% to 40% at 0.3. At 1.0, where raw GPTQ3
+loops less, there is less to recover (ablations and strict grading in Appendix E.1). The correction carries over to 3-bit
+Qwen3-8B and to Gemma 4 31B, a different family, raising Gemma’s MATH accuracy from 70% to 90%, but not
+to R1-Distill-Llama-8B, which rarely runs into repetition (Appendix Table 12). Table 2 also reports how close each
+policy’s generated text is to BF16’s with a closeness score: 100 minus the average gap between a policy and BF16 on
+four statistics of its text, namely word overlap with BF16’s responses, how alike the policy’s own responses to the same
+prompt are, repeated four-grams, and the share of responses that hit the length limit (details in Appendix E.7).
+Of the three divergences, forward KL gives per-step TempQuant the highest accuracy, matching global TempQuant at
+0.3 and 0.6 and exceeding it at 1.0 (Appendix Table 10). Global TempQuant adds no cost at deployment, and per-step
+TempQuant adds time per token (Appendix G).
+4.7
+Does TempQuant preserve behavior and task performance?
+Since similar accuracy can hide large changes in behavior [5], and matching a reference model need not improve task
+performance [44], we report behavior alongside accuracy, using task-specific measures and the closeness score of
+Section 4.6. The three divergences behave differently here, and the results separate into two cases: long reasoning under
+heavy degradation, and shorter outputs or lighter degradation.
+4.7.1
+Long reasoning under heavy degradation
+At the requested temperature, GPTQ3’s reasoning collapses into repetition: most of its responses repeat themselves
+until the length limit, while BF16’s rarely do (Table 2). Here, preserving BF16’s behavior mostly means stopping these
+8
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Accuracy (%)
+Mean
+At length
+Policy
+GSM8K
+MATH
+AIME
+GPQA
+accuracy
+limit (%)
+Closeness
+Temperature (τ) = 0.3
+BF16
+94.33
+95.05
+66.56
+40.34
+74.07
+5.5
+100
+GPTQ3
+18.30
+15.20
+0.73
+6.69
+10.23
+97.6
+43.7
+Global TempQuant
+81.71
+53.00
+1.98
+25.00
+40.42
+43.5
+71.0
+Per-step TempQuant, forward KL
+81.33
+52.10
+1.43
+26.07
+40.23
+44.4
+71.2
+Per-step TempQuant, JSD
+52.72
+29.45
+0.49
+11.05
+23.43
+83.1
+49.9
+Per-step TempQuant, reverse KL
+14.12
+12.53
+0.52
+5.18
+8.08
+98.8
+43.2
+Temperature (τ) = 0.6
+BF16
+94.83
+95.75
+69.58
+41.48
+75.41
+2.6
+100
+GPTQ3
+50.36
+29.90
+0.94
+10.98
+23.05
+83.7
+47.3
+Global TempQuant
+80.80
+52.35
+1.72
+25.19
+40.01
+42.7
+70.2
+Per-step TempQuant, forward KL
+79.68
+51.35
+1.43
+24.08
+39.14
+48.2
+68.1
+Per-step TempQuant, JSD
+61.50
+34.92
+0.55
+13.73
+27.67
+76.8
+50.9
+Per-step TempQuant, reverse KL
+20.29
+16.88
+0.57
+6.60
+11.08
+96.9
+41.7
+Temperature (τ) = 1.0
+BF16
+94.92
+95.05
+68.54
+43.50
+75.50
+2.3
+100
+GPTQ3
+80.27
+50.40
+0.73
+21.59
+38.25
+48.6
+66.0
+Global TempQuant
+78.66
+49.00
+1.77
+22.16
+37.90
+44.3
+70.1
+Per-step TempQuant, forward KL
+80.86
+51.90
+2.29
+25.28
+40.08
+42.2
+72.1
+Per-step TempQuant, JSD
+79.25
+47.50
+0.65
+21.53
+37.23
+53.6
+63.0
+Per-step TempQuant, reverse KL
+45.56
+28.52
+0.81
+9.56
+21.12
+86.0
+46.2
+Table 2: GPTQ3 accuracy, with the share of responses at the length limit and the closeness to BF16 averaged over the
+four tasks. Bold marks the best quantized value (lowest for the length limit); green marks Holm-significant gains over
+GPTQ3.
+loops, and a response that never finishes cannot be graded correct. Breaking the loops and giving flipped tokens back
+their probability both need a higher temperature. Forward KL, which warms the most, undoes about half of the collapse
+and recovers the most accuracy, while reverse KL cools, keeps the model on its favorite tokens, and makes the repetition
+worse (Table 2, Appendix E.7). The same pattern holds on the other 3-bit models (Appendix Table 12). In this case the
+forward KL controller preserves BF16’s behavior best, because it targets the largest source of divergence, the looping.
+Quantized reasoning models also overthink [22], and TempQuant reduces this only in part (Appendix E.8).
+4.7.2
+Short text and light degradation
+On short summaries, GPTQ3 does not loop, so there is little accuracy to recover. Its main error is instead spreading
+probability onto tokens BF16 would not pick, so at 0.3 it varies about as much as BF16 does at 0.6. Reverse KL
+penalizes exactly this error, so it cools GPTQ3 back toward BF16’s variety, while forward KL makes nearly every
+sample different. The reverse KL controller is closest to BF16 on variety, meaning diversity, summary quality, and
+closeness at every temperature (Table 3).
+MXFP4 is a similar case on reasoning, with lighter degradation. It loses little accuracy, but similar accuracy can hide
+many answer flips, samples that the full-precision model answers correctly and the quantized model does not, or the
+reverse [5]. On MATH at 0.6, the reverse KL and JSD controllers keep accuracy about the same while removing about a
+third of the extra answer flips MXFP4 has with BF16 (Figure 7), and across all four tasks and three temperatures, the
+JSD controller brings which questions MXFP4 answers correctly closer to BF16’s (Appendix Table 33).
+These results suggest the forward KL controller for more aggressive quantization, the JSD controller for reasoning under
+light degradation, and the reverse KL controller for short text, though larger experiments are needed before committing
+to this split.
+9
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+MXFP4
+Global Forward
+KL
+Reverse
+KL
+JSD
+0
+50
+100
+Accuracy (%)
+92.7
+92.5
+93.4
+93.1
+93.3
+(a) Accuracy
+MXFP4
+Global Forward
+KL
+Reverse
+KL
+JSD
+0
+50
+100
+Disagreements
+106
+107
+102
+93.5
+91.5
+(b) Disagreements with BF16
+Figure 7: MXFP4 on MATH at τ = 0.6: (a) accuracy and (b) disagreements with BF16, samples that one answers
+correctly and the other does not.
+Policy
+Unique
+summaries (%)
+Meaning
+diversity
+ROUGE-2
+Closeness
+Temperature (τ) = 0.3
+BF16 (value)
+50
+0.037
+6.81
+100
+∆GPTQ3
++22
++0.045
+−0.78
+−15.2
+∆Per-step TempQuant, forward KL
++49
++0.141
+−1.22
+−21.3
+∆Per-step TempQuant, JSD
++43
++0.090
+−0.99
+−17.8
+∆Per-step TempQuant, reverse KL
++13
++0.032
+−0.71
+−14.8
+Temperature (τ) = 0.6
+BF16 (value)
+75
+0.061
+6.52
+100
+∆GPTQ3
++17
++0.067
+−0.61
+−13.6
+∆Per-step TempQuant, forward KL
++25
++0.163
+−1.24
+−21.2
+∆Per-step TempQuant, JSD
++23
++0.089
+−0.74
+−15.9
+∆Per-step TempQuant, reverse KL
++1
++0.028
+−0.46
+−11.7
+Temperature (τ) = 1.0
+BF16 (value)
+90
+0.092
+6.25
+100
+∆GPTQ3
++8
++0.074
+−0.53
+−12.2
+∆Per-step TempQuant, forward KL
++10
++0.121
+−0.89
+−16.5
+∆Per-step TempQuant, JSD
++8
++0.071
+−0.55
+−12.1
+∆Per-step TempQuant, reverse KL
+0
++0.029
+−0.36
+−9.3
+Table 3: GPTQ3 XSum summaries, eight per article: share of unique summaries, meaning diversity (mean embedding
+distance between samples), quality (ROUGE-2 against human summaries), and closeness to BF16 (Section 4.6). BF16
+rows give its values, and ∆rows give each policy’s change from BF16, so values nearer 0 are closer. Bold marks the
+closest policy.
+5
+Limitations
+Temperature and top-p cannot reorder tokens, so errors that flip rankings remain even for the oracle. The accuracy gains
+are large only when the quantized model runs into repetition. None of the per-step controllers we trained preserves
+every behavior we measure. We fit TempQuant on math text only, evaluate reasoning with thinking mode on, use a
+single reference top-p of .95, and compare with Qwen’s presence penalty on one model. Global TempQuant adds no
+cost at deployment, while our unoptimized per-step implementation adds 18–34% to the time per generated token
+(Appendix G).
+10
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+6
+Conclusion
+Quantized models run hotter, but most of the error sits on the few tokens whose ranking quantization flips, which tend to
+need warming while the rest tend to need cooling. Global TempQuant finds without labels the setting that tuning on
+answers would find, and recovers much of the accuracy lost by 3-bit models that fall into repetition. Per-step TempQuant,
+which chooses the setting at every token from the quantized model alone, matches this at requested temperatures 0.3 and
+0.6 and is more accurate at 1.0. The choice of divergence decides what is preserved: forward KL restores accuracy
+when the model loops, while for a lightly degraded model reverse KL brings short text and JSD brings reasoning closer
+to BF16’s. Overall, we show that much of the quantization error can be recovered through temperature and top-p, so
+quantized models should be deployed at different settings from their full-precision counterparts.
+References
+[1] Agarwal, R., Vieillard, N., Zhou, Y., Stanczyk, P., Ramos, S., Geist, M., and Bachem, O. On-policy distillation of
+language models: Learning from self-generated mistakes, 2024. URL https://arxiv.org/abs/2306.
+13649.
+[2] Basu, S., Ramachandran, G. S., Keskar, N. S., and Varshney, L. R. Mirostat: A neural text decoding algorithm that
+directly controls perplexity, 2021. URL https://arxiv.org/abs/2007.14966.
+[3] Braverman, M., Chen, X., Kakade, S. M., Narasimhan, K., Zhang, C., and Zhang, Y. Calibration, entropy rates,
+and memory in language models. In Proceedings of the 37th International Conference on Machine Learning,
+2020. URL https://arxiv.org/abs/1906.05664.
+[4] Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton,
+J., Nakano, R., Hesse, C., and Schulman, J. Training verifiers to solve math word problems, 2021. URL
+https://arxiv.org/abs/2110.14168.
+[5] Dutta, A., Krishnan, S., Kwatra, N., and Ramjee, R. Accuracy is not all you need, 2024. URL https:
+//arxiv.org/abs/2407.09141.
+[6] Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D. GPTQ: Accurate post-training quantization for generative
+pre-trained transformers, 2023. URL https://arxiv.org/abs/2210.17323.
+[7] Guo, C., Pleiss, G., Sun, Y., and Weinberger, K. Q. On calibration of modern neural networks, 2017. URL
+https://arxiv.org/abs/1706.04599.
+[8] Hendrycks, D., Burns, C., Kadavath, S., Arora, A., Basart, S., Tang, E., Song, D., and Steinhardt, J. Measuring
+mathematical problem solving with the MATH dataset, 2021. URL https://arxiv.org/abs/2103.
+03874.
+[9] Hewitt, J., Manning, C. D., and Liang, P. Truncation sampling as language model desmoothing, 2022. URL
+https://arxiv.org/abs/2210.15191.
+[10] Hinton, G., Vinyals, O., and Dean, J. Distilling the knowledge in a neural network, 2015. URL https:
+//arxiv.org/abs/1503.02531.
+[11] Holm, S. A simple sequentially rejective multiple test procedure. Scandinavian Journal of Statistics, 6(2):65–70,
+1979.
+[12] Holtzman, A., Buys, J., Du, L., Forbes, M., and Choi, Y. The curious case of neural text degeneration. In
+International Conference on Learning Representations, 2020. URL https://arxiv.org/abs/1904.
+09751v2.
+[13] Keskar, N. S., McCann, B., Varshney, L. R., Xiong, C., and Socher, R. CTRL: A conditional transformer language
+model for controllable generation, 2019. URL https://arxiv.org/abs/1909.05858.
+[14] Kullback, S. and Leibler, R. A. On information and sufficiency. The Annals of Mathematical Statistics, 22(1):79 –
+86, 1951. doi: 10.1214/aoms/1177729694. URL https://doi.org/10.1214/aoms/1177729694.
+[15] Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I.
+Efficient memory management for large language model serving with PagedAttention, 2023. URL https:
+//arxiv.org/abs/2309.06180.
+11
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+[16] Lee, S., Lee, J., Yoo, D., Kim, J. G., Ryu, H., Ryu, S., and Choi, J. ReSET: Accurate latency-critical NVFP4
+reasoning via step-aware temperature scaling, 2026. URL https://arxiv.org/abs/2606.13233.
+[17] Li, S., Ning, X., Wang, L., Liu, T., Shi, X., Yan, S., Dai, G., Yang, H., and Wang, Y. Evaluating quantized large
+language models, 2024. URL https://arxiv.org/abs/2402.18158.
+[18] Lin, C.-Y. ROUGE: A package for automatic evaluation of summaries. In Text Summarization Branches
+Out, pp. 74–81, Barcelona, Spain, July 2004. Association for Computational Linguistics.
+URL https:
+//aclanthology.org/W04-1013/.
+[19] Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M., Wang, W.-C., Xiao, G., Dang, X., Gan, C., and Han, S. AWQ:
+Activation-aware weight quantization for LLM compression and acceleration. In Proceedings of Machine Learning
+and Systems, 2024. URL https://arxiv.org/abs/2306.00978.
+[20] Liu, R., Sun, Y., Zhang, M., Bai, H., Yu, X., Yu, T., Yuan, C., and Hou, L. Quantization hurts reasoning? An
+empirical study on quantized reasoning models, 2025. URL https://arxiv.org/abs/2504.04823.
+[21] Liu, Z., Oguz, B., Zhao, C., Chang, E., Stock, P., Mehdad, Y., Shi, Y., Krishnamoorthi, R., and Chandra, V.
+LLM-QAT: Data-free quantization aware training for large language models, 2023. URL https://arxiv.
+org/abs/2305.17888.
+[22] Lotfi, S., Kirichenko, P., Li, S., and Liu, Z. Quantized reasoning models think they need to think longer, but they
+do not, 2026. URL https://arxiv.org/abs/2606.00206.
+[23] Luo, B., Wang, S., Li, S., and Wei, H. Your pre-trained LLM is secretly an unsupervised confidence calibrator,
+2025. URL https://arxiv.org/abs/2505.16690.
+[24] Luo, B., Wang, C., Wei, H., Li, S., and Du, X. Unlocking the pre-trained model as a dual-alignment calibrator for post-
+trained LLMs. arXiv preprint arXiv:2601.04277, 2026. URL https://arxiv.org/abs/2601.04277v1.
+[25] Mattei, P.-A. and Loureiro, B. The well-tempered classifier: Some elementary properties of temperature scaling,
+2026. URL https://arxiv.org/abs/2602.14862.
+[26] Meister, C., Pimentel, T., Wiher, G., and Cotterell, R. Locally typical sampling. Transactions of the Association
+for Computational Linguistics, 2023. URL https://arxiv.org/abs/2202.00666.
+[27] Narayan, S., Cohen, S. B., and Lapata, M. Don’t give me the details, just the summary! topic-aware convolutional
+neural networks for extreme summarization. In Proceedings of the 2018 Conference on Empirical Methods in Natural
+Language Processing, pp. 1797–1807, Brussels, Belgium, October-November 2018. Association for Computational
+Linguistics. doi: 10.18653/v1/D18-1206. URL https://aclanthology.org/D18-1206/.
+[28] Nguyen, M. N., Baker, A., Neo, C., Roush, A., Kirsch, A., and Shwartz-Ziv, R. Turning up the heat: Min-p
+sampling for creative and coherent LLM outputs, 2025. URL https://arxiv.org/abs/2407.01082.
+[29] Ollama. qwen3:4b. https://ollama.com/library/qwen3, 2025. Default parameters of the 4-bit build;
+accessed November 2026.
+[30] Papineni, K., Roukos, S., Ward, T., and Zhu, W.-J. Bleu: a method for automatic evaluation of machine
+translation. In Proceedings of the 40th Annual Meeting of the Association for Computational Linguistics,
+pp. 311–318, Philadelphia, Pennsylvania, USA, July 2002. Association for Computational Linguistics. doi:
+10.3115/1073083.1073135. URL https://aclanthology.org/P02-1040/.
+[31] Peeperkorn, M., Kouwenhoven, T., Brown, D., and Jordanous, A. Is temperature the creativity parameter of large
+language models?, 2024. URL https://arxiv.org/abs/2405.00492v1.
+[32] Pillutla, K., Liu, L., Thickstun, J., Welleck, S., Swayamdipta, S., Zellers, R., Oh, S., Choi, Y., and Harchaoui, Z.
+MAUVE scores for generative models: Theory and practice, 2023. URL https://arxiv.org/abs/2212.
+14578.
+[33] Post, M. A call for clarity in reporting BLEU scores. In Proceedings of the Third Conference on Machine
+Translation: Research Papers, pp. 186–191, Brussels, Belgium, October 2018. Association for Computational
+Linguistics. doi: 10.18653/v1/W18-6319. URL https://aclanthology.org/W18-6319/.
+[34] Qiu, Z.-H., Guo, S., Xu, M., Zhao, T., Zhang, L., and Yang, T. To cool or not to cool? Temperature network meets
+large foundation models via DRO, 2024. URL https://arxiv.org/abs/2404.04575.
+[35] Qwen Team. Qwen3-4B model card. https://huggingface.co/Qwen/Qwen3-4B, 2025. Accessed
+November 2026.
+[36] Qwen Team. Qwen3-4B-AWQ model card. https://huggingface.co/Qwen/Qwen3-4B-AWQ, 2025.
+Accessed November 2026.
+12
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+[37] Qwen Team. Qwen3-8B-GGUF model card. https://huggingface.co/Qwen/Qwen3-8B-GGUF, 2025.
+Accessed November 2026.
+[38] Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., Zhou, Y., Li, W., and Liu, P. J. Exploring the
+limits of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research, 2020.
+URL https://arxiv.org/abs/1910.10683.
+[39] Rein, D., Hou, B. L., Stickland, A. C., Petty, J., Pang, R. Y., Dirani, J., Michael, J., and Bowman, S. R. GPQA: A
+graduate-level Google-Proof Q&A benchmark, 2023. URL https://arxiv.org/abs/2311.12022.
+[40] Renze, M. and Guven, E. The effect of sampling temperature on problem solving in large language models.
+In Findings of the Association for Computational Linguistics: EMNLP 2024, pp. 7346–7356. Association for
+Computational Linguistics, 2024. doi: 10.18653/v1/2024.findings-emnlp.432. URL http://dx.doi.org/
+10.18653/v1/2024.findings-emnlp.432.
+[41] Rouhani, B. D., Zhao, R., More, A., Hall, M., Khodamoradi, A., Deng, S., Choudhary, D., Cornea, M., Dellinger,
+E., Denolf, K., Dusan, S., Elango, V., Golub, M., Heinecke, A., James-Roxby, P., Jani, D., Kolhe, G., Langhammer,
+M., Li, A., Melnick, L., Mesmakhosroshahi, M., Rodriguez, A., Schulte, M., Shafipour, R., Shao, L., Siu, M.,
+Dubey, P., Micikevicius, P., Naumov, M., Verrilli, C., Wittig, R., Burger, D., and Chung, E. Microscaling data
+formats for deep learning, 2023. URL https://arxiv.org/abs/2310.10537.
+[42] Shen, M., Das, S., Greenewald, K., Sattigeri, P., Wornell, G., and Ghosh, S. Thermometer: Towards universal
+calibration for large language models, 2024. URL https://arxiv.org/abs/2403.08819.
+[43] Shi, C., Yang, H., Cai, D., Zhang, Z., Wang, Y., Yang, Y., and Lam, W. A thorough examination of decoding
+methods in the era of LLMs, 2024. URL https://arxiv.org/abs/2402.06925.
+[44] Stanton, S., Izmailov, P., Kirichenko, P., Alemi, A. A., and Wilson, A. G. Does knowledge distillation really work?,
+2021. URL https://arxiv.org/abs/2106.05945.
+[45] Unsloth. Qwen3-4B-GGUF. https://huggingface.co/unsloth/Qwen3-4B-GGUF, 2025. Accessed
+November 2026.
+[46] Wang, Z., Ma, D., Huang, X., Cai, D., Lan, T., Xu, J., Mi, H., Tang, X., and Wang, Y. The end of manual decoding:
+Towards truly end-to-end language models, 2025. URL https://arxiv.org/abs/2510.26697.
+[47] Wu, Z., Dhiman, S., and Koshiyama, A. Which decisions low-bit quantization breaks, and how to predict them,
+2026. URL https://arxiv.org/abs/2608.06564.
+[48] Xie, J., Chen, A. S., Lee, Y., Mitchell, E., and Finn, C. Calibrating language models with adaptive temperature
+scaling, 2024. URL https://arxiv.org/abs/2409.19817.
+[49] Xu, J., Liu, X., Yan, J., Cai, D., Li, H., and Li, J. Learning to break the loop: Analyzing and mitigating repetitions
+for neural text generation, 2022. URL https://arxiv.org/abs/2206.02369.
+[50] Yang, A., Zhang, B., Hui, B., Gao, B., Yu, B., Li, C., Liu, D., Tu, J., Zhou, J., Lin, J., Lu, K., Xue, M., Lin,
+R., Liu, T., Ren, X., and Zhang, Z. Qwen2.5-Math technical report: Toward mathematical expert model via
+self-improvement, 2024. URL https://arxiv.org/abs/2409.12122.
+[51] Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C., Zheng, C., Liu, D.,
+Zhou, F., Huang, F., Hu, F., Ge, H., Wei, H., Lin, H., Tang, J., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou,
+J., Zhou, J., Lin, J., Dang, K., Bao, K., Yang, K., Yu, L., Deng, L., Li, M., Xue, M., Li, M., Zhang, P., Wang, P.,
+Zhu, Q., Men, R., Gao, R., Liu, S., Luo, S., Li, T., Tang, T., Yin, W., Ren, X., Wang, X., Zhang, X., Ren, X., Fan,
+Y., Su, Y., Zhang, Y., Zhang, Y., Wan, Y., Liu, Y., Wang, Z., Cui, Z., Zhang, Z., Zhou, Z., and Qiu, Z. Qwen3
+technical report, 2025. URL https://arxiv.org/abs/2505.09388.
+13
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+A
+Extended related work
+Adaptive decoding.
+Adaptive temperature scaling (ATS) and TempNet also learn temperatures at a fine granularity,
+but for different reasons. ATS learns a temperature for each token to improve the model’s confidence calibration [48],
+and TempNet learns to predict a temperature for each input to improve prediction and generalization across tasks [34].
+ReSET also sets the temperature per token, and targets NVFP4-quantized reasoning models. It observes that quantization
+adds sampling errors at confident tokens and concentrates probability too much at uncertain reasoning steps. It samples
+high-entropy tokens at temperature 1.0 and the rest at a lower temperature, with an entropy threshold that adapts to the
+current reasoning step, and calibrates the low temperature for each model and task on labeled held-out data [16]. It does
+not learn a temperature predictor, and its goal is to balance precision and exploration during reasoning, rather than
+to imitate the full-precision model. Our entropy-threshold baseline in Appendix E.3 is a simpler rule in the spirit of
+ReSET, and not ReSET itself. AutoDeco is the closest work to ours architecturally, since it also learns temperature and
+top-p at each generation step, with two small heads on the language model. It trains them with cross-entropy to raise the
+probability of the next token in reasoning traces selected for correct final answers [46], and we borrow its two-head
+design. TempQuant instead learns these settings so that the quantized model’s next-token probabilities match those of
+its full-precision counterpart, and uses them to measure how much of the quantization error the sampler can remove.
+Decoding-time fixes for degeneration.
+Lotfi et al. [22] measure the token-level KL between quantized and full-
+precision reasoning models, find that it is high at uncertain positions, where quantized models oversample overthinking
+markers such as “wait”, and reduce this with a training-free logit penalty on a curated set of these markers. TempQuant
+also corrects the quantized model at decoding time without retraining it, but fits the standard temperature and top-p to
+the full-precision model, with no chosen set of tokens. More general samplers target repetition and incoherence without
+a reference model: repetition penalties [13], Mirostat, which holds perplexity at a target [2], locally typical sampling
+[26], truncation sampling [9], and min-p [28]. Repetition also reinforces itself once it starts [49], which is consistent
+with how quickly a cold 3-bit model falls into loops. Braverman et al. [3] show that the entropy rate of generated text
+drifts away from that of real text, and correct this with a single temperature-like parameter, a close precedent for global
+TempQuant. We fit such a parameter against the full-precision model after quantization.
+Temperature calibration.
+Other work learns temperatures to calibrate a model’s confidence. Temperature scaling fits
+one temperature on labeled data [7]. DACA fits a temperature with a reference-based forward KL so that a post-trained
+model’s confidence matches its pre-trained model [23]. Thermometer predicts one temperature for a task by aggregating
+unlabeled prompts [42], and Dual-Align combines output and layerwise supervision to fit a single temperature [24]. We
+do not select temperature and top-p for confidence calibration, but to preserve the behavior of a quantized model.
+Distillation.
+Matching a teacher’s next-token distribution is the basis of knowledge distillation [10]. LLM-QAT
+applies it to quantization, updating the quantized weights to minimize forward KL to the full-precision model [21], and
+Agarwal et al. [1] study how the choice of divergence affects a student that cannot reproduce its teacher.
+Temperature and generation behavior.
+Temperature affects the diversity and coherence of generated text. Holtzman
+et al. [12] show that low-temperature sampling can reduce diversity and increase repetitive loops in open-ended
+generation. In a Llama-2 story-generation study, Peeperkorn et al. [31] find that higher temperature is only weakly
+associated with novelty and more strongly associated with incoherence. For full-precision models, the temperature
+between 0 and 1 has little effect on problem-solving accuracy [40].
+Behavioral effects of quantization.
+Quantization can change reasoning behavior as well as accuracy, and similar
+aggregate accuracy does not establish that behavior is preserved [5]. Lotfi et al. [22] find that aggressive quantization
+can lengthen chains of thought and increase overthinking errors, where a model reaches a correct intermediate answer
+and then abandons it. In dialogue evaluations, Li et al. [17] document sentence-level repetition under 3-bit weight or
+KV-cache quantization and repeated-token failures at 2 bits. The effects vary by configuration: Liu et al. [20] find
+response lengths close to BF16 under several settings, while more aggressive quantization can lengthen outputs. In our
+14
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+data, 3-bit responses are several times longer than full-precision ones, mostly because they run into repetition. We
+measure response length and repetition alongside accuracy, using BF16 as our behavioral reference.
+Quantization and token probabilities.
+Wu et al. [47] find that low-bit quantization can shrink decision margins, the
+logit differences between the first tokens of two candidate continuations, and introduce directional biases that reverse
+model preferences. A margin describes a particular choice, while entropy describes uncertainty over the full vocabulary,
+and one does not determine the other. We study the related question of how quantization changes entropy and which
+tokens’ rankings it flips. Our quantized models use GPTQ [6], AWQ [19], and the MXFP4 microscaling format [41].
+B
+Why the divergences disagree on flipped tokens
+Figure 8 uses the three-token examples of Figure 1 to show how cooling and warming the quantized model change
+forward KL, P
+i pi log(pi/qi), and reverse KL, P
+i qi log(qi/pi), where p is the full-precision distribution and q the
+quantized one. When the rankings are preserved, quantization only spreads the probabilities, and cooling brings q back
+toward p under both divergences. When the rankings flip, cooling sharpens q around the wrong token: reverse KL
+improves, because q moves its mass off the token BF16 rules out, while forward KL worsens, because BF16’s preferred
+token loses probability. Warming does the opposite. A typical preserved token therefore pulls a single setting the same
+way under both divergences, and the divergences part ways mainly on the flipped tokens.
+Forward KL  0.15
+Reverse KL  0.75
+Forward KL  0.02 ↓
+Reverse KL  0.12 ↓
+Forward KL  0.33 ↑
+Reverse KL  1.65 ↑
+Forward KL  0.56
+Reverse KL  1.17
+Forward KL  0.85 ↑
+Reverse KL  0.93 ↓
+Forward KL  0.53 ↓
+Reverse KL  1.83 ↑
+Paris
+Rome
+Oslo
+80%
+20%
+0%
+Full precision
+Paris
+Rome
+Oslo
+60%
+30%
+10%
+Quantized (T = 1)
+Paris
+Rome
+Oslo
+78%
+20%
+2%
+Cooled (T = 0.5)
+Paris
+Rome
+Oslo
+47%
+34%
+20%
+Warmed (T = 2.1)
+42
+40
+48
+80%
+20%
+0%
+Full precision
+42
+40
+48
+30%
+60%
+10%
+Quantized (T = 1)
+42
+40
+48
+20%
+78%
+2%
+Cooled (T = 0.5)
+42
+40
+48
+34%
+47%
+20%
+Warmed (T = 2.1)
+(a) Token rankings preserved
+(b) Token rankings flipped
+Forward KL = ∑
+i
+pi log (pi /qi)          Reverse KL = ∑
+i
+qi log (qi /pi)          p: full precision,  q: quantized
+Figure 8: Forward and reverse KL for the three-token examples of Figure 1, before correction and after cooling or
+warming the quantized model. Arrows mark whether each divergence falls or rises.
+Table 4 gives the settings global TempQuant selects under each divergence. Unlike Figure 4, which varies the temperature
+alone, the search also chooses top-p, which lets reverse KL cut more tokens and cool further.
+15
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Training divergence
+τ = 0.3
+τ = 0.6
+τ = 1.0
+Forward KL
+(1.09, 1.00)
+(1.13, 1.00)
+(1.22, 1.00)
+JSD
+(0.58, 0.98)
+(0.67, 0.99)
+(0.82, 0.98)
+Reverse KL
+(0.20, 0.90)∗
+(0.15, 0.90)∗
+(0.15, 0.90)∗
+Table 4: Temperature and top-p (T, p) that global TempQuant selects for GPTQ3 under each training divergence. ∗At
+the lower edge of the search range.
+C
+Controller architecture and training
+We train two controllers per objective with different seeds and average their results. Figure 9 shows the design.
+Figure 9: Per-step TempQuant’s two prediction heads and their connection to next-token sampling.
+C.1
+Architecture and inputs
+The temperature and top-p heads share the same 42 logit features but have separate weights. The temperature head
+outputs the correction factor κ, and the top-p head also receives log κ, so gradients reach both heads. We pass log κ
+rather than κ so that keeping the requested temperature gives zero, and doubling or halving it moves the input by the
+same amount in opposite directions. Following AutoDeco, the top-p head receives the predicted temperature because
+changing the temperature changes which tokens a given cutoff keeps.
+Model and quantization.
+We use Qwen/Qwen3-4B [51]. MXFP4 quantizes the linear weights statically and their
+inputs dynamically, in groups of 32 with shared E8M0 scales. Embeddings, normalization, the tied vocabulary head,
+and the KV cache stay in BF16. We serve models with vLLM [15].
+C.2
+Input features
+Table 6 lists the features. We adjust the logits for the requested temperature first, and normalize each feature with its
+training mean and standard deviation. Here ez is the logits scaled by τ0/τ and shifted so the maximum is zero, with
+τ0 = 0.6, rk is its kth largest value, s is its standard deviation, and v = softmax(ez/0.6).
+16
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Controller architecture
+Model
+Qwen3-4B GPTQ3 (main results) or native MXFP4 W4A4; BF16 KV
+Reference
+BF16 temperatures 0.3, 0.6, 1.0, top-p = .95
+Input
+Ten distribution summaries followed by 32 ranked logit features
+Temperature head
+42 →1398 →16 →1, Tanh hidden activations
+Top-p head
+43 →1375 →16 →1, Tanh
+Trainable parameters
+165,048
+Temperature output
+κ ∈(0.083, 83)
+Top-p output
+ρQ ∈(0, 1)
+Sampling temperature
+T = τκ, the requested temperature τ multiplied by the correction factor
+Table 5: Architecture and output ranges of the per-step predictor.
+Coordinate
+Feature
+Definition
+1
+Gap between the first- and second-ranked logits
+r1 −r2
+2
+Gap between the first- and eighth-ranked logits
+r1 −r8
+3
+Gap between the first- and 32nd-ranked logits
+r1 −r32
+4
+Logit sample standard deviation
+std(ez)
+5
+Mean logit
+V −1 P
+i ezi
+6
+Maximum logit after centering
+r1 = 0
+7
+Entropy (nats)
+H(v) = −P
+i vi log vi
+8
+Largest token probability
+v(1)
+9
+Probability mass of the eight most likely tokens
+P8
+k=1 v(k)
+10
+Probability mass of the 32 most likely tokens
+P32
+k=1 v(k)
+11–42
+The 32 largest logits divided by their scale
+rk/s,
+k = 1, . . . , 32
+Table 6: The controller’s ten distribution summaries and 32 leading-logit features, before normalization.
+C.3
+Output ranges and starting values
+Each head produces an unbounded number, and a sigmoid maps it into an allowed range. For head outputs aθ(x) and
+bϕ(x, log κ),
+log κ = log κmin + σ(aθ(x) + cT ) log
+κmax
+κmin
+
+,
+ρQ = σ(bϕ(x, log κ) + cp),
+(κmin, κmax) =
+  0.05
+0.6 , 50
+0.6
+
+.
+(5)
+The first line places log κ between log κmin and log κmax, so the correction lies between about 0.083 and 83 and is
+spread evenly on a log scale. Equivalently, the temperature the head would use for a request of 0.6, which is the scale the
+features are normalized to, lies between 0.05 and 50. A correction of κ = 1 keeps the requested temperature, and the
+sampler uses Tt = τκt. The second line keeps the top-p cutoff between 0 and 1. These are Fθ and Gϕ in Equation 3.
+The constants cT and cp are set so that, before training, both heads output the global TempQuant setting fitted on the
+training data, and the final layers start at zero. Every prefix therefore starts at that global setting, and training learns how
+far to move away from it at each token.
+C.4
+Training settings
+Only the two heads are trained (Table 7). We use the controller after 120 updates.
+17
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Training configuration
+Objectives
+Smoothed forward KL, smoothed reverse KL, symmetric JSD
+Loss scale cD
+1/4 for either KL objective; 1 for JSD
+Uniform mixture η
+10−4 for KL; none for JSD
+Smooth top-p width
+ϵ = .01
+Action-variance weight
+λ = .01
+Optimizer
+Adam: β1 = .9, β2 = .999, ϵAdam = 10−8, weight decay 0; without AMSGrad
+Learning rate
+.001 for updates 1–30; .0001 for 31–120; optimizer state retained at the transition
+Update / clipping
+Full weighted pool of 6,912 rows, accumulated in chunks of 32; global gradient norm clipped
+to 1 before each update
+Table 7: Training settings for all three objectives and every training run.
+Action-variance regularization.
+A small penalty keeps the predicted settings from varying too much from one
+training prefix to the next. At each requested temperature, it adds the variance across prefixes of the log predicted
+temperature and of the predicted cutoff on the log-odds scale, which spreads out cutoffs near 1, and then averages over
+the three requested temperatures:
+R = 1
+3
+X
+τ∈{0.3,0.6,1.0}
+1
+N
+N
+X
+t=1
+
+(ℓt,τ −¯ℓτ)2 + (ζt,τ −¯ζτ)2
+,
+(6)
+where ℓt,τ = log κt(τ), ζt,τ = logit ρQ
+t (τ), N = 2,304 training prefixes are weighted equally, and bars are means. The
+implementation scales the divergence by cD and the penalty by λ = .01, which gives Equation 4 with λD = λ/cD.
+Smooth top-p.
+During training we replace top-p with a smooth version. Sort the logits in ascending order, let bi be
+their probabilities after temperature scaling, and let Ci = P
+j≤i bj. With ϵ = 0.01,
+log gi = log σ
+Ci −(1 −ρQ)
+ϵ
+
+−log σ
+Ci
+ϵ
+
+,
+eqi =
+bigi
+P
+j bjgj
+,
+(7)
+with gi = 1 for the top token. Targets, evaluation, and generation use ordinary top-p. The KL smoothing weight and the
+sharpness of this smooth top-p are choices we make only so that training works, so Table 8 tests how much the results
+depend on them. Halving or doubling either one changes held-out forward KL by at most 5% and the mean chosen
+temperature by at most 4%. The predictor therefore learns essentially the same settings whatever values we pick, so
+these choices make training possible without shaping what it learns. Since the held-out divergence is measured with
+ordinary top-p, this also shows that training with the smooth version carries over to the hard cutoff used in deployment.
+Forward KL
+Mean chosen T
+Training variant
+τ = 0.3
+0.6
+1.0
+τ = 0.3
+0.6
+1.0
+As in the paper
+0.594
+0.483
+0.482
+1.090
+1.404
+1.371
+KL smoothing ×0.5
+0.594
+0.482
+0.487
+1.096
+1.407
+1.344
+KL smoothing ×2
+0.594
+0.482
+0.488
+1.097
+1.407
+1.345
+Smooth top-p sharpness ×0.5
+0.595
+0.495
+0.505
+1.080
+1.373
+1.316
+Smooth top-p sharpness ×2
+0.595
+0.467
+0.468
+1.105
+1.428
+1.344
+Table 8: GPTQ3 held-out forward KL and mean chosen temperature for forward-KL per-step TempQuant when the KL
+smoothing weight or the sharpness of the smooth top-p used in training is halved or doubled. All variants use the same
+random seed; the chosen top-p stays between .974 and .976.
+18
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+C.5
+Training data
+We train on 24 GSM8K [4] and 24 MATH [8] training questions, and hold out 32 more from each, excluding MATH-500.
+For each question we collect two responses each from BF16, uncorrected quantization, and a preliminary version of
+per-step TempQuant, at temperature 0.6 and top-p 0.95. We take eight points from each training response and two
+from each held-out response, giving 2,304 training steps and 768 held-out steps, and reuse them at all three requested
+temperatures.
+D
+Evaluation details
+D.1
+Protocol notes for Section 4
+Fitting global TempQuant has a one-time cost: generating the calibration responses and recording both models’
+next-token probabilities on them. Each requested temperature needs its own fit, on the same data.
+Every learned setting is fit on training questions, and divergence is measured on 768 decoding steps from 64 other
+questions. Since we also used these questions during development, we confirm the reductions on 64 fresh questions
+with the same settings and no refitting: at 0.6, GPTQ3’s forward KL falls from 1.35 to 0.35 with global TempQuant
+and 0.37 with per-step TempQuant, and MXFP4’s from 0.79 to 0.23 and 0.32. Unless noted, downstream results for
+per-step TempQuant average two training runs, and its divergence results on Qwen3-4B average five. The comparison
+with Qwen’s recipe (Table 1) and the temperature sweep (Figure 6) use 200 MATH questions, and the former also 198
+GPQA questions, with one sample each.
+All GPTQ3 models use 3-bit GPTQ with group size 128 and keep the vocabulary head in BF16. The Qwen3-4B GPTQ3
+checkpoint is a public third-party release1, and we quantized Qwen3-8B, R1-Distill-Llama-8B, and Gemma 4 31B
+ourselves, calibrating on C4 [38]. GPTQ3 weights are dequantized for BF16 computation, while MXFP4 runs in native
+four-bit computation.
+D.2
+Benchmarks and comparison methods
+Table 9 lists the tasks. GSM8K, MATH-500, and GPQA-Diamond [39] use their full test sets. AIME-120 is AIME90
+plus the 30 problems from 2025. XSum [27] uses a fixed validation subset screened for overlap with the training data.
+The global TempQuant settings are searched per requested temperature (Appendix E.3), and per-step TempQuant (T
+only) keeps p = .95.
+Task
+Items
+Trials
+Output limit (tokens)
+GSM8K test
+1,319
+4
+16,384
+MATH-500 test
+500
+4
+32,768
+AIME-120
+120
+8
+32,768
+GPQA-Diamond
+198
+8
+32,768
+XSum validation subset
+128
+8
+512
+Table 9: Evaluation tasks, responses per item, and output limits at each requested temperature.
+D.3
+Generation and scoring
+Seeds match across policies by task, question, and trial. Accuracy is the average over sampled responses. Thinking
+mode is on for reasoning tasks and off for XSum, with no repetition penalty. GSM8K and AIME use the Qwen2.5-Math
+scorer [50], MATH-500 uses Math-Verify on the last boxed answer, and GPQA uses LM-eval’s flexible extraction.
+1https://huggingface.co/irish-quant/Qwen-Qwen3-4B-3bit, revision d2c2902.
+19
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+XSum quality is ROUGE-2 F1 against the human summaries [18], after removing a leading thinking block. The MXFP4
+and GPTQ3 studies each sample their own BF16 reference runs, so BF16 scores differ slightly between their tables.
+D.4
+Behavior measures and uncertainty
+Length counts generated tokens, and the cap rate is the share of responses that hit the length limit. BLEU against BF16
+[30, 33] measures word overlap with BF16 responses, splitting each question’s responses into two halves, so BF16
+against itself scores below 100. Self-BLEU measures how similar a model’s responses to the same question are, so
+higher means less diverse. Repetition is the share of repeated four-grams within a response.
+Testing one comparison.
+To compare two policies, for example raw GPTQ3 and global TempQuant, we use the
+fact that both answer the same questions with the same random seeds, and take the difference in accuracy question by
+question. We then resample the questions with replacement many times and recompute the average difference each time.
+The middle 95% of these averages gives the interval, and a gain is significant when the interval excludes zero. We call
+this a paired bootstrap over questions. Intervals in the appendix are not adjusted for multiple comparisons unless stated.
+When a grade is unknown, we count it as half correct, the midpoint of counting it wrong or right.
+Testing many comparisons.
+We compare several policies, each training loss and global TempQuant, on several tasks
+and temperatures, and with this many comparisons a few would look significant by chance. The Holm correction [11]
+guards against this. It sorts the comparisons from smallest to largest p-value and tests them in that order: with m
+comparisons, the smallest must fall below 0.05/m, the next below 0.05/(m −1), and so on, and testing stops at the first
+comparison that fails. The chance that any comparison is declared significant by luck then stays below 5% across all of
+them together. For GPTQ3, we apply it across all 75 comparisons of every task, temperature, and policy against raw
+GPTQ3 and against each other (Table 10). For MXFP4, we apply it across its 54 comparisons of every task, temperature,
+and training loss against native MXFP4 (Table 30). MATH drops 3 questions whose reference answers cannot be graded.
+Task
+τ
+Global −GPTQ3
+Per-step −GPTQ3
+Per-step −global
+GSM8K
+0.3
++63.5 [+61.7, +65.2]
++63.1 [+61.4, +64.8]
+−0.4 [-1.3, +0.5]
+0.6
++30.5 [+28.6, +32.3]
++29.3 [+27.5, +31.2]
+−1.1 [-2.1, -0.1]
+1.0
+−1.6 [-2.9, -0.4]
++0.6 [-0.4, +1.6]
++2.2 [+1.1, +3.3]
+MATH
+0.3
++38.0 [+34.5, +41.6]
++37.1 [+33.7, +40.6]
+−0.9 [-2.6, +0.8]
+0.6
++22.6 [+19.6, +25.5]
++21.6 [+18.8, +24.4]
+−1.0 [-2.7, +0.7]
+1.0
+−1.4 [-3.5, +0.6]
++1.5 [-0.2, +3.2]
++2.9 [+1.3, +4.5]
+AIME
+0.3
++1.2 [-0.9, +3.3]
++0.6 [-1.4, +2.5]
+−0.6 [-1.5, +0.1]
+0.6
++0.7 [-1.5, +2.5]
++0.4 [-1.7, +2.0]
+−0.3 [-0.9, +0.3]
+1.0
++1.0 [+0.1, +2.3]
++1.5 [+0.3, +3.2]
++0.5 [-0.4, +1.5]
+GPQA
+0.3
++18.3 [+14.2, +22.5]
++19.4 [+15.3, +23.5]
++1.1 [-1.0, +3.2]
+0.6
++14.2 [+10.3, +18.1]
++13.1 [+9.4, +16.9]
+−1.1 [-3.1, +0.9]
+1.0
++0.6 [-2.5, +3.7]
++3.7 [+1.4, +6.0]
++3.1 [+0.1, +6.1]
+Table 10: GPTQ3 accuracy differences in percentage points with 95% intervals from a paired bootstrap over questions
+(Appendix D.4). Per-step is forward-KL per-step TempQuant. Green marks gains that remain significant after Holm
+correction over all 75 tests, which cover every task, temperature, and training loss; the table shows the comparisons with
+global and per-step TempQuant. Differences use paired attempts, so they can differ slightly from Table 2.
+Strict grading.
+A response that hits the length limit is cut off before it finishes. Our graders take the last answer that
+appears in the text, so a response that reached the right answer and then kept going, often repeating itself until the limit,
+can still be graded correct. At τ = 0.3, for example, raw GPTQ3 hits the limit on 94% of GSM8K responses yet scores
+20
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+18%. To check that TempQuant’s gains do not come from grading unfinished responses, Table 11 counts every response
+that hits the length limit as wrong. The gains from TempQuant at τ = 0.3 and 0.6 hold under this stricter grading, and
+much of them comes from more responses finishing: at τ = 0.3, GPTQ3 finishes few responses, while TempQuant
+finishes most of its GSM8K and GPQA responses and about half of its MATH responses. Among the responses that
+finish, GPTQ3 is more accurate, because it only finishes its easiest ones. At τ = 1.0, global TempQuant finishes fewer
+GSM8K responses than GPTQ3, so it falls further behind under strict grading, while per-step TempQuant stays level or
+ahead.
+GSM8K
+MATH
+GPQA
+τ
+Policy
+Strict
+Fin. acc.
+Fin.
+Strict
+Fin. acc.
+Fin.
+Strict
+Fin. acc.
+Fin.
+0.3
+BF16
+94.28
+94.7
+99.6
+94.90
+96.5
+98.7
+38.83
+41.9
+92.7
+0.3
+GPTQ3
+5.46
+92.3
+5.9
+2.67
+96.4
+2.8
+0.06
+7.7
+0.8
+0.3
+Global TempQuant
+66.22
+88.1
+75.2
+39.12
+75.7
+51.8
+22.35
+26.2
+85.2
+0.3
+Per-step TempQuant (FKL)
+68.43
+87.7
+78.1
+40.14
+77.7
+51.7
+23.30
+28.9
+80.5
+0.6
+BF16
+94.83
+94.9
+99.9
+95.65
+96.4
+99.5
+41.29
+41.7
+99.1
+0.6
+GPTQ3
+36.64
+90.1
+40.7
+14.30
+92.6
+15.4
+3.47
+38.5
+9.0
+0.6
+Global TempQuant
+67.48
+87.0
+77.6
+41.40
+78.2
+53.0
+22.92
+27.0
+84.8
+0.6
+Per-step TempQuant (FKL)
+65.19
+86.9
+75.0
+36.85
+78.9
+46.8
+20.83
+27.8
+75.0
+1.0
+BF16
+94.92
+95.0
+99.9
+95.05
+95.5
+99.8
+43.50
+43.6
+99.8
+1.0
+GPTQ3
+69.86
+87.4
+79.9
+40.95
+81.9
+50.1
+17.74
+26.3
+67.5
+1.0
+Global TempQuant
+61.83
+85.7
+72.1
+37.45
+70.5
+53.1
+17.23
+23.9
+72.2
+1.0
+Per-step TempQuant (FKL)
+69.97
+87.7
+79.8
+39.05
+76.2
+51.3
+23.45
+27.6
+85.1
+Table 11: Qwen3-4B GPTQ3 under strict grading. Strict counts responses that hit the length limit as wrong; Fin. acc. is
+accuracy among responses that finished; Fin. is the share of responses that finished (%). Per-step TempQuant is forward
+KL, two fits averaged.
+E
+Additional experimental results
+E.1
+Full results for Section 4
+In Table 12, Qwen3-4B is evaluated on the full benchmarks and the other models on 300 GSM8K, 300 MATH, and 198
+GPQA questions with four samples each. On Qwen3-8B and R1-Distill-Llama-8B, the per-token oracle removes a
+similar share of the divergence as on Qwen3-4B (Table 13).
+E.2
+Details for Figure 2
+The effective temperature.
+Figure 2a reports, for each requested temperature τ, the BF16 temperature Teq(τ) whose
+mean entropy matches the quantized model’s on the same prefixes:
+X
+i
+wiH
+
+softmax
+
+ui
+Teq(τ)
+
+=
+X
+i
+wiH
+
+softmax
+zi
+τ
+
+.
+(8)
+We use the 198 BF16-generated GPQA-Diamond responses, sampled at 0.6 with top-p .95, with questions weighted
+equally. GPTQ3 is hotter than BF16 at all three requested temperatures, on these responses and on MXFP4-generated
+ones.
+Random-noise control.
+For the noise line, we add Gaussian noise to BF16’s logits at every token, with the same size
+as GPTQ3’s difference from BF16 at that token, and find the BF16 temperature with the same mean entropy. The noise
+21
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Model
+Policy
+GSM8K
+MATH
+GPQA
+At length limit (%)
+GPTQ3 →global
+Forward KL
+removed (%)
+Qwen3-4B
+BF16
+94.83
+95.75
+41.48
+GPTQ3
+50.36
+29.90
+10.98
+76.7 →29.9
+73
+Global TempQuant
+80.80
+52.35
+25.19
+Per-step TempQuant
+79.68
+51.35
+24.08
+Qwen3-8B
+BF16
+96.50
+95.75
+42.68
+GPTQ3
+88.67
+60.83
+22.22
+29.2 →11.7
+70
+Global TempQuant
+92.75
+70.42
+27.15
+Per-step TempQuant
+92.92
+69.33
+25.51
+Gemma 4 31B
+BF16
+98.67
+98.42
+84.85
+GPTQ3
+97.33
+69.75
+62.12
+17.1 →1.3
+79
+Global TempQuant
+97.42
+90.25
+68.81
+Per-step TempQuant
+97.00
+89.67
+70.08
+R1-Distill-Llama-8B
+BF16
+93.42
+89.92
+42.17
+GPTQ3
+76.67
+67.33
+22.85
+5.0 →0.3
+66
+Global TempQuant
+77.25
+67.83
+21.34
+Per-step TempQuant
+76.83
+67.50
+26.58
+Table 12: 3-bit models at τ = 0.6: accuracy (%), the share of responses at the length limit before and after global
+TempQuant, and the forward KL it removes. Green marks gains over GPTQ3.
+Model
+Policy
+Forward KL
+Reverse KL
+JSD
+TV
+Qwen3-8B
+GPTQ3
+.915
+1.310
+.0530
+.119
+Global TempQuant (0.95, 1)
+.275
+1.860
+.0590
+.141
+Per-step TempQuant, forward KL
+.424
+1.922
+.0592
+.144
+Per-step TempQuant, JSD
+.874
+1.353
+.0531
+.121
+Per-step TempQuant, reverse KL
+1.538
+1.122
+.0583
+.120
+Oracle per-step TempQuant (T only)
+.162
+1.073
+.0363
+.086
+Oracle per-step TempQuant
+.143
+.996
+.0341
+.081
+R1-Distill-Llama-8B
+GPTQ3
+.706
+.837
+.0477
+.125
+Global TempQuant (0.72, 1)
+.242
+1.227
+.0518
+.137
+Per-step TempQuant, forward KL
+.329
+1.389
+.0532
+.143
+Per-step TempQuant, JSD
+.641
+.882
+.0476
+.126
+Per-step TempQuant, reverse KL
+1.476
+.679
+.0574
+.136
+Oracle per-step TempQuant (T only)
+.176
+.856
+.0370
+.100
+Oracle per-step TempQuant
+.153
+.757
+.0342
+.092
+Mean entropy before top-p (nats) and the BF16 temperature with the same mean entropy
+Qwen3-8B
+BF16 .174, GPTQ3 .229; BF16 at T = 0.78
+Table 13: Two further models quantized with GPTQ3, at requested temperature τ = 0.6, on held-out steps. Global
+TempQuant settings are searched on training steps and given as (T, p); per-step values average two training runs. On
+Qwen3-4B, the gap between per-step and global TempQuant comes from the learned cutoff (Appendix F.4).
+22
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+gives 0.29, 0.58, and 0.99, against 0.36, 0.74, and 1.26 for GPTQ3, with question-level 95% intervals narrower than
+±0.02.
+Placing MXFP4.
+MXFP4 was measured on its own set of BF16-generated GPQA responses, where BF16’s entropy
+is known at only the three requested temperatures. We take its mean entropy relative to BF16’s on that text at each
+requested temperature and find the BF16 temperature with the same ratio on the GPTQ3 responses. Applied to GPTQ3,
+the same procedure reproduces its values in the figure exactly.
+Grouping in panel (b).
+Panel (b) groups tokens by the average entropy of the two models. Figure 10 shows why.
+Grouped by BF16’s entropy alone, both GPTQ3 and random noise with the same forward KL look flatter on confident
+tokens and sharper on uncertain ones, since tokens picked for high BF16 entropy tend to have lower entropy under any
+other model. Grouped by the average of the two entropies, the noise is sharper and GPTQ3 flatter almost everywhere.
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+0.5
+0.0
+Entropy 
+ BF16 entropy (nats)
+= 0.3, grouped by BF16 entropy
+GPTQ3
+Random noise, same KL
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+= 0.6, grouped by BF16 entropy
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+= 1.0, grouped by BF16 entropy
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+Entropy group (nats)
+0.25
+0.00
+0.25
+0.50
+0.75
+Entropy 
+ BF16 entropy (nats)
+= 0.3, grouped by average entropy
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+Entropy group (nats)
+= 0.6, grouped by average entropy
+(0,.05]
+(.05,.2]
+(.2,.5]
+(.5,1]
+(1,10]
+Entropy group (nats)
+= 1.0, grouped by average entropy
+Figure 10: Entropy change from BF16 for GPTQ3 and for random noise with the same forward KL, grouped by BF16
+entropy (top) or by the average of the two entropies (bottom).
+Top-p and entropy.
+Figure 11 shows how the requested top-p changes the gap. Top-p removes the least likely tokens,
+which lowers the entropy of both models and also narrows the gap between them: after top-p, the gap from BF16 is
+13–34% smaller. Top-p alone does not remove it, so the quantized model still runs hotter than BF16 at the user’s settings.
+E.3
+Global TempQuant
+How the setting is fit.
+For each requested temperature, global TempQuant tries a coarse grid of temperatures from
+0.15 to 3.5 and top-p values from .9 to 1 on the training steps, refines around the best pair, and is scored on held-out
+steps from other questions. Nearby settings give almost the same divergence. The downstream runs at 0.3 and 1.0 use
+(1.09, 1) and (1.22, 1). The runs at 0.6 use (1.01, 1) from an earlier, coarser search, whose forward KL is within 2% of
+the refined (1.13, 1) that the divergence tables use.
+Do our measurement choices create the improvement?
+Plain KL is infinite when top-p cuts a token BF16 keeps,
+so we mix a tiny uniform probability into both distributions (weight 10−4). The uncorrected model still pays a large
+23
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+0.3
+0.6
+1.0
+Requested temperature τ
+0.000
+0.005
+0.010
+0.015
+0.020
+0.025
+Quantized − BF16
+mean entropy (nats)
+MXFP4
+0.3
+0.6
+1.0
+Requested temperature τ
+0.000
+0.025
+0.050
+0.075
+0.100
+0.125
+0.150
+GPTQ3
+Before top-p
+After top-p (.95)
+Figure 11: Quantized-minus-BF16 mean entropy on BF16 responses before and after top-p at .95, with 95% intervals.
+penalty for each cut token, and the penalty grows as the weight shrinks, so part of its divergence comes from this choice.
+Table 14 varies the weight a thousandfold. The uncorrected model’s divergence changes with it, because it cuts a BF16
+token on about 15% of steps, while global TempQuant turns top-p off, cuts nothing, and stays the same. TempQuant
+stays far below the uncorrected model at every weight, so the smoothing changes how large the gap looks, not whether it
+exists. The other requested temperatures behave the same way.
+Forward KL at smoothing weight
+BF16 token
+Policy (τ = 0.6)
+10−6
+10−5
+10−4
+10−3
+cut (%)
+Uncorrected
+1.793
+1.643
+1.493
+1.342
+14.5
+Global TempQuant (top-p only)
+0.548
+0.548
+0.548
+0.547
+0.0
+Global TempQuant
+0.397
+0.397
+0.397
+0.396
+0.0
+Per-step TempQuant (T only)
+0.546
+0.528
+0.510
+0.491
+2.8
+Per-step TempQuant
+0.513
+0.498
+0.483
+0.468
+2.3
+Table 14: GPTQ3 forward KL to BF16 at τ = 0.6 for each smoothing weight, and the share of steps where the policy’s
+top-p cuts a token BF16 keeps.
+Our target is also BF16 as the user samples it, with top-p cutting its least likely tokens. To check that this choice does
+not create the gains, Table 15 compares against BF16’s full distribution instead.
+τ = 0.3
+τ = 0.6
+τ = 1.0
+Removed (%)
+Top-p
+Full
+Top-p
+Full
+Top-p
+Full
+Global TempQuant
+81
+82
+73
+75
+60
+65
+Per-step TempQuant
+75
+76
+68
+69
+45
+49
+Oracle per-step TempQuant
+89
+89
+84
+84
+75
+76
+Table 15: Share of GPTQ3’s uncorrected forward KL removed, measured against BF16 with top-p .95 (Top-p), as in the
+rest of the paper, and against the untruncated BF16 distribution (Full).
+What drives the fitted temperature up?
+Section 4.2 argues that the flipped tokens push a single temperature up.
+Table 16 tests this by fitting global TempQuant only on tokens whose rankings are preserved.
+24
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+τ
+Fit on
+Chosen (T, p)
+All tokens
+Preserved
+Flipped
+0.3
+All tokens
+(1.09, 1)
+0.451
+0.156
+1.875
+Preserved only
+(0.45, 1)
+0.733
+0.122
+3.676
+0.6
+All tokens
+(1.13, 1)
+0.397
+0.151
+1.579
+Preserved only
+(0.63, 1)
+0.527
+0.129
+2.445
+1.0
+All tokens
+(1.22, 1)
+0.346
+0.148
+1.298
+Preserved only
+(0.85, 1)
+0.402
+0.136
+1.684
+Table 16: Global TempQuant fit on all tokens or only on tokens whose rankings are preserved. Held-out GPTQ3 forward
+KL to BF16 on 768 steps, overall and split by rankings. Bold marks the lower value in each pair.
+Global TempQuant against tuning on answers.
+Global TempQuant needs no labels, while tuning the sampler on
+answers took about 7,800 graded responses (Figure 12). One could tune on a small labeled set instead. Table 17
+simulates this: we choose the most accurate setting on 10 to 100 random MATH questions and score it on the rest,
+against global TempQuant on the same questions. Table 18 compares the settings tuned on all 200 questions with global
+TempQuant on new MATH questions, GSM8K, and GPQA. In both, global TempQuant reaches about the accuracy of
+answer tuning without any labels.
+0.3
+0.6
+0.8
+0.9
+1
+1.01
+1.09
+1.1
+1.2
+1.22
+1.3
+1.4
+1.6
+Temperature T
+.90
+.95
+1
+Top-p
+0
+10
+20
+30
+40
+50
+60
+70
+80
+MATH accuracy (%)
+Qwen3-4B GPTQ3
+0.6
+0.72
+0.8
+1
+1.2
+1.4
+Temperature T
+.90
+.95
+1
+Top-p
+0
+10
+20
+30
+40
+50
+60
+70
+80
+R1-Distill-Llama-8B GPTQ3
+Fixed setting
+Global TempQuant setting
+Figure 12: MATH accuracy of GPTQ3 at fixed temperature and top-p settings, and at the settings global TempQuant
+chooses from BF16 without answers, on the 198 gradable of 200 MATH questions with one sample each. For Qwen3-4B,
+(1.0, 1) shows the mean of two runs (52.0 and 49.0).
+Other ways to choose a setting.
+We also tried 12 rules in the spirit of ReSET [16] that use a low temperature below
+an entropy threshold and a higher one above it. The best reaches 49.5% on the tuning questions, against 53.0% for the
+best fixed setting. Sampling every quantized model at 1.0 with top-p off would be simpler, since raw GPTQ3 already
+does much better at 1.0 than at 0.6 (Table 2), but the best setting differs between models. R1-Distill-Llama-8B collapses
+a little above 1.0, and matching BF16 picks a lower temperature for it, close to its most accurate setting (Figure 12),
+while Qwen’s 4-bit AWQ release is best matched near 0.7 (Appendix E.10).
+25
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Tuned minus global TempQuant (accuracy points)
+Labeled questions
+Mean
+10th–90th percentile
+Worse by 3+ points (%)
+10
++0.4
+[−3.7, +3.3]
+16
+20
++0.8
+[−3.4, +3.2]
+12
+50
++1.0
+[−1.4, +3.2]
+6
+100
++0.7
+[−2.3, +3.8]
+7
+Table 17: Tuning GPTQ3’s sampler on a small labeled MATH set at τ = 0.6 and scoring it on the remaining questions,
+minus global TempQuant on the same questions (4,000 random splits of 198 questions).
+Qwen3-4B GPTQ3 setting
+Tuning MATH
+New MATH
+GSM8K
+GPQA
+Global TempQuant, τ = 0.6, (1.01, 1)
+49.00
+53.92
+80.80
+25.63
+Global TempQuant, τ = 0.3, (1.09, 1)
+48.75
+54.67
+81.71
+24.24
+Tuned on answers (1.0, 1)
+47.75
+55.83
+81.12
+25.63
+Tuned on answers (1.2, .95)
+49.38
+54.33
+80.40
+24.75
+R1-Distill-Llama-8B GPTQ3 setting
+Tuning MATH
+New MATH
+GSM8K
+GPQA
+Default (0.6, .95)
+64.48
+69.50
+76.57
+22.73
+Global TempQuant (0.72, 1)
+70.03
+69.17
+76.72
+21.72
+Tuned on answers (0.8, 1)
+71.55
+67.17
+76.42
+27.27
+Table 18: Accuracy (%) of settings tuned on MATH answers and of global TempQuant, on the 200 tuning questions, 300
+new MATH questions, GSM8K, and GPQA. Global TempQuant’s GSM8K and GPQA scores come from the original
+runs with four samples per question, and the tuned settings use two to four new samples.
+E.4
+Per-step examples
+Table 19 shows two written prompts. In the first, GPTQ3 puts all of its probability on “multiple” where BF16 writes
+“common”, and per-step TempQuant raises the temperature far above the global one, doubling the probability of
+“common”. In the second, GPTQ3 already mostly agrees with BF16, and per-step TempQuant stays close to the requested
+temperature, while global TempQuant’s higher temperature moves probability onto other tokens.
+Text so far
+“. . . if a number is divisible by both
+6 and 10, that means it has to be a”
+“. . . if the number is 1, then it has 1
+divisor, but 1 isn”
+BF16’s next token
+common
+’t
+Policy
+T
+P(common)
+T
+P(’t)
+BF16
+0.60
+1.00
+0.60
+1.00
+GPTQ3
+0.60
+0.00
+0.60
+0.79
+Global TempQuant
+1.13
+0.14
+1.13
+0.18
+Per-step TempQuant
+2.19
+0.29
+0.64
+0.73
+Oracle per-step TempQuant
+2.94
+0.34
+0.45
+1.00
+Table 19: GPTQ3: temperature each policy uses and the probability it gives BF16’s next token at τ = 0.6, on written
+prompts.
+E.5
+Comparing training losses
+Lowering the divergence a model is trained on need not lower the others. Table 20 measures every training loss on all
+four divergences for GPTQ3. Each loss lowers its own divergence, and none lowers all four at every temperature, which
+26
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+is why we report all three losses instead of treating one divergence as the measure of fidelity. The same holds for fixed
+settings. Among 140 fixed temperature and top-p settings, none lowers all four on the training steps for GPTQ3 at 0.3
+and 0.6 or for MXFP4 at any temperature, and the few that do for GPTQ3 at 1.0 lower them by at most 11%.
+Since per-step TempQuant is a learned predictor, a result could depend on a lucky training run. Table 21 retrains each
+loss five times with different seeds: the divergences vary by only a few percent between runs, for example from 0.460 to
+0.483 for forward KL at 0.6, so a single run is representative. Unless noted, downstream results average two runs.
+Policy
+Forward KL
+Reverse KL
+JSD
+Total variation
+Temperature (τ) = 0.3
+Global TempQuant (forward KL)
+-81
++36
++4
++27
+Global TempQuant (JSD)
+-48
++7
+-6
++5
+Global TempQuant (reverse KL)
++26
+-1
++5
+0
+Global TempQuant (top-p only, forward KL)
+-57
+0
+-2
+0
+Per-step TempQuant (forward KL)
+-75
++33
++2
++25
+Per-step TempQuant (JSD)
+-43
++7
+-6
++4
+Per-step TempQuant (reverse KL)
++23
+-1
++4
+0
+Temperature (τ) = 0.6
+Global TempQuant (forward KL)
+-73
++40
++9
++20
+Global TempQuant (JSD)
+-40
++6
+-2
++2
+Global TempQuant (reverse KL)
++114
+-9
++20
++4
+Global TempQuant (top-p only, forward KL)
+-63
++3
+-1
++1
+Per-step TempQuant (forward KL)
+-68
++56
++14
++29
+Per-step TempQuant (JSD)
+-17
++5
+-2
++1
+Per-step TempQuant (reverse KL)
++62
+-7
++9
+0
+Temperature (τ) = 1.0
+Global TempQuant (forward KL)
+-60
++28
++11
++13
+Global TempQuant (JSD)
+-2
+-8
+0
+-1
+Global TempQuant (reverse KL)
++297
+-24
++40
++12
+Global TempQuant (top-p only, forward KL)
+-58
++8
++3
++4
+Per-step TempQuant (forward KL)
+-45
++35
++12
++15
+Per-step TempQuant (JSD)
++8
+-4
+0
+-1
+Per-step TempQuant (reverse KL)
++124
+-19
++11
++1
+Table 20: Change in GPTQ3 divergence from BF16 relative to uncorrected GPTQ3 (%), on held-out steps. Bold marks
+reductions.
+Table 22 shows why the losses trade off. Forward KL charges most for cutting a token BF16 would use, so the
+forward-KL predictor warms and opens its cutoff, cutting almost none of BF16’s probability; the warming also moves
+probability onto tokens BF16’s own top-p removes, which reverse KL and total variation charge for. Reverse KL does
+the opposite: it cools and tightens the cutoff, placing the least probability on tokens BF16 removes while cutting more
+of BF16’s. JSD lands in between.
+E.6
+What learning top-p adds
+Per-step TempQuant learns a temperature and a top-p cutoff. To see what the cutoff adds, we compare it with per-step
+TempQuant (T only), trained the same way but keeping p = .95. On divergence, learning the cutoff lowers forward
+KL at every requested temperature, and all four divergences at 0.6 and 1.0 (Table 23). On accuracy, the two versions
+are close (Table 24); the difference on GSM8K at 0.6 is +0.7 points with a 95% interval of [−0.1, +1.6]. Global
+TempQuant that learns only top-p reaches much lower accuracy than global TempQuant that also learns the temperature,
+a mean of 28.3% against 40.0% at 0.6. With its learned top-p turned off at 1.0, per-step TempQuant scores 0.6 points
+27
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Training loss
+τ
+Forward KL
+Reverse KL
+JSD
+Forward KL
+0.3
+0.594 [0.594, 0.594]
+3.506 [3.500, 3.514]
+0.1006 [0.1005, 0.1008]
+0.6
+0.470 [0.460, 0.483]
+3.222 [3.212, 3.235]
+0.0943 [0.0940, 0.0945]
+1.0
+0.484 [0.477, 0.491]
+2.451 [2.425, 2.492]
+0.0787 [0.0783, 0.0795]
+Reverse KL
+0.3
+2.939 [2.895, 2.987]
+2.600 [2.598, 2.602]
+0.1028 [0.1026, 0.1032]
+0.6
+2.395 [2.395, 2.395]
+1.927 [1.927, 1.927]
+0.0900 [0.0900, 0.0900]
+1.0
+1.940 [1.937, 1.941]
+1.490 [1.489, 1.490]
+0.0789 [0.0789, 0.0789]
+JSD
+0.3
+1.365 [1.364, 1.365]
+2.801 [2.799, 2.803]
+0.0925 [0.0924, 0.0925]
+0.6
+1.242 [1.221, 1.253]
+2.171 [2.169, 2.173]
+0.0810 [0.0809, 0.0811]
+1.0
+0.944 [0.940, 0.952]
+1.780 [1.778, 1.781]
+0.0711 [0.0711, 0.0712]
+Table 21: GPTQ3 divergence from BF16 for five per-step TempQuant training runs per loss: mean [minimum,
+maximum].
+BF16 probability
+the policy cuts (%)
+Policy probability on
+tokens BF16 cuts (%)
+Mean
+temperature
+Mean
+top-p
+τ = 0.3
+GPTQ3
+11.1
+12.3
+0.30
+0.950
+Forward KL
+1.0
+18.1
+1.09
+0.975
+JSD
+5.6
+13.7
+0.62
+0.962
+Reverse KL
+14.0
+12.1
+0.48
+0.942
+τ = 0.6
+GPTQ3
+6.5
+9.8
+0.60
+0.950
+Forward KL
+0.7
+17.0
+1.40
+0.974
+JSD
+5.1
+10.5
+0.68
+0.958
+Reverse KL
+11.5
+8.7
+0.46
+0.929
+τ = 1.0
+GPTQ3
+3.3
+9.0
+1.00
+0.950
+Forward KL
+0.9
+13.1
+1.37
+0.974
+JSD
+3.7
+8.6
+0.94
+0.956
+Reverse KL
+9.3
+6.6
+0.62
+0.928
+Table 22: GPTQ3 and per-step TempQuant trained with each loss, on held-out steps: probability each side places on
+tokens the other’s top-p removes, and the mean settings the predictor chooses. Bold marks the lowest value in each mass
+column. Rows average two training runs.
+lower on GSM8K and 1.3 on MATH, with intervals [−1.5, +0.2] and [−3.4, +0.8]. Most of the correction therefore
+comes from the temperature.
+E.7
+Behavior beyond accuracy
+Closeness.
+The closeness score summarizes how far a policy’s generated text is from BF16’s on four statistics:
+word overlap with BF16’s responses to the same question (BLEU against a different half of BF16’s samples, so
+BF16 against itself scores below 100); self-BLEU, which measures how alike the policy’s own responses to the same
+question are; the share of repeated four-grams; and the share of responses that hit the length limit. For each task it
+is 100 −1
+4
+P
+m |xm −bm|, where xm are the policy’s statistics and bm BF16’s, so BF16 scores 100; for reasoning
+we average it over GSM8K, MATH, AIME, and GPQA. Table 25 shows the four statistics at τ = 0.6. On reasoning,
+the gaps in repetition and in responses at the length limit dominate, so the score mostly tracks looping. On XSum,
+where nothing loops, word overlap and self-BLEU dominate, so it tracks variety. The closest controller in each block
+follows the split of Section 4.7. Long reasoning under heavy degradation, GPTQ3 on the four reasoning tasks, should
+28
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Per-step TempQuant
+Forward KL
+Reverse KL
+JSD
+Total variation
+τ = 0.3
+Temperature only
+−69.4
++33.4
++1.7
++24.3
+Temperature and top-p
+−75.4
++33.3
++1.8
++24.6
+τ = 0.6
+Temperature only
+−65.9
++64.3
++18.5
++33.2
+Temperature and top-p
+−67.7
++55.6
++14.5
++28.5
+τ = 1.0
+Temperature only
+−43.1
++43.4
++15.5
++18.7
+Temperature and top-p
+−44.9
++34.8
++11.7
++14.8
+Table 23: Change in GPTQ3 divergence from BF16 relative to uncorrected GPTQ3 (%), on held-out steps, for
+forward-KL per-step TempQuant with and without a learned top-p. Bold marks the lower of each pair. Rows average
+two training runs.
+Policy
+GSM8K
+MATH
+AIME
+GPQA
+Global TempQuant, τ = 0.6
+Top-p only
+62.06
+35.40
+0.47
+15.21
+Temperature and top-p
+80.80
+52.35
+1.72
+25.19
+Per-step TempQuant, τ = 0.6
+Temperature only
+78.93
+51.91
+1.25
+–
+Temperature and top-p
+79.68
+51.35
+1.43
+–
+Per-step TempQuant, τ = 1.0
+Learned top-p turned off
+80.22
+50.60
+–
+–
+Learned top-p on
+80.86
+51.90
+–
+–
+Table 24: GPTQ3 accuracy (%) with and without learning top-p. Per-step rows use forward KL and average two training
+runs; – marks a comparison not run.
+favor forward KL, and the forward KL controllers are closest. Short text should favor reverse KL, and the reverse KL
+controller is closest on both GPTQ3 and MXFP4 summaries. Reasoning under light degradation, MXFP4 on GPQA,
+should favor JSD, and the JSD controller is the closest of the three.
+MAUVE.
+MAUVE [32] compares the distribution of a policy’s responses with BF16’s (Table 26). It is computed on
+512 responses per task and temperature, with the same questions and seeds for every policy and each response truncated
+to its first 1,024 GPT-2 tokens. At 0.3 and 0.6, both forms of TempQuant score above raw GPTQ3 on every task, and all
+policies stay below the agreement between two halves of BF16’s own samples.
+E.8
+Overthinking
+Quantized reasoning models tend to overthink, sampling words such as “Wait” and “Alternatively” that start unnecessary
+rechecking [22]. GPTQ3 does the same. Continuing generation from 14 points where GPTQ3 strongly prefers “Wait”
+and BF16 does not, chosen to show the effect where it is largest, raw GPTQ3 writes about twice as many overthinking
+markers as BF16, and the learned settings barely change this (Table 28). Table 27 shows one such point. GPTQ3 always
+opens with “Wait” there and BF16 never does; per-step TempQuant warms sharply at this step and opens with doubt less
+often than global TempQuant. Across all 14 points, the learned settings and even the oracle move only part of the way to
+BF16. Changing the temperature delays this behavior more than it removes it.
+29
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Policy (τ = 0.6)
+Word overlap
+with BF16
+Self-BLEU
+Repeated
+4-grams (%)
+At length
+limit (%)
+Closeness
+GPTQ3, reasoning (mean of four tasks)
+BF16
+66.1
+72.0
+35.3
+2.6
+100
+GPTQ3
+7.3
+55.6
+89.6
+83.7
+47.3
+Global TempQuant
+18.0
+64.8
+59.2
+42.7
+70.2
+Per-step TempQuant, forward KL
+16.6
+62.6
+58.6
+48.2
+68.1
+Per-step TempQuant, JSD
+9.0
+56.9
+85.5
+76.8
+50.9
+Per-step TempQuant, reverse KL
+4.7
+55.1
+95.8
+96.9
+41.7
+GPTQ3, XSum
+BF16
+85.7
+90.4
+0.02
+0.0
+100
+GPTQ3
+41.5
+80.7
+0.30
+0.2
+86.4
+Per-step TempQuant, forward KL
+37.1
+54.3
+0.06
+0.0
+78.8
+Per-step TempQuant, JSD
+40.0
+73.5
+0.51
+0.4
+84.1
+Per-step TempQuant, reverse KL
+42.0
+87.7
+0.25
+0.1
+88.3
+MXFP4, GPQA
+BF16
+69.2
+75.8
+42.8
+0.7
+100
+MXFP4
+56.8
+74.4
+44.1
+0.4
+96.2
+Per-step TempQuant, forward KL
+55.7
+71.3
+32.3
+0.1
+92.7
+Per-step TempQuant, JSD
+57.2
+73.9
+40.7
+0.3
+95.9
+Per-step TempQuant, reverse KL
+55.8
+74.4
+48.8
+1.4
+94.7
+MXFP4, XSum
+BF16
+86.4
+90.2
+0.00
+0.0
+100
+MXFP4
+48.7
+81.7
+0.00
+0.0
+88.5
+Per-step TempQuant, forward KL
+46.2
+68.4
+0.00
+0.0
+84.5
+Per-step TempQuant, JSD
+48.1
+77.6
+0.01
+0.0
+87.3
+Per-step TempQuant, reverse KL
+48.9
+84.7
+0.01
+0.0
+89.3
+Table 25: The four statistics behind the closeness score at τ = 0.6. Closeness is 100 minus the average absolute gap
+from BF16 over the four statistics, computed per task; for reasoning, the statistics and closeness are averaged over
+GSM8K, MATH, AIME, and GPQA. Bold marks the quantized value nearest BF16’s.
+Task
+τ
+BF16 vs BF16
+GPTQ3
+Global TempQuant
+Per-step TempQuant
+MATH
+0.3
+.939
+.579
+.879
+.883
+0.6
+.967
+.797
+.881
+.830
+1.0
+.983
+.898
+.851
+.902
+GSM8K
+0.3
+.951
+.458
+.662
+.652
+0.6
+.958
+.485
+.582
+.657
+1.0
+.961
+.579
+.637
+.538
+AIME
+0.3
+.958
+.548
+.841
+.830
+0.6
+.946
+.806
+.864
+.835
+1.0
+.973
+.776
+.752
+.820
+GPQA
+0.3
+.961
+.439
+.830
+.881
+0.6
+.974
+.731
+.918
+.861
+1.0
+.942
+.877
+.513
+.769
+Table 26: GPTQ3 MAUVE against BF16 (higher is closer). BF16 vs BF16 compares two halves of BF16’s own samples;
+per-step TempQuant uses forward KL. Bold marks the quantized policy closest to BF16.
+30
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Text so far: “. . . So maybe I should start by finding the LCM of 6 and 10. Then, once I have that, I can figure out the smallest multiple
+of that LCM that’s greater than 100.”
+Policy
+T
+Start of one continuation
+Opens with doubt
+BF16
+0.60
+Alright, let me recall how to calculate the LCM. I think the
+formula is LCM(a, b) = ab/GCD(a, b). . .
+0/16
+GPTQ3
+0.60
+Wait, but let me check. The LCM of 6 and 10. . . Hmm, 6
+and 10. Let me recall how to calculate the LCM. . .
+16/16
+Global TempQuant
+1.13
+Wait, but let me check. Let me remember that LCM of 6 and
+10. But 6 and 10 have a common factor. . .
+14/16
+Per-step TempQuant
+1.91
+Alright, so let’s start with finding the LCM of 6 and 10. To
+find the LCM of two numbers, I think I need to find their prime
+factors. . .
+10/16
+Oracle per-step TempQuant
+2.58
+Hmm, right. Let me recall how to find the LCM. To find the
+LCM of two numbers, I can use the formula. . .
+9/16
+Table 27: GPTQ3 continuations of one written problem at τ = 0.6 from the same seed. Of 16 sampled continuations
+per policy, “Opens with doubt” counts those whose first word is “Wait”, “Hmm”, or “Alternatively” (bold), which start
+the rechecking Lotfi et al. [22] associate with overthinking.
+Policy
+Starts with
+BF16’s word (%)
+Opens with
+doubt (%)
+“Wait” per
+continuation
+Markers per
+continuation
+BF16
+83
+18
+1.4
+8.0
+Raw GPTQ3
+5
+75
+5.4
+18.4
+Global TempQuant
+12
+63
+5.1
+18.5
+Per-step TempQuant
+13
+60
+5.0
+17.5
+Oracle per-step TempQuant
+15
+52
+4.5
+15.8
+Table 28: Continuations from 14 points where GPTQ3 prefers “Wait” and BF16 does not, 16 per point and policy, 400
+tokens each, with matched seeds. Opens with doubt counts continuations whose first words are “Wait”, “Hmm”, or
+“Alternatively”. Markers are the 50 overthinking markers of Lotfi et al. [22]. Bold marks the best non-oracle policy.
+E.9
+MXFP4 results
+This section collects the MXFP4 versions of the GPTQ3 results.
+Divergence.
+Global TempQuant removes about three quarters of MXFP4’s forward KL at every requested temperature
+(Table 29). On MXFP4 at 0.6, the per-token oracle removes about four fifths of the forward KL, and temperature alone
+about two thirds.
+Policy
+τ = 0.3
+τ = 0.6
+τ = 1.0
+Uncorrected
+1.226
+0.722
+0.582
+Top-p off
+0.488
+0.264
+0.172
+Global TempQuant (T only)
+0.330
+0.282
+0.255
+Global TempQuant
+0.236
+0.189
+0.153
+Per-step TempQuant
+0.330
+0.246
+0.211
+Table 29: MXFP4 version of Table 36: forward KL to BF16 on held-out steps. Global TempQuant uses (T, p) = (1.21, 1),
+(1.27, 1), and (1.43, 1). These MXFP4 next-token distributions come from a separate collection on the same steps. On
+GPTQ3, the gap between per-step and global TempQuant comes from the learned cutoff (Appendix F.4).
+31
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Accuracy.
+Table 30 is the MXFP4 version of Table 2. MXFP4’s closeness on GPQA is in Table 25.
+Accuracy (%)
+Mean
+At length
+Policy
+GSM8K
+MATH
+AIME
+GPQA
+accuracy
+limit (%)
+Temperature (τ) = 0.3
+BF16
+94.47
+95.40
+65.6
+39.8
+73.82
+5.6
+MXFP4
+93.67
+91.95
+43.2
+41.5
+67.58
+3.5
+Global TempQuant
+93.76
+93.20
+47.6
+40.8
+68.85
+1.8
+Per-step TempQuant, forward KL
+93.75
+92.48
+47.9
+40.1
+68.56
+1.8
+Per-step TempQuant, JSD
+93.56
+92.70
+46.0
+39.5
+67.95
+2.4
+Per-step TempQuant, reverse KL
+93.51
+92.15
+44.1
+39.4
+67.30
+3.9
+Temperature (τ) = 0.6
+BF16
+94.47
+95.55
+68.2
+41.5
+74.95
+2.6
+MXFP4
+93.27
+92.45
+45.8
+39.3
+67.71
+3.1
+Global TempQuant
+93.93
+92.50
+48.1
+39.3
+68.47
+1.7
+Per-step TempQuant, forward KL
+93.67
+93.10
+46.9
+42.0
+68.94
+2.0
+Per-step TempQuant, JSD
+93.66
+93.08
+48.0
+40.7
+68.87
+2.6
+Per-step TempQuant, reverse KL
+93.18
+92.83
+44.5
+39.5
+67.50
+4.2
+Temperature (τ) = 1.0
+BF16
+95.02
+95.55
+69.3
+42.7
+75.64
+2.3
+MXFP4
+93.65
+92.55
+48.1
+39.6
+68.48
+2.2
+Global TempQuant
+93.48
+92.45
+43.5
+36.8
+66.57
+5.9
+Per-step TempQuant, forward KL
+93.91
+93.20
+46.6
+40.9
+68.65
+2.0
+Per-step TempQuant, JSD
+93.88
+92.68
+48.2
+40.9
+68.92
+2.2
+Per-step TempQuant, reverse KL
+93.48
+93.15
+48.8
+39.3
+68.67
+3.0
+Table 30: MXFP4 version of Table 2: accuracy, and the share of responses that hit the length limit, averaged over the
+four tasks. Bold marks the best quantized value (lowest for the length limit); green marks gains over MXFP4 that remain
+significant after Holm correction (Appendix D.4).
+Summaries.
+Table 31 is the MXFP4 version of Table 3, with variety measured by self-BLEU, how alike a policy’s
+summaries of the same article are. The reduction in the reverse KL controller’s self-BLEU gap from BF16 has a 95%
+interval below zero at each temperature.
+Correctness agreement on MATH.
+Table 32 extends Figure 7 to all three temperatures, on the 497 MATH questions
+whose reference answers can be scored, counting both directions of disagreement with BF16. Two BF16 runs already
+disagree on about 67, 67, and 53 of 1,988 attempts at the three temperatures, and the best loss removes 23%, 37%, and
+24% of the disagreements MXFP4 adds on top of this.
+Pooled test across tasks.
+Figure 7 shows one task at one temperature, where there are few disagreements to count. To
+check whether the effect holds more broadly, we combine all four reasoning tasks at all three temperatures into one test,
+fixed before we computed it. For each question, we compare how often a policy answers it correctly with how often
+BF16 does: if BF16 is right on 3 of 4 samples and the policy on 1 of 4, they differ by 0.5. We average this difference
+over all questions, and compare native MXFP4 with the JSD and reverse KL controllers. To decide whether a difference
+is larger than chance, we resample the questions many times (Appendix D.4), correcting for running two tests. Table 33
+gives the result. For reference, two halves of BF16’s own samples differ by 0.081 on this measure.
+32
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Policy
+Self-BLEU
+ROUGE-2
+Closeness
+Temperature (τ) = 0.3
+BF16 (value)
+95.4
+6.76
+100
+∆MXFP4
+−8.6
+−1.14
+−14.0
+∆Per-step TempQuant, forward KL
+−22.4
+−1.20
+−17.7
+∆Per-step TempQuant, JSD
+−13.6
+−1.16
+−15.2
+∆Per-step TempQuant, reverse KL
+−6.9
+−1.18
+−13.5
+Temperature (τ) = 0.6
+BF16 (value)
+90.2
+6.65
+100
+∆MXFP4
+−8.5
+−1.06
+−11.5
+∆Per-step TempQuant, forward KL
+−21.8
+−1.12
+−15.5
+∆Per-step TempQuant, JSD
+−12.6
+−1.00
+−12.7
+∆Per-step TempQuant, reverse KL
+−5.5
+−0.96
+−10.7
+Temperature (τ) = 1.0
+BF16 (value)
+83.0
+6.24
+100
+∆MXFP4
+−8.7
+−0.59
+−9.1
+∆Per-step TempQuant, forward KL
+−15.8
+−0.67
+−11.4
+∆Per-step TempQuant, JSD
+−11.0
+−0.62
+−9.8
+∆Per-step TempQuant, reverse KL
+−2.6
+−0.56
+−7.3
+Table 31: MXFP4 version of Table 3: self-BLEU, how alike a policy’s summaries of the same article are (lower is more
+varied), quality (ROUGE-2 against human summaries), and closeness to BF16 (Section 4.6). BF16 rows give its values,
+and ∆rows give each policy’s change from BF16. Bold marks the closest policy.
+Quantized policy
+Accuracy (%)
+BF16 correct,
+quantized wrong
+BF16 wrong,
+quantized correct
+Total disagreements
+Temperature τ = 0.3
+Native MXFP4
+92.20
+92
+23
+115
+Forward KL
+92.73
+88
+29.5
+117.5
+Reverse KL
+92.40
+88.5
+23.5
+112
+JSD
+92.96
+79
+25
+104
+Global TempQuant
+93.20
+74
+30
+104
+Temperature τ = 0.6
+Native MXFP4
+92.71
+84
+22
+106
+Forward KL
+93.36
+75.5
+26.5
+102
+Reverse KL
+93.08
+74
+19.5
+93.5
+JSD
+93.34
+70.5
+21
+91.5
+Global TempQuant
+92.50
+84
+23
+107
+Temperature τ = 1.0
+Native MXFP4
+92.81
+81
+21
+102
+Forward KL
+93.46
+68.5
+21.5
+90
+Reverse KL
+93.41
+72
+24
+96
+JSD
+92.93
+79
+21.5
+100.5
+Global TempQuant
+92.45
+87
+25
+112
+Table 32: MXFP4 MATH accuracy and correctness disagreements with BF16 on 1,988 scoreable attempts per
+temperature. Per-step rows average two fits. Bold marks the highest accuracy and the fewest disagreements at each
+temperature.
+33
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Policy
+Distance to BF16
+Reduction [95% CI]
+p
+Holm p
+Native MXFP4
+0.1301
+Per-step TempQuant, JSD
+0.1242
+0.0059 [0.0013, 0.0106]
+0.011
+0.021
+Per-step TempQuant, reverse KL
+0.1303
+−0.0002 [−0.0054, 0.0051]
+0.94
+0.94
+Per-step TempQuant, forward KL
+0.1263
+0.0038 [−0.0015, 0.0091]
+0.16
+Table 33: Average difference between each policy’s and BF16’s share of correct answers per question on MXFP4, over
+four tasks and three temperatures. The test compares the JSD and reverse KL controllers with native MXFP4; forward
+KL is shown for reference. Bold marks the policy closest to BF16.
+E.10
+Qwen3-4B AWQ
+We apply global TempQuant to Qwen’s official 4-bit AWQ release of Qwen3-4B (revision 74d4bd2, served in float16
+with vLLM 0.33), which loses little accuracy, and apply the forward KL per-step predictor trained on GPTQ3 to it
+unchanged. Table 34 gives the forward KL to BF16 on the held-out steps at τ = 0.6, and Table 35 the accuracy over
+two samples per question.
+Setting for AWQ
+Temperature
+Forward KL
+Requested, (0.6, .95)
+0.60
+0.237
+Top-p off, (0.6, 1)
+0.60
+0.063
+AWQ’s global TempQuant, (0.71, 1)
+0.71
+0.061
+GPTQ3’s global TempQuant, (1.13, 1)
+1.13
+0.088
+GPTQ3’s per-step predictor
+1.7 (mean)
+0.148
+Table 34: Qwen3-4B AWQ forward KL to BF16 on held-out steps at τ = 0.6 under each setting.
+Policy
+GSM8K
+MATH
+GPQA
+At length limit (%)
+AWQ, (0.6, .95)
+94.7
+95.3
+41.2
+0.3
+Global TempQuant, (0.71, 1)
+94.5
+94.7
+45.2
+0.1
+Table 35: Accuracy (%) of Qwen3-4B AWQ at τ = 0.6. Bold marks the better value in each column (lower for the
+length limit).
+F
+Divergence measures and oracle analysis
+F.1
+Forward KL, reverse KL, and JSD
+With natural logarithms and m = p+q
+2 ,
+KL(p∥q) =
+X
+i:pi>0
+pi log
+pi
+qi
+
+,
+DJS(p, q) = 1
+2 KL(p∥m) + 1
+2 KL(q∥m),
+(9)
+and reverse KL swaps p and q. Forward KL is infinite when the quantized model removes a token BF16 keeps, and
+reverse KL in the opposite case. JSD is always between zero and log 2.
+34
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+F.2
+KL with smoothed probabilities
+To keep KL finite, we mix a small uniform distribution U into both distributions, Pη = (1 −η)P + ηU with η = 10−4,
+and compute
+DF,η(P, Q) = KL(Pη∥Qη),
+DR,η(P, Q) = KL(Qη∥Pη).
+(10)
+If the quantized model removes probability mass M that BF16 keeps, the penalty grows like M log(1/η) as η shrinks.
+Training scales both KL losses by 1/4; reported values are unscaled.
+F.3
+Temperature-only oracle
+For a target p and qβ = softmax(βz) with β = 1/T and µ = P
+i pizi,
+L(β) = log
+X
+i
+eβzi −βµ −H(p),
+L′(β) = Eqβ[z] −µ,
+L′′(β) = Varqβ(z).
+(11)
+The problem is convex in β, and at an interior optimum Eqβ[z] = Ep[z] and H(q∗) = H(p) + KL(p∥q∗), so the best
+temperature does not match entropy unless the distributions match exactly [25].
+On the full distributions, without top-p, the best per-step temperature removes 73%, 53%, and 33% of GPTQ3’s forward
+KL at requested temperatures 0.3, 0.6, and 1.0.
+F.4
+Forward-KL oracle for temperature and top-p
+Table 36 compares the oracle with both forms of TempQuant and their smaller versions. Per-step TempQuant’s held-out
+forward KL is above global TempQuant’s because its learned cutoff sometimes removes tokens BF16 keeps, which
+forward KL penalizes heavily; with top-p turned off, the two match. Allowing the oracle any cutoff, down to keeping
+only the top token, lowers its forward KL by about another 40% at 0.6.
+Policy
+τ = 0.3
+τ = 0.6
+τ = 1.0
+Uncorrected
+2.409
+1.493
+0.867
+Global TempQuant (top-p only)
+1.037
+0.548
+0.364
+Global TempQuant (T only)
+0.564
+0.513
+0.474
+Global TempQuant
+0.451
+0.397
+0.346
+Oracle per-step TempQuant (T only)
+0.288
+0.264
+0.255
+Oracle per-step TempQuant
+0.272
+0.240
+0.220
+Per-step TempQuant (T only)
+0.738
+0.510
+0.494
+Per-step TempQuant
+0.594
+0.470
+0.484
+Per-step TempQuant, top-p off
+0.449
+0.400
+0.344
+Oracle per-step TempQuant: share removed (%)
+89
+84
+75
+Table 36: GPTQ3 smoothed forward KL to BF16 in nats. The oracle sees BF16 at every token and picks the best setting
+from the grid global TempQuant searches. Per-step TempQuant, top-p off, keeps the predicted temperature and turns
+top-p off. Per-step values average five training runs, except that row, which averages the two runs evaluated downstream;
+the two averages differ by under 3%.
+For unsmoothed forward KL, the oracle must keep every token BF16 gives positive probability, and keeping more
+tokens only adds to the loss. With logits sorted so z1 ≥· · · ≥zV and k∗= max{i : pi > 0}, the joint problem reduces
+to minimizing
+Lk∗(β) = log
+X
+j≤k∗
+eβzj −β
+X
+i
+pizi −H(p)
+over the temperature range and then picking a cutoff that keeps exactly the top k∗tokens. This is again convex in β.
+35
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+F.5
+The oracle in generation
+At every step, the oracle chooses the temperature and top-p that minimize forward KL to BF16 and samples from
+GPTQ3’s own filtered distribution. All policies run with the same seeds and code on the same GPU for each question.
+On MATH, the oracle is ahead of per-step TempQuant by 21.9 points [10.9, 32.8] and of global TempQuant by 25.0
+[14.1, 35.9]. This gap shows how much a per-step predictor could still gain by better recognizing, from the quantized
+model alone, when the top token has flipped, which we leave to future work.
+GSM8K (96 questions)
+MATH (64 questions)
+Policy
+Accuracy
+Length (K)
+At limit
+Accuracy
+Length (K)
+At limit
+BF16, same questions
+96.6
+2.3
+0.3
+93.4
+4.9
+1.2
+GPTQ3
+47.9
+12.2
+63.5
+25.0
+29.8
+89.1
+Global TempQuant
+84.4
+7.6
+19.8
+53.1
+19.0
+42.2
+Per-step TempQuant
+79.7
+8.3
+25.5
+56.3
+20.4
+46.9
+Oracle per-step TempQuant
+92.7
+4.8
+3.1
+78.1
+13.3
+21.9
+Table 37: GPTQ3 on the first GSM8K and MATH questions at τ = 0.6 (accuracy and responses at the length limit in
+%). Per-step TempQuant pools its two training runs; BF16 averages four samples from the original runs.
+F.6
+Limits of correcting token rankings
+A positive temperature keeps the logit ranking, and top-p keeps a leading set without reordering it, so a lower-ranked
+token can never become the most likely one. If BF16’s top token has rank r in the quantized model, any setting gives it
+probability at most 1/r. GPTQ3 keeps BF16’s most likely token at 83% of steps and MXFP4 at 89%. When GPTQ3
+changes it, BF16’s token is usually second, which happens at 10% of steps, and it falls below fifth at only 1.8%. Table 38
+splits forward KL by these steps at each requested temperature, before and after the oracle. Table 39 splits it further by
+the rank GPTQ3 gives BF16’s most likely token and, when that rank is 1, by whether GPTQ3 keeps the order of the
+tokens BF16 keeps after top-p. The largest share of the error sits where BF16’s top token falls to second place. This
+is the most common kind of flip, at about 10% of steps, and it holds 37–41% of the error the oracle leaves at every
+requested temperature, more than any other group.
+Figure 3 uses the training and held-out steps together at τ = 0.6, and fits the temperature only, with top-p off.
+Top token kept (83%)
+Top token changed (17%)
+Share on changed steps (%)
+τ
+GPTQ3
+Oracle
+GPTQ3
+Oracle
+GPTQ3
+Oracle
+0.3
+0.28
+0.03
+12.66
+1.45
+90
+92
+0.6
+0.35
+0.04
+7.01
+1.22
+81
+87
+1.0
+0.31
+0.05
+3.55
+1.02
+70
+80
+Table 38: Forward KL per step from GPTQ3 to BF16 on 768 held-out steps, split by whether GPTQ3 keeps BF16’s
+most likely token, before and after the per-step oracle, and the share of the total on steps where it changes.
+36
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+Steps grouped by GPTQ3 rank of BF16 top token
+Steps
+(%)
+Raw forward
+KL (%)
+Oracle
+residual (%)
+Removed by
+oracle (%)
+Temperature (τ) = 0.3; oracle removes 89% overall
+Top token kept, order kept
+80.1
+5.1
+1.3
+97
+Top token kept, order changed
+3.3
+3.7
+6.0
+82
+BF16 top ranked 2nd
+9.9
+44.4
+41.2
+90
+BF16 top ranked 3rd–5th
+4.9
+33.6
+33.3
+89
+BF16 top ranked below 5th
+1.8
+13.3
+18.1
+85
+Temperature (τ) = 0.6; oracle removes 84% overall
+Top token kept, order kept
+78.0
+8.8
+1.8
+97
+Top token kept, order changed
+5.3
+9.5
+10.3
+83
+BF16 top ranked 2nd
+9.9
+30.7
+39.7
+79
+BF16 top ranked 3rd–5th
+4.9
+33.0
+31.4
+85
+BF16 top ranked below 5th
+1.8
+18.1
+16.9
+85
+Temperature (τ) = 1.0; oracle removes 75% overall
+Top token kept, order kept
+73.0
+11.1
+2.7
+94
+Top token kept, order changed
+10.3
+18.3
+16.9
+77
+BF16 top ranked 2nd
+9.9
+28.3
+37.3
+67
+BF16 top ranked 3rd–5th
+4.9
+26.6
+28.1
+73
+BF16 top ranked below 5th
+1.8
+15.7
+14.9
+76
+Table 39: Where the error left by the per-step oracle’s temperature and top-p sits, for GPTQ3 on 768 held-out steps,
+grouped by the rank GPTQ3 gives BF16’s most likely token (%).
+G
+Runtime cost
+Table 40 measures the cost of each generated token during decoding. Global TempQuant only changes the two numbers
+passed to the sampler, so it costs nothing, and turning top-p off makes it slightly faster. Per-step TempQuant adds 0.5–2
+ms, or 18–34%, per token, and peak memory is the same for all three. The predictor itself is small; most of this time
+goes to passes over the full vocabulary to compute its features and apply top-p, which our implementation does not
+optimize and which fused kernels could shorten. The added time grows with batch size (Table 40). We time MXFP4;
+GPTQ3 is served as dequantized BF16 weights, so the predictor adds the same work per token.
+Batch size
+Requested settings
+Global TempQuant
+Per-step TempQuant
+Per-step increase
+1
+2.93
+2.89
+3.47
+18%
+8
+3.48
+3.41
+4.64
+33%
+64
+6.09
+5.89
+8.19
+34%
+Table 40: Milliseconds per generated token for MXFP4 Qwen3-4B in vLLM on one AMD Instinct MI350X GPU, with
+512 prompt tokens and 1,024 generated tokens, averaged over three repeats.
+H
+Use of AI tools
+Generative AI assisted with planning, literature review, code and tests, derivations, writing, and figures. LLM coding
+agents were also used extensively to run and monitor experiments, collect model outputs, and process and analyze the
+resulting data.
+37
+
+
+TempQuant: Learning Adaptive Temperatures for Quantized Language Models
+We also tried Sakana AI’s ShinkaEvolve2, which evolves code with LLM-proposed changes, to search for improvements
+to earlier temperature predictors, scoring each candidate by its held-out divergence from BF16. None improved clearly
+enough over the baseline to be adopted in the final method.
+The authors remain responsible for the experiments, claims, and manuscript. Automated checks do not replace human
+verification.
+2https://github.com/SakanaAI/ShinkaEvolve
+38

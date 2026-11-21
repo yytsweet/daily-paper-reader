@@ -1,0 +1,2362 @@
+FAVR: Flow-Aware Visual Residual Alignment
+for Vision-Language-Action Policies
+Qixuan Wu1,∗
+Xiaole Yang2,∗
+Yuguang Yang3,†
+Canyu Chen4
+Linlin Yang5
+Haixia Pan2
+Guodong Guo6
+Baochang Zhang1,†
+1School of Artificial Intelligence, Beihang University, Beijing, China
+2School of Software, Beihang University, Beijing, China
+3School of Electronic and Information Engineering, Beihang University, Beijing, China
+4National College for Excellent Engineers, Beihang University, Beijing, China
+5Communication University of China, Beijing, China
+6Lane Department of Computer Science and Electrical Engineering, West Virginia University, Morgantown, USA
+∗Equal contribution.
+†Corresponding authors.
+Abstract
+Pretrained video representations provide rich temporal infor-
+mation for robotic manipulation, yet effectively integrating
+them into existing vision-language-action (VLA) policies re-
+mains challenging. We present Flow-Aware Visual Residual
+Alignment (FAVR), a lightweight framework for flow-aware
+visual conditioning of frozen VLA policies. FAVR maintains
+a compact temporal visual state through linear Test-Time
+Training (TTT) and retrieves action-conditioned visual fea-
+tures throughout flow-based action generation. By exploiting
+the affine structure of the frozen action head, we explicitly
+characterize how injected visual features influence predicted
+action velocities and formulate flow-aware channel selection
+as a box-constrained optimization problem. We develop a
+FISTA-based solver for joint gate optimization and derive an
+efficient closed-form approximation through diagonalization
+and rescaling. With only 1.74–2.19M trainable parameters
+and 5,000 adaptation steps, FAVR improves pretrained VLA
+policies across benchmarks. On RoboTwin 2.0, FAVR im-
+proves LingBot-VLA from 87.12% to 90.04% under clean
+conditions and from 86.88% to 89.38% under randomized
+conditions. A controlled ablation on five RoboTwin tasks fur-
+ther shows that flow-aware gating increases average success
+from 72.0% with a gate shared across flow steps to 82.0%,
+demonstrating the benefit of adapting visual conditioning
+throughout action generation.
+1. Introduction
+Vision-language-action (VLA) models adapt pretrained
+vision-language representations to robotic control. Flow-
+based policies such as π0 and π0.5 generate continuous ac-
+tion chunks conditioned on visual observations and language
+instructions [6, 14]. Video pretraining provides a comple-
+mentary source of visual knowledge by learning represen-
+Video
+Context
+⋯
+⋯
+Gate value
+0.0
+0.5
+1.0
+Shared Gate
+τ = 1.0
+g
+τ = 0.7
+g
+τ = 0.5
+g
+τ = 0.3
+g
+τ = 0.1
+g
+Average Success:  72.0%
+Flow-Aware Gate
+τ = 1.0
+g1
+τ = 0.7
+g2
+τ = 0.5
+g3
+τ = 0.3
+g4
+τ = 0.1
+g5
+Average Success:  82.0%
+Figure 1. Shared versus flow-aware gating under the same video
+context. The heatmaps show recorded channel weights at repre-
+sentative flow steps. On five RoboTwin 2.0 tasks, average success
+increases from 72.0% with a shared gate to 82.0%.
+tations of scene structure, object interactions, and temporal
+evolution [2, 3, 26]. Recent studies demonstrate the bene-
+fits of incorporating video representations into VLA poli-
+cies [25, 37], raising the question of how to effectively use
+them within existing action policies.
+Incorporating video representations requires more than
+aggregating temporal information and retrieving action-
+relevant features: the retrieved features must also benefit
+action generation. For flow-based policies, action chunks
+are constructed through successive velocity evaluations. Al-
+arXiv:2611.20971v2  [cs.CV]  17 Nov 2026
+
+
+though the visual context remains fixed within an action
+chunk, the noisy action representation and corresponding
+policy features evolve across flow steps, so the appropriate
+visual contribution may also change. While state-dependent
+retrieval can implicitly learn this contribution, it does not
+explicitly account for the induced corrections in the action-
+velocity space. This motivates explicit velocity-residual
+alignment across flow steps.
+We introduce Flow-Aware Visual Residual Alignment
+(FAVR), a lightweight framework that integrates pretrained
+video representations into frozen VLA policies. FAVR em-
+ploys linear Test-Time Training (TTT) [33] to aggregate fea-
+tures from a frozen video encoder into a compact temporal vi-
+sual state, queried by the current action features at each flow
+step. Learned projections adapt state construction and re-
+trieval to the control task. A lightweight predictor estimates
+the target velocity residual, while the frozen affine action
+head provides an exact mapping from gated visual features
+to velocity corrections. We formulate flow-aware channel
+selection as a box-constrained velocity-residual alignment
+problem and employ a FISTA-based solver to jointly opti-
+mize channel weights while accounting for their interactions.
+The gated visual features are injected through a residual
+connection immediately before the action head. Both pre-
+trained backbones remain frozen, with only the auxiliary
+visual interface and residual predictor trained.
+Joint gate optimization, however, requires iterative com-
+putation at each flow step. To reduce this overhead, we derive
+an approximate closed-form gate through diagonalization
+and analytic rescaling, simplifying channel interactions and
+calibrating the resulting correction. A coupling-dependent
+error bound characterizes the effect of the omitted interac-
+tions. The approximation reduces computational cost at
+the expense of a modest portion of the joint solver’s perfor-
+mance gains. As illustrated in Fig. 1, the flow-aware gating
+employed by FAVR adapts channel weights across flow steps,
+unlike a shared gate. On five RoboTwin 2.0 tasks, this design
+improves average success from 72.0% to 82.0%.
+We
+evaluate
+FAVR
+on
+LIBERO,
+LIBERO-Plus,
+RoboTwin 2.0, and real-world dual-arm manipulation
+tasks. With only 1.74–2.19M additional trainable param-
+eters and 5,000 adaptation steps in simulation, FAVR
+achieves 98.6% and 85.05% success on LIBERO and
+LIBERO-Plus, respectively, using π0.5.
+On RoboTwin
+2.0, it improves LingBot-VLA from 87.12% to 90.04%
+under clean conditions and from 86.88% to 89.38% under
+randomized conditions.
+Real-world experiments further
+show improvements in block pick-and-place and paper-cup
+grasping over continued fine-tuning.
+Our main contributions are summarized as follows:
+• We introduce FAVR, a lightweight framework that inte-
+grates temporal video representations into frozen VLA
+policies through action-conditioned retrieval and flow-
+aware visual conditioning.
+• We formulate visual channel selection as a box-constrained
+velocity-residual alignment problem, with a FISTA-based
+joint solver and an approximate closed-form solution sup-
+ported by a coupling-dependent error bound.
+• We validate FAVR across three manipulation benchmarks
+and real-world experiments, with controlled ablations
+demonstrating the benefits of flow-aware gating and
+velocity-residual alignment.
+2. Related Work
+Vision-Language-Action Models. Vision-language-action
+(VLA) models transfer pretrained visual and language repre-
+sentations to robotic manipulation, as exemplified by Open-
+VLA [17].
+OpenVLA-OFT improves action generation
+through parallel decoding, action chunking, and continu-
+ous regression [18]. Flow-based policies such as π0 [6],
+π0.5 [14], and LingBot-VLA [35] combine pretrained vision-
+language backbones with action experts trained using flow
+matching [21], generating continuous action chunks through
+successive velocity evaluations.
+Video Representations for Robot Control. Video pre-
+training captures scene structure and temporal dynamics, as
+demonstrated by the V-JEPA series [2, 3, 26]. WorldVLA
+and DreamVLA incorporate visual prediction into action
+generation through autoregressive modeling and diffusion
+conditioning, respectively [7, 36]. JEPA-VLA integrates
+frozen V-JEPA 2 features through input fusion or gated cross-
+attention [25], while PVI injects auxiliary visual features
+through a trainable action expert conditioned on the current
+noisy action [37]. Both studies show that video-pretrained
+representations can outperform image-pretrained features in
+robotic manipulation [25, 37].
+Test-Time Training for Robot Policies. Test-time train-
+ing (TTT) maintains recurrent states through self-supervised
+fast-weight updates [33]. Recent studies have extended TTT
+to robotic policies, enabling the aggregation of historical
+observations and action-generation features to support tem-
+porally informed control [12, 16, 20, 24, 34, 38]. Unlike
+methods that incorporate fast-weight updates within pre-
+trained policy components, FAVR employs linear TTT as an
+external temporal visual interface, aggregating features from
+a frozen video encoder and retrieving them using current
+action features at each flow step.
+Time-Dependent Conditioning in Diffusion and Flow
+Models.
+Diffusion Policy conditions action denoising
+on noisy actions and diffusion timesteps [9].
+Beyond
+classifier-free guidance (CFG) [13], prior work explores
+noise-dependent guidance intervals [19], condition anneal-
+ing [30], and dynamically adjusted guidance scales [28, 29].
+Related studies analyze guidance in probability-flow dy-
+namics and flow matching [11, 15]. These works motivate
+time-dependent conditioning [27], while FAVR explicitly op-
+
+
+Frozen VLA policy πθ
+Flow-aware visual
+conditioning
+Current observation
+ot
+“Pick up the red block”
+Language instruction ℓ
+Flow state
+aτ
+τ
+Noisy action and flow time
+Observation history
+ot−K:t
+VLM backbone
+Patch embed
+Visual tokens
+Tokenizer
+Language tokens
+Flow-matching action expert
+···
+DiT / Transformer
+hτ
++ h̃τ
+Affine
+action head
+vτ
+gτ ⊙xτ
+gτ
+V-JEPA 2.1
+Video encoder
+Spatiotemporal
+tubelet features
+Linear TTT
+xτ
+Residual
+predictor
+μτ
+Execute action chunk
+Grasp the red block
+Future observations
+ot+1:t+H
+Append new frames to the history window
+Frozen
+FAVR pathway
+Rϕ
+Training target
+rτ = u − vτ
+0
+Gate optimization
+B
+FISTA g⁺ = clip(y − ∇F(y)/L, 0, 1)
+g(0)
+···
+g(k)
+g(k+1)
+Closed-form gate
+D = diag(B)
+clip(sⱼ / Dⱼⱼ, 0, 1)
+Diagonal gate gᴰ
+g
+CF= α
+∗g
+D
+Scalar calibration
+hτ
+qτ
+St−1
+Write
+Kt,Vt
+St
+Read
+St
+T qτ
+Figure 2. Overview of FAVR. Observed video features update a linear TTT state queried by action features at each flow step. A predicted
+velocity residual guides FISTA-based joint or approximate closed-form gating before the frozen affine action head. Executed actions provide
+subsequent observations for state updates.
+timizes channel-wise visual contributions according to their
+induced velocity corrections through a frozen VLA action
+head.
+3. Method
+FAVR augments a frozen flow-based VLA policy with tem-
+poral visual conditioning and flow-aware residual alignment
+(Fig. 2). At planning step t, the frozen policy πθ conditions
+action generation on the current observation ot, propriocep-
+tion, and language instruction ℓ. Following the rectified-flow
+formulation [6, 14, 21, 23], a normalized demonstration ac-
+tion chunk a ∈RH×m and Gaussian noise ϵ of the same
+shape define
+aτ = (1 −τ)a + τϵ,
+u = ϵ −a,
+(1)
+where H is the action-chunk length, m the action di-
+mension, τ ∈[0, 1] the flow time, and u the target velocity.
+Conditioned on aτ and τ, the frozen action expert produces
+a final normalized feature hτ ∈Rd, followed by an affine
+action head v0
+τ = Whτ + b, where W ∈Rm×d and b ∈Rm
+are frozen. For simplicity, feature- and velocity-space equa-
+tions refer to one action position within the jointly generated
+chunk, with its index omitted; u below denotes the corre-
+sponding target velocity. FAVR retrieves temporal visual
+information using hτ. Only the visual interface and residual
+predictor are trained.
+3.1. Temporal Visual State Construction and Re-
+trieval
+For each observed video window, a frozen V-JEPA 2.1 en-
+coder [26] extracts spatiotemporal visual tokens Z. Learned
+mappings fK and fV produce keys and values, denoted Kt
+and Vt for the newly observed video features in Fig. 2. For a
+token block with K, V ∈Rn×p, linear TTT [33] maintains
+a state S ∈Rp×p by fitting the key-to-value mapping. One
+gradient step on ∥KS −V ∥2
+F /(2n) gives
+S ←S −η
+nK⊤(KS −V ),
+(2)
+where η = sigmoid(ηraw) and the projections are learned
+during adaptation. Each environment maintains an indepen-
+dent state initialized from learned S0 at episode boundaries.
+At planning step t, the working state S starts from St−1 and
+is updated with newly observed token blocks through Eq. (2).
+The resulting state St remains fixed during action generation
+and is updated again when new observations arrive.
+At each flow evaluation, the current action feature hτ
+queries St. Treating vectors as columns, the query and
+readout are
+qτ = norm
+ P ⊤
+Q LN(hτ)
+
+,
+exτ = P ⊤
+O S⊤
+t qτ + bO,
+(3)
+where LN denotes layer normalization, norm denotes ℓ2
+
+
+normalization, PQ ∈Rd×p and PO ∈Rp×d are learned
+projections, and bO is a learned bias. We constrain the
+readout magnitude relative to hτ:
+xτ = exτ clip[0,1]
+ ρ sg(∥hτ∥2)
+∥exτ∥2 + εnum
+
+,
+(4)
+where sg stops gradients, ρ > 0 controls the relative mag-
+nitude, and εnum > 0 ensures numerical stability. The re-
+trieved feature xτ is subsequently gated and injected before
+the frozen action head.
+3.2. Flow-Aware Visual Residual Alignment
+Although St remains fixed during action generation, the
+noisy action aτ and corresponding policy features evolve
+across flow steps. Consequently, both the visual readout
+xτ and base velocity v0
+τ change with τ, motivating flow-
+dependent visual corrections.
+During training, the target velocity u defines the resid-
+ual rτ
+=
+u −v0
+τ.
+Since u is unavailable at in-
+ference, a lightweight predictor Rϕ estimates µτ
+=
+Rϕ(hτ, xτ, Wxτ, e(τ)) from the current action feature, vi-
+sual readout, its velocity-space projection, and flow-time em-
+bedding. The predictor is trained against the detached resid-
+ual using valid-coordinate MSE, with its inputs detached
+during this update. The predicted residual guides gating
+during both training and inference.
+For gτ ∈[0, 1]d, the gated visual readout produces the
+corrected feature ehτ = hτ +gτ ⊙xτ. The frozen affine head
+then gives
+vτ = Wehτ + b
+= v0
+τ + Qτgτ,
+Qτ = W diag(xτ).
+(5)
+Each column xτ,jW:j describes one visual channel’s con-
+tribution to the predicted velocity. We align the induced
+correction with the predicted residual by solving
+g⋆
+τ ∈arg min
+g∈[0,1]d Fτ(g),
+Fτ(g) = 1
+2∥Qτg −µτ∥2
+2.
+(6)
+Both Qτ and µτ vary with the flow state, allowing channel
+weights to adapt throughout action generation.
+3.3. Joint Gate Optimization via FISTA
+FAVR solves Eq. (6) using FISTA-based joint optimiza-
+tion [4, 5]. Define Bτ = Q⊤
+τ Qτ and sτ = Q⊤
+τ µτ; the
+off-diagonal terms of Bτ couple visual channels. The gradi-
+ent is
+∇Fτ(g) = Bτg −sτ
+= xτ ⊙W ⊤[W(xτ ⊙g) −µτ] .
+(7)
+It uses products with the frozen head without constructing
+dense Bτ, while box projection is element-wise clipping.
+Joint Optimization (FISTA)
+Closed-Form Approximation
+Full coupling (B = QᵀQ)
+Diagonal approximation (D = diag(B))
+g
+(1)
+g
+(2)
+ĝ
+B
+B
+D
+g
+D
+α
+∗g
+D
+Figure 3. Comparison of joint and closed-form gate optimization.
+FISTA iteratively optimizes channel weights while retaining cross-
+channel coupling, whereas the closed-form approximation first
+computes a diagonal gate gD and then applies analytic rescaling to
+obtain gCF = α⋆gD.
+With Lτ ≥∥Qτ∥2
+2, a feasible initialization g(0), y(0) = g(0),
+and ω0 = 1, FISTA iterates
+g(k+1) = clip[0,1]d
+
+y(k) −∇Fτ(y(k))
+Lτ
+
+,
+ωk+1 = 1 +
+p
+1 + 4ω2
+k
+2
+,
+y(k+1) = g(k+1) + ωk −1
+ωk+1
+ g(k+1) −g(k)
+.
+(8)
+Here k indexes FISTA iterations. After Niter iterations at
+fixed τ, the resulting gate bgτ is used to predict the corrected
+velocity v0
+τ + Qτbgτ, supervised by valid-coordinate MSE
+against u. The residual loss updates ϕ with detached inputs,
+while the action loss holds ϕ fixed and propagates through
+the predictor inputs and solver steps to train the visual in-
+terface. Both pretrained backbones remain frozen. Each
+FISTA iteration costs O(md) per action position, giving
+O(Nitermd) for the full solver. A gate-regularized exten-
+sion is derived in Appendix B.3.
+3.4. An Approximate Closed-Form Gate
+Joint optimization in FAVR accounts for channel coupling
+but requires iterative updates at every flow evaluation. To
+reduce this computational overhead, we introduce FAVR-CF
+as a lower-cost approximation that trades a modest reduction
+in task performance for improved inference efficiency. As il-
+lustrated in Fig. 3, FAVR-CF approximates the joint solution
+through two non-iterative steps: diagonal approximation and
+analytic rescaling.
+Omitting τ, let B = Q⊤Q and s = Q⊤µ. We retain the
+diagonal part D of B, with Djj = Bjj = ∥Q:j∥2
+2, while
+omitting off-diagonal interactions. The resulting bounded
+diagonal solution is
+gD
+j =
+
+
+
+clip[0,1]
+ sj
+Djj
+
+,
+Djj > 0,
+0,
+Djj = 0.
+(9)
+Here sj measures alignment with the residual and Djj rep-
+resents the squared velocity contribution of channel j.
+
+
+Table 1. Success rates (%) on LIBERO-Plus across seven perturbation categories. Avg. is computed over all 10,030 evaluation scenarios.
+Method
+Camera
+Robot
+Language
+Light
+Background
+Noise
+Layout
+Avg.
+VLA-JEPA [32]
+63.30
+67.10
+85.40
+95.60
+93.60
+66.30
+85.10
+78.00
+π0.5 (Frozen)
+68.36
+78.58
+86.34
+95.79
+95.91
+86.45
+85.25
+84.22
+JEPA-VLA [25]
+67.23
+76.52
+85.82
+93.43
+91.54
+81.07
+84.66
+81.96
+PVI [37]
+69.17
+77.48
+87.83
+95.18
+92.19
+81.07
+85.31
+83.10
+FAVR-CF
+69.17
+79.10
+86.92
+96.76
+95.35
+85.63
+85.90
+84.55
+FAVR
+70.42
+79.87
+88.03
+96.41
+96.00
+85.82
+85.64
+85.05
+Table 2. Success rates (%) on LIBERO.
+Method
+Spatial
+Object
+Goal
+Long
+Avg.
+OpenVLA-OFT [18]
+97.6
+98.4
+97.9
+94.5
+97.10
+MemoryVLA [31]
+98.4
+98.4
+96.4
+93.4
+96.65
+VLA-JEPA [32]
+96.2
+99.6
+97.2
+95.8
+97.20
+π0.5 (Frozen)
+98.0
+98.2
+97.0
+96.4
+97.40
+JEPA-VLA [25]
+98.8
+99.4
+97.8
+95.2
+97.80
+PVI [37]
+98.4
+100.0
+97.2
+94.6
+97.55
+FAVR-CF
+99.2
+99.4
+97.6
+96.8
+98.25
+FAVR
+98.8
+100.0
+98.4
+97.2
+98.60
+To calibrate the combined correction cD = QgD, we
+minimize the regularized one-dimensional objective ∥αcD −
+µ∥2
+2/2 + εnumα2/2 over α ∈[0, 1], yielding
+gCF = α⋆gD,
+α⋆= clip[0,1]
+
+µ⊤cD
+∥cD∥2
+2 + εnum
+
+.
+(10)
+This rescaling adjusts the magnitude of the combined veloc-
+ity correction while preserving relative channel weights.
+Using cached action-head column norms, FAVR-CF com-
+putes the gate without explicitly forming Q or B, requiring
+O(md) arithmetic and O(d + m) additional space per ac-
+tion position, compared with O(Nitermd) for FISTA. Its
+approximation bound is provided in Appendix B.4, and its
+performance and latency are evaluated in Sec. 4.4.
+4. Experiments
+4.1. Experimental Setup
+Benchmarks.
+We evaluate FAVR on LIBERO [22],
+LIBERO-Plus [10], and RoboTwin 2.0 [8]. LIBERO con-
+tains four suites (Spatial, Object, Goal, and Long) with 10
+language-conditioned tasks each. We report suite-wise and
+average success rates over 50 episodes per task. LIBERO-
+Plus evaluates 10,030 scenarios across seven perturbation
+categories: camera viewpoints, robot initial states, language
+instructions, lighting, background textures, sensor noise, and
+object layout. RoboTwin 2.0 comprises 50 bimanual ma-
+nipulation tasks. We evaluate both Clean-to-Clean (C2C)
+Table 3. Success rates (%) on RoboTwin 2.0. C2C and C2R denote
+Clean-to-Clean and Clean-to-Randomized evaluation, respectively.
+Method
+C2C
+C2R
+π0.5 [35]
+82.74
+76.76
+LingBot-VLA
+87.12
+86.88
+FAVR
+90.04
+89.38
+and Clean-to-Randomized (C2R) settings, reporting task-
+averaged success rates over 100 rollouts per task in each
+setting.
+Models.
+We instantiate FAVR on LIBERO-finetuned
+π0.5 [14] for LIBERO and LIBERO-Plus, and a RoboTwin-
+post-trained 4B LingBot-VLA [35] for RoboTwin 2.0. We
+use a frozen V-JEPA 2.1 ViT-B video encoder [26] for
+temporal visual conditioning, while keeping both VLA
+backbones frozen. Only the temporal visual interface and
+velocity-residual predictor are trained, introducing 2.190M
+and 1.736M parameters, respectively.
+In simulation, FAVR adapters are trained for 5,000
+AdamW steps at a learning rate of 5 × 10−5, with effective
+batch sizes of 32 for LIBERO and LIBERO-Plus and eight
+for RoboTwin. We train separate LIBERO and LIBERO-
+Plus adapters, the latter using 14,347 perturbed demonstra-
+tions, while RoboTwin uses 50 clean demonstrations per task.
+Evaluation uses 10 flow steps to predict 50-action chunks,
+executing the first 10 actions on LIBERO and LIBERO-Plus
+and all 50 on RoboTwin. FAVR uses 10-frame histories from
+one external camera on LIBERO and LIBERO-Plus, and
+from the head and two wrist cameras on RoboTwin. We
+denote the FISTA-based joint method as FAVR and its ap-
+proximate closed-form variant as FAVR-CF. FAVR uses 8
+FISTA iterations on LIBERO and 128 on LIBERO-Plus and
+RoboTwin 2.0. Residual-loss weights are 1.0 for π0.5 and
+0.5 for LingBot-VLA. Further implementation details are
+provided in Appendix A.
+Baselines. We compare against the corresponding frozen
+VLA backbones and visual augmentation methods JEPA-
+VLA [25] and PVI [37]. We further compare with some
+representative VLA methods [18, 31].
+
+
+Figure 4. Representative Cobot Magic rollouts: block pick-and-place, paper-cup grasping, covered-block retrieval, and history-conditioned
+cup selection. The last two tasks require visual history and separate observation from execution.
+4.2. Main Results
+Tables 1–3 compare FAVR, JEPA-VLA, PVI with frozen
+backbones, and representative VLA policies across three
+benchmarks.
+LIBERO. Table 2 shows that FAVR improves the frozen π0.5
+from 97.40% to 98.60% across all four suites, achieving the
+highest average success rate in Table 2. It trains only 2.190M
+parameters, versus 24.129M for JEPA-VLA and 444.445M
+for PVI. FAVR-CF reaches 98.25%, improving over the
+frozen baseline by 0.85 pp while trailing joint optimization
+by 0.35 pp. The largest suite-level gains arise on Object
+(+1.80 pp) and Goal (+1.40 pp), where the frozen policy
+already exceeds 97% success.
+LIBERO-Plus.
+Table 1 shows that FAVR improves
+LIBERO-Plus success from 84.22% to 85.05%, with gains in
+six of seven perturbation categories. The largest gains arise
+from camera viewpoints (+2.06 pp), language instructions
+(+1.69 pp), and robot initialization (+1.29 pp), indicating
+benefits under both visual and manipulation changes. FAVR-
+CF achieves 84.55%: 0.33 pp above the frozen base and only
+0.50 pp below FAVR. Compared with JEPA-VLA (81.96%)
+and PVI (83.10%), FAVR makes better use of auxiliary video
+conditioning under these perturbations. Sensor noise is the
+one category without improvement, so the gains are not
+uniform across all shifts.
+RoboTwin 2.0. On RoboTwin 2.0 (Table 3), FAVR im-
+proves frozen LingBot-VLA from 87.12% to 90.04% in
+Clean-to-Clean (C2C) and from 86.88% to 89.38% in Clean-
+to-Randomized (C2R). Using 1.736M trainable parameters
+and three-view visual history, these gains extend FAVR to
+bimanual manipulation and randomized conditions without
+modifying the action expert.
+Table 4. Real-world manipulation results on Cobot Magic. Each
+task uses 35 demonstrations and 20 evaluation trials.
+Task
+Initial FT
+Continued FT
+FAVR(Ours)
+Block PnP
+10/20
+12/20
+15/20
+Paper-cup grasping
+8/20
+11/20
+13/20
+4.3. Real-World Experiments
+We further evaluate FAVR on Cobot Magic, a dual-arm plat-
+form based on Mobile ALOHA [1]. We consider four tasks,
+collecting 35 demonstrations per task. Representative execu-
+tion sequences are shown in Fig. 4.
+Standard manipulation. We evaluate color-conditioned
+block pick-and-place and left/right paper-cup grasping, the
+latter requiring more precise positioning and grasp control.
+For each task, we first fine-tune a pretrained bimanual π0.5
+policy, then compare continued fine-tuning with FAVR adap-
+tation from the same checkpoint under matched additional
+training budgets. During FAVR adaptation, both π0.5 and
+V-JEPA remain frozen.
+As shown in Table 4, the initial block policy achieves
+10/20 successes after 5,000 steps. With 3,000 additional
+steps, continued fine-tuning reaches 12/20, whereas FAVR
+achieves 15/20. For paper-cup grasping, the initial policy
+reaches 8/20 after 15,000 steps; with another 5,000 steps,
+continued fine-tuning achieves 11/20, compared with 13/20
+for FAVR.
+History-dependent manipulation. TTT has been explored
+as a memory mechanism for sequential modeling [33], with
+recent robotic approaches employing recurrent states to cap-
+ture interaction histories [16, 24, 34]. Since FAVR also
+employs a TTT-based temporal visual interface, we further
+examine its ability to support memory-dependent manipula-
+
+
+Table 5. Ablation results on five RoboTwin 2.0 tasks. All adapted variants are trained for 1K steps and evaluated over 50 trials per task. The
+frozen baseline uses previously obtained evaluation results.
+Method
+Hanging mug
+Can/pot
+Bell
+Bread/skillet
+Can/basket
+Avg.
+Frozen baseline
+47%
+72%
+77%
+84%
+64%
+68.8%
+Non-flow-aware gate
+50%
+66%
+88%
+88%
+68%
+72.0%
+Learned gate
+42%
+74%
+70%
+90%
+72%
+69.6%
+Direct output
+50%
+86%
+90%
+90%
+78%
+78.8%
+Hidden-only
+52%
+82%
+86%
+92%
+86%
+79.6%
+Window-wise reset
+52%
+86%
+88%
+90%
+72%
+77.6%
+Static pooling
+40%
+78%
+76%
+88%
+62%
+68.8%
+FAVR (Ours)
+58%
+86%
+94%
+94%
+78%
+82.0%
+tion through two tasks requiring information unavailable in
+the current observation.
+In covered-block retrieval, the robot must place a pre-
+viously covered block into a container after its cover is re-
+moved. In history-conditioned cup selection, the robot must
+select the cup concealing a block of the instructed color,
+whose location was visible before covering. Both tasks sepa-
+rate observation from execution, with the robot remaining
+stationary during observation to prevent target information
+from leaking through its own movements. Without action
+suppression, small arm movements during the observation
+phase can reveal the selected side through proprioception,
+allowing the policy to bypass the intended use of visual
+history.
+After 5,000 training steps, FAVR correctly selects the
+target in 7/10 trials on each task. While exceeding the 50%
+chance level for binary selection, the improvement remains
+modest. These results suggest that the TTT state can provide
+useful temporal context, while its primary role in FAVR is to
+support visual conditioning rather than serve as a dedicated
+memory module.
+Dependence on pretrained manipulation capability. To
+test dependence on the base policy, we freeze an unadapted
+bimanual π0.5 and V-JEPA checkpoint and train only FAVR
+for 5,000 steps on block pick-and-place demonstrations. The
+resulting arms repeatedly move above the workspace with-
+out reliably approaching or grasping the blocks. Unlike
+adaptation from a task-fine-tuned checkpoint, this does not
+establish stable manipulation: FAVR improves visual con-
+ditioning on a base policy that already possesses relevant
+task-level capabilities.
+4.4. Ablation Studies
+We investigate the key design choices of FAVR on five
+RoboTwin 2.0 tasks:
+hanging mug, move can pot,
+click bell,
+place bread skillet,
+and
+place can basket.
+All variants are trained for
+1,000 steps with a batch configuration of 2 × 4 and a
+learning rate of 5 × 10−5, and evaluated over 50 trials per
+task. The frozen LingBot-VLA baseline achieves 68.8%
+average success (Table 5).
+Flow-aware gating. As illustrated in Fig. 1, FAVR adapts
+visual channel weights to the current flow state. Since the
+predicted velocity evolves throughout flow integration, chan-
+nel weights selected at the initial step may no longer provide
+suitable corrections at later steps. To examine this, we com-
+pare FAVR with a variant that reuses the initial gate across all
+flow steps while retaining the action-conditioned visual read-
+out. Recomputing the gate increases average success from
+72.0% to 82.0%. On move can pot, success rises from
+66% to 86%, illustrating how a gate selected at one flow state
+can become less suitable as the velocity field evolves. This
+improvement highlights the importance of adapting visual
+corrections to the evolving action-generation state.
+Injection position and action-head geometry. A key prop-
+erty of FAVR is that the visual correction passes directly
+through the frozen affine action head, yielding the exact map-
+ping ∆vτ = W diag(xτ)gτ. This enables gate optimization
+directly in velocity space. At earlier injection positions,
+however, subsequent nonlinear layers invalidate this map-
+ping. Applying the same head-derived optimization at layers
+12, 24, and 36 yields success rates of 67.2%, 66.8%, and
+65.6%, respectively, all below the frozen baseline. We there-
+fore also evaluate learned gates that implicitly model the
+downstream nonlinear response. These improve success to
+75.2%, 79.6%, and 74.4%, but remain below FAVR’s 82.0%
+(see Appendix D.3). Under the limited adaptation budget,
+final-head injection is preferable because the known channel-
+to-velocity mapping permits direct gate optimization instead
+of learning the downstream nonlinear response.
+Correction mechanisms. We test whether the gains arise
+from velocity-residual alignment rather than simply adding
+a correction branch. We compare three alternatives: Learned
+Gate, which directly predicts channel weights; Direct Output,
+which predicts bounded velocity corrections without gated
+feature injection; and Hidden-Only, which removes the tem-
+poral video-state interface and relies solely on VLA hidden
+features. Their average success rates are 69.6%, 78.8%, and
+79.6%, respectively, compared with 82.0% for FAVR.
+Temporal visual state. We test whether recurrent visual
+
+
+Figure 5. Benefits of multi-view visual conditioning in open microwave. Synchronized rollout frames show that gripper slippage is
+difficult to identify from the head camera but visible from the wrist camera.
+states outperform independent video windows. Resetting
+TTT after each window reduces average success from 82.0%
+to 77.6%, while replacing recurrent updates with static fea-
+ture pooling further reduces success to 68.8%. These results
+indicate that accumulating observations across windows pro-
+vides more useful visual context than independent window
+processing or static aggregation.
+Video representation and multi-view conditioning. We
+first examine the contribution of video-pretrained representa-
+tions. On LIBERO, replacing V-JEPA with I-JEPA reduces
+average success from 98.6% to 97.8%, with the largest differ-
+ence on LIBERO-Long (97.2% versus 94.8%). This suggests
+that video-pretrained features are particularly useful for ma-
+nipulation tasks involving extended temporal interactions.
+We further investigate whether additional camera views
+improve the visual information available to V-JEPA. On the
+full 50-task RoboTwin 2.0 benchmark, conditioning V-JEPA
+on the head camera alone yields 88.48% average success,
+whereas incorporating the head and two wrist cameras in-
+creases success to 90.04%. The VLA policy retains its three-
+view observations in both settings.
+The open microwave task illustrates why multi-view
+conditioning can be valuable (Fig. 5). During manipulation,
+the gripper may slip from the handle, requiring the robot to
+recover its grasp before continuing. Such contact changes
+are difficult to distinguish from the head camera but clearly
+visible from the wrist camera. With head-only video con-
+ditioning, the auxiliary visual representation may miss this
+local interaction change and continue to favor nominal task
+progression. Incorporating wrist observations provides addi-
+tional evidence of the actual contact state, allowing visual
+corrections to better reflect the need for recovery. On this
+task, three-view conditioning improves success from 45% to
+64% (+19 pp). This example helps explain why multi-view
+video representations can substantially benefit manipulation
+tasks requiring precise contact monitoring and recovery.
+Inference cost. V-JEPA processes ten-frame windows dur-
+ing execution, with the final update overlapping VLA in-
+ference at replanning. Averaged over 100 RoboTwin 2.0
+calls (50-action chunks, 10 flow steps), inference latency is
+1117.7 ms for the frozen baseline, 1134.3 ms for FAVR-CF,
+and 1487.3 ms for FAVR. FAVR-CF thus reduces latency by
+23.7% relative to FAVR with only 1.5% overhead over the
+frozen baseline, while trailing FAVR by 0.35 and 0.50 per-
+centage points on LIBERO and LIBERO-Plus, respectively.
+5. Conclusion
+We presented FAVR, a lightweight framework for integrating
+pretrained video representations into frozen vision-language-
+action policies. FAVR constructs a compact temporal visual
+state through TTT and performs flow-aware visual residual
+alignment by exploiting the affine structure of the frozen ac-
+tion head. This formulation enables direct gate optimization
+in velocity space, for which we develop a FISTA-based joint
+solver and an approximate closed-form alternative, FAVR-
+CF. Experiments on LIBERO, LIBERO-Plus, RoboTwin
+2.0, and real-world manipulation demonstrate consistent im-
+provements with few trainable parameters, while FAVR-CF
+offers a favorable trade-off between performance and infer-
+ence efficiency. Future work may extend velocity-residual
+alignment to more general action mappings and explore joint
+adaptation of visual representations and action policies.
+
+
+A. Implementation Details
+We distinguish environment time t, which advances with
+observations, from flow time τ, which indexes velocity eval-
+uations within one action chunk. The pretrained VLA and
+V-JEPA 2.1 encoders remain frozen throughout FAVR adap-
+tation.
+A.1. Video encoding and temporal state
+FAVR encodes consecutive ten-frame RGB windows at
+384 × 384 resolution using frozen V-JEPA 2.1 ViT-
+B [26] (vjepa2 1 vit base 384, with ema encoder
+weights from vjepa2 1 vitb dist vitG 384.pt).
+Windows advance by ten observed frames. LIBERO and
+LIBERO-Plus use one external camera, while RoboTwin 2.0
+concatenates video tokens from the head and two wrist cam-
+eras into a shared TTT state.
+Token-level layer normalization and learned projections
+produce normalized keys and tanh-bounded values of width
+p = 128. The FP32 state S ∈Rp×p is initialized from
+learned S0 and updated sequentially. For a block (K, V )
+containing n tokens, the update is
+S ←S −η
+nK⊤(KS −V ),
+η = sigmoid(ηraw). (S1)
+Tokens within each block use the same incoming state, and
+updates proceed sequentially across blocks. The state is
+reset to learned S0 at each episode boundary, retained across
+observed windows within an episode, and held fixed during
+the flow integration of one action chunk. Only observed
+frames contribute to writes; no predicted future image or
+unobserved frame is used for current action conditioning.
+A.2. Action-conditioned retrieval and trainable
+modules
+At action token k and flow time τ, the frozen policy’s final
+normalized hidden feature ht,τ,k forms a query to the com-
+mitted state St. Using column vectors, the learned readout
+is
+q = norm(P ⊤
+Q LN(h)),
+ex = P ⊤
+O S⊤
+t q + bO.
+(S2)
+The feature is capped relative to the unmodified policy fea-
+ture,
+x = ex clip[0,1]
+ ρ sg(∥h∥2)
+∥ex∥2 + εnum
+
+.
+(S3)
+We use ρ = 0.1; sg denotes stop-gradient and εnum > 0 pro-
+vides numerical stabilization. The trainable interface com-
+prises the initial state, key/value/query/output projections
+and associated normalization, together with the velocity-
+residual predictor. The resulting trainable totals are 2.190M
+for π0.5 and 1.736M for LingBot-VLA, including the auxil-
+iary modules but excluding both frozen backbones.
+The residual predictor Rϕ receives the current action fea-
+ture h, retrieved readout x, projected contribution Wx, and
+a flow-time embedding e(τ). It estimates µ ≈u −v0 with
+valid-coordinate MSE, where u is the rectified-flow train-
+ing target and v0 is the frozen policy velocity. During the
+residual-predictor update, the predictor inputs and target are
+detached. During the action-loss update, ϕ is held fixed
+while gradients propagate through its inputs, the finite gate-
+solver steps, and the visual interface. The base VLA and
+V-JEPA weights remain frozen in both paths. The residual
+predictor has three linear layers with SiLU activations after
+the first two. For LingBot-VLA, its action hidden size, flow-
+time embedding size, and output velocity dimension are 768,
+768, and 14, giving an MLP of 2318 →512 →256 →14.
+For π0.5, these dimensions are 1024, 1024, and 7, giving
+3079 →512 →256 →7. The concatenated inputs are
+[h, x, Wx, e(τ)]. The residual auxiliary loss coefficient is
+0.5 for LingBot-VLA and 1.0 for π0.5.
+A.3. Causal state scheduling at inference
+For each environment, the inference sequence is: (i) encode
+newly observed frames when a complete ten-frame window
+is available; (ii) commit the TTT updates; (iii) generate a
+new action chunk using the fixed committed state and a
+flow-dependent action query; and (iv) incorporate subse-
+quently observed frames after execution. The π0.5 protocols
+predict 50 actions and execute the first ten before replan-
+ning, whereas RoboTwin executes all 50; thus a 50-action
+RoboTwin interval can incorporate five consecutive observed
+ten-frame windows before the next plan. Replanning and
+visual-state updates operate on different clocks.
+A.4. Benchmark-specific training configurations
+Table S1 collects the settings associated with the main bench-
+marks. The two LIBERO-family adapters are trained sepa-
+rately; their initial backbone is the LIBERO-finetuned π0.5
+checkpoint. RoboTwin uses the 4B LingBot-VLA check-
+point post-trained on RoboTwin. The standard-LIBERO
+recipe samples four trajectories with eight consecutive su-
+pervision points; the RoboTwin recipe uses two trajectories
+with four.
+AdamW training uses a 5% warmup, cosine learning-
+rate decay, zero weight decay, and gradient clipping at
+one. The standard-LIBERO configuration specifies a gate-
+regularization coefficient of 10−3. The RoboTwin single-
+view and three-view configurations both use a residual aux-
+iliary loss coefficient of 0.5; the π0.5/LIBERO family uses
+1.0.
+The main five-task ablations use a separate 1,000-update
+budget, learning rate 5 × 10−5, batch configuration 2 × 4,
+and 50 trials per task.
+
+
+Table S1. Main benchmark training and evaluation configurations. Steps are optimizer updates and the evaluation horizon is written as
+predicted/executed actions. Views refer to the auxiliary V-JEPA branch; the original VLA observation interface is retained.
+Benchmark
+Base policy
+Steps
+LR
+Eff. batch
+Adapter data
+V-JEPA views
+FISTA / horizon
+LIBERO
+π0.5
+5,000
+5×10−5
+32
+LIBERO demonstrations
+1
+8 / 50:10
+LIBERO-Plus
+π0.5
+5,000
+5×10−5
+32
+14,347 perturbed demos
+1
+128 / 50:10
+RoboTwin 2.0
+LingBot-VLA 4B
+5,000
+5×10−5
+8
+50 clean demos/task
+3
+128 / 50:50
+B. Optimization Details and Proofs
+B.1. Velocity-space gate objective
+For a fixed action token and flow step, let h denote the frozen
+policy feature, x the retrieved visual readout, and g ∈[0, 1]d
+the channel gate. The frozen affine action head gives
+W(h+g⊙x)+b = (Wh+b)+Qg,
+Q = W diag(x).
+(S4)
+The induced correction is linear in the gate, so matching the
+predicted velocity residual µ leads to
+min
+g∈[0,1]d F(g),
+F(g) = 1
+2∥Qg −µ∥2
+2.
+(S5)
+For intermediate-layer injection, subsequent nonlinear trans-
+formations alter the effect of the injected feature. The final
+affine interface instead permits direct box-constrained opti-
+mization in velocity space.
+B.2. FISTA implementation
+Define B = Q⊤Q and s = Q⊤µ. We evaluate the gradient
+without constructing B:
+∇F(g) = Bg −s = x ⊙W ⊤ W(x ⊙g) −µ
+
+.
+(S6)
+For L ≥∥Q∥2
+2, the accelerated projected iterations are
+g(k+1) = clip[0,1]d
+
+y(k) −∇F(y(k))
+L
+
+,
+(S7)
+ωk+1 = 1 +
+p
+1 + 4ω2
+k
+2
+,
+y(k+1) = g(k+1) + ωk −1
+ωk+1
+(g(k+1) −g(k)).
+(S8)
+The
+implementation
+uses
+L
+=
+max(1.00001λmax(QQ⊤), 10−12).
+If an accelerated
+candidate increases F, the solver falls back to a projected
+step from the preceding feasible iterate. Gradients through
+the visual interface propagate through the executed solver
+steps. The iteration budgets are eight on LIBERO and 128
+on LIBERO-Plus and RoboTwin 2.0.
+B.3. Extension to quadratic gate regularization
+Consider a quadratic penalty with coefficient λ ≥0:
+Fλ(g) = 1
+2∥Qg −µ∥2
+2 + λ
+2 ∥g∥2
+2,
+g ∈[0, 1]d.
+(S9)
+Its gradient and a valid FISTA step-size bound are
+∇Fλ(g) = Q⊤(Qg−µ)+λg,
+Lλ ≥∥Q∥2
+2+λ. (S10)
+In the diagonal surrogate D = Diag(Q⊤Q), the solution
+becomes
+gD
+λ,j = clip[0,1]
+
+sj
+Djj + λ
+
+,
+s = Q⊤µ,
+(S11)
+with gD
+λ,j = 0 if the denominator vanishes. Set cD
+λ = QgD
+λ .
+Including the quadratic gate penalty in scalar rescaling yields
+min
+0≤α≤1
+1
+2∥αcD
+λ −µ∥2
+2 + λ
+2 α2∥gD
+λ ∥2
+2 + εnum
+2 α2,
+α∗
+λ = clip[0,1]
+
+µ⊤cD
+λ
+∥cD
+λ ∥2
+2 + λ∥gD
+λ ∥2
+2 + εnum
+
+.
+(S12)
+The diagonal-solution argument below also gives, for any
+minimizer g∗
+λ of Fλ,
+0 ≤Fλ(α∗
+λgD
+λ )−Fλ(g∗
+λ) ≤∥EgD
+λ ∥1+ εnum
+2 ,
+E = Q⊤Q−D.
+(S13)
+Setting λ = 0 recovers the FAVR-CF formulation used in
+the main manuscript.
+B.4.
+FAVR-CF
+derivation
+and
+approximation
+bound
+Decompose B = Q⊤Q = D+E, where Djj = ∥Q:j∥2
+2 and
+E contains the off-diagonal terms; let s = Q⊤µ. Omitting
+E gives the separable objective
+FD(g) = 1
+2g⊤Dg −s⊤g + 1
+2∥µ∥2
+2,
+(S14)
+whose exact box-constrained solution is
+gD
+j =
+(
+clip[0,1](sj/Djj),
+Djj > 0,
+0,
+Djj = 0.
+(S15)
+If Djj = 0, column Q:j vanishes and sj = 0, so zero is
+a valid minimizer. With cD = QgD, FAVR-CF solves the
+stabilized scalar problem
+min
+0≤α≤1
+1
+2∥αcD −µ∥2
+2 + εnum
+2 α2.
+(S16)
+Differentiating and projecting the stationary point onto [0, 1]
+yields
+α∗= clip[0,1]
+
+µ⊤cD
+∥cD∥2
+2 + εnum
+
+,
+gCF = α∗gD.
+(S17)
+
+
+Approximation bound.
+Let g∗minimize F over [0, 1]d.
+By the first-order optimality of gD for FD, (DgD−s)⊤(g∗−
+gD) ≥0. Convexity of F therefore gives
+F(gD) −F(g∗) ≤∇F(gD)⊤(gD −g∗)
+≤(EgD)⊤(gD −g∗) ≤∥EgD∥1.
+(S18)
+Since α∗minimizes the regularized scalar objective and α =
+1 is feasible, F(gCF) + εnum(α∗)2/2 ≤F(gD) + εnum/2.
+Combining these inequalities and using ∥gD∥2 ≤
+√
+d gives
+0 ≤F(gCF) −F(g∗) ≤∥EgD∥1 + εnum
+2
+≤d∥E∥2 + εnum
+2 .
+(S19)
+Matrix-free computation.
+For a frozen action head, pre-
+compute the action-head column norms and evaluate
+s = x⊙(W ⊤µ),
+Djj = x2
+j∥W:j∥2
+2,
+cD = W(x⊙gD).
+(S20)
+The closed-form gate requires O(md) arithmetic and O(m+
+d) extra workspace per action token; Niter FISTA steps
+require O(Nitermd) arithmetic after step-size setup.
+C. Benchmark Protocols and Detailed Results
+C.1. Evaluation units and reported metrics
+LIBERO. We evaluate the Spatial, Object, Goal, and Long
+suites [22], each containing ten tasks. Each task has 50
+evaluation episodes (500 per suite, 2,000 overall). Suite and
+overall success rates are equal-weight task averages. The
+action policy predicts 50 actions and executes the first ten
+before replanning.
+LIBERO-Plus. We evaluate the complete 10,030 per-
+turbed scenarios in seven families: camera, robot initial-
+ization, language, lighting, background, sensor noise, and
+object layout [10]. The overall result is pooled across scenar-
+ios, rather than the unweighted mean of the seven category
+percentages. The Plus adapter is trained separately from the
+standard-LIBERO adapter using 14,347 perturbed demon-
+strations. Its evaluation also uses the 50/10 action horizon.
+RoboTwin 2.0. We evaluate all 50 bimanual tasks [8],
+with 100 rollouts per task in each of the Clean-to-Clean
+(C2C) and Clean-to-Randomized (C2R) conditions. Task
+success is averaged equally across the 50 tasks. Adaptation
+uses 50 clean demonstrations per task; randomized condi-
+tions are evaluated separately. The policy executes the full
+predicted 50-action chunk before replanning. The RoboTwin
+rendering configuration uses ray tracing with 32 samples per
+pixel, path depth eight, and no denoiser; the policy retains
+its native action-normalization convention.
+Table S2. LIBERO success counts. Each suite has 500 trials
+(2,000 in total).
+Policy
+Spat. Obj. Goal Long
+Total
+Frozen π0.5
+490
+491
+485
+482 1,948
+FAVR-CF
+496
+497
+488
+484 1,965
+FAVR
+494
+500
+492
+486 1,972
+Table S3. LIBERO-Plus perturbation breakdown. ∆denotes
+FAVR minus the corresponding frozen π0.5 baseline, in percentage
+points; Avg. pools all 10,030 evaluation scenarios.
+Perturbation
+Base FAVR ∆(pp)
+Camera viewpoint
+68.36
+70.42
++2.06
+Robot initialization
+78.58
+79.87
++1.29
+Language instruction 86.34
+88.03
++1.69
+Lighting
+95.79
+96.41
++0.62
+Background texture
+95.91
+96.00
++0.09
+Sensor noise
+86.45
+85.82
+-0.63
+Object layout
+85.25
+85.64
++0.39
+Avg.
+84.22
+85.05
++0.83
+C.2. Clean-to-Randomized scene protocol
+RoboTwin C2R applies randomized scene appearance
+and geometry while evaluating policies adapted us-
+ing clean demonstrations.
+Wall and tabletop tex-
+tures are randomized; each surface can retain its de-
+fault background with approximately 2% probability
+(clean background rate=0.02). Clutter objects are
+sampled on the tabletop, targeting ten distractors, although
+placement failures can yield fewer; clutter can also be
+skipped with approximately 2% probability. The tabletop
+height is randomly shifted within the configured range of
+−3 to 0 cm relative to the default. Directional and point
+lights are randomized in RGB color and intensity. Dynamic
+lighting, whose parameters can vary with successive ren-
+ders, is enabled with 2% probability. Extra head-camera
+displacement is disabled (parameter 0).
+C.3. LIBERO task-suite results
+Table S2 reports the exact integer successes corresponding
+to the four-suite rates in the main manuscript.
+The overall differences are +1.20 percentage points for
+FAVR and +0.85 for FAVR-CF relative to the frozen policy;
+FAVR-CF trails FAVR by 0.35 points.
+C.4. Perturbation-level outcomes on LIBERO-Plus
+Table S3 gives the two local policies’ category percentages
+and their signed differences. The largest positive differences
+are for viewpoint, instruction, and robot initialization; the
+sensor-noise category decreases by 0.63 percentage points.
+
+
+C.5. Complete RoboTwin 2.0 task-level results
+Table S4 lists the success rates on all 50 tasks under C2C and
+C2R. The π0.5 columns are taken from Table S9 of LingBot-
+VLA [35]; the frozen LingBot-VLA and FAVR columns are
+evaluated using our RoboTwin setup. Each task has 100
+rollouts per condition. FAVR improves the frozen LingBot-
+VLA average from 87.12% to 90.04% under C2C and from
+86.88% to 89.38% under C2R.
+D. Additional Results and Ablations
+D.1. Common five-task ablation protocol
+The main-text RoboTwin ablations use the task set
+hanging mug,
+move can pot,
+click bell,
+place bread skillet,
+and
+place can basket.
+Adapted variants are trained for 1,000 updates with effective
+batch configuration 2 × 4 and evaluated on 50 trials per task.
+The frozen LingBot-VLA policy serves as the reference
+(68.8% mean success).
+D.2. Flow-dependent gate refitting
+The Shared Gate and flow-aware FAVR variants were in-
+dependently retrained from the same initialization, produc-
+ing distinct final checkpoints. Both use the same five-task
+dataset (50 clean demonstrations per task, 250 total), a com-
+mon training seed of 7, and 1,000 optimizer updates, each
+sampling two trajectories with four supervised checkpoints.
+Their frozen three-view V-JEPA encoder, 10-frame history
+windows, and TTT state-update procedure are identical. The
+evaluation pairs the initial scenes and policy noise across the
+variants: demo clean, 50 rollouts per task (250 overall),
+predicted/executed horizon 50/50, and ten flow evaluations.
+At every flow evaluation, both variants query the current
+TTT state using the current action hidden feature, so the
+video readout is flow-conditioned in both. FAVR refits the
+gate at each step; Shared Gate computes the gate at the first
+step of a chunk and reuses those weights over the subsequent
+nine steps, recomputing at the next action chunk. Shared
+Gate uses one additional reference forward pass during train-
+ing. Mean success increases from 72.0% with Shared Gate to
+82.0% with flow-aware refitting; move can pot increases
+from 66% to 86%.
+D.3. Injection depth and alternative correction
+heads
+At the final affine head the map from gate to correction is
+exactly Qg at each fixed flow state (Eq. (S4)). At earlier
+action-expert layers, the same final-head-derived quadratic
+is no longer the exact response after the nonlinear suffix.
+We compare applying this head-derived optimization at in-
+termediate layers with learning the gate at each location.
+Table S5 reports the full five-task results. Learned gates
+outperform head-derived optimization at every intermedi-
+ate layer, whereas FAVR at the final affine head obtains the
+highest mean success.
+We additionally contrast three correction mechanisms.
+Learned Gate directly predicts channel weights without solv-
+ing the residual-fitting objective. Direct Output predicts
+a bounded correction in velocity space, bypassing gated
+feature injection. Hidden-Only removes the temporal video-
+state branch and predicts corrections from VLA hidden fea-
+tures. Their five-task means are 69.6%, 78.8%, and 79.6%,
+respectively, versus 82.0% for FAVR.
+D.4. State persistence versus static aggregation
+Window-wise resetting reinitializes the TTT state to learned
+S0 before each new video window. It retains the same pro-
+jections and within-window update mechanism but does not
+accumulate state across windows. Static pooling replaces
+recurrent writes with aggregate visual features. On the five-
+task experiment, these variants achieve 77.6% and 68.8%,
+compared with 82.0% for full FAVR. This supports main-
+taining the recurrent TTT state across observation windows.
+D.5. Image-pretrained versus video-pretrained fea-
+tures
+On the four LIBERO suites, replacing V-JEPA with I-JEPA
+changes the mean from 98.6% to 97.8%. Table S6 provides
+the individual suite results. The largest difference occurs
+on Long (+2.4 percentage points for V-JEPA); on Spatial,
+I-JEPA is higher by 0.4 points.
+D.6. Single-view versus three-view V-JEPA condi-
+tioning
+We study whether auxiliary video conditioning benefits from
+views that reveal local contact states. The frozen VLA policy
+itself receives three views in both configurations. Feeding
+only the head-camera history to V-JEPA gives 88.48% mean
+success on the full 50-task RoboTwin benchmark, while
+head and both wrist-camera histories give 90.04%. Both the
+head-only and three-view RoboTwin variants use a residual
+auxiliary loss weight of 0.5.
+The open microwave rollout illustrates one way the
+extra wrist evidence can matter. The wrist view reveals
+when the gripper slips from the handle, whereas a head view
+alone makes the contact change difficult to distinguish. A
+head-only visual correction may continue to favor nominal
+progression when regrasping is needed. The three-view
+configuration reaches 64% success on this task versus 45%
+for head-only, a 19-point difference. Synchronized head-
+and wrist-camera frames are shown in the main-paper figure.
+D.7. Joint and approximate gate outcomes
+The full FAVR solver retains the cross-channel interactions
+in Q⊤Q. FAVR-CF instead uses a diagonal gate followed
+
+
+Table S4. RoboTwin 2.0 success rates (%) for all 50 tasks. The π0.5 columns are reported in LingBot-VLA [35] (Table S9); Frozen
+LingBot-VLA and FAVR are our evaluations (100 trials per task per setting). C2C/C2R denote clean/randomized evaluation.
+Task
+π0.5 C2C
+Frozen C2C
+FAVR C2C
+π0.5 C2R
+Frozen C2R
+FAVR C2R
+adjust bottle
+100
+100
+100
+99
+98
+99
+beat block hammer
+96
+90
+92
+93
+81
+83
+blocks ranking rgb
+92
+92
+90
+85
+90
+93
+blocks ranking size
+49
+67
+72
+26
+74
+72
+click alarmclock
+98
+78
+89
+89
+86
+89
+click bell
+99
+77
+92
+66
+91
+94
+dump bin bigbin
+92
+76
+83
+97
+89
+91
+grab roller
+100
+99
+100
+100
+100
+100
+handover block
+66
+90
+97
+57
+86
+90
+handover mic
+98
+94
+98
+97
+100
+100
+hanging mug
+18
+47
+64
+17
+41
+49
+lift pot
+96
+100
+100
+85
+100
+100
+move can pot
+51
+72
+88
+55
+65
+84
+move pillbottle pad
+84
+93
+96
+61
+94
+96
+move playingcard away
+96
+100
+100
+84
+98
+100
+move stapler pad
+56
+71
+74
+42
+64
+77
+open laptop
+90
+95
+96
+96
+100
+100
+open microwave
+34
+82
+64
+77
+60
+50
+pick diverse bottles
+81
+76
+89
+71
+72
+81
+pick dual bottles
+93
+86
+98
+63
+93
+95
+place a2b left
+87
+80
+86
+82
+86
+87
+place a2b right
+87
+85
+85
+84
+79
+79
+place bread basket
+77
+92
+90
+64
+92
+95
+place bread skillet
+85
+84
+98
+66
+83
+91
+place burger fries
+94
+99
+100
+87
+97
+98
+place can basket
+62
+64
+78
+62
+62
+68
+place cans plasticbox
+94
+99
+100
+84
+100
+99
+place container plate
+99
+99
+99
+95
+95
+97
+place dual shoes
+75
+83
+82
+75
+85
+92
+place empty cup
+100
+100
+100
+99
+100
+100
+place fan
+87
+81
+81
+85
+86
+90
+place mouse pad
+60
+94
+93
+39
+90
+93
+place object basket
+80
+94
+95
+76
+92
+92
+place object scale
+86
+87
+90
+80
+88
+96
+place object stand
+91
+95
+97
+85
+93
+95
+place phone stand
+81
+91
+93
+81
+88
+96
+place shoe
+92
+91
+91
+93
+90
+93
+press stapler
+87
+89
+89
+83
+88
+90
+put bottles dustbin
+84
+83
+90
+79
+78
+78
+put object cabinet
+80
+86
+86
+79
+85
+88
+rotate qrcode
+89
+90
+93
+87
+89
+85
+scan object
+72
+87
+89
+65
+89
+87
+shake bottle
+99
+100
+100
+97
+98
+99
+shake bottle horizontally
+99
+100
+100
+99
+99
+99
+stack blocks three
+91
+91
+89
+76
+94
+93
+stack blocks two
+97
+98
+98
+100
+99
+100
+stack bowls three
+77
+84
+86
+71
+86
+79
+stack bowls two
+95
+96
+93
+96
+97
+97
+stamp seal
+79
+80
+86
+55
+92
+96
+turn switch
+62
+69
+63
+54
+62
+74
+Average
+82.74
+87.12
+90.04
+76.76
+86.88
+89.38
+Table S5. Five-task injection-position experiment. Success rates (%) for three earlier injection layers and the final affine interface. All
+variants are reported with per-task results.
+Position
+Gate
+Mug
+Can/pot
+Bell
+Bread/skillet
+Can/basket
+Avg.
+Layer 12
+Head-derived
+42
+68
+68
+94
+64
+67.2
+Layer 12
+Learned
+56
+74
+90
+92
+64
+75.2
+Layer 24
+Head-derived
+46
+70
+64
+86
+68
+66.8
+Layer 24
+Learned
+54
+80
+96
+88
+80
+79.6
+Layer 36
+Head-derived
+54
+68
+62
+88
+56
+65.6
+Layer 36
+Learned
+52
+80
+92
+86
+62
+74.4
+Before affine head
+FAVR
+58
+86
+94
+94
+78
+82.0
+by a regularized scalar rescaling (Sec. B.4). In the main
+benchmark tables, FAVR-CF achieves 98.25% on LIBERO
+and 84.55% on LIBERO-Plus, compared with 98.60% and
+85.05% for FAVR. Thus the approximate version trails joint
+
+
+Table S6. Representation ablation on LIBERO: success rates
+(%). Both alternatives are used as frozen visual representations for
+the FAVR interface.
+Representation
+Spatial
+Object
+Goal
+Long
+Avg.
+I-JEPA
+99.2
+99.8
+97.4
+94.8
+97.8
+V-JEPA
+98.8
+100.0
+98.4
+97.2
+98.6
+Table S7. Standard real-world manipulation. Each task has
+35 demonstrations. Initial fine-tuning establishes the shared task-
+adapted checkpoint; continued fine-tuning and FAVR use the same
+additional update budget. Outcomes are successes out of 20 trials.
+Task
+Initial
+Extra
+Initial FT
+Cont. FT
+FAVR
+Block pick-and-place
+5K
+3K
+10/20
+12/20
+15/20
+Paper-cup grasping
+15K
+5K
+8/20
+11/20
+13/20
+optimization by 0.35 and 0.50 percentage points while re-
+maining above the corresponding frozen baselines. Inference
+latency is reported in Sec. F.
+E. Real-World Experimental Details
+E.1. Platform, data, and comparison protocol
+Real-world experiments use Cobot Magic, a dual-arm manip-
+ulation platform based on the Mobile ALOHA teleoperation
+framework [1]. We collect 35 teleoperated demonstrations
+for each of four tasks. Two are standard manipulation tasks;
+two require information observed before the robot begins act-
+ing. The real-world visual-conditioning interface operates on
+the observed camera history while the underlying bimanual
+π0.5 policy is frozen during FAVR adaptation. The platform
+records three RGB views: one fixed frontal external camera,
+a left wrist camera, and a right wrist camera, each at an orig-
+inal resolution of 640 × 480. The action executor publishes
+commands at 30 Hz. The policy predicts 50 action targets
+and executes the first ten before replanning. Each target is a
+14-dimensional absolute-position command: six arm-joint
+targets (in radians) plus one continuous gripper-opening tar-
+get for each arm. Demonstrations synchronously record all
+three camera streams, the actual follower-arm states, and
+the leader-arm teleoperation commands; supervised action
+labels are based on the leader commands, not obtained by
+copying follower states.
+For standard manipulation, both comparison branches
+start from the same task-fine-tuned π0.5 checkpoint. One
+branch continues fine-tuning the base policy; the other
+freezes the base policy and V-JEPA and trains only the
+FAVR modules using the same number of additional op-
+timizer steps. The reported success fractions are over 20
+trials for each branch and task, as summarized in Table S7.
+E.2. Standard task definitions
+Color-conditioned block pick-and-place. The instruction
+identifies a target block by color. A successful episode re-
+quires selecting that block and placing it into the designated
+container. This task tests instruction-conditioned target se-
+lection, reaching, grasping, and placement in a coordinated
+sequence.
+Left/right paper-cup grasping. The instruction speci-
+fies which of the two paper cups the robot should pick up.
+Compared with block pick-and-place, grasp success is sen-
+sitive to the end-effector approach and contact pose. The
+initial, continued-fine-tuned, and FAVR results in Table S7
+follow the common 20-trial evaluation count for the respec-
+tive tasks.
+In the unadapted block policy, some failures involve
+choosing the incorrect color despite the pretrained vision–
+language backbone. The initial checkpoint records three
+such errors among its ten failures.
+E.3.
+History-dependent
+tasks
+and
+observa-
+tion/action separation
+The history-dependent experiments are motivated by earlier
+uses of TTT as a recurrent memory mechanism, including
+its application to robotic interaction histories [16, 33, 34].
+We evaluate the history-conditioned selection enabled by the
+TTT temporal visual interface.
+In covered-block retrieval, one of two colored blocks is
+initially covered by a paper cup. After the observation phase,
+the cover is removed; the robot must identify and place
+the previously covered block into a container. In history-
+conditioned cup selection, the positions of two differently
+colored blocks are visible before separate cups cover them.
+After covering, the robot must choose the cup concealing the
+block named by the instruction. Both tasks are constructed
+so that the relevant identity or mapping is established during
+observation, not by the final visible arrangement alone.
+The trial has two phases. During the observation phase, a
+human manipulates the cups while the robot receives visual
+inputs and updates its TTT state but issues no movement
+commands. The action phase begins only after the human
+withdraws from the workspace. Observation-stage motion is
+suppressed so that the robot cannot encode the target side in
+its proprioception through anticipatory arm movement.
+Each history-dependent task uses 35 demonstrations and
+a 5,000-update FAVR adaptation. We report correct target
+selection. Table S8 gives the completed counts. Both tasks
+achieve 7/10 correct choices, above the 50% binary chance
+level.
+E.4. Dependence on a task-capable initial policy
+A complementary control starts directly from the pretrained
+bimanual π0.5 checkpoint, without first performing task-
+specific block-pick-and-place fine-tuning. Both the policy
+
+
+Table S8. History-conditioned target selection on the real robot.
+Selection correctness is reported separately from full task comple-
+tion.
+Task
+Demos
+Steps
+Correct / trials
+Covered-block retrieval
+35
+5K
+7/10
+History-conditioned cup selection
+35
+5K
+7/10
+Table S9. Reported inference latency. Measurements are averages
+over 100 inference calls under the pipelined schedule described
+below, using RoboTwin 2.0 inputs on an NVIDIA RTX PRO 6000
+Blackwell GPU. Each call predicts a 50-action chunk with ten flow
+steps.
+Policy
+Average latency (ms)
+Frozen VLA baseline
+1117.7
+FAVR-CF
+1134.3
+FAVR
+1487.3
+and video encoder remain frozen, and only the FAVR mod-
+ules are trained for 5,000 updates on the block demonstra-
+tions. The resulting controller repeatedly moves its arms
+above the workspace without reliably approaching the desig-
+nated block or establishing a stable grasp. The contrast with
+task-adapted initialization in Table S7 shows that FAVR im-
+proves an existing manipulation policy rather than learning
+base reaching and grasping skills from scratch.
+F. Inference Cost and Complexity
+F.1. Inference latency on RoboTwin 2.0
+Table S9 reports the average inference latencies for the
+frozen policy, FAVR-CF, and FAVR. The two FAVR ver-
+sions differ in the gate solver: FAVR employs joint FISTA
+iterations, while FAVR-CF uses a diagonal approximation
+followed by analytic scalar rescaling.
+The 16.6 ms in-
+crease of FAVR-CF over the frozen policy corresponds to
+16.6/1117.7 = 1.5% (rounded); the 353.0 ms reduction
+relative to FAVR corresponds to 353.0/1487.3 = 23.7%
+(rounded).
+During action execution, the V-JEPA branch processes
+newly observed frames in ten-frame windows, with incre-
+mental TTT state updates. At replanning, processing of the
+remaining ten-frame window overlaps with VLA inference.
+The reported latencies are measured under this pipelined
+schedule.
+F.2. State storage and arithmetic
+Each TTT state contains 1282 FP32 scalars, or 1282 × 4 =
+65,536 bytes (64 KiB). If committed and in-progress copies
+are kept simultaneously, the two matrices occupy 128 KiB,
+excluding key/value activations, video frames, pretrained
+weights, and framework allocator overhead.
+At fixed flow time, a joint gradient needs two products
+with the frozen m×d action-head matrix, which costs O(md)
+arithmetic. With Niter FISTA steps, the iterative gate there-
+fore costs O(Nitermd) after computing its step-size infor-
+mation. The closed-form gate computes s = x ⊙(W ⊤µ)
+and cD = W(x ⊙gD) with cached column norms, cost-
+ing O(md) arithmetic and O(d + m) extra working storage.
+These are gate-subroutine costs; they do not include V-JEPA
+encoding, TTT writes, backbone action inference, host syn-
+chronization, or physical robot execution.
+
+
+LLM Usage Statement
+OpenAI ChatGPT was used to assist with literature ex-
+ploration, methodological discussions, manuscript draft-
+ing and revision, and checking equations and figures.
+The authors reviewed the assisted content and take full
+responsibility for the final manuscript and reported re-
+sults.
+References
+[1] AgileX Robotics. COBOT MAGIC: A mobile ALOHA-based
+bimanual teleoperation platform. https://www.agilex.
+ai/products/COBOTMAGIC. Accessed November 2026.
+6, 14
+[2] Mido Assran, Adrien Bardes, David Fan, Quentin Garrido,
+Russell Howes, Mojtaba Komeili, et al. V-JEPA 2: Self-
+supervised video models enable understanding, prediction
+and planning. arXiv:2506.09985, 2025. 1, 2
+[3] Adrien Bardes, Quentin Garrido, Jean Ponce, Xinlei Chen,
+Michael Rabbat, Yann LeCun, et al. Revisiting feature pre-
+diction for learning visual representations from video. arXiv
+preprint arXiv:2404.08471, 2024. 1, 2
+[4] Amir Beck and Marc Teboulle. A fast iterative shrinkage-
+thresholding algorithm for linear inverse problems. SIAM
+Journal on Imaging Sciences, 2(1):183–202, 2009. 4
+[5] Amir Beck and Marc Teboulle. Fast gradient-based algo-
+rithms for constrained total variation image denoising and
+deblurring problems. IEEE Transactions on Image Process-
+ing, 18(11):2419–2434, 2009. 4
+[6] Kevin Black, Noah Brown, Danny Driess, Adnan Es-
+mail, Michael Equi, Chelsea Finn, et al.
+π0: A vision-
+language-action flow model for general robot control.
+arXiv:2410.24164, 2024. 1, 2, 3
+[7] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng
+Huang, Jiayan Guo, et al. WorldVLA: Towards autoregressive
+action world model. arXiv:2506.21539, 2025. 2
+[8] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, et al. Robotwin 2.0: A scalable data generator
+and benchmark with strong domain randomization for robust
+bimanual robotic manipulation. arXiv:2506.18088, 2025. 5,
+11
+[9] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric
+Cousineau, Benjamin Burchfiel, and Shuran Song. Diffu-
+sion policy: Visuomotor policy learning via action diffusion.
+In Proceedings of Robotics: Science and Systems, 2023. 2
+[10] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai,
+Pengfang Qian, et al. Libero-plus: In-depth robustness anal-
+ysis of vision-language-action models. arXiv:2510.13626,
+2025. 5, 11
+[11] Ruiqi Feng, Chenglei Yu, Wenhao Deng, Peiyan Hu, and
+Tailin Wu. On the guidance of flow matching. In Proceedings
+of the 42nd International Conference on Machine Learning,
+pages 16993–17029, 2025. 2
+[12] Yusen Feng, Bingchen Han, Jiangran Lyu, Kai Liu, Yixin
+Zheng, Yuxuan Wan, Weiheng Liu, Sun Han, Ruiqin Li, Yu-
+long Zhang, Fangfu Liu, Xuesong Shi, Libin Liu, Yizhou
+Wang, Zhizheng Zhang, and He Wang. WAM-TTT: Steering
+world-action models by watching human play at test time.
+arXiv:2607.06988, 2026. 2
+[13] Jonathan Ho and Tim Salimans. Classifier-free diffusion
+guidance. arXiv preprint arXiv:2207.12598, 2022. 2
+[14] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. arXiv:2504.16054, 2025. 1, 2, 3, 5
+[15] Enze Jiang and Zheng Ma.
+Analytic distribution of
+classifier-free guidance for schedule design. arXiv preprint
+arXiv:2607.19725, 2026. 2
+[16] Yunfan Jiang, Yevgen Chebotar, Ruijie Zheng, Fengyuan Hu,
+Yunhao Ge, Jimmy Wu, et al. Robottt: Context scaling for
+robot policies. arXiv:2607.15275, 2026. 2, 6, 14
+[17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, et al. Openvla: An open-
+source vision-language-action model.
+arXiv:2406.09246,
+2024. 2
+[18] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. arXiv:2502.19645, 2025. 2, 5
+[19] Tuomas Kynk¨a¨anniemi, Miika Aittala, Tero Karras, Samuli
+Laine, Timo Aila, and Jaakko Lehtinen. Applying guidance
+in a limited interval improves sample and distribution quality
+in diffusion models.
+In Advances in Neural Information
+Processing Systems, 2024. 2
+[20] Wenbo Li, Jun Yang, Yiteng Chen, Wei Zhang, and Qingyao
+Wu. RecastVLA: From past interaction to future control with
+adaptive policy states. arXiv:2609.32155, 2026. 2
+[21] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow matching for generative
+modeling. arXiv preprint arXiv:2210.02747, 2022. 2, 3
+[22] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. Libero: Benchmarking knowledge
+transfer for lifelong robot learning. arXiv:2306.03310, 2023.
+5, 11
+[23] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow straight
+and fast: Learning to generate and transfer data with rectified
+flow. In International Conference on Learning Representa-
+tions, 2023. 3
+[24] Yize Liu, Huang Huang, Yining Hong, Zijian Du, Zhi Cao, Li
+Fei-Fei, and Jiajun Wu. T2Mem: Learning test-time memory
+for robotics. arXiv:2609.36720, 2026. 2, 6
+[25] Shangchen Miao, Ningya Feng, Jialong Wu, Ye Lin, Xu He,
+Dong Li, and Mingsheng Long. JEPA-VLA: Video predictive
+embedding is needed for VLA models. arXiv:2602.11832,
+2026. 1, 2, 5
+[26] Lorenzo Mur-Labadia, Matthew Muckley, Amir Bar, Mido
+Assran, Koustuv Sinha, Mike Rabbat, et al.
+V-jepa 2.1:
+Unlocking dense features in video self-supervised learning.
+arXiv:2603.14482, 2026. 1, 2, 3, 5, 9
+[27] Byeonghu Na, Minsang Park, Gyuwon Sim, Donghyeok Shin,
+HeeSun Bae, Mina Kang, Se Jung Kwon, Wanmo Kang, and
+Il-chul Moon. Diffusion adaptive text embedding for text-to-
+image diffusion models. In Advances in Neural Information
+Processing Systems, 2025. 2
+
+
+[28] Pinelopi Papalampidi, Olivia Wiles, Ira Ktena, Aleksandar
+Shtedritski, Emanuele Bugliarello, Ivana Kajic, Isabela Al-
+buquerque, and Aida Nematzadeh. Dynamic classifier-free
+diffusion guidance via online feedback. In International Con-
+ference on Learning Representations, 2026. 2
+[29] Ashwini Pokle, Alexandre Galashov, Arnaud Doucet, Mauri-
+cio Delbracio, and Valentin De Bortoli. Adversarial learn-
+ing of classifier-free guidance schedules.
+arXiv preprint
+arXiv:2608.14038, 2026. 2
+[30] Seyedmorteza Sadat, Jakob Buhmann, Derek Bradley, Otmar
+Hilliges, and Romann M. Weber. Cads: Unleashing the diver-
+sity of diffusion models through condition-annealed sampling.
+In International Conference on Learning Representations,
+2024. 2
+[31] Hao Shi, Bin Xie, Yingfei Liu, Lin Sun, Fengrong Liu, Tian-
+cai Wang, et al. Memoryvla: Perceptual-cognitive memory
+in vision-language-action models for robotic manipulation.
+arXiv:2508.19236, 2026. 5
+[32] Jingwen Sun, Wenyao Zhang, Zekun Qi, Shaojie Ren, Zezhi
+Liu, Hanxin Zhu, Guangzhong Sun, Xin Jin, and Zhibo Chen.
+VLA-JEPA: Enhancing vision-language-action model with
+latent world model, 2026. 5
+[33] Yu Sun, Xinhao Li, Karan Dalal, Jiarui Xu, Arjun Vikram,
+Genghan Zhang, et al. Learning to (learn at test time): Rnns
+with expressive hidden states. arXiv:2407.04620, 2025. 2, 3,
+6, 14
+[34] Haoxuan Wang, Gengyu Zhang, Ramana Rao Kompella,
+Gaowen Liu, and Yan Yan. Test-time training as residual
+memory for robot policies, 2026. 2, 6, 14
+[35] Wei Wu, Fan Lu, Yunnan Wang, Shuai Yang, Shi Liu,
+Fangjing Wang, et al. A pragmatic vla foundation model.
+arXiv:2601.18692, 2026. 2, 5, 12, 13
+[36] Wenyao Zhang, Hongsi Liu, Zekun Qi, Yunnan Wang, Xin-
+qiang Yu, Jiazhao Zhang, et al.
+DreamVLA: A vision-
+language-action model dreamed with comprehensive world
+knowledge. arXiv:2507.04447, 2025. 2
+[37] Zezhou Zhang, Songxin Zhang, Xiao Xiong, Junjie Zhang,
+Zejian Xie, Jingyi Xi, Zunyao Mao, Zan Mao, Zhixin Mai,
+Zhuoyang Song, and Jiaxing Zhang. PVI: Plug-in visual in-
+jection for vision-language-action models. arXiv:2603.12772,
+2026. 1, 2, 5
+[38] Qiangong Zhou, Jiafeng Liang, Yimin Dong, Yang He, and
+Hongxiang Li. Ttt in vla models: Exploring training with
+human demonstrations, 2026. 2

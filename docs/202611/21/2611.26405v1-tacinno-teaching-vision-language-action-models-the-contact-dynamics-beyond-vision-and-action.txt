@@ -1,0 +1,1430 @@
+TacInno: Teaching Vision-Language-Action Models
+the Contact Dynamics Beyond Vision and Action
+Weile Li1,2*
+Yunfan Lou3*
+Muqing Shi4*
+Zihao Zhang2
+Zhenbiao Huang5
+Boxian Yao3
+Xiyu Zhu3
+Zhibo Pang3†
+1ShanghaiTech University
+2Institute of AI for Industries (IAII), Chinese Academy of Sciences
+3Peking University
+4Washington University in St. Louis
+5Beijing FiveAges Technology
+zhibo.pang@pku.edu.cn
+Project page: tacinno.github.io
+(a)  Tactile change mixes two signals
+stable
+contact
++5
++10
++15
+incipient
+slip
++5
++10
++15
+tactile
+change
+=
+explained by
+images + actions
++
+contact response
+only tactile input reveals
+(c)  Existing tactile VLAs vs TacInno
+VLA
+tactile signal as an input
+the action loss can ignore it
+predict all future tactile change
+much of the target is action-induced
+weight
+weight by change size
+much of the weight is action-induced
+TacInno
+learns only what tactile input adds
+TacInno
+the contact dynamics that
+vision and action cannot explain
+(b)  Encode what images +
+actions miss
+tactile
+t … t+15
+Encoder
+tactile innovation
+code
+Decoder
++
+images +
+actions
+the code
+images + actions
+(d)  Simulation, success rate (%)
+insert hole
+insert tube
+lift bottle
+lift can
+pull out key
+put bottle
+(e)  Real robot, success rate (%)
+FTP-1
+𝒩0-VTLA
+SimpleTouch
+TacInno-VLA
+74.2 75.3 76.8
+87.5
++10.7
+average
+40
+24
+54
+75
++21
+lowest task
+wipe board
+insert plug
+lift can
+unscrew cap
+FTP-1  58.5
+SimpleTouch  61.5
+TacInno-VLA  70.5
+88 82 88
+wipe board
+16
+28
+38
+insert plug
+66 62
+74
+lift can
+64
+74 82
+unscrew cap
+Figure 1. Overview of TacInno. (a) The tactile change mixes a component explained by vision and executed actions with a contact
+response that only tactile input reveals. (b) The TacInno tokenizer encodes the contact response into the tactile innovation code. (c)
+Existing visuo-tactile VLA models versus TacInno, which uses the code solely as a training target. (d) Average and lowest per-task success
+rates on six UniVTAC tasks. (e) Success rates on four real-world tasks.
+Abstract
+Vision-Language-Action (VLA) models have recently been
+equipped with tactile sensing to perceive visually subtle
+contact events in contact-rich manipulation.
+However,
+adding tactile input yields inconsistent gains, and some
+visuo-tactile VLA models rely little on tactile input, because
+much of the tactile change, such as the gel deformation dur-
+ing gripper closure, is predictable from visual observations
+and executed actions. To address this problem, we introduce
+* Equal contribution.
+† Corresponding author.
+TacInno, which isolates the contact dynamics that vision
+and executed actions cannot explain, termed tactile innova-
+tion, and uses tactile innovation only as a training target.
+Specifically, the TacInno tokenizer, conditioned on visual
+observations and executed actions, compresses the future
+tactile change into a discrete code, and the policy, TacInno-
+VLA, learns to predict the code, adding no module for the
+code at deployment. TacInno-VLA achieves average suc-
+cess rates of 87.5% across six simulation tasks and 70.5%
+across four real-world tasks, outperforming the strongest
+visuo-tactile baseline by 10.7 and 9.0 percentage points,
+1
+arXiv:2611.26405v1  [cs.RO]  19 Nov 2026
+
+
+respectively. Ablation studies validate the contributions of
+visual and action conditioning, multi-frame encoding, and
+auxiliary code prediction. Together, these results demon-
+strate the effectiveness of tactile innovation as a supervision
+signal for contact-rich manipulation.
+1. Introduction
+Vision-Language-Action (VLA) models have emerged as a
+promising approach to general-purpose robotic manipula-
+tion [4, 5, 19, 27]. Building on pretrained Vision-Language
+Models (VLMs), VLA models learn to predict robot ac-
+tions from visual observations, language instructions, and
+proprioceptive states through imitation learning [3]. Nev-
+ertheless, contact-rich manipulation remains challenging,
+as critical contact events, such as incipient slip and jam-
+ming during insertion, are often difficult to infer from ex-
+ternal visual observations. To capture contact events, re-
+cent efforts augment VLA models with tactile observa-
+tions [2, 11, 16, 22, 26, 38, 40, 42, 44], typically acquired
+by vision-based tactile sensors such as GelSight [41] and
+DIGIT [20], which capture the deformation of a soft gel.
+Existing visuo-tactile policies incorporate tactile obser-
+vations as additional inputs [16, 32, 40, 43, 49], predict fu-
+ture tactile signals [9, 13, 33, 38, 46], or emphasize tactile
+changes during training [10, 25, 36, 37, 45] (Fig. 1c). How-
+ever, incorporating tactile inputs yields inconsistent gains
+and can even reduce the success rate relative to the same
+VLA without tactile inputs [40, 44]. Moreover, we apply
+a tactile-off test, which removes tactile input at test time,
+and find that the success rates of some existing policies
+change little, indicating limited reliance on tactile infor-
+mation (Sec. 4.4). We attribute the inconsistent gains and
+the limited reliance to the nature of the tactile signal, since
+a tactile sensor measures how the contact responds to the
+robot’s own actions. Consequently, given the initial tactile
+observation, a substantial portion of the subsequent tactile
+change, such as the gel deformation during gripper closure,
+is predictable from visual observations and executed actions
+(Sec. 4.5, Fig. 1a). As an input, the predictable portion is
+largely redundant, and adding an input modality can even
+degrade performance [34]. When future tactile signals are
+the prediction target, the predictable portion makes up most
+of the target, so the prediction loss is dominated by changes
+that vision and executed actions already explain. Weight-
+ing the loss by the magnitude of tactile change does not
+help, since the largest changes are often the predictable ones
+(Fig. 4). A central question arises: How can the contact dy-
+namics that vision and executed actions cannot explain be
+isolated and used to guide VLA policy learning?
+To answer this question, we propose TacInno, which
+isolates the contact dynamics that vision and executed ac-
+tions cannot explain as the supervision signal for VLA
+training. Inspired by the notion of innovation in estima-
+tion theory [17, 18], we define tactile innovation as the
+residual tactile change after accounting for the initial tac-
+tile observation, visual observations, and executed actions.
+Three properties of tactile innovation determine the design
+of TacInno. First, tactile innovation is conditional on visual
+observations and executed actions. We therefore introduce
+the TacInno tokenizer, which learns a compact discrete code
+as a proxy for tactile innovation and conditions both its en-
+coder and decoder on the corresponding visual observations
+and executed actions, so that the code retains the contact
+dynamics that the two conditions cannot explain (Fig. 1b).
+Second, tactile innovation is dynamic, arising from transient
+contact events, such as incipient slip, that span several con-
+trol steps. The tokenizer therefore encodes a short sequence
+of tactile observations with causal temporal attention rather
+than a single pair of frames. Third, tactile innovation lies
+in the future and is unavailable when the policy acts. We
+therefore train TacInno-VLA to predict the code from cur-
+rent observations as an auxiliary objective, supervising the
+tactile representations used for action prediction. The code
+serves only as a training target, and the tokenizer and auxil-
+iary prediction heads are removed at deployment.
+We evaluate TacInno on six contact-rich tasks from the
+UniVTAC benchmark [8] and four real-world tasks using
+a Franka FR3 robot equipped with a vision-based tactile
+sensor.
+TacInno-VLA achieves average success rates of
+87.5% in simulation and 70.5% in the real world, the highest
+among the evaluated visuo-tactile policies. Ablation studies
+verify the contribution of each design, and the tactile-off
+test confirms that TacInno-VLA relies on tactile input.
+Our contributions are summarized as follows:
+• With the tactile-off test, we show that some existing
+visuo-tactile policies rely little on tactile input, attribute
+the limited reliance to the redundancy of the tactile sig-
+nal, and propose to separate the tactile change that vision
+and executed actions cannot explain, termed tactile inno-
+vation.
+• We propose TacInno, which encodes tactile innovation
+into a discrete code with a conditional multi-frame tok-
+enizer and uses the code solely as an auxiliary training
+target, adding no module for the code at deployment.
+• TacInno-VLA outperforms the strongest visuo-tactile
+baseline by 10.7 and 9.0 percentage points in average suc-
+cess rate in simulation and the real world, respectively.
+The success rate of TacInno-VLA drops from 88% to 0%
+on Lift Can under the tactile-off test and by 21 percent-
+age points on the lifting tasks when the code encodes the
+entire tactile change.
+2. Related Work
+Visuo-tactile policy learning.
+Earlier visuo-tactile poli-
+cies fuse tactile images [15, 21, 23] or pretrained tactile
+2
+
+
+representations [14, 47] with visual features in imitation-
+learning policies such as ACT [48] and Diffusion Pol-
+icy [12]. Recent methods extend tactile sensing to VLA
+models in three progressive directions (Fig. 1c). The first
+incorporates tactile observations as additional inputs and re-
+lies on the action loss alone to determine how the tactile in-
+puts are used [2, 11, 16, 22, 26, 32, 40, 42, 43, 49]. Because
+the action loss rewards only what improves the imitated ac-
+tions, the policy is not required to use the tactile inputs,
+and the gains are modest and occasionally negative [40, 44].
+FACT [29] further replaces the tactile input with noise to ex-
+amine how much of the reported gain originates from tactile
+information. The second direction therefore assigns the tac-
+tile signal an objective of its own and predicts future tactile
+signals, either within the policy [9, 13, 24, 38] or through
+tactile world models [33, 46]. Since predicting every fu-
+ture tactile signal spends much of the supervision on peri-
+ods in which the contact hardly changes, the third direction
+emphasizes tactile changes during training by weighting or
+gating the tactile signal according to the magnitude of its
+change [10, 25, 36, 37, 45]. However, the second and third
+directions still supervise the tactile representation with the
+entire future tactile change, including the component that
+vision and executed actions already explain. Our method
+extends this progression by supervising only the compo-
+nent that vision and executed actions cannot explain. The
+closest work, ResTacVLA [44], uses the quantized residual
+between visually predicted and observed tactile representa-
+tions as a policy input, whereas our code encodes the future
+tactile change that vision and executed actions cannot ex-
+plain and serves only as a training target.
+Discrete latent dynamics learning.
+Vector-quantized
+variational autoencoders (VQ-VAEs) [31] learn compact
+discrete representations by mapping continuous features to
+entries in a learned codebook and reconstructing observa-
+tions from the quantized codes.
+Vector quantization has
+been extended to temporal modeling, where discrete la-
+tent variables capture transitions between observations. Ge-
+nie [6] learns latent actions from unlabeled videos to enable
+controllable video generation. LAPA [39] employs a VQ-
+VAE-based action tokenizer to extract discrete latent actions
+from video transitions, which serve as supervision for VLA
+pretraining. UniVLA [7] further incorporates language con-
+ditioning into inverse- and forward-dynamics learning to
+obtain task-centric latent actions. Building on discrete la-
+tent dynamics learning, our method applies vector quanti-
+zation to tactile observations. The encoder compresses a se-
+quence of tactile observations into discrete codes, while the
+decoder reconstructs future tactile changes conditioned on
+the current tactile state, visual observations, and executed
+actions.
+Unlike latent action models, which infer unob-
+served actions, our tokenizer is trained on demonstrations
+with known actions and therefore provides the actions to
+both the encoder and the decoder. With conditional recon-
+struction, the codes retain only the contact dynamics that
+the conditioning information cannot explain.
+3. Method
+In this section, we present TacInno in three parts (Figs. 2
+and 3). First, Sec. 3.1 formulates the problem and defines
+tactile innovation. Then, Sec. 3.2 presents the TacInno to-
+kenizer, which isolates tactile innovation from demonstra-
+tions and labels each demonstration frame with a discrete
+code. Finally, Sec. 3.3 describes TacInno-VLA, which is
+trained to predict the code as an auxiliary objective.
+3.1. Problem Formulation
+At control step t, the policy receives visual observations
+ot, a language instruction ℓ, the proprioceptive state qt, and
+the tactile observation Xt, which comprises the indentation
+depth map and the marker displacement field of the vision-
+based tactile sensors. The policy predicts an action chunk
+at+1:t+H over the next H steps, where at+i denotes the
+offset of the joint target at step t+i from qt. The policy is
+trained by imitation learning on expert demonstrations.
+Tactile innovation.
+To characterize the tactile change af-
+ter step t, we sample four time steps, t, t+5, t+10, and
+t+15, and index the last three as t+5k with k ∈{1, 2, 3}.
+Visual and tactile observations are sampled only at the
+four time steps, denoted ot:t+5k = (ot, ot+5, . . . , ot+5k),
+whereas actions are taken at every control step, denoted
+at+1:t+5k = (at+1, . . . , at+5k).
+The cumulative tactile
+change is defined as
+∆Xt:t+5k = Xt+5k −Xt,
+k ∈{1, 2, 3}.
+(1)
+Conditioned on the current tactile observation Xt, the visual
+observations ot:t+5k, and the executed actions at+1:t+5k,
+the cumulative tactile change decomposes as
+∆Xt:t+5k = E
+
+∆Xt:t+5k | Xt, ot:t+5k, at+1:t+5k
+
+|
+{z
+}
+predictable from vision and actions
++
+νt:t+5k
+| {z }
+tactile innovation
+,
+(2)
+where the first term denotes the component predictable from
+the visual observations and executed actions, and the resid-
+ual νt:t+5k denotes the component that the two conditions
+cannot explain, which we term tactile innovation. Since
+the conditions include the visual observations up to t+5k,
+a contact response that has become visible is explained by
+the first term, and ν retains only the contact responses that
+the visual observations have not yet revealed. Future visual
+3
+
+
+Encoder     Spatial-Temporal Transformer
+Decoder     Spatial-Temporal Transformer
+code  ct
+codebook
+t
+Conv DINOv2
+tactile
+images
+padding
+queries
+t + 5
+Conv DINOv2 MLP
+tactile
+images
+actions
+queries
+t + 10
+Conv DINOv2 MLP
+tactile
+images
+actions
+queries
+t + 15
+Conv DINOv2 MLP
+tactile
+images
+actions
+queries
+zt
+t
+t + 5
+t + 10
+t + 15
+code
+tactile
+images
+padding
+no prediction
+at frame t
+code
+mask tokens
+images
+actions
+prediction
+target
+ℒrec
+code
+mask tokens
+images
+actions
+prediction
+target
+ℒrec
+code
+mask tokens
+images
+actions
+prediction
+target
+ℒrec
+spatial attention
+causal temporal attention
+executed action
+learned token
+code token
+frozen
+Image and action conditioning
+the code holds what
+images and actions
+cannot explain
+𝒟(Xt, ct)
+ct ≈ ΔX
+𝒟(Xt, ct; o, a)
+o, a
+ct ≈ ν
+Figure 2. Architecture of the TacInno tokenizer. The encoder compresses the tactile observations from t to t+15 into the 16-bit code
+ct, and the decoder reconstructs the future tactile change from Xt and ct. The encoder and the decoder are both conditioned on visual
+observations and executed actions, so that ct retains tactile innovation (lower left).
+observations are included because a closed-loop policy per-
+ceives any contact response that becomes visible within the
+window through its cameras at subsequent steps, so tactile
+sensing only needs to provide what the visual observations
+have not yet revealed.
+3.2. TacInno Tokenizer
+Tactile innovation cannot be computed directly from
+demonstrations, because the conditional expectation in
+Eq. (2) is unknown and must be estimated from a finite
+set of demonstrations.
+Moreover, even if ν were avail-
+able, ν would be a per-pixel change field over both tac-
+tile sensors with the same dimensionality as Xt, which is
+too high-dimensional to serve as a prediction target for the
+policy.
+We therefore learn a 16-bit discrete code ct =
+(c(1)
+t , . . . , c(4)
+t ) ∈{0, . . . , 15}4 as a compact proxy for ν,
+comprising four tokens that each take one of 16 values.
+Tokenizer architecture.
+Figure 2 illustrates the overall
+architecture of the tokenizer. Since isolating ν is equiva-
+lent to compressing the information that a window of tactile
+observations carries beyond the visual observations and ex-
+ecuted actions, we adopt the encoder-decoder structure of
+latent action models [6, 7, 39], which can be compactly ex-
+pressed as
+zt = E
+ Xt:t+15; ot:t+15, at+1:t+15
+
+,
+ct = VQ(zt),
+{d
+∆Xt:t+5k}3
+k=1 = D
+ Xt, ct; ot:t+15, at+1:t+15
+
+,
+(3)
+where the encoder E, an inverse dynamics model, takes
+the four tactile observations of the window as input and
+compresses the tactile change into four latent vectors zt =
+(z(1)
+t
+, . . . , z(4)
+t
+). VQ denotes vector quantization [31] with
+a separate codebook Cs of 16 learnable vectors for each to-
+ken s, and c(s)
+t
+is the index of the vector in Cs nearest to
+z(s)
+t . The codebooks are trained jointly with the encoder
+and the decoder under the VQ-VAE objective. The decoder
+D, a forward dynamics model, then reconstructs the tactile
+changes at the three future time steps from the current tac-
+tile observation Xt and the code ct in a single forward pass.
+Since the inputs after the semicolons serve as conditions and
+temporal attention is causal, the k-th output is conditioned
+only on ot:t+5k and at+1:t+5k, as in Eq. (2).
+Visual and action conditioning.
+The conditions deter-
+mine the content of the code. Information that the decoder
+receives directly need not be encoded in the code. Given
+Xt alone, the code would have to encode the entire tactile
+change, whereas a decoder that also receives the visual ob-
+servations and executed actions has access to all variables
+on which the first term of Eq. (2) depends. Since the de-
+coder receives no tactile observation after t, information
+about ν reaches the decoder only through ct, and the re-
+construction objective thus encourages the 16-bit code to
+encode ν [1]. The encoder receives the same conditions,
+which allows the encoder to identify the tactile changes that
+the conditions already explain.
+Implementation and training.
+We implement E and D
+as spatial-temporal Transformers [6] with spatial attention
+within each frame and causal temporal attention across
+frames.
+Each of the four time steps corresponds to one
+frame composed of tactile, image, and action tokens, where
+the image features are extracted by a frozen DINOv2 [28]
+(Fig. 2). The encoder appends four learnable queries to each
+frame. Since temporal attention is causal, only the queries
+of frame t+15 attend to the entire window, and the outputs
+4
+
+
+head + wrist images
+"lift
+the can"
+instruction
+proprio
+tactile history
+code
+queries
+learned noisy actions
+SigLIP
+tokenizer
+MLP
+MLP
+tactile encoder
+…
+…
+…
+SigLIP + PaliGemma
+VLM prefix
+action expert
+flow matching
+K/V
+action chunk
+training only
+contact-state
+prediction head
+code
+prediction head
+contact state
+tactile innovation code
+from the frozen TacInno tokenizer
+ℒcontact
+ℒcode
+deployment
+TacInno-VLA
+no TacInno tokenizer, no extra head
+attention mask
+row attends to
+column
+prefix
+prefix
+proprio
+proprio
+tactile
+tactile
+queries
+queries
+actions
+actions
+ℒflow
+Figure 3. Architecture of TacInno-VLA. Tactile tokens and four
+learnable code queries are inserted into the action expert of π0.5.
+During training, two auxiliary heads predict the tactile innovation
+code from the code queries and the current contact state from the
+tactile tokens. The attention mask (left) prevents all other tokens
+from attending to the code queries. At deployment (top left), the
+TacInno tokenizer and both auxiliary heads are removed.
+of the queries of frame t+15 form the four vectors of zt.
+The decoder reconstructs d
+∆Xt:t+5k from learnable mask
+tokens in the future frames and is supervised by ∆Xt:t+5k
+with a contact-weighted L1 loss. The trained tokenizer la-
+bels every demonstration frame with a code ct.
+3.3. TacInno-VLA Policy
+The code ct of each demonstration frame is provided to the
+policy as a training target rather than an input, since ct sum-
+marizes future observations that are unavailable when the
+policy acts. The policy must therefore learn to predict ct
+from the inputs available at step t, which is feasible because
+early signs of tactile innovation, such as the shear that in-
+creases before slip, often appear in the preceding tactile ob-
+servations. To this end, we equip the VLA with a tactile
+branch that encodes three tactile observations and is super-
+vised by the code prediction loss (Fig. 3).
+Policy architecture.
+TacInno-VLA is built upon the pre-
+trained VLA π0.5 [3], which combines a PaliGemma VLM
+backbone with a Gemma 300M action expert trained with
+flow matching. The backbone encodes the visual observa-
+tions and the language instruction into prefix tokens, and
+the action expert attends to the prefix tokens to generate ac-
+tions. We insert three groups of condition tokens before the
+noisy action tokens of the action expert. The three groups
+are proprioceptive tokens encoded from qt, 60 tactile tokens
+encoded by a lightweight Transformer tactile encoder from
+the three tactile observations (t−8, t−4, and t), and four
+learnable code queries u1, . . . , u4, which are used solely to
+predict the tactile innovation code.
+We adopt a block-wise attention mask under which the
+code queries attend to the prefix, proprioceptive, and tac-
+tile tokens, whereas no other token, including the action to-
+kens, attends to the code queries, so the outputs of the code
+queries never influence action prediction. During training,
+the gradient of the code prediction loss in Eq. (4) reaches the
+rest of the network only through the tokens attended by the
+code queries. Since the action tokens attend to the same to-
+kens, the code prediction loss shapes the tactile representa-
+tions used for action prediction. Allowing the action tokens
+to attend to the code queries would let the code prediction
+loss bypass the shared tactile representations (Sec. 4.3).
+Training objectives.
+Let hs denote the final-layer hidden
+state of us. The code prediction head consists of four per-
+token classifiers, where the s-th classifier maps hs to a dis-
+tribution ps(· | hs) over the 16 values of c(s)
+t . The head is
+supervised by the code ct from the tokenizer with the code
+prediction loss, defined as
+Lcode = −1
+4
+4
+X
+s=1
+log ps(c(s)
+t
+| hs).
+(4)
+Predicting tactile innovation also requires estimating the
+current contact state, since tactile innovation is a devia-
+tion from the current contact state. We therefore attach a
+contact-state prediction head to the tactile encoder, which
+predicts contact properties such as contact area, shear, and
+indentation depth and yields the contact-state loss Lcontact.
+The final training objective is defined as
+L = Lflow + λcontactLcontact + λcodeLcode,
+(5)
+where Lflow is the flow matching loss of the VLA, and the
+weights λcontact and λcode are set such that each auxiliary
+loss equals 15% of Lflow at the beginning of training.
+Training and deployment.
+The policy is initialized from
+the pretrained weights of the VLA and trained end-to-end
+on the demonstrations with Eq. (5), where the codes are
+precomputed by the tokenizer of Sec. 3.2. Since neither the
+tokenizer nor the two auxiliary heads are required for action
+prediction, all three are removed at deployment, and the de-
+ployed model is the VLA with a 60-token tactile branch.
+4. Experiments
+We describe the experimental setup in Sec. 4.1, compare
+TacInno-VLA with visuo-tactile baselines in simulation in
+5
+
+
+Table 1. Comparison of TacInno-VLA and baselines on UniVTAC. All policies are trained on the same 50 demonstrations per task. We
+report closed-loop success rates (%), with rows sorted by average success rate in ascending order. Bold and underlined values denote the
+best and second-best results, respectively.
+Method
+Tactile
+Insert Hole ↑
+Insert Tube ↑
+Lift Bottle ↑
+Lift Can ↑
+Pull-out Key ↑
+Put Bottle ↑
+Avg. ↑
+UniVTAC-ACT [8, 48]
+input
+46
+55
+49
+27
+41
+25
+40.5
+π0.5 [3]
+none
+88
+70
+26
+25
+36
+40
+47.5
+FTP-π0.5 [40]
+input
+77
+99
+45
+33
+19
+88
+60.2
+FTP-1 [40]
+input
+63
+99
+61
+94
+40
+88
+74.2
+N0-VTLA [26]
+input
+99
+90
+24
+81
+77
+81
+75.3
+SimpleTouch [38]
+input + predict
+94
+93
+82
+65
+54
+73
+76.8
+TacInno-VLA (ours)
+input + innovation target
+95
+95
+78
+88
+94
+75
+87.5
+Sec. 4.2, and ablate each design in Sec. 4.3. Section 4.4 ex-
+amines whether each policy relies on tactile input, Sec. 4.5
+verifies that a substantial portion of the tactile change is pre-
+dictable from vision and executed actions, and Sec. 4.6 eval-
+uates TacInno-VLA in the real world.
+4.1. Experimental Setup
+Benchmark and data.
+We adopt six tasks from the Uni-
+VTAC benchmark [8], namely Insert Hole, Insert Tube, Lift
+Bottle, Lift Can, Pull-out Key, and Put Bottle in Shelf (Put
+Bottle), simulated in Isaac Sim with two vision-based tac-
+tile sensors [41] rendered by Taxim [30]. Each task pro-
+vides 100 expert demonstrations, of which demonstrations
+0 to 49 are used to train the policies, 0 to 89 to train the
+tokenizer, and 90 to 99 are held out for analysis. We further
+set up four real-world tasks, namely wiping a board, insert-
+ing a plug into a power strip, lifting a lying can upright, and
+unscrewing a bottle cap, with a Xense vision-based tactile
+sensor on the fingertip of a Franka FR3 gripper (Sec. 4.6).
+For each real-world task, we collect 50 demonstrations by
+teleoperation with GELLO [35] at 30 Hz, of which the first
+45 train the policies and the tokenizer. Each policy is eval-
+uated for 100 episodes per task with identical random seeds
+in simulation (Tabs. 1 and 2) and for 50 trials per task in the
+real world.
+Baselines.
+We compare TacInno-VLA against five visuo-
+tactile baselines, namely UniVTAC-ACT, the visuo-tactile
+ACT provided by the benchmark [8, 48], FTP-π0.5 and
+FTP-1 (Foundation Tactile Policy) [40], N0-VTLA [26],
+and SimpleTouch [38]. We also report π0.5 [3], the VLA on
+which TacInno-VLA is built, fine-tuned as a multi-task pol-
+icy without tactile input. For fair comparison, all baselines
+are retrained on the same demonstrations with the official
+configurations, including the action execution horizon, and
+evaluated under the same protocol.
+4.2. Simulation Experiment
+As shown in Tab. 1, TacInno-VLA achieves an average suc-
+cess rate of 87.5% across the six tasks, 10.7 and 12.2 per-
+centage points above the two strongest baselines, Simple-
+Touch and N0-VTLA. Moreover, TacInno-VLA is the only
+policy that reaches at least 75% on every task, whereas each
+baseline drops to 54% or below on at least one task. With
+the execution horizon of TacInno-VLA, the baselines av-
+erage 82.0% (FTP-1), 79.3% (SimpleTouch), 78.0% (N0-
+VTLA), and 68.0% (FTP-π0.5), all below the 91.3% of
+TacInno-VLA on the same seeds. Note that TacInno-VLA
+requires no tactile pretraining, whereas FTP-1 and N0-
+VTLA are initialized from policies pretrained on external
+visuo-tactile data, and SimpleTouch employs a frozen en-
+coder pretrained on external tactile data.
+4.3. Ablation Study
+Section 1 attributes the limited benefit of tactile input to
+the redundancy of the tactile signal and derives three de-
+signs from the attribution. To verify each design, Tab. 2 re-
+moves or alters one design of TacInno-VLA at a time on the
+two lifting tasks, on which the tactile-off test distinguishes
+TacInno-VLA from the baselines (Sec. 4.4). The variant
+without tactile input is the π0.5 of Tab. 1, and every other
+variant follows the training recipe, data, random seeds, and
+action execution horizon of TacInno-VLA. All differences
+refer to the success rate averaged over the two tasks.
+Impact of visual and action conditioning.
+To verify the
+necessity of conditioning, we remove the visual observa-
+tions and executed actions from both the encoder and the
+decoder of the tokenizer, so that the code encodes the en-
+tire future tactile change (w/o conditioning), which lowers
+the average success rate by 21 points. Conditioning the tok-
+enizer on the visual observations alone, as in a visual resid-
+ual [44] (vision-only conditioning), recovers only part of
+the drop, and the average success rate remains 13.5 points
+lower. On held-out Lift Can demonstrations, the fraction
+6
+
+
+Table 2. Ablation study on the two lifting tasks. We report suc-
+cess rates (%). The variant w/o tactile input is the π0.5 of Tab. 1,
+and every other variant differs from TacInno-VLA in one design.
+Variant
+Lift Can ↑
+Lift Bottle ↑
+Avg. ↑
+TacInno-VLA
+88
+78
+83.0
+w/o conditioning
+63
+61
+62.0
+vision-only conditioning
+62
+77
+69.5
+two-frame code
+81
+72
+76.5
+w/o attention mask
+66
+70
+68.0
+w/o code loss
+84
+68
+76.0
+w/o tactile input
+25
+26
+25.5
+of the tactile change that the decoder explains only through
+the code is 48% without conditioning, 40% with the visual
+observations alone, 23% with the executed actions alone,
+and 13% with both conditions. The action-induced change
+is therefore removed by the executed actions rather than by
+the visual observations, and continues to dominate a code
+conditioned on vision alone.
+Impact of the multi-frame window.
+To examine whether
+the code must describe a sequence of tactile observations,
+we compute the code from only the two endpoints of the
+window, t and t+15 (two-frame code), while keeping the
+policy unchanged. The average success rate drops by 6.5
+points, since a code computed from the two endpoints
+misses the contact events that occur within the window.
+Impact of the attention mask.
+To examine whether the
+code must serve as a training target rather than an input, we
+allow the action tokens to attend to the code queries (w/o at-
+tention mask). The average success rate drops by 15 points,
+demonstrating that the code is most effective when action
+prediction cannot access the code queries.
+Impact of the tactile branch and the code prediction loss.
+Removing the tactile branch (w/o tactile input) and the code
+prediction loss (w/o code loss) reduces the average success
+rate by 57.5 and 7 points, respectively. The tactile branch
+provides the tactile signal, whereas the code prediction loss
+determines which part of the tactile signal the policy retains.
+4.4. Analysis of Tactile Reliance
+A higher success rate does not by itself indicate that a pol-
+icy relies on tactile input. We therefore apply the tactile-off
+test, which replaces the tactile input with a fixed no-contact
+frame at test time and keeps all other inputs unchanged, so
+that any change in the success rate is attributable solely to
+tactile input. Table 3 reports the results on the two lifting
+tasks, in which the object must be grasped firmly enough
+to be lifted yet loosely enough to rotate in the grasp. Re-
+moving tactile input reduces the success rate of TacInno-
+Table 3. Tactile-off test on the two lifting tasks. The first two
+columns report the relative drop in closed-loop success rate, com-
+puted on the same seeds with and without tactile input (100 seeds
+on Lift Can and 25 on Lift Bottle, except 25 on both tasks for
+UniVTAC-ACT and 100 on both for N0-VTLA). The last two
+columns report the relative change in the error of the predicted arm
+and gripper actions on held-out Lift Can demonstrations. Positive
+values indicate reliance on tactile input.
+Closed-loop
+success drop
+Open-loop action
+change, Lift Can
+Policy
+Lift Can
+Lift Bottle
+Arm
+Gripper
+N0-VTLA [26]
+5%
+8%
+−6%
++4%
+FTP-1 [40]
+15%
+−27%
+−1%
++45%
+SimpleTouch [38]
+15%
+5%
++5%
++84%
+UniVTAC-ACT [8, 48]
+17%
+58%
++9%
++50%
+TacInno-VLA (ours)
+100%
+95%
++156%
++238%
+VLA from 88% to 0% on Lift Can and to 4% on Lift Bottle,
+whereas N0-VTLA, FTP-1, and SimpleTouch retain most
+of their success rates, and FTP-1 even improves on Lift Bot-
+tle. Without tactile input, TacInno-VLA reaches the can but
+fails to lift the can, whereas FTP-1 still completes the task.
+The open-loop results on Lift Can are consistent with the
+closed-loop results. On held-out demonstrations, the same
+replacement increases the errors of the arm and gripper ac-
+tions predicted by TacInno-VLA by 156% and 238%, re-
+spectively, far more than for any baseline. On tasks whose
+outcome depends on the grasp, the actions of TacInno-VLA
+therefore depend on tactile input.
+4.5. Analysis of Tactile Innovation
+Predictability of the tactile change.
+To verify the de-
+composition in Eq. (2) at the dataset level, we train probes
+on the six tasks to predict the code without conditioning
+and the tactile innovation code, each from the context alone
+(task, visual observations, proprioceptive state, and exe-
+cuted future actions) or from the context together with the
+tactile history, and measure in nats, on the held-out demon-
+strations, the information that the tactile history adds be-
+yond the context. For the code without conditioning, which
+encodes the entire future tactile change, the tactile history
+adds only 0.020 nats, so the context alone already accounts
+for 97% of the information extracted with the tactile his-
+tory. For the tactile innovation code, the tactile history adds
+0.073 nats, 3.6× as much. The entire future tactile change,
+which tactile world models use as the prediction target, is
+therefore largely predictable without tactile input.
+Temporal distribution of tactile innovation.
+Measured
+with the tokenizer on held-out demonstrations, the fraction
+of the tactile change that visual observations and executed
+actions cannot explain averages 37% over the six tasks. On
+the held-out Lift Can demonstrations, the decoder output
+7
+
+
+a  t = 10
+approach
+b  t = 20
+contact forms
+c  t = 80
+starts to turn
+d  t = 140
+turning, visible
+e  t = 200
+upright
+head
+camera
+true tactile
+change
+from images
++ actions
+added by
+the code
+0
+0.5
+1
+0
+50
+100
+150
+200
+control step t
+a b
+c
+d
+e
+|ΔX| (normalized)
+fraction explained by the code
+can tilt
+Figure 4. Temporal distribution of tactile innovation on a held-out Lift Can demonstration. The left panel shows, at five time steps,
+the head-camera image, the tactile change over the next 15 steps, and the components explained by visual observations and executed
+actions (blue) and by the code (orange). The right panel shows the magnitude of the tactile change (gray), the fraction explained by the
+code (orange), and the can tilt angle (dashed). The fraction explained by the code peaks before contact onset (a) and at incipient slip (c).
+averaged over the distribution of codes explains 65%, 78%,
+and 87% of the squared future tactile change at +5, +10,
+and +15 steps, respectively, and the code explains a fur-
+ther 25%, 16%, and 7%. The fraction explained by the code
+peaks immediately before contact onset and at incipient slip,
+when the contact state is about to change, and vanishes once
+the motion of the can becomes visible in the visual observa-
+tions (Fig. 4).
+Effect of the code prediction loss on the policy.
+We
+probe the tactile tokens in the action expert of TacInno-
+VLA and of the variant without the code prediction loss,
+both fine-tuned on Lift Can, using per-token linear classi-
+fiers for ct on held-out Lift Can windows. The probe per-
+forms comparably on the tactile tokens of the two policies
+at the input layer of the action expert, but within the ac-
+tion expert the two policies differ on the 10% of windows
+with the largest tactile innovation, where the tactile tokens
+of TacInno-VLA predict the code with a top-1 accuracy of
+49.0%, compared with 38.6% for the variant without the
+code prediction loss. Tactile input also modulates the atten-
+tion of TacInno-VLA. After accounting for the magnitude
+of the tactile change, the attention from the action tokens
+to the tactile tokens correlates with tactile innovation, and
+replacing the tactile input with a no-contact frame removes
+90% of the correlation, compared with 13% for the variant
+without the code prediction loss. The code prediction loss
+therefore alters the tactile information that the action expert
+retains.
+4.6. Real-World Experiment
+We evaluate TacInno-VLA on four contact-rich real-world
+tasks against two visuo-tactile baselines, FTP-1 and Simple-
+Touch, and three ablated settings of TacInno-VLA, namely
+without tactile input, without the code prediction loss, and
+Table 4. Real-world experiments. All policies are trained on the
+same demonstrations of each task, and we report success rates (%).
+The visuo-tactile baselines are listed separately from the ablated
+settings and our method.
+Policy
+Wipe
+Board ↑
+Insert
+Plug ↑
+Lift
+Can ↑
+Unscrew
+Cap ↑
+Avg. ↑
+FTP-1 [40]
+88
+16
+66
+64
+58.5
+SimpleTouch [38]
+82
+28
+62
+74
+61.5
+TacInno-VLA, tactile-off
+52
+10
+46
+52
+40.0
+w/o code loss
+62
+22
+50
+56
+47.5
+w/o tactile input
+62
+14
+52
+78
+51.5
+TacInno-VLA (ours)
+88
+38
+74
+82
+70.5
+under the tactile-off test. All policies are trained on the
+same demonstrations. From the depth and marker estimates
+of the sensor, we compute the same indentation depth map
+and marker displacement field as in simulation. A trial is
+counted as successful when the writing is wiped off the
+board, the plug is fully inserted, the can stands upright, or
+the cap is separated from the bottle, with the same criteria
+for all policies. As shown in Tab. 4, TacInno-VLA achieves
+an average success rate of 70.5%, surpassing SimpleTouch
+and FTP-1 by 9.0 and 12.0 percentage points, respectively,
+as well as all three ablated settings. The code prediction
+loss improves every real-world task by 16 to 26 percent-
+age points. The comparable success rates of the variants
+without the code prediction loss (47.5%) and without tac-
+tile input (51.5%) indicate that, on the real-world tasks, the
+tactile branch is beneficial only when trained with tactile
+innovation as the target.
+5. Conclusion
+In this work, we address the redundancy of the tactile sig-
+nal in visuo-tactile VLA models, where a substantial por-
+8
+
+
+tion of the tactile change is predictable from vision and exe-
+cuted actions. To this end, we introduce TacInno, which iso-
+lates tactile innovation and uses tactile innovation solely as
+a training target. Central to TacInno is a conditional multi-
+frame tokenizer that encodes tactile innovation into a 16-
+bit discrete code, which TacInno-VLA predicts as an aux-
+iliary objective. Experiments on six simulation tasks and
+four real-world tasks show that TacInno-VLA achieves the
+highest average success rates among the evaluated visuo-
+tactile policies and relies on tactile input, and that removing
+the conditioning from the tokenizer lowers the success rate
+by 21 percentage points. The notion of innovation is not
+specific to tactile sensing, and extending TacInno to other
+modalities is left for future work.
+LLM Usage Statement
+Claude was used to assist with coding,
+manuscript
+polishing,
+and result visualization.
+All AI-assisted
+outputs
+were
+reviewed
+and
+verified
+by
+the
+au-
+thors,
+who
+take
+full
+responsibility
+for
+this
+work.
+References
+[1] Alexander A. Alemi, Ian Fischer, Joshua V. Dillon, and
+Kevin Murphy.
+Deep variational information bottleneck.
+In International Conference on Learning Representations,
+2017. 4
+[2] Jianxin Bi, Kevin Yuchen Ma, Ce Hao, Mike Zheng Shou,
+and Harold Soh. VLA-Touch: Enhancing vision-language-
+action models with dual-level tactile feedback.
+IEEE
+Robotics and Automation Letters, 11(7):8487–8494, 2026.
+2, 3
+[3] Kevin Black, Noah Brown, James Darpinian, Karan Dha-
+balia, Danny Driess, Adnan Esmail, Michael Equi, Chelsea
+Finn, Niccolo Fusai, et al. π0.5: A vision-language-action
+model with open-world generalization.
+In Conference on
+Robot Learning, pages 17–40, 2025. 2, 5, 6
+[4] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. In Robotics:
+Science and Systems, 2025. 2
+[5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding,
+Danny Driess, Avinava Dubey, Chelsea Finn, et al. RT-2:
+Vision-language-action models transfer web knowledge to
+robotic control. In Conference on Robot Learning, 2023. 2
+[6] Jake Bruce, Michael Dennis, Ashley Edwards, Jack Parker-
+Holder, Yuge Shi, Edward Hughes, Matthew Lai, Aditi
+Mavalankar, Richie Steigerwald, Chris Apps, et al. Genie:
+Generative interactive environments. In Proceedings of the
+41st International Conference on Machine Learning, 2024.
+3, 4
+[7] Qingwen Bu, Yanting Yang, Jisong Cai, Shenyuan Gao,
+Guanghui Ren, Maoqing Yao, Ping Luo, and Hongyang Li.
+Learning to act anywhere with task-centric latent actions. In
+Robotics: Science and Systems, 2025. 3, 4
+[8] Baijun Chen, Weijie Wan, Tianxing Chen, Xianda Guo, Con-
+gsheng Xu, Yuanyang Qi, Haojie Zhang, Longyan Wu, Tian-
+ling Xu, Zixuan Li, et al.
+UniVTAC: A unified simula-
+tion platform for visuo-tactile manipulation data generation,
+learning, and benchmarking. In Conference on Robot Learn-
+ing, 2026. 2, 6, 7
+[9] Ruilin Chen, Jingkai Jia, Tong Yang, Xinyu Zhou, Qiao
+Sun, Jiangwei Zhong, Shizeng Zhang, Nuo Chen, Bailin
+He, Wei Li, et al.
+Representation-aligned tactile ground-
+ing for contact-rich robotic manipulation.
+arXiv preprint
+arXiv:2607.14609, 2026. 2, 3
+[10] Ning Cheng, Jinan Xu, Wanlin Li, Yangzhi Chen, Jing Gao,
+Yiqun Wang, Kelan Peng, and Wenjuan Han. τ: Learning
+touch-augmented vision-language-action models from future
+visual supervision. arXiv preprint arXiv:2607.24485, 2026.
+2, 3
+[11] Zhengxue Cheng, Yiqian Zhang, Anni Tang, Keyu Wang,
+Wenkang Zhang, Haoyu Li, Hengdi Zhang, and Li Song.
+OmniVTLA: Vision-tactile-language-action models with
+semantic-aligned tactile sensing.
+IEEE Robotics and Au-
+tomation Letters, 11(9):10146–10153, 2026. 2, 3
+[12] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun
+Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song.
+Diffusion policy: Visuomotor policy learning via action dif-
+fusion. In Robotics: Science and Systems, 2023. 3
+[13] Yankai Fu, Ning Chen, Junkai Zhao, Heng Zhang, Guo-
+cai Yao, Pengwei Wang, Zhongyuan Wang, and Shanghang
+Zhang.
+DeCAL: Towards physically-grounded dexterous
+vision-language-action models via contact-aware latent co-
+imagination. arXiv preprint arXiv:2609.09119, 2026. 2, 3
+[14] Carolina Higuera, Akash Sharma, Chaithanya Krishna Bod-
+duluri, Taosha Fan, Patrick Lancaster, Mrinal Kalakrishnan,
+Michael Kaess, Byron Boots, Mike Lambeta, Tingfan Wu,
+et al.
+Sparsh: Self-supervised touch representations for
+vision-based tactile sensing. In Conference on Robot Learn-
+ing, 2024. 3
+[15] Binghao Huang, Yixuan Wang, Xinyi Yang, Yiyue Luo, and
+Yunzhu Li. 3D-ViTac: Learning fine-grained manipulation
+with visuo-tactile sensing. In Conference on Robot Learning,
+2024. 2
+[16] Jialei Huang, Shuo Wang, Fanqi Lin, Yihang Hu, Chuan
+Wen, and Yang Gao.
+Tactile-VLA: Unlocking vision-
+language-action model’s physical knowledge for tactile gen-
+eralization. arXiv preprint arXiv:2507.09160, 2025. 2, 3
+[17] Thomas Kailath. An innovations approach to least-squares
+estimation—Part I: Linear filtering in additive white noise.
+IEEE Transactions on Automatic Control, 13(6):646–655,
+1968. 2
+[18] Rudolf E. Kalman. A new approach to linear filtering and
+prediction problems. Transactions of the ASME–Journal of
+Basic Engineering, 82(1):35–45, 1960. 2
+[19] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-
+ter, Grace Lam, Pannag Sanketi, et al.
+OpenVLA: An
+open-source vision-language-action model. In Conference
+on Robot Learning, 2024. 2
+9
+
+
+[20] Mike Lambeta, Po-Wei Chou, Stephen Tian, Brian Yang,
+Benjamin Maloon, Victoria Rose Most, Dave Stroud, Ray-
+mond Santos, Ahmad Byagowi, Gregg Kammerer, et al.
+DIGIT: A novel design for a low-cost compact high-
+resolution tactile sensor with application to in-hand manip-
+ulation. IEEE Robotics and Automation Letters, 5(3):3838–
+3845, 2020. 2
+[21] Michelle A. Lee, Yuke Zhu, Krishnan Srinivasan, Parth
+Shah, Silvio Savarese, Li Fei-Fei, Animesh Garg, and
+Jeannette Bohg.
+Making sense of vision and touch:
+Self-supervised learning of multimodal representations for
+contact-rich tasks.
+In IEEE International Conference on
+Robotics and Automation, pages 8943–8950, 2019. 2
+[22] Xiaoqi Li, Muhe Cai, Jiadong Xu, Juan Zhu, Hongwei Fan,
+Yan Shen, Guangrui Ren, and Hao Dong. AT-VLA: Adaptive
+tactile injection for enhanced feedback reaction in vision-
+language-action models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 28764–28774, 2026. 2, 3
+[23] Fangchen Liu, Chuanyu Li, Yihua Qin, Jing Xu, Pieter
+Abbeel, and Rui Chen.
+ViTaMIn: Learning contact-rich
+tasks through robot-free visuo-tactile manipulation interface.
+arXiv preprint arXiv:2504.06156, 2025. 2
+[24] Jiaming Liu, Xinghao Zhu, Yiming Zhang, Shanghang
+Zhang, Yinxi Wang, Yichu Yang, Zhuoyang Liu, Dantong
+Niu, Soha Pouya, Juekun Li, et al. Physical words: A vocab-
+ulary for structuring latent reasoning in robot manipulation.
+arXiv preprint arXiv:2610.26854, 2026. 3
+[25] Yunfan Lou, Yifan Ye, Yankai Fu, Jun Cen, Xiaowei Chi,
+Yaoxu Lyu, Peidong Jia, Sirui Han, Zhihe Lu, and Shang-
+hang Zhang.
+Dream-Tac: A unified tactile world action
+model for contact-rich robot manipulation. In Proceedings
+of the 34th ACM International Conference on Multimedia,
+pages 7089–7098, 2026. 2, 3
+[26] NeoteAI Team and Fudan TEAI Team.
+N0-VTLA: Scal-
+ing vision-tactile-language-action model with latent tactile
+tokens. arXiv preprint arXiv:2607.23782, 2026. 2, 3, 6, 7
+[27] NVIDIA, Johan Bjorck, Fernando Casta˜neda, Nikita Cher-
+niadev, Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Di-
+eter Fox, Fengyuan Hu, et al. GR00T N1: An open foun-
+dation model for generalist humanoid robots. arXiv preprint
+arXiv:2503.14734, 2025. 2
+[28] Maxime Oquab, Timoth´ee Darcet, Th´eo Moutakanni, Huy
+Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez,
+Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al.
+DINOv2: Learning robust visual features without supervi-
+sion. Transactions on Machine Learning Research, 2024. 4
+[29] Carlota Par´es-Morlans, Nils Kuhn, Y. Isabel Liu, Alberta
+Longhini, and Jeannette Bohg. Demystifying when and why
+VLAs fail in contact-rich tasks and how to fix them. In Con-
+ference on Robot Learning, 2026. 3
+[30] Zilin Si and Wenzhen Yuan. Taxim: An example-based sim-
+ulation model for GelSight tactile sensors. IEEE Robotics
+and Automation Letters, 7(2):2361–2368, 2022. 6
+[31] A¨aron
+van
+den
+Oord,
+Oriol
+Vinyals,
+and
+Koray
+Kavukcuoglu.
+Neural discrete representation learning.
+In Advances in Neural Information Processing Systems,
+2017. 3, 4
+[32] Mark Van der Merwe, Mohamad Louai Shehab, Jayjun Lee,
+Youngsun Wi, Yinpei Dai, Dmitry Berenson, and Nima
+Fazeli. TAP-VLA: Tactile annotation prompting for vision
+language action models. arXiv preprint arXiv:2606.29089,
+2026. 2, 3
+[33] Enyi Wang, Mingxin Wang, Quan Shi, Hetian Guo, Hongyu
+Wang, Xi Wang, Bin Qian, Yupeng Zheng, Wenxuan Song,
+Houde Liu, et al.
+TacDyn-WAM: Learning implicit tac-
+tile dynamics in a heterogeneous visuo-tactile world action
+model. arXiv preprint arXiv:2610.00638, 2026. 2, 3
+[34] Weiyao Wang, Du Tran, and Matt Feiszli. What makes train-
+ing multi-modal classification networks hard? In Proceed-
+ings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2020. 2
+[35] Philipp Wu, Yide Shentu, Zhongke Yi, Xingyu Lin, and
+Pieter Abbeel.
+GELLO: A general, low-cost, and intu-
+itive teleoperation framework for robot manipulators.
+In
+IEEE/RSJ International Conference on Intelligent Robots
+and Systems, pages 12156–12163, 2024. 6
+[36] Siyu Wu, Linjing You, Junjie Zhu, Yaozu Liu, Kaixiang
+Huang, Yonghang Chen, Jituo Li, Changhao Zhang, Jian Liu,
+Hengshuo Chu, et al. Tactile-WAM: Touch-aware world ac-
+tion model with tactile asymmetric attention. arXiv preprint
+arXiv:2606.26663, 2026. 2, 3
+[37] Chao Xue, Chaofan Zhang, Wenxuan Ma, Guocai Yao,
+Shaowei Cui, and Shuo Wang. HiTac-WAM: A hierarchical
+tactile world action model for contact-rich robot manipula-
+tion. arXiv preprint arXiv:2608.19574, 2026. 2, 3
+[38] Chen Yang, Linzhe Shi, Changjie Wu, Hang Zhang, Rong-
+han Chen, Lingjun Zhang, Xu Hu, Mu Xu, Jiansheng Fan,
+and Chen Wang. SimpleTouch: Can vision-language-action
+models master contact-rich manipulation without tactile pol-
+icy pretraining? arXiv preprint arXiv:2610.02784, 2026. 2,
+3, 6, 7, 8
+[39] Seonghyeon Ye, Joel Jang, Byeongguk Jeon, Sejune Joo,
+Jianwei Yang, Baolin Peng, Ajay Mandlekar, Reuben Tan,
+Yu-Wei Chao, Bill Yuchen Lin, et al. Latent action pretrain-
+ing from videos. In International Conference on Learning
+Representations, 2025. 3, 4
+[40] Chengbo Yuan, Zicheng Zhang, Mingjie Zhou, Wendi Chen,
+Yi Wang, Zhuoyang Liu, Dantong Niu, Shuo Wang, Hui
+Zhang, Wenkang Zhang, et al. FTP-1: A generalist foun-
+dation tactile policy across tactile sensors for contact-rich
+manipulation. arXiv preprint arXiv:2606.13102, 2026. 2,
+3, 6, 7, 8
+[41] Wenzhen Yuan, Siyuan Dong, and Edward H. Adelson. Gel-
+Sight: High-resolution robot tactile sensors for estimating
+geometry and force. Sensors, 17(12):2762, 2017. 2, 6
+[42] Chaofan Zhang, Peng Hao, Xiaoge Cao, Xiaoshuai Hao,
+Shaowei Cui, and Shuo Wang.
+VTLA: Vision-tactile-
+language-action model with preference learning for insertion
+manipulation. Biomimetic Intelligence and Robotics, page
+100333, 2026. 2, 3
+[43] Kaidi Zhang, Heng Zhang, Zhengtong Xu, Zhiyuan Zhang,
+Md Rakibul Islam Prince, Xiang Li, Xiaojing Han, Yuhao
+Zhou, Arash Ajoudani, and Yu She.
+TacVLA: Contact-
+aware tactile fusion for robust vision-language-action manip-
+ulation. arXiv preprint arXiv:2603.12665, 2026. 2, 3
+10
+
+
+[44] Pengwei Zhang, Bin Xie, Xinpan Meng, Xinyu Guo, Ce
+Hao, Fang Deng, Long Cheng, and Tiancai Wang. Feeling
+the unexpected: ResTacVLA for contact-rich manipulation
+via residual tactile representation. In IEEE/RSJ International
+Conference on Intelligent Robots and Systems, 2026. 2, 3, 6
+[45] Xuancheng Zhang, Xuetao Liu, Qianying Tang, Jizhe Wang,
+Runsheng Wang, Zhijing Cheng, Bochen Lin, Haoran Wen,
+Ming Li, Kun Zhan, et al. ME-Dex 1.0: Bringing hetero-
+geneous tactile sensing into world action modeling. arXiv
+preprint arXiv:2609.21449, 2026. 2, 3
+[46] Zhiyuan Zhang, Pokuang Zhou, Kaidi Zhang, Adeesh De-
+sai, Temitope Amosa, Davood Soleymanzadeh, Jiuzhou
+Lei, Yuhao Zhou, Minghui Zheng, and Yu She.
+Contact-
+World: What representations matter for vision-tactile latent
+world models in contact-rich manipulation. arXiv preprint
+arXiv:2606.13877, 2026. 2, 3
+[47] Jialiang Zhao, Yuxiang Ma, Lirui Wang, and Edward H.
+Adelson. Transferable tactile transformers for representation
+learning across diverse sensors and tasks. In Conference on
+Robot Learning, 2024. 3
+[48] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. In Robotics: Science and Systems, 2023.
+3, 6, 7
+[49] Jianbo Zhou, Boyuan Zhao, Yuzheng Zhang, Yiyang Chen,
+Wenxin Chen, Qiuyue Li, Xiangyang Gu, Yuhan Cao, Xiao
+Xia, Yi Yang, et al. TacForcing: Streaming action gener-
+ation with execution-time tactile feedback. arXiv preprint
+arXiv:2608.25798, 2026. 2, 3
+11
