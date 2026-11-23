@@ -1,0 +1,1151 @@
+Exploring the Potential of Ultra-Low-Bit Inference
+on LLM Accelerators
+Hao Wang1, Yang Shi1, Jiageng Shi1, Qiuran Li2, and Yaohua Wang1,*
+1 National University of Defense Technology
+Key Laboratory of Advanced Microprocessor Chips and Systems, Changsha, China
+2 Zhejiang University
+{hao wang, shiyang14, shijiagengsjg, yhwang}@nudt.edu.cn, qiuranli@zju.edu.cn
+* Corresponding author
+Abstract—Vector quantization (VQ) enables ultra-low-bit com-
+pression of large language models (LLMs) by encoding groups
+of values as compact codebook indexes. However, reconstruct-
+ing these values for computation requires frequent codebook
+lookups, which conflict with the dataflows of conventional LLM
+accelerators and limit the performance gains from VQ com-
+pression. Consequently, prior work has resorted to VQ-specific
+accelerator designs, which either incur substantial additional
+hardware overhead or support only a limited range of inference
+scenarios. In this work, we argue that existing systolic-array-
+based LLM accelerators already possess the essential hardware
+resources for efficient VQ inference, but lack the mechanisms
+to effectively exploit them. To bridge this gap, we present
+VQACC, an architectural enhancement that jointly redesigns
+the existing operand buffer’s access logic and data mapping
+to reuse its storage and port resources for codebook lookups,
+seamlessly integrating dequantization into the normal operand-
+addressing dataflow. Evaluation shows that VQACC achieves a
+2.63× speedup over the EVA baseline, with additional hardware
+occupying only 0.17% of the compute array’s area.
+Index Terms—vector quantization, large language model, de-
+quantization, systolic array.
+I. INTRODUCTION
+The success of large language models (LLMs) in language
+understanding and generation places increasing demands on
+hardware memory capacity and bandwidth [14], [18], [22],
+[37]. LLM inference stores large model weights and key–value
+(KV) caches that retain information from previously processed
+tokens. KV caches grow with context length and the number
+of concurrent requests, and both weights and KV caches must
+be accessed repeatedly during token generation. Quantization
+represents these data with fewer bits, reducing transfers and
+allowing larger models and longer contexts within a given
+memory budget [9], [11]–[13], [23].
+Vector quantization (VQ) extends this opportunity to ultra-
+low-bit inference with 4-bit or lower precision per value. Un-
+like commonly used element-wise quantization, which com-
+presses each value independently, VQ jointly represents a
+group of values as a vector. It learns a shared codebook of rep-
+resentative vectors and replaces each original vector with the
+low-bit index of its closest representative (Fig. 1(a)). The index
+thus encodes the pattern across multiple elements, exploiting
+their correlations to preserve information that independent
+quantization loses. For LLMs, VQ can achieve higher accuracy
+K-Means
+Clustering
+d
+d
+#entry
+(a)
+Weight / KV cache
+...
+Quantize
+Codebook
+Weight / KV cache Quantized
+(b)
+Dequantize
+Low-bit Index
+Codebook
+ Dequantized
+GEMM
+Activation
+Output
+...
+...
+lookup
+codebook
+Fig. 1. (a) The principle of VQ. (b) VQ dequantization flow.
+than element-wise quantization at an effective precision of 4-
+bit per value, or retain comparable accuracy at 2-bit [8], [30],
+[34], and some methods even achieve 1-bit compression [2].
+Element-wise quantization, in contrast, is commonly limited to
+4-bit by substantial accuracy loss at lower bit widths [15], [19],
+[20]. This improved accuracy–compression tradeoff makes VQ
+attractive for ultra-low-bit LLM inference.
+However, a gap remains between VQ’s strong compression
+capability and its actual performance gains. As Fig. 1(b)
+shows, VQ introduces dequantization before LLM matrix com-
+putations, retrieving vectors from codebooks using their in-
+dexes. Commercial accelerators handle these frequent lookups
+poorly, which erodes the expected speedup from VQ: some
+VQ operators even run slower than their FP16 counterparts [7],
+[23]. Specialized accelerators for VQ-based LLMs address this
+problem at the cost of additional hardware or limited appli-
+cability. Vortex builds a custom dequantization pipeline with
+units such as additional codebook buffers and lookup staging
+buffers, which incurs expensive hardware overhead [27]. EVA
+bypasses conventional dequantization through a mathematical
+transformation, but supports VQ only for model weights, with
+benefits concentrated in small-batch LLM decoding [7].
+This work starts from a key observation: in existing LLM
+accelerators based on systolic arrays (SAs), operand-buffer ad-
+dressing is naturally compatible with codebook lookup, and its
+capacity and ports can also support storing multiple codebooks
+of typical size and performing parallel, conflict-free lookups.
+What is missing is a mechanism to exploit these resources
+effectively. We therefore propose VQACC, a VQ-enhanced
+architecture built on existing SA-based LLM accelerators.
+VQACC jointly redesigns operand-buffer access logic and data
+mapping to integrate dequantization into operand addressing
+1
+arXiv:2611.27561v1  [cs.AR]  20 Nov 2026
+
+
+TABLE I
+PARAMETERS OF VQ ALGORITHMS
+Item
+Description
+Example values
+d
+Number of values per vector
+2/4/8
+#entry
+Number of entries in a codebook
+256
+with minimal hardware overhead. Four complementary designs
+realize this approach. First, we propose a mapping strategy
+that reuses the existing operand buffer to store codebooks and
+the indexes representing quantized values. Second, building on
+this mapping, we reuse existing buffer ports to read indexes
+and design an index address generator to convert them into
+buffer addresses. Reads through the existing ports at these
+addresses then directly return the codebook lookup results.
+Third, we design a lightweight shift layout unit that realigns
+lookup results on the fly into the operand order required by the
+SA, without additional latency. Finally, we refine the existing
+dataflow schedule at tile granularity to reduce codebook-
+related memory traffic.
+Evaluations across multiple LLMs, VQ algorithms, and
+inference scenarios show that VQACC achieves speedups of
+2.63× and 1.10× over EVA and Vortex, respectively, while its
+added logic occupies only 0.17% of the compute array’s area,
+125.0× less than Vortex’s dedicated dequantization hardware.
+II. BACKGROUND AND RELATED WORK
+A. Quantization in LLM Inference
+LLM inference consists of a prefill phase and a decoding
+phase. Prefill processes the entire prompt at once, whereas de-
+coding generates one token at a time. Weights and KV caches
+are fetched repeatedly for each generated token with little
+reuse, so decoding is typically bound by memory bandwidth.
+Batching multiple requests amortizes weight fetches across the
+batch, but each request keeps its own KV cache, so KV traffic
+still grows with both the batch size and the context length.
+KV caches also occupy memory capacity in proportion to
+these two factors, limiting the number of concurrent requests
+and thus the benefit of batching [1], [4]. Memory bandwidth
+therefore remains a severe challenge for LLM decoding.
+Quantization stores weights and KV caches in fewer bits,
+reducing both memory traffic and footprint and thereby deliv-
+ering significant speedups in LLM decoding [28], [35]. The
+same quantized weights usually serve prefill as well, because
+keeping a separate high-precision copy for prefill would offset
+the memory savings, which memory-constrained inference
+systems cannot afford [31], [36].
+B. Vector Quantization
+Table I summarizes the two parameters that characterize
+a VQ algorithm. VQ encodes each d-value vector with a
+log2(#entry)-bit index into a codebook of #entry represen-
+tative vectors, giving an effective precision of log2(#entry)/d
+bits per value. Each codebook serves one scope of a tensor,
+such as a whole weight matrix, a weight block, or a KV
+head [23]. Like prior VQ LLM accelerators [7], [27], VQACC
+1-bit
+2-bit
+4-bit
+0
+2
+4
+ΔPPL
+(a) Weight
+AWQ-2
+GPTVQ-2
+AQLM-1
+AWQ-4
+GPTVQ-4
+2-bit
+4-bit
+0
+0.5
+ΔPPL
+(b) KV cache
+KVQuant-2
+CQ-2
+QoQ-4
+KVQuant-4
+CQ-4
+Full FP16
+CQ-2
+0
+20
+40
+60
+Latency (μs)
+30.72
+61.44
+(c) Attention latency
+Element-wise
+VQ
+Fig. 2. (a,b) Accuracy comparison of VQ and element-wise quantization for
+(a) weights and (b) KV caches [2], [8], [15], [19]–[21], [23], [30], [34], where
+∆PPL is the perplexity increase over FP16 (lower is better). (c) Attention
+latency comparison between Full FP16 and CQ-2 for batch-1 decoding of
+Llama-2-7B [29] on A800 with a 1024-token KV cache.
+targets 256-entry codebooks, the practical configuration that
+mainstream VQ algorithms typically offer [8], [34]. Such a
+codebook balances accuracy against on-chip storage: a single
+FP16 codebook occupies at most 4 KiB for d ≤8, and each
+index fits in exactly one byte. With d = 2, 4, and 8, it yields
+a precision of 4-bit, 2-bit, and 1-bit per value, respectively.
+As Fig. 2(a,b) shows, VQ preserves accuracy better than
+element-wise quantization at the same bit width for both
+weights and KV caches, and its advantage grows as the bit
+width decreases, giving VQ a clear accuracy–compression
+advantage at 4-bit and below. This advantage, however, comes
+at the cost of expensive dequantization: on existing commer-
+cial accelerators, hardware and software stacks designed for
+regular LLM dataflows handle its frequent codebook lookups
+poorly, causing heavy on-chip data movement and bank con-
+flicts, so VQ can even run slower than FP16 (Fig. 2(c)).
+C. VQ-Based LLM Accelerators
+Several accelerators customized for VQ-based LLMs have
+been proposed to overcome the inefficiency of dequantization,
+but they either incur substantial hardware overhead or support
+only a limited range of inference scenarios.
+Vortex introduces dedicated hardware for VQ dequantiza-
+tion [27]. An additional multi-bank codebook buffer holds
+multiple codebook copies to support parallel, conflict-free
+lookups, and an additional lookup staging buffer reorders and
+aligns the lookup results before they enter the compute array.
+These additional buffers, however, incur expensive hardware
+overhead.
+EVA instead avoids weight dequantization by moving the
+lookup to the output side [7]. It multiplies the activations with
+the weight codebook, treats the products held in the output
+buffer as a table of partial sums, and reuses the multiple
+banks of the output buffer to select and accumulate table
+entries in parallel according to the weight indexes. Because
+both the table and the number of lookups grow with the
+batch size, EVA’s benefits concentrate in small-batch decoding.
+Moreover, the transformation depends on how a weight tensor
+is partitioned into blocks that share one codebook, which
+restricts it to weight VQ.
+2
+
+
+WB
+AB
+SA
+VPU
+OB
+VRF
+L1
+Cache
+/
+Shared
+Buffer
+SA
+③ Shift Layout Unit
+④ Codebook-
+Stationary Dataflow
+② Index Addr. Gen
+① Codebook-Index
+Mapping
+Fig. 3. Overview of the VQACC architecture.
+In contrast to these designs, our approach adds VQ support
+to existing LLM accelerators at minimal hardware cost, and it
+applies efficiently to all LLM quantized inference scenarios.
+III. VQACC DESIGN
+A. Overview
+In this section, we present VQACC, an architectural en-
+hancement that accelerates VQ dequantization by efficiently
+reusing the resources that an LLM accelerator already pro-
+vides. Fig. 3 shows the overall architecture of VQACC.
+VQACC builds on typical SA-based accelerator architec-
+tures [5], [10], [17]: the SA reads activations from the activa-
+tion buffer (AB) and weights or KV caches from the weight
+buffer (WB), and writes results to the output buffer (OB);
+a vector processing unit (VPU) with its register file (VRF)
+executes operators other than matrix multiplication; and an
+L1 cache or shared buffer passes VPU results to the SA
+on chip, as kernels such as FlashAttention require [6], [18].
+AB, WB, and OB are built from multi-bank SRAMs, each
+bank with two read/write ports, which supports ping-pong
+scheduling between external data transfers and operand supply
+to the SA. On this basis, VQACC enhances only the operand
+path from WB to the SA so that it can additionally support
+the VQ dequantization flow. Four designs realize this change,
+numbered ①–④in Fig. 3 and detailed in Sec. III-B–III-E.
+B. Codebook-Index Mapping
+First, we propose a codebook-index mapping that stores
+codebooks and indexes in WB’s existing banks in a layout that
+enables efficient lookups. We assume that WB holds 64 KiB
+in 32 dual-port banks of 16-bit width for FP16 operands.
+As Fig. 4(a) shows, VQACC splits each 32 KiB ping-pong
+half of WB into 16 KiB of indexes and 16 KiB of codebooks.
+While the SA consumes the active half, the idle half receives
+the indexes and codebooks of the next tile. Based on the
+target codebook configuration introduced in Sec. II-B, both
+regions meet their storage requirements with the capacity WB
+already has. For the index region, 16 KiB of indexes can
+decode into 64 KiB of FP16 values even at d = 2, twice the
+32 KiB capacity limit of an unquantized half. Any unquantized
+operand tile that fits in a half therefore still fits in the index
+region after VQ. For the codebook region, VQACC maps
+32/d codebooks (copies of the same codebook or different
+codebooks), which exactly fill the 16 KiB codebook region,
+as a 256-entry FP16 codebook occupies 512d B. For the
+32 Banks × 16bit 1R port : Lookup Output
+8 Sliding-Window Banks × 16-bit 1R Port : Read Indexs
+Index Addr. Gen
+Remaining 24 Banks × 16-bit 1W Port:
+Load Indexes (and Codebooks) of next tile
+128-bit indexes
+32× Index Addrs.
+...
+...
+#entry=256
+× g=8
+d=4
+...
+...
+...
+...
+...
+d=2/4/8 banks
+...
+× g
+d×g=32
+e.g.
+WB: 64KB
+32 Banks
+× 2RW
+16bit Port
+ping-pong
+32KB (idle)
+ping-pong
+32KB (active)
+Indexes 16KB
+Codebooks 16KB
+(a) Codebook-Index Mapping
+(b) Index Address Generator and Port Multiplexing
+#entry=256
+Fig. 4. (a) Codebook-index mapping. (b) Index address generator and port
+multiplexing.
+placement of these codebooks, we specify that each codebook
+is distributed across d adjacent banks, with each bank holding
+one element position, so a single access to these d banks
+retrieves a complete vector without bank conflicts. The 32
+banks thus form 32/d groups that can look up in parallel,
+fully using all 32 banks every cycle.
+C. Index Address Generator and Port Multiplexing
+Second, we use an index address generator together with
+a port multiplexing strategy that provides, at the same time,
+the bandwidth a lookup needs for its index input and for its
+output. VQACC first provides one port of each of the 32
+banks as a read port that outputs codebook lookup results.
+Among the remaining ports, we choose eight adjacent banks
+to provide read ports that fetch 8 × 16 bits, i.e., 128 bits of
+indexes as the input to the codebook lookup. Because a 128-
+bit index word holds sixteen 8-bit indexes, one word covers
+all 32/d codebooks even at d = 2, so the indexes read in one
+cycle guarantee that every codebook is supplied at least once.
+These eight adjacent banks are therefore defined as an index
+window: we divide the 32 banks into four windows and use a
+4:1 multiplexer to move the window across the 32 banks. We
+add an index address generator that turns each 128-bit index
+word into 32 index addresses, one per bank, and drives the
+lookup read ports of the banks in the next cycle. Finally, the
+remaining 24 banks provide write ports that write the indexes
+of the next tile into the idle half, along with new codebooks
+when the codebooks need to be replaced.
+This port multiplexing sustains the full operand bandwidth
+of the SA with little index traffic. The read ports of the 32
+banks return 32 FP16 values per cycle, exactly the number
+of operands the SA consumes, so the SA is fed at the same
+rate as with unquantized FP16 operands. Meanwhile, each
+3
+
+
+Index
+Vector
+0
+1
+2
+3
+4
+5
+6
+7
+3
+7
+...
+...
+1
+11
+3
+3
+3
+3
+7
+7
+7
+9
+9
+9
+9
+4
+4
+Codebook
+CB0
+CB1
+3
+3
+3
+3
+7
+7
+7
+7
+9
+4
+9
+9
+9
+9
+4
+4
+4
+4
+1
+1
+11 11 11 11
+1
+1
+...
+...
+(a)
+1
+1
+1
+1
+11
+11
+11
+11
+0
+0
+0
+0
+0
+0
+0
+0
+0
+1
+2
+3
+4
+5
+7
+6
+1
+1
+1
+1
+1
+1
+1
+1
+255
+255
+255
+255
+255
+255
+255
+255
+3
+3
+1
+1
+t
+c
+0
+1
+2
+3
+4
+5
+6
+7
+CB1
+CB0
+...
+...
+b
+0
+1
+255
+...
+entry
+0
+1
+2
+3
+4
+5
+7
+6
+k mod B
+(b)
+(c)
+0
+1
+2
+3
+4
+5
+6
+7
+c
+0
+1
+2
+3
+4
+5
+6
+7
+c
+3
+9
+11
+3
+9
+11
+t = 1: 
+right-shift = (1+1) mod 8 = 2 
+t = 4: 
+right-shift = (4+1) mod 8 = 5
+Fig. 5. Operation of the shift layout unit, shown for a WB with B = 8 banks holding two d = 4 codebooks (CB0 and CB1) and an output-stationary SA
+with 8 columns. (a) Operand layout required by the SA. (b) Reverse codebook placement. (c) In cycles t = 1 and 4, the bank outputs (top) are cyclically
+right-shifted by (t + 1) mod B onto the correct SA columns (bottom).
+cycle consumes only 32/d bytes of indexes, 2d× less on-
+chip traffic than FP16 weights. Excluding codebook loads, the
+write ports of the 24 loading banks provide 48 B/cycle, which
+easily keeps up with this index consumption under ping-pong
+scheduling, and the compression benefit extends to on-chip
+data movement.
+D. Shift Layout Unit
+Third, we design a lightweight shift layout unit that converts
+WB’s lookup results on the fly into the operand layout the SA
+consumes. The unit works together with the output-stationary
+SA; we explain it with the example in Fig. 5, which uses
+B = 8 WB banks for clarity and extends directly to B = 32.
+As Fig. 5(a) shows, each SA column receives one operand
+per cycle and starts one cycle after its left neighbor, forming a
+diagonal wavefront: in cycle t, column c consumes the operand
+at reduction position k = t −c. Because VQ vectors usually
+lie along the reduction dimension, the elements of looked-
+up vectors must enter the same SA column over consecutive
+cycles. To enable parallel, conflict-free lookups, however, the
+d elements of each codebook vector are spread over d separate
+banks, so a lookup returns them side by side, and the results
+must be transposed before they can flow down the SA columns
+(red boxes in Fig. 5(a)).
+To solve this efficiently, we design a shift-based transpose
+built on reverse placement, which folds the layout alignment
+into the SA’s operand supply. First, VQACC spreads the
+reduction dimension across all B banks in reverse order: from
+the SA’s view, the operand element at reduction position k is
+stored in bank b = B −1 −(k mod B) (Fig. 5(b)). Within
+a codebook, each vector is stored in reverse, e.g., elements
+0–3 of CB0 in banks 7–4. Some VQ algorithms, such as CQ
+for key cache [34], use different codebooks for consecutive
+vectors along the reduction dimension, so one reduction span
+is restored from several codebooks; the order across codebooks
+is therefore reversed as well, as CB0 occupies banks 7–4
+and CB1 banks 3–0 in the example. Next, we derive which
+bank feeds which SA column. In cycle t, column c needs
+position k = t −c, which reverse placement puts in bank
+b ≡B −1 −t + c (mod B), so the distance from this target
+bank to the column is c −b ≡t + 1 (mod B), independent
+of the column. Each bank therefore reads its data at the index
+addresses that produce the diagonal wavefront of Fig. 5(a),
+(a) (Kmax,Nmax)
+Kmax
+CK
+CN
+Nmax
+CK
+Nmax
+Kmax
+CN
+(b) (CK,Nmax)
+(c) (Kmax,CN)
+(d) (CK,CN)
+Fig. 6.
+Codebook-sharing partitions of a Kmax × Nmax operand. For an
+operand dimension D ∈{K, N}, let CD be the size of the region that
+shares one codebook along D, and Dmax means that this dimension is not
+partitioned.
+supplied by the index address generator (Sec. III-C), and the
+unit right-shifts all bank outputs by (t+1) mod B (a standard
+B-lane, 16-bit rotator suffices), delivering every operand to its
+correct column at once. As Fig. 5(c) shows, right shifts by 2
+and 5 in cycles t = 1 and 4 exactly reproduce these two rows
+of Fig. 5(a). For the special VQ algorithms that lay codebook
+vectors along the output dimension (e.g., CQ for the value
+cache [34]), no transpose is needed; the vectors are stored in
+natural order with a zero shift. The unit integrates seamlessly
+into the existing datapath without adding any cycle or pipeline
+stage, so from the SA’s view the operand supply is identical
+to the normal dataflow.
+E. Codebook-Stationary Dataflow
+Finally, we design a codebook-stationary dataflow at tile
+granularity that keeps each codebook resident in WB for as
+long as possible, so that codebook loads cost less. As Fig. 6
+shows, VQ algorithms often partition an operand into regions
+that each use their own codebook. A conventional dataflow
+schedules tiles without regard to these regions, so a single
+tile frequently crosses codebook boundaries; every crossing
+reloads a codebook, consuming DRAM and L1 bandwidth and
+stalling the lookups that depend on it. Let TD be the tile size
+along D in the conventional dataflow and T ′
+D the tile size that
+VQACC uses instead. When CD > B (bank number of WB),
+VQACC sets T ′
+D = min(TD, CD) so that no tile straddles
+two codebook regions. When CD ≤B, VQACC sets T ′
+D =
+nCD with the largest positive integer n satisfying nCD ≤B,
+as the codebook mapping of Sec. III-B can hold and decode
+different codebooks simultaneously; a tile thus grows as large
+as the lookup bandwidth allows. Furthermore, while keeping
+the operand and result residency of the conventional dataflow,
+VQACC reorders tiles to traverse the region of the current
+4
+
+
+codebook first, so that the codebook stays resident in WB
+across many tiles.
+IV. EVALUATION
+A. Experimental Setup
+We evaluate Llama-2-7B [29], Qwen3-8B [24], and Mistral-
+7B [16] under the VQ configurations in Table II, using
+AQLM-1 (W1) [8] and GPTVQ-2 (W2) [30] for weights
+and CQ-2 (KV2) and CQ-4 (KV4) [34] for KV caches. The
+overall comparison combines them into W1KV2, W2KV2, and
+W2KV4 and covers decoding with batch sizes 1–32 and a 2K-
+token KV cache.
+Building on SCALE-Sim [25], [26], we develop a cycle-
+level simulator for VQ LLM inference, with the architecture
+parameters in Table III. We compare VQACC with four
+designs built on the same accelerator configuration. Full FP16
+uses full FP16 operands. VPU Dequant dequantizes in the
+VPU; we extend the VPU with VQ-specific instructions so
+that it performs conflict-free lookups from the VRF at the
+same lookup bandwidth as VQACC. Its gap therefore lies
+mainly in the extra on-chip traffic of writing the reconstructed
+FP16 operands back to WB through L1. EVA-OL32 follows
+EVA [7] and reuses 32 output-buffer banks for output lookup;
+it keeps KV caches in FP16 and does not support prefill.
+Vortex-IL uses the dedicated dequantization pipeline of Vor-
+tex [27] to look up operands on the input side, with additional
+2 × 16 KiB ping-pong codebook buffers and 2 × 8 KiB ping-
+pong lookup staging buffers. Vortex additionally integrates an
+EVA-style mechanism that is compatible with this pipeline and
+selects between the two according to which suits the scenario;
+since EVA is already part of our comparison and VQACC
+can incorporate EVA equally cheaply, we do not evaluate that
+mechanism separately. Moreover, we do not perform online
+VQ (clustering) of the dynamically generated KV caches on
+any of these designs; as in common VQ deployments, it is
+offloaded to an off-chip processor [33] and does not affect
+LLM inference. We implement VQACC and the baseline
+designs in SystemVerilog and synthesize them in 28 nm at
+1 GHz to compare area. SRAM buffer areas come from a
+commercial memory compiler and SRAM access energy from
+CACTI [3]; DRAM energy uses the DDR4 access energy
+reported in GANAX [32].
+B. Decoding Performance
+Across all models, VQ algorithms, and decoding config-
+urations, VQACC is the fastest design on average (Fig. 7).
+Relative to Full FP16, VPU Dequant, EVA-OL32, and Vortex-
+IL, it delivers average speedups of 1.79×, 1.71×, 2.63×,
+and 1.10×, respectively. That Full FP16 and VPU Dequant
+differ by only a few percent shows that optimizing the lookup
+operation alone cannot solve the VQ dequantization bottle-
+neck: once VQ compression removes most of the DRAM
+accesses, overall performance becomes limited by on-chip
+execution time, so the additional on-chip traffic produced by
+dequantization is an equally significant cost. Although Vortex-
+IL builds a dedicated dequantization pipeline that optimizes
+TABLE II
+VQ CONFIGURATIONS IN EVALUATION
+Scheme
+Target
+d Bits
+Codebook partition
+Abbr.
+AQLM-1
+Weight 8
+1
+(Kmax, Nmax)
+W1
+GPTVQ-2 Weight 4
+2 (CK=256, CN=256)
+W2
+CQ-2
+Key /
+Value
+4
+2
+(CK=4, Nmax)/
+(Kmax, CN=4)
+KV2
+CQ-4
+Key /
+Value
+2
+4
+(CK=2, Nmax)/
+(Kmax, CN=2)
+KV4
+TABLE III
+HARDWARE CONFIGURATION
+SA
+32 × 32 FP16, output stationary, 1 GHz
+AB/WB/OB
+64 KiB each, 1 GHz
+VRF&VPU
+64 KiB, 32 lanes, 1 GHz
+L1 Cache
+64 B/cycle, 1 GHz
+DRAM
+25.6 GB/s (DDR4-3200)
+W1KV2
+W2KV2
+W2KV4
+W1KV2
+W2KV2
+W2KV4
+W1KV2
+W2KV2
+W2KV4
+0.0
+0.5
+1.0
+1.5
+2.0
+Avg. Latency / FP16
+Llama-2-7B
+Qwen3-8B
+Mistral-7B
+Across All
+Workloads
+0.0
+0.5
+1.0
+1.5
+2.0
+Speedup / FP16
+1.05
+0.68
+1.63
+1.79
+VPU Dequant
+EVA-OL32
+Vortex-IL
+VQACC
+Fig. 7. Decoding latency normalized to Full FP16, averaged over batch sizes
+1–32 with a 2K-token KV cache.
+both the lookup operation and the on-chip data traffic, it still
+leaves performance headroom compared with VQACC. The
+reason is that Vortex-IL relies on lookup staging buffers to
+pass the dequantized operands to the SA, and the capacity of
+these buffers limits the largest tile the SA can execute at once.
+By contrast, VQACC keeps dequantization entirely within the
+existing data path, so in some scenarios it can use larger tiles
+and obtain higher SA utilization by draining the array less
+often. EVA-OL32 transforms the dequantization flow itself,
+which makes it the only design whose performance degrades
+sharply as the batch grows and which cannot support VQ
+inference for the KV cache; over the full multi-batch decoding
+range, it can even fall below Full FP16.
+Fig. 8 details the effect of the batch size across designs: at
+every batch size, VQACC is faster than every baseline except
+EVA-OL32. In contrast, EVA-OL32 is the best only up to
+batch 8, where the reduced computation of its transformation
+pays off, but as the batch grows its latency grows with
+the computation. This limitation restricts its usability in the
+mainstream multi-batch decoding setting, and rules out prefill,
+where the computation is far larger than in decoding. Fig. 9
+5
+
+
+1
+2
+4
+8
+16
+32
+1
+2
+4
+8
+16
+32
+0
+1
+2
+Latency / FP16
+Qwen3-8B-W1
+Qwen3-8B-W2
+3.44
+VPU Dequant
+EVA-OL32
+Vortex-IL
+VQACC
+Fig. 8.
+Decoding latency of one Qwen3-8B feed-forward network (FFN)
+block with batch sizes 1–32, normalized to Full FP16.
+1K
+2K
+4K
+8K
+16K
+32K
+1K
+2K
+4K
+8K
+16K
+32K
+0.6
+0.8
+1.0
+1.2
+Latency / W2KV16
+Qwen3-8B-W2KV2
+Qwen3-8B-W2KV4
+VPU Dequant
+Vortex-IL
+VQACC
+Fig. 9. Decoding latency of Qwen3-8B with CQ-2/CQ-4 KV caches at batch
+16 and context lengths 1K–32K, normalized to the same design with FP16
+KV caches (W2KV16).
+32
+64
+128
+256
+512
+1K
+32
+64
+128
+256
+512
+1K
+0.0
+0.5
+1.0
+Latency / FP16
+Qwen3-8B-W1
+Qwen3-8B-W2
+VPU Dequant
+Vortex-IL
+VQACC
+Fig. 10. Prefill latency of Qwen3-8B at batch 1 with context lengths 32–1K,
+normalized to Full FP16.
+further shows the effect of the KV cache length: as the length
+grows, the advantage of VQACC and Vortex-IL becomes more
+pronounced but approaches a plateau (for KV2, the latency
+ratio levels off at 0.75× at 32K tokens), because the codebook-
+sharing partition specific to attention caps the compute tile at
+a small size, so on-chip compute time is dominated by SA
+drain cycles and becomes the bottleneck.
+C. Prefill Performance
+Although prefill is not the target of VQ, running the quan-
+tized weights there is still worth evaluating (Sec. II-A). Fig. 10
+shows that VQACC’s prefill is at least as fast as Full FP16
+at every context length, and sometimes significantly faster.
+This advantage comes from the DRAM traffic that VQ itself
+removes, so it is clearest on short contexts, reaching 53% at 32
+tokens. As the context grows, the bottleneck shifts gradually
+to computation, and latency levels off with Full FP16.
+D. Area and Energy
+VQACC’s gains cost almost no area. RTL synthesis shows
+that the logic VQACC adds occupies only 3,785 µm2, just
+32×32 FP16 SA
+VQACC
+increment
+EVA-OL32
+increment
+Vortex-IL
+increment
+102
+103
+104
+105
+106
+107
+Area (μm2)
+2,206,253
+3,785
+0.172% of SA
+26,350
+473,202
+6.96×
+125.03×
+Fig. 11. Area of the SA and the components added by VQACC, EVA-OL32
+(the additional reduction tree for output lookup), and Vortex-IL (codebook
+and staging buffers, lookup logic) in 28 nm (log scale).
+Full FP16
+VPU
+Dequant
+EVA-OL32
+Vortex-IL
+VQACC
+0
+1
+2
+3
+4
+Avg. Dynamic
+Energy (J)
+3.201
+1.394
+1.871
+1.365
+1.300
+DRAM
+Buffer
+Compute
+Fig. 12.
+Average energy per decoding step over the workloads in Fig. 7,
+broken down into DRAM, buffer, and compute.
+W2
+(FFN)
+KV2
+(Attention)
+KV4
+(Attention)
+0.0
+0.5
+1.0
+Current / Baseline
+0.99
+0.17
+0.18
+0.71
+0.16
+0.19
+Latency
+Energy
+Fig. 13. Latency and energy of the codebook-stationary dataflow relative to
+a codebook-unaware baseline (Qwen3-8B; mean over batch 1–32).
+0.17% of the SA (Fig. 11). By comparison, the additional
+area of EVA-OL32 and Vortex-IL is 7.0× and 125.0× larger,
+respectively. Since Vortex does not disclose its microarchitec-
+ture details, we count only the cost of its additional buffers, so
+its actual overhead is larger. Moreover, we evaluate the energy
+gap in decoding: VQACC achieves the lowest dynamic energy
+per decoding step among all designs (Fig. 12).
+E. Codebook-Stationary Dataflow
+Fig. 13 compares the conventional and codebook-stationary
+dataflows on VQACC. In the attention computation, the con-
+ventional dataflow switches codebooks frequently, and the
+small SA compute tiles (Sec. IV-B) cannot hide that latency,
+so it incurs 5.4–5.8× the latency and 5.3–6.1× the energy of
+the codebook-stationary dataflow. In the FFN, W2’s large CK
+and CN give large tiles that hide the switches, so the latency
+gain is small, yet 8× fewer codebook loads still lower FFN
+energy by 29% on average.
+V. CONCLUSION
+Vector quantization is a key enabler of ultra-low-bit LLM
+inference, yet its dequantization flow is a significant per-
+formance bottleneck. This paper presented VQACC, which
+6
+
+
+unlocks efficient VQ inference on existing SA-based LLM
+accelerators. VQACC adds no separate dequantization stage;
+instead, it reuses the storage, ports, and addressing of the
+existing weight buffer, so that codebook lookups are folded
+into ordinary operand reads. It achieves overall speedups of
+2.63× and 1.10× over the existing VQ LLM accelerators EVA
+and Vortex, and occupies only 0.17% of the compute array’s
+area.
+REFERENCES
+[1] A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani,
+A. Tumanov, and R. Ramjee, “Taming throughput-latency tradeoff in
+LLM inference with Sarathi-Serve,” in Proc. OSDI, 2024.
+[2] AQLM Contributors, “AQLM: Official model releases,” 2025, pV-tuned
+Llama-2-7B 1x8g8 release; accessed November 9, 2026. [Online].
+Available: https://github.com/Vahe1994/AQLM
+[3] R. Balasubramonian, A. B. Kahng, N. Muralimanohar, A. Shafiee,
+and V. Srinivas, “CACTI 7: New tools for interconnect exploration in
+innovative off-chip memories,” ACM Transactions on Architecture and
+Code Optimization, vol. 14, no. 2, pp. 14:1–14:25, 2017.
+[4] J. Cai, D. Kong, H. Huang, Z. Jiang, Z. Ma, Q. Guo, Z. Zhang, G. Shi,
+M. Gao, K. Ma, and M. Yu, “Characterizing cloud-native LLM inference
+at ByteDance and exposing optimization challenges and opportunities
+for future AI accelerators,” in Proc. HPCA (Industry Track), 2026.
+[5] Y.-H. Chen, T.-J. Yang, J. Emer, and V. Sze, “Eyeriss v2: A flexible
+accelerator for emerging deep neural networks on mobile devices,” IEEE
+J. Emerg. Sel. Topics Circuits Syst., vol. 9, no. 2, pp. 292–308, 2019.
+[6] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. R´e, “FlashAttention: Fast
+and memory-efficient exact attention with IO-awareness,” in Advances
+in Neural Information Processing Systems (NeurIPS), 2022.
+[7] B. Duan, C. Guo, C. Wei, H. Shan, Y. Fu, X. Chen, Y. Xu, Z. Zhang,
+C. Zhou, H. Li, and Y. Chen, “EVA: Accelerating LLM decoding
+via an efficient vector quantization architecture,” in 2026 ACM/IEEE
+International Symposium on Computer Architecture (ISCA), 2026,
+arXiv:2605.24144.
+[8] V. Egiazarian, A. Panferov, D. Kuznedelev, E. Frantar, A. Babenko, and
+D. Alistarh, “Extreme compression of large language models via additive
+quantization,” 2024, arXiv:2401.06118.
+[9] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “GPTQ: Accu-
+rate post-training quantization for generative pre-trained transformers,”
+CoRR, vol. abs/2210.17323, 2022.
+[10] H. Genc, S. Kim, A. Amid, A. Haj-Ali, V. Iyer, P. Prakash, J. Zhao,
+D. Grubb, H. Liew, H. Mao, A. Ou, C. Schmidt, S. Steffl, J. Wright,
+I. Stoica, J. Ragan-Kelley, K. Asanovic, B. Nikolic, and Y. S. Shao,
+“Gemmini: Enabling systematic deep-learning architecture evaluation
+via full-stack integration,” in Proc. DAC, 2021.
+[11] C. Guo, Y. Qiu, J. Leng, X. Gao, C. Zhang, Y. Liu, F. Yang, Y. Zhu,
+and M. Guo, “SQuant: On-the-fly data-free quantization via diagonal
+Hessian approximation,” in Proc. ICLR, 2022.
+[12] C. Guo, J. Tang, W. Hu, J. Leng, C. Zhang, F. Yang, Y. Liu, M. Guo,
+and Y. Zhu, “OliVe: Accelerating large language models via hardware-
+friendly outlier-victim pair quantization,” in Proc. ISCA, 2023, pp. 3:1–
+3:15.
+[13] C. Guo, C. Zhang, J. Leng, Z. Liu, F. Yang, Y. Liu, M. Guo, and Y. Zhu,
+“ANT: Exploiting adaptive numerical data type for low-bit deep neural
+network quantization,” in Proc. MICRO, 2022, pp. 1414–1433.
+[14] C. Guo, R. Zhang, J. Xu, J. Leng, Z. Liu, Z. Huang, M. Guo, H. Wu,
+S. Zhao, J. Zhao, and K. Zhang, “GMLake: Efficient and transparent
+GPU memory defragmentation for large-scale DNN training with virtual
+memory stitching,” in Proc. ASPLOS, 2024, pp. 450–466.
+[15] C. Hooper, S. Kim, H. Mohammadzadeh, M. W. Mahoney, Y. S. Shao,
+K. Keutzer, and A. Gholami, “KVQuant: Towards 10 million context
+length LLM inference with KV cache quantization,” in Advances in
+Neural Information Processing Systems (NeurIPS), 2024.
+[16] A. Q. Jiang, A. Sablayrolles, A. Mensch, C. Bamford, D. S. Chaplot,
+D. de las Casas, F. Bressand, G. Lengyel, G. Lample, L. Saulnier,
+L. R. Lavaud, M.-A. Lachaux, P. Stock, T. L. Scao, T. Lavril, T. Wang,
+T. Lacroix, and W. E. Sayed, “Mistral 7B,” 2023, arXiv:2310.06825.
+[17] H. Kwon, P. Chatarasi, M. Pellauer, A. Parashar, V. Sarkar, and
+T. Krishna, “Understanding reuse, performance, and hardware cost of
+DNN dataflows: A data-centric approach using MAESTRO,” 2018,
+arXiv:1805.02566.
+[18] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E.
+Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for
+large language model serving with PagedAttention,” in Proceedings of
+the 29th Symposium on Operating Systems Principles (SOSP), 2023.
+[19] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen, W.-C. Wang, G. Xiao,
+X. Dang, C. Gan, and S. Han, “AWQ: Activation-aware weight quantiza-
+tion for on-device LLM compression and acceleration,” in Proceedings
+of Machine Learning and Systems (MLSys), 2024.
+[20] Y. Lin, H. Tang, S. Yang, Z. Zhang, G. Xiao, C. Gan, and S. Han,
+“QServe: W4A8KV4 quantization and system co-design for efficient
+LLM serving,” in Proceedings of Machine Learning and Systems (ML-
+Sys), 2025.
+[21] Y. Liu, J. Wen, Y. Wang, S. Ye, L. L. Zhang, T. Cao, C. Li, and M. Yang,
+“VPTQ: Extreme low-bit vector post-training quantization for large
+language models,” in Proceedings of the 2024 Conference on Empirical
+Methods in Natural Language Processing, 2024, pp. 8181–8196.
+[Online]. Available: https://aclanthology.org/2024.emnlp-main.467/
+[22] Z. Liu, J. Leng, Z. Zhang, Q. Chen, C. Li, and M. Guo, “VELTAIR: To-
+wards high-performance multi-tenant deep learning services via adaptive
+compilation and scheduling,” in Proc. ASPLOS, 2022, pp. 388–401.
+[23] Z. Liu, X. Luo, J. Guo, W. Ni, Y. Zhou, Y. Guan, C. Guo, W. Cui,
+Y. Feng, M. Guo, Y. Zhu, M. Zhang, J. Leng, and C. Jin, “VQ-LLM:
+High-performance code generation for vector quantization augmented
+LLM inference,” in 2025 IEEE International Symposium on High
+Performance Computer Architecture (HPCA), 2025, arXiv:2503.02236.
+[24] Qwen Team, “Qwen3-8B model card,” 2025, native context length
+32768; accessed November 10, 2026. [Online]. Available: https:
+//huggingface.co/Qwen/Qwen3-8B
+[25] A. Samajdar, Y. Zhu, P. Whatmough, M. Mattina, and T. Krishna,
+“SCALE-Sim: Systolic CNN accelerator simulator,” 2018. [Online].
+Available: https://arxiv.org/abs/1811.02883
+[26] SCALE-Sim
+Project,
+“SCALE-Sim:
+Systolic
+CNN
+accelerator
+simulator,” 2025, v3.0.0; accessed November 17, 2026. [Online].
+Available: https://github.com/scalesim-project/SCALE-Sim
+[27] H. Shan, C. Guo, B. Duan, C. Wei, F. Cheng, Y. Fu, Y. He, H. Li,
+and Y. Chen, “Vortex: Bridging extreme compression and efficient LLM
+inference,” 2026, arXiv:2609.12208.
+[28] W. Shao, M. Chen, Z. Zhang, P. Xu, L. Zhao, Z. Li, K. Zhang,
+P. Gao, Y. Qiao, and P. Luo, “OmniQuant: Omnidirectionally calibrated
+quantization for large language models,” in Proc. ICLR, 2024.
+[29] H. Touvron, L. Martin, K. Stone, P. Albert, A. Almahairi, Y. Babaei,
+N. Bashlykov, S. Batra, P. Bhargava, S. Bhosale, D. Bikel, L. Blecher,
+C. C. Ferrer, M. Chen, G. Cucurull, D. Esiobu, J. Fernandes, J. Fu,
+W. Fu, B. Fuller, C. Gao, V. Goswami, N. Goyal, A. Hartshorn,
+S. Hosseini, R. Hou, H. Inan, M. Kardas, V. Kerkez, M. Khabsa,
+I. Kloumann, A. Korenev, P. S. Koura, M.-A. Lachaux, T. Lavril, J. Lee,
+D. Liskovich, Y. Lu, Y. Mao, X. Martinet, T. Mihaylov, P. Mishra,
+I. Molybog, Y. Nie, A. Poulton, J. Reizenstein, R. Rungta, K. Saladi,
+A. Schelten, R. Silva, E. M. Smith, R. Subramanian, X. E. Tan, B. Tang,
+R. Taylor, A. Williams, J. X. Kuan, P. Xu, Z. Yan, I. Zarov, Y. Zhang,
+A. Fan, M. Kambadur, S. Narang, A. Rodriguez, R. Stojnic, S. Edunov,
+and T. Scialom, “Llama 2: Open foundation and fine-tuned chat models,”
+2023, arXiv:2307.09288.
+[30] M. van Baalen, A. Kuzmin, I. Koryakovskiy, M. Nagel, P. Coupe-
+rus, C. Bastoul, E. Mahurin, T. Blankevoort, and P. Whatmough,
+“GPTVQ: The blessing of dimensionality for LLM quantization,” 2024,
+arXiv:2402.15319.
+[31] D. Xu, H. Zhang, L. Yang, R. Liu, G. Huang, M. Xu, and X. Liu, “Fast
+on-device LLM inference with NPUs,” in Proc. ASPLOS, 2025.
+[32] A. Yazdanbakhsh, H. Falahati, P. J. Wolfe, K. Samadi, N. S.
+Kim, and H. Esmaeilzadeh, “GANAX: A unified MIMD-SIMD
+acceleration for generative adversarial networks,” 2018. [Online].
+Available: https://arxiv.org/abs/1806.01107
+[33] H. Zhang, X. Ji, Y. Chen, F. Fu, X. Miao, X. Nie, W. Chen, and B. Cui,
+“PQCache: Product quantization-based KVCache for long context LLM
+inference,” Proceedings of the ACM on Management of Data, vol. 3,
+no. 3, 2025.
+[34] T. Zhang, J. Yi, Z. Xu, and A. Shrivastava, “KV cache is 1 bit
+per channel: Efficient large language model inference with coupled
+quantization,” 2024, arXiv:2405.03917.
+7
+
+
+[35] C. Zhao, C. Deng, C. Ruan, D. Dai, H. Gao, J. Li, L. Zhang, P. Huang,
+S. Zhou, S. Ma, W. Liang, Y. He, Y. Wang, Y. Liu, and Y. X.
+Wei, “Insights into DeepSeek-V3: Scaling challenges and reflections on
+hardware for AI architectures,” in Proc. ISCA, 2025.
+[36] Y. Zhao, C.-Y. Lin, K. Zhu, Z. Ye, L. Chen, S. Zheng, L. Ceze,
+A. Krishnamurthy, T. Chen, and B. Kasikci, “Atom: Low-bit quantization
+for efficient and accurate LLM serving,” in Proc. MLSys, 2024.
+[37] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao,
+C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. W. Barrett, and Y. Sheng,
+“SGLang: Efficient execution of structured language model programs,”
+in Proc. NeurIPS, 2024.
+8

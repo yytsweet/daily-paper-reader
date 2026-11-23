@@ -1,0 +1,2147 @@
+Learning from Incomplete Actions: Interval Motion Supervision for
+Vision-Language-Action Policies
+Yunpeng Mei* Chenyu Wang* Xiaowen Zhu
+Chenbo Xin
+Hongjie Cao
+Yiyuan Li
+Chengye Zhang
+YuAn Wang
+Gang Wang†
+Beijing Institute of Technology
+Abstract
+Visual labeling of egocentric demonstrations often leaves
+contiguous gaps in action supervision.
+Reliable poses
+around a gap still provide its net translation and rota-
+tion.
+We use this information to train vision-language-
+action policies while preserving ordinary flow matching on
+reliable local actions. A composition objective constrains
+the aggregate motion of missing-action estimates, combin-
+ing multiple fixed windows when a gap exceeds the policy
+horizon. A shared interval branch learns from reliable end-
+points and supplies the composition target. On LIBERO
+with 20% of demonstrations and 70.5% missing actions, the
+main method achieves 87.9% mean success over three train-
+ing runs. In one paired comparison with matched observa-
+tion exposure and training cost, its advantage over mask-
+ing is 10.5%. On Ego-informed RoboTwin gaps, success
+is 45.4%, versus 40.3% for masking. On five real-robot
+tasks, mean success is 59.6%, versus 54.8% for interval
+flow matching alone and 48.8% for masking.
+1. Introduction
+Egocentric demonstrations can supplement robot teleoper-
+ation [8], but visual motion labels can become unreliable
+under occlusion or tracking failure. HOT3D benchmarks
+this hand and object tracking problem [1]. Filtering unreli-
+able estimates leaves contiguous gaps in action supervision.
+Figure 1(a) illustrates how these gaps can affect either hand
+independently while visual observations remain available,
+using constructed pose offsets on real Ego frames. How can
+a vision-language-action (VLA) policy [2] learn from par-
+tial action labels and partly observed interval motion?
+We study end-effector pose increments:
+the policy
+learns stepwise translation and rotation, while reliable poses
+around a gap specify their net change. Mapped Ego trajec-
+tories and robot demonstrations share this supervision struc-
+*Equal contribution.
+†Corresponding author.
+ture. Each interval requires reliable endpoints in a common
+frame and its starting observation.
+Common treatments use only part of this supervision
+structure. Holding the last pose creates zero motion fol-
+lowed by a reacquisition jump. Interpolation assigns point-
+wise targets along an assumed interior path. Masking re-
+moves unreliable targets, but also leaves the known net mo-
+tion unused. We instead retain local supervision wherever
+labels are reliable and use endpoint motion to constrain the
+missing segment as a whole.
+The training objective follows the available information
+at two temporal scales (Figure 1(b)). Reliable local actions
+keep their original flow-matching (FM) targets. Within a
+gap, we compose estimated pose increments in temporal or-
+der and constrain the resulting net motion. This leaves the
+individual missing actions free to depend on the observa-
+tion and the pretrained policy. Long gaps share a constraint
+across fixed windows, each with its own observation.
+We implement interval supervision with a shared action–
+interval expert. Its interval branch learns net motion from
+reliable endpoints and supplies features to action genera-
+tion. Our main method uses a stopped-gradient interval pre-
+diction as the composition target, with a linear reference in
+the missing-action inputs. The missing actions receive ag-
+gregate supervision rather than pointwise interpolation tar-
+gets. Observed endpoints provide comparison targets.
+Our contribution is a training formulation that connects
+reliable local supervision to interval motion, including in-
+tervals that span multiple policy windows.
+Controlled
+LIBERO experiments test composition, interval prediction,
+and increasing gap severity. RoboTwin transfers bimanual
+missingness patterns from Ego data. A five-task real-robot
+comparison evaluates learning from robot and visually la-
+beled Ego demonstrations with natural labeling gaps.
+2. Problem Formulation
+2.1. Partial actions and reliable endpoints
+At episode step t, let It denote camera inputs, st the policy
+state, and ℓa task instruction. Together they form the obser-
+1
+arXiv:2611.27171v1  [cs.RO]  20 Nov 2026
+
+
+(a) Ego observations with incomplete pose labels
+(b) Training with incomplete action labels
+(i)
+3.42s
+(ii)
+5.53s
+(iii)
+6.09s
+(iv)
+7.75s
+(v)
+8.20s
+Left
+Right
+Accepted
+Gap (unreliable)
+Gap handling and endpoint supervision
+Hold
+Keep last pose
+Linear
+Assign a path
+Mask
+No targets
+Omit local targets
+Ours
+Endpoint
+supervision
+Two interval scopes
+Reliable pose
+Filled pose
+Missing span
+Action estimates and interval prediction
+⋯
+⋯
+Chunk length
+Predicted
+Position + rotation at the bridge endpoints
+Full-chunk interval (
+ steps)
+Figure 1. Training from local labels and observed endpoint motion. (a) Illustrative pose offsets and availability tracks on real Ego
+frames compare Hold, Linear, Mask, and endpoint supervision. (b) A chunk starts at step u and contains H action estimates bai. Solid blue
+points are observed poses Pi. Rings are endpoint predictions from composed actions ( bP A) or interval prediction ( bP D). Dashed steps lack
+local targets. Three missing poses remove four action targets. Composition loss LB constrains the inner bridge, and interval FM loss LD
+supervises the outer span.
+vation Ct = (It, st, ℓ). For the single-arm LIBERO formu-
+lation, a physical robot action has seven coordinates: three
+translation commands, three rotation commands, and a grip-
+per command. We retain the pretrained action interface with
+da padded coordinates and a fixed horizon H = 10. Writ-
+ing the normalized, padded action at step t as at, a chunk is
+At = (at, . . . , at+H−1).
+Let Mt,i ∈{0, 1} indicate whether the action at offset
+i is reliable. In LIBERO, a gap removes the entire seven-
+dimensional action label, including the gripper. The biman-
+ual RoboTwin study masks six pose coordinates per arm
+and retains recorded gripper labels. Missing steps receive
+no pointwise supervision. We distinguish excluding their
+tokens from attention from retaining tokens with a specified
+input distribution. In LIBERO world axes, let pt ∈R3 and
+Rt ∈SO(3) denote position and rotation at step t, where
+SO(3) is the 3D rotation group. Reliable endpoints at steps
+u and v are Pu = (pu, Ru) and Pv = (pv, Rv), separated
+by L = v −u actions. The principal logarithm Log maps a
+rotation to a skew-symmetric matrix, and ∨converts it to a
+rotation vector. Their interval motion is
+Du,L =
+
+pv −pu
+Log(RvR⊤
+u )∨
+
+∈R6.
+(1)
+Equation (1) concatenates translation with the rotation vec-
+tor of the relative rotation. Rotation composition preserves
+temporal order. The target has six motion coordinates. Re-
+liable gripper commands receive local supervision.
+Each record contains reliable actions, their mask, and
+valid (u, L, Du,L) intervals. The range code q = (0, L)
+specifies zero start offset and duration L. Intervals read Cu,
+loading it directly if u is absent from ordinary sampling.
+Endpoint motion constrains net pose change while leav-
+ing interior paths, contact timing, and missing gripper com-
+mands ambiguous.
+The pretrained policy combines this
+constraint with local labels and visual context.
+3. Method
+Three objectives connect local and interval supervision
+(Figure 2): LA supervises reliable actions, LD learns inter-
+val motion, and LB constrains composed action estimates
+across one or more windows.
+The main method uses a
+stopped-gradient interval prediction as its composition tar-
+get. A comparison variant uses observed endpoints directly.
+3.1. Reliable-action flow matching
+Reliable labels remain useful even when the same window
+overlaps a gap. Let τ ∈[0, 1] denote flow time, with data
+at zero and noise at one. Within a window, i indexes action
+slots. For independent standard Gaussian noise ϵi, define
+the noised input xτ,i and action velocity target uA
+i as
+xτ,i = (1 −τ)ai + τϵi,
+uA
+i = ϵi −ai.
+(2)
+The model parameters θ define the action velocity predic-
+tion vA
+θ . Using b for batch rows, i for action offsets, and
+2
+
+
+(a) Main call
+(b) Auxiliary interval call
+S
+Image · Text · State
+Context
+S
+Image · Text · State
+Context
+Noisy interval
+Length
+Interval FM output
+Noisy interval
+Length
+Interval FM output
+Noisy actions
+Missing labels
+Inactive actions
+Inactive slots
+Unused output
+Transformer action expert
+Transformer action expert
+Shared weights
+Actions read {context,
+,
+};
+reads {context,
+}
+reads {context,
+}
+stop gradient
+Interval supervision Reliable actions
+Action composition
+Predicted
+Interval supervision
+No pointwise action loss
+Figure 2. Shared action-interval expert. The two LIBERO calls share weights and read interval-start observations. Squares denote tokens
+or readouts, embedded by WA and WD. (a) LA supervises reliable actions. Hatched actions receive composition supervision through LB,
+comparing bBX with the stopped-gradient prediction bDX. (b) Auxiliary calls predict variable-length intervals with unused action outputs.
+Both train LD. Actions read context, actions, and DH. Intervals read only context and themselves. Inference uses the main call.
+∥· ∥for the Euclidean norm, the action objective is
+LA =
+P
+b,i: Mb,i=1
+vA
+θ,b,i −uA
+b,i
+
+2
+/da
+max(P
+b,i Mb,i, 1)
+.
+(3)
+Reliable rows retain the base FM targets and padded-
+coordinate reduction. Reliable action predictions also at-
+tend to the missing-position inputs in Section 3.5.
+For
+Mb,i = 0, pointwise action FM has zero weight. Com-
+position constrains the six motion coordinates in aggregate,
+leaving missing gripper commands unsupervised.
+3.2. Flow matching on observable interval motion
+Reliable endpoints provide interval targets even when their
+interior action labels are missing. An ordinary main view
+predicts the H-step interval from its starting observation.
+An auxiliary view predicts a variable-length interval from
+that interval’s own starting observation. Write D for in-
+terval motion with its start index omitted. The duration-
+dependent normalizer NL produces target z = NL(D).
+Normalization uses frozen action statistics and interval du-
+ration (supplementary Sec. B). For independent standard
+Gaussian interval noise η ∈R6, define the noised interval
+dτ and velocity target uD as
+dτ = (1 −τ)z + τη,
+uD = η −z.
+(4)
+Let vD
+θ be the predicted interval velocity. Index intervals
+by j within batch row b, with Vb,j ∈{0, 1} indicating valid
+endpoint supervision. Pooling both interval types gives
+LD =
+P
+b,j: Vb,j=1
+vD
+θ,b,j −uD
+b,j
+
+2
+/6
+max(P
+b,j Vb,j, 1)
+.
+(5)
+Both views share one update and unit interval-loss weight.
+3.3. Endpoint constraints on action composition
+The composition objective transfers interval supervision to
+the action outputs inside a gap. Denote the single-time ac-
+tion and interval estimates by bai and bD, respectively. Using
+the inverse normalizer N −1
+L , one velocity evaluation gives
+bai = xτ,i −τvA
+θ,i,
+bD = N −1
+L (dτ −τvD
+θ ).
+(6)
+At deployment, the policy integrates the velocity field over
+ten Euler steps. On labeled paths, xτ −τ(ϵ −a) = a.
+Endpoint supervision constrains missing-position proxies
+through the input distribution. These estimates use the sam-
+pled training time, so composition needs no rollout through
+the ten-step sampler.
+Re-index grouped estimates by episode time. For action
+indices I = {u, . . . , v −1}, undo normalization of bai to ob-
+tain command-space estimates bci. Superscripts p, R select
+translation and rotation commands. Let Exp map a rotation
+vector to its rotation matrix. The composed translation bpI
+and rotation bRI are
+bpI = 0.05
+X
+i∈I
+bcp
+i ,
+bRI = Exp(0.5bcR
+v−1) · · · Exp(0.5bcR
+u ).
+(7)
+For duration X = |I|, the composed six-vector bBX con-
+catenates bpI and Log( bRI)∨. The interval-head estimate bDX
+uses the same representation. Both omit the start index. Ex-
+press the target as translation p∗
+I and rotation matrix R∗
+I.
+With frozen translation-action scale sp and selected inter-
+vals I, define residuals rp
+I, rR
+I and composition loss LB:
+rp
+I = bpI −p∗
+I
+0.05|I|sp
+,
+rR
+I = Log( bRI(R∗
+I)⊤)∨
+π
+,
+(8)
+LB =
+1
+max(|I|, 1)
+X
+I∈I
+∥rp
+I∥2 +
+rR
+I
+2
+6
+.
+(9)
+3
+
+
+(a) Main · train / inference
+base
+Key / value
+(b) Auxiliary · train
+Key / value
+Query
+Prefix
+Action
+Interval
+Blocked
+base
+Figure 3. Attention connectivity. Rows are queries and columns
+are keys/values. P denotes context and AH denotes actions. Col-
+ors allow attention, white blocks it, and gray inherits prefix mask-
+ing. (a) Actions read context, actions, and valid DH. Inference
+activates DH. (b) Intervals read only context and themselves. In-
+active auxiliary action slots are retained for shape compatibility
+and do not participate in interval attention.
+An empty interval set contributes zero. With composition
+weight λB, the total loss is L = LA + LD + λBLB. The
+operator stopgrad preserves its input value and blocks its
+gradient. The main target is stopgrad( bDX), with its ro-
+tation vector converted to a matrix. Thus LD trains inter-
+val predictions, while LB trains action estimates, includ-
+ing through interval features read by actions. The interval
+target is denoised from a noised observed interval rather
+than generated by a pure-noise rollout. The predicted-target
+method uses λB = 1 on LIBERO and 0.1 on RoboTwin.
+The LIBERO observed-target variant uses λB = 1. We also
+study λB = 0. Simulation endpoints come from permitted
+samples of a command-integrated trajectory. Composition-
+only uses observed targets without an interval branch.
+3.4. One interval constraint across fixed windows
+The supervision interval can grow beyond the policy hori-
+zon while the action windows keep their original length.
+Ordinary sampling keeps fixed ten-action (H10) windows,
+including those starting or ending inside a gap. Reliable
+actions remain supervised. The main DH target requires
+reliable endpoints of that H-step interval.
+No gap. We supervise all local actions, valid DH targets,
+and duration-conditioned auxiliary motion.
+Short gap. DH may span a gap if both window end-
+points are reliable.
+Otherwise its interval loss is absent
+while reliable-action losses remain. A complete-bridge aux-
+iliary interval uses its exact left observation.
+Long gap. Twelve missing poses yield a 13-action span.
+For a bridge [103, 116), the auxiliary view predicts D13
+from C103. Windows [100, 110) and [110, 120) supply off-
+sets 3–9 and 0–5 for LB, respectively. Each window reads
+its own starting observation. Depending on alignment, two
+or three H10 views cover the bridge. Figure 4 contrasts
+fixed action windows with longer supervision intervals.
+Grouped chunks use one sampled time, independent
+noise, and one computation graph. Their shared endpoint
+loss contributes to a single optimizer update. Extra grouped
+rows contribute only composition loss.
+Supplementary
+Sec. B gives implementation details.
+3.5. Shared model and attention
+Actions and intervals use separate tokens in a shared pre-
+trained action expert (Figure 2). Pretrained action projec-
+tions are retained, while new interval projections embed
+noised motion and its duration. Tokens DH and DX pre-
+dict interval velocities for their respective durations. The
+main view pairs actions with DH at Ct. Auxiliary forwards
+share weights and use the exact start observation Cu. Sup-
+plementary Sec. B gives tensor shapes and embeddings.
+Missing-action inputs.
+We compare three inputs for
+missing-action tokens in normalized action space.
+With
+Gaussian noise ϵi, zero reference uses xτ,i = τϵi, and pure
+noise uses xτ,i = ϵi. For linear reference, endpoint interpo-
+lation with a normalized-zero gripper yields eai. Its input is
+xτ,i = (1 −τ)eai + τϵi. Zero reference denotes zero in nor-
+malized action space. Pointwise action FM supervises re-
+liable positions, whose inputs retain the ordinary FM path.
+All three keep missing action keys readable, so their context
+affects reliable predictions.
+Figure 3 shows the attention mask. Action queries read
+the observation prefix, all action keys, and a valid main DH
+with q = (0, H). Interval queries read only their own pre-
+fix and themselves. Auxiliary interval calls provide no ac-
+tion features. The interval-FM-only baseline instead blocks
+missing action keys and zeroes their inputs.
+3.6. Joint inference at a fixed horizon
+At deployment, independent Gaussian action and interval
+states are jointly denoised over ten Euler steps with q =
+(0, H). All main tokens are active, and actions read interval
+features at each step. The integration-step count matches
+the LIBERO baseline (supplementary Sec. B). Deployment
+requires only the current observation, with variable-length
+auxiliary calls confined to training.
+4. Experimental Protocol and Results
+4.1. Data, gap construction, and training
+We use a fixed 20% subset of the selected LIBERO
+suites [12], comprising 339 demonstrations across 40 tasks.
+All methods use the same visual observations and ordinary
+action-window sampling list. We fine-tune the same generic
+π0.5 initialization.
+4
+
+
+Pose index
+0
+3
+9
+10
+16
+20
+No gap
+Main:
+Main:
+Short gap
+Main:
+Main:
+Aux:
+Missing
+5 poses
+6 actions
+Long gap
+: no valid
+: no valid
+Aux:
+Missing
+12 poses
+13 actions
+H10 action window
+H10 action window
+Figure 4.
+Fixed action windows, variable supervision intervals.
+Circles denote poses, rectangles denote actions, and open cir-
+cles/hatching mark missing labels. With H = 10, five or twelve missing poses yield X = 6 or 13 action spans. Cyan spans mark
+interval FM L(X)
+D
+and bridge-only composition L(X)
+B . Interval FM uses the exact start observation. Composition joins views with their
+own observations under one constraint. The long gap permits auxiliary L(13)
+D
+but neither main L(10)
+D
+. H10-first prioritizes valid main
+intervals, then complete bridges.
+Controlled
+gaps
+remove
+interior
+samples
+from
+a
+command-integrated pose trajectory, retain designated end-
+points, and mark affected action differences as missing.
+LIBERO uses world-axis translation and left-multiplied ro-
+tation increments, with scales 0.05 and 0.5. RoboTwin uses
+local-frame composition in the rigid-motion group SE(3).
+Supplementary Sec. B gives the integration equations. Sec-
+tion 4.8 evaluates visually labeled Ego data.
+The main composition study uses 1.2-second pose gaps:
+twelve unavailable poses give thirteen affected action differ-
+ences. Gap frequency is set to yield 70.5% missing actions.
+The event manifest is fixed across methods.
+LIBERO uses 5, 000 updates with 256 ordinary action
+windows per update. Supplementary Sec. B details the op-
+timizer, learning-rate schedule, and implementation.
+4.2. Compared methods and information access
+Hold repeats the last reliable pose before computing labels,
+including rotation. Its FM input and target both use the re-
+sulting actions. Linear interpolates translation and rotation
+between endpoints, then uses the completed actions as both
+FM inputs and targets. Mask excludes missing keys and
+losses. Interval FM only adds main and auxiliary interval
+prediction to this blocked-key baseline. The composition
+variants retain missing keys and cross the three inputs in
+Section 3.5 with four constraint choices. Linear reference
+supplies a missing-action FM input without a pointwise tar-
+get. Unless otherwise stated, Ours in the main performance
+comparisons denotes linear-reference inputs with predicted-
+interval composition over bridges. Observed-D and D-free
+variants isolate its components.
+The base comparisons share demonstrations, ordinary
+sampling, gap manifests, initialization, and evaluator. Aux-
+iliary interval views and grouped action views change expo-
+sure and computation. Section 4.5 specifies these controls.
+4.3. Evaluation and interval-only reference
+Each simulation model is evaluated on 800 episodes with
+shared task and initialization keys across methods. Tables 1-
+6 and supplementary Table S4 report one training run per
+setting. Supplementary Tables S2 and S5 report means over
+two independent training runs, and supplementary Table S3
+reports means over three.
+See supplementary Tables S1–S2 for interval-only FM
+with roughly 30% missing actions and 0.5/1.2-second gaps.
+4.4. Supervising aggregate motion across gaps
+The high-missingness study separates the input at miss-
+ing positions from the supervision applied to their aggre-
+gate motion.
+All cells in Table 1 retain LA + LD and
+readable missing keys. The columns add no composition
+loss, a stopped-gradient predicted interval, observed end-
+point motion over bridges only, or observed endpoint mo-
+tion with H10-first selection. “Observed” refers to the reli-
+able command-space endpoints retained after label removal.
+We test two observed-target scopes. Bridge-only con-
+strains complete missing intervals.
+H10-first constrains
+each ordinary H10 with valid endpoints. If either endpoint
+is invalid, it collects the complete bridges overlapping that
+window. H10 and bridge terms share one interval-count de-
+nominator, so this change alters both interval coverage and
+the relative weight of bridge supervision.
+5
+
+
+Table 1. Action-composition study at 70.5% missing actions.
+LIBERO, 20% demonstrations, 1.2-second pose gaps. Success
+(%). Gap input specifies the input at missing action positions.
+Every cell retains interval FM and readable missing keys. The
+“None” column uses LA + LD.
+Predicted D uses a stopped-
+gradient single-time interval estimate as the composition target.
+Bridge-only uses observed bridge endpoints.
+H10-first prefers
+valid H10 endpoints, then complete overlapping bridges.
+Gap input
+None
+Predicted D
+Observed D
+Bridge-only
+H10-first
+Zero reference
+80.3
+87.1
+87.8
+85.4
+Pure noise
+80.4
+86.8
+87.4
+87.0
+Linear reference
+79.3
+88.4
+85.3
+85.9
+Composition improves control across missing inputs.
+Across zero, noise, and linear inputs, observed bridge
+targets improve success over no composition by 6.0%–
+7.5%, and predicted targets by 6.4%–9.1%.
+The model
+with linear-reference inputs and predicted-interval compo-
+sition reaches 88.4%, compared with 76.4% for blocked-
+key Mask, 78.6% for blocked-key interval FM, and 92.4%
+for Clean. The 12.0% gain over Mask includes changes
+in attention, auxiliary observations, and composition. Each
+row fixes the input and interval branch.
+Target choice interacts with the input.
+Observed bridge
+targets exceed predicted targets by 0.6% for both zero refer-
+ence and pure noise, but trail them by 3.1% for linear refer-
+ence. H10-first changes success relative to observed bridge-
+only constraints by −2.4%, −0.4%, and +0.6%. The effect
+of H10-first selection depends on the input construction.
+Predicted-interval composition averages 85.5%, 85.6%,
+and 87.9% for zero, noise, and linear references (supple-
+mentary Table S3). Linear reference ranks highest.
+4.5. Contribution of the interval branch
+A 2 × 2 comparison separates interval prediction from ob-
+served bridge composition (Table 2). All four variants use
+zero-reference inputs and readable missing keys. Adding
+composition to action-only supervision raises success from
+78.8% to 84.5%. Adding interval prediction alone gives
+80.3%, while combining both gives 87.8%. The interval
+branch adds 3.3% when composition is present, compared
+with 1.5% without it.
+At the same training budget, the branch-removal compar-
+ison also covers pure-noise and linear inputs (supplemen-
+tary Table S4). Retaining D improves success by 4.1% and
+0.3%, respectively. The smaller linear-reference difference
+shows that the benefit depends on the missing-input con-
+struction. D-free removes the interval token, projections,
+loss, and dedicated interval-start observation forward.
+Table 2. Component isolation. Same LIBERO 70.5% gap man-
+ifest, zero reference, and readable missing keys. Entries report
+success (%). Composition uses observed bridge endpoints. Sup-
+plementary Table S4 extends the with/without-D comparison to all
+three missing-input constructions. Reg-Read replaces interval FM
+with endpoint regression loss LR. NoRead blocks action access to
+the interval token.
+Variant
+Objective
+Success
+Action FM only
+LA
+78.8
+Interval only
+LA + LD
+80.3
+Composition only
+LA + LB
+84.5
+Full (observed D)
+LA + LD + LB
+87.8
+Reg-Read
+LA + LR + LB
+84.9
+NoRead
+LA + LD + LB
+83.1
+Representation controls.
+Reg-Read replaces interval FM
+with direct regression of normalized endpoint motion from
+a learned query. It retains action access to the query fea-
+tures and observed bridge LB. NoRead retains interval FM
+and shared parameters while blocking action access to the
+interval token in every training and inference layer. Both
+retain the interval ranges, observation views, and the 5, 000-
+update, batch-256 training recipe. Full reaches 87.8%, com-
+pared with 84.9% for Reg-Read and 83.1% for NoRead (Ta-
+ble 2). The respective gains of 2.9% and 4.6% support the
+interval-FM construction and direct feature access in this
+zero-reference, observed-target setting.
+Matched
+observation
+exposure.
+Exposure-matched
+Mask uses the main method’s linear-reference inputs
+and readable missing keys. It replays the same ordinary
+starts, auxiliary interval starts, and bridge-covering action
+views, supervising reliable actions at those starts.
+Ours
+reaches 88.4%, compared with 77.9% for this control
+(Table 3). The 10.5% advantage supports adding interval
+prediction and composition when observation exposure and
+missing-action inputs are aligned. Supplementary Sec. B
+gives the sampling and budget settings.
+4.6. Longer gaps and task-stage missingness
+We vary gap coverage and duration to test the method as su-
+pervision becomes sparse and intervals extend across more
+fixed windows. At 1.2-second width, Ours scores 90.6%,
+89.6%, and 88.4% as target missing-action coverage rises
+from 30% to 70%. Mask falls from 88.9% to 76.4% (Ta-
+ble 4).
+At 70% coverage, increasing width from 1.2 to
+3.0 seconds lowers both methods, but Ours retains gains
+of 12.0%, 10.8%, and 9.6% at 1.2, 2.0, and 3.0 seconds.
+Interval prediction alone remains closer to Mask. Supple-
+mentary Table S5 reports the mean success of Mask and
+interval-only reference probes.
+6
+
+
+Table 3.
+Matched observation exposure and training cost.
+LIBERO, 1.2-second gaps and 70.5% missing actions.
+Both
+models use linear-reference inputs, readable missing keys, and
+matched observation reads. Costs are measured training time in
+L20-equivalent GPU-hours. Both use 256 ordinary windows per
+update for 5,000 updates. Success uses 800 evaluation episodes.
+Setting
+Matched Mask
+Ours
+Ordinary window reads
+1,280,000
+1,280,000
+Additional reads
+433,654
+433,654
+GPU-hours
+279.36
+279.18
+Success (%)
+77.9
+88.4
+Table 4. Gap width and missing-action coverage. LIBERO,
+20% demonstrations, H10.
+Ours uses a linear reference and
+predicted-interval composition. Coverage is the target fraction of
+missing actions. Success (%).
+Width (s)
+Missing (%)
+Mask
+Interval only
+Ours
+1.2
+30
+88.9
+89.6
+90.6
+1.2
+50
+83.0
+85.5
+89.6
+1.2
+70
+76.4
+78.6
+88.4
+2.0
+70
+73.9
+78.4
+84.6
+3.0
+70
+65.8
+69.6
+75.4
+Table 5. Fixed task-stage gaps. LIBERO, 339 demonstrations.
+Ours uses pure-noise inputs and predicted-interval composition.
+Complete counts fully labeled demonstrations. Missing reports
+the action-missing fraction (%). Other entries give success (%).
+Condition
+Complete
+Missing
+Mask
+Ours
+70% bridged
+102
+19.9
+85.9
+87.6
+One/task
+40
+24.8
+79.6
+83.0
+None
+0
+28.2
+51.8
+59.9
+Fixed task-stage gaps.
+Unlike random gaps, these condi-
+tions remove grasp/lift labels, with two gaps for compound
+tasks (Table 5). All conditions use the same 339 demonstra-
+tions. The one-complete-per-task and no-complete condi-
+tions use packed bridge-covering chunks for composition.
+Predicted-interval composition with pure-noise inputs im-
+proves over Mask by 1.8% when 70% of demonstrations
+have gaps, 3.4% with one complete demonstration per task,
+and 8.1% with none. Across these conditions, complete
+demonstrations decrease from 102 to 40 to 0, while missing-
+action coverage rises from 19.9% to 24.8% to 28.2%. With
+gaps in every demonstration, local labels and interval mo-
+tion support 59.9% success versus 51.8% for Mask.
+Table 6. Ego-informed RoboTwin evaluation. Ten tasks, 250
+training demonstrations, 5,000 updates, H50 with 50 executed
+actions, and ten FM integration steps.
+Success (%) over 800
+episodes. Both composition variants use linear-reference inputs.
+Ours uses predicted intervals as composition targets. Clean is a
+fully supervised reference.
+Method
+Success
+Clean
+49.5
+Mask
+40.3
+Hold
+20.3
+Linear
+38.1
+Interval FM only
+42.8
+Ours (observed endpoints)
+44.6
+Ours
+45.4
+4.7. Ego-informed bimanual simulation
+RoboTwin 2.0 [4] uses ten tasks and 250 training demon-
+strations with Ego-informed bimanual gaps. Models train
+for 5, 000 updates and predict and execute 50 actions per
+chunk, using ten FM integration steps and 800 evaluation
+episodes. Local-frame pose increments compose in SE(3)
+separately for each arm.
+Supplementary Sec. E and Ta-
+bles S8 and S9 detail gap transfer and per-arm supervision.
+Ours reaches 45.4%, improving on Mask by 5.1% and
+interval FM alone by 2.6% (Table 6). Observed-endpoint
+composition reaches 44.6%. Linear and Hold reach 38.1%
+and 20.3%, respectively. Clean reaches 49.5%, leaving a
+4.1% gap to complete supervision.
+4.8. Real-robot learning from labeled Ego data
+Table 7. Real-robot evaluation on five tasks. Success (%) over
+50 episodes per task. Mean averages the five tasks equally. Ours
+uses linear-reference inputs and predicted-interval composition.
+Method
+Towels Flowers Rolls Trash Blocks Mean
+Robot-only
+24.0
+42.0
+52.0 48.0
+44.0
+42.0
+Raw
+22.0
+26.0
+42.0 38.0
+28.0
+31.2
+Hold
+20.0
+34.0
+38.0 32.0
+30.0
+30.8
+Linear
+30.0
+38.0
+60.0 46.0
+38.0
+42.4
+Mask
+32.0
+44.0
+64.0 54.0
+50.0
+48.8
+Interval FM only
+36.0
+50.0
+70.0 62.0
+56.0
+54.8
+Ours
+42.0
+54.0
+78.0 66.0
+58.0
+59.6
+Figure 5 shows the five tasks with examples from both
+training sources.
+Each task uses 20 robot teleoperation
+demonstrations and 160 Ego demonstrations. Mixed-data
+methods sample the two sources equally. Pose-label screen-
+ing identifies unreliable Ego actions. Robot data provide
+recorded state, while missing Ego states are interpolated
+7
+
+
+Figure 5. Five real-world tasks. Ego demonstrations (top) and robot teleoperation demonstrations (bottom) show towel folding, flower
+picking, paper-roll pickup, trash pickup, and block stacking, from left to right. Columns pair the two sources by task.
+separately from action supervision. Deployment uses robot
+state. Supplementary Sec. D details the labeling pipeline.
+In the Ego statistics, gaps up to 0.5 s comprise 76.3%
+of events but only 33.1% of missing duration (supplemen-
+tary Figure S1). Gaps above 2 s comprise only 2.4% of
+events but contribute 19.2% of missing duration.
+These
+widths count missing-pose time, whereas supervision spans
+the reliable poses surrounding a complete gap. This dura-
+tion imbalance motivates variable-length interval supervi-
+sion alongside fixed action windows.
+Comparison.
+We compare seven methods with 50 eval-
+uation episodes per task (Table 7). Robot-only uses tele-
+operation data. Raw retains available low-confidence Ego
+labels, while Hold and Linear fill flagged segments. Mask
+omits unreliable local supervision.
+Interval FM adds
+endpoint-motion prediction.
+Ours uses linear-reference
+inputs and constrains composed action estimates against
+stopped-gradient predicted interval motion. Supplementary
+Sec. D gives the label-quality criteria, gap statistics, and ad-
+ditional real-robot settings.
+Results.
+Ours reaches 59.6% mean success, compared
+with 54.8% for interval FM alone and 48.8% for Mask.
+Gains span 2.0−8.0% and 8.0−14.0%, respectively, across
+all five tasks. Raw labels yield 31.2%, below robot-only
+training at 42.0%. Filtering improves Ego supervision, and
+interval constraints add motion information.
+Sensitivity to label screening.
+The original filter yields
+59.6% mean success versus 53.2% for checking only the
+wrist and two fingertips against the hand box, a 6.4% gain.
+Supplementary Tables S6 and S7 give task results, label
+coverage, and gap statistics.
+5. Discussion and Limitations
+Endpoints constrain net motion, while reliable local labels
+supervise interior actions. Their quality depends on visual
+estimates and the mapping to robot control. Tracking fail-
+ures can bias endpoints and require interpolated Ego state
+inputs. Contact and controller tracking errors can also sep-
+arate commanded from measured motion.
+6. Related Work
+Generative policies and auxiliary prediction.
+Flow
+matching learns a velocity field along a probability
+path [11], and π0.5 uses a generative action expert [2].
+PAD jointly denoises images and actions [6]. UMA jointly
+models 3D object motion and actions with available-label
+masks [3]. SUAVE uses masked video/action tokens, in-
+cluding action-free co-training [14]. ELAN4D supervises
+an action branch with robot keypoint tracks and discards its
+track decoder at inference [7]. ForesightFlow predicts suc-
+cess potential for policy improvement and candidate rank-
+ing [13]. Our interval branch predicts physical endpoint
+motion and constrains the aggregate output of missing ac-
+tions across fixed windows.
+Incomplete action supervision.
+Behavioral cloning from
+observation infers actions through inverse dynamics [15],
+while latent-action pretraining learns transitions from
+video [16]. EgoMimic aligns human and robot data for co-
+training [8]. We address label gaps after this alignment:
+reliable actions coexist with observed motion over missing
+intervals. Ambient Diffusion learns from corrupted mea-
+surements [5]. Flow Matching with Missing Data averages
+over posterior completions [9], with complete-data equiva-
+lence requiring the true completion law. Our objective in-
+stead combines local action FM, observed-interval FM, and
+an action-composition constraint.
+8
+
+
+7. Conclusion
+Reliable local labels and observed endpoint motion provide
+complementary supervision. Our method retains action FM,
+constrains missing-action composition, and combines fixed
+windows for long gaps. Matched-observation LIBERO con-
+trols and Ego-informed simulation support this formulation,
+while five real-robot tasks show its value for learning from
+visually labeled demonstrations.
+References
+[1] Prithviraj Banerjee,
+Sindi
+Shkodrani,
+Pierre
+Moulon,
+Shreyas Hampali, Shangchen Han, Fan Zhang, Linguang
+Zhang, Jade Fountain, Edward Miller, Selen Basol, Richard
+Newcombe, Robert Wang, Jakob Julian Engel, and Tomas
+Hodan. HOT3D: Hand and Object Tracking in 3D from Ego-
+centric Multi-View Videos. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 7061–7071, 2025. 1
+[2] Kevin Black, Noah Brown, James Darpinian, Karan Dha-
+balia, Danny Driess, Adnan Esmail, Michael Robert Equi,
+Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya
+Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szy-
+mon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc,
+Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj
+Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura
+Smith, Jost Tobias Springenberg, Kyle Stachowicz, James
+Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan
+Wang, Lili Yu, and Ury Zhilinsky. π0.5: a Vision-Language-
+Action Model with Open-World Generalization. In Proceed-
+ings of The 9th Conference on Robot Learning, pages 17–40.
+PMLR, 2025. 1, 8
+[3] Yunhao Cao, Shitong Liu, Chao Feng, Meryl Zhang, Xu-
+anchen Lu, Andrew Owens, and Kuan Fang. Unified Motion-
+Action Modeling for Heterogeneous Robot Learning. arXiv
+preprint arXiv:2606.16917, 2026. 8
+[4] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge,
+Zhenyu Gu, Weiliang Deng, Yubin Guo, Tian Nian, Xuan-
+bing Xie, Qiangyu Chen, Kailun Su, Tianling Xu, Guodong
+Liu, Mengkang Hu, Huan-Ang Gao, Kaixuan Wang, Zhix-
+uan Liang, Yusen Qin, Xiaokang Yang, Ping Luo, and Yao
+Mu. RoboTwin 2.0: A Scalable Data Generator and Bench-
+mark with Strong Domain Randomization for Robust Bi-
+manual Robotic Manipulation. In Proceedings of the 43rd In-
+ternational Conference on Machine Learning, pages 13673–
+13699. PMLR, 2026. 7
+[5] Giannis Daras, Kulin Shah, Yuval Dagan, Aravind Gol-
+lakota, Alex Dimakis, and Adam Klivans. Ambient Diffu-
+sion: Learning Clean Distributions from Corrupted Data. In
+Advances in Neural Information Processing Systems, pages
+288–313, 2023. 8
+[6] Yanjiang Guo, Yucheng Hu, Jianke Zhang, Yen-Jen Wang,
+Xiaoyu Chen, Chaochao Lu, and Jianyu Chen. Prediction
+with Action: Visual Policy Learning via Joint Denoising Pro-
+cess. In Advances in Neural Information Processing Systems,
+pages 112386–112410, 2024. 8
+[7] Zeyuan He, Bowen Yang, Zhirui Fang, Keru Zhou, Lei Jiang,
+Jingjing Qian, Fan Mo, Junchi Yan, Philip Torr, Xiu Li, Li
+Jiang, and Jialin Yu. ELAN4D: Embodiment-Centric 4D Su-
+pervision for Vision-Language-Action Models via Plug-and-
+Play Adaptation. arXiv preprint arXiv:2605.30484, 2026. 8
+[8] Simar Kareer, Dhruv Patel, Ryan Punamiya, Pranay Mathur,
+Shuo Cheng, Chen Wang, Judy Hoffman, and Danfei
+Xu. EgoMimic: Scaling Imitation Learning via Egocentric
+Video. In Proceedings of the IEEE International Conference
+on Robotics and Automation, pages 13226–13233, 2025. 1,
+8
+[9] Fairoz Nower Khan, Nabuat Zaman Nahim, and Peizhong
+Ju.
+Flow Matching with Missing Data.
+arXiv preprint
+arXiv:2607.28698, 2026. 8
+[10] Lightwheel. EgoSuite-Open100K: A fully annotated open
+egocentric human dataset.
+https://huggingface.
+co / collections / LightwheelAI / egosuite -
+open100k, 2026. Dataset. 12
+[11] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow Matching for Generative
+Modeling. In International Conference on Learning Repre-
+sentations, 2023. 8
+[12] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. LIBERO: Benchmarking Knowl-
+edge Transfer for Lifelong Robot Learning.
+In Advances
+in Neural Information Processing Systems, pages 44776–
+44791, 2023. 4
+[13] Yunpeng Mei, Jiakai He, Hongjie Cao, Chenyu Wang, Xi-
+aowen Zhu, Yihan Zhou, Jiamin Wang, Chenbo Xin, Peng
+Cheng, Yuxuan Yang, Yijie Wang, Xinhu Zheng, Gao
+Huang, Jie Chen, and Gang Wang. Potential-Guided Flow
+Matching for Vision-Language-Action Policy Improvement.
+arXiv preprint arXiv:2606.04968, 2026. 8
+[14] Rhythm Syed, Jean Mercat, Sedrick Keh, Kushal Arora,
+Paarth Shah, Aykut Onol, Mengchao Zhang, and Tony Dear.
+SUAVE: Unified Video-Action Models via Masked Diffu-
+sion. arXiv preprint arXiv:2610.04009, 2026. 8
+[15] Faraz Torabi, Garrett Warnell, and Peter Stone. Behavioral
+Cloning from Observation. In Proceedings of the Twenty-
+Seventh International Joint Conference on Artificial Intelli-
+gence, pages 4950–4957, 2018. 8
+[16] Seonghyeon Ye, Joel Jang, Byeongguk Jeon, Se June Joo,
+Jianwei Yang, Baolin Peng, Ajay Mandlekar, Reuben Tan,
+Yu-Wei Chao, Bill Yuchen Lin, Lars Liden, Kimin Lee,
+Jianfeng Gao, Luke Zettlemoyer, Dieter Fox, and Minjoon
+Seo.
+Latent Action Pretraining from Videos.
+In Inter-
+national Conference on Learning Representations, pages
+28213–28239, 2025. 8
+[17] Jinglei Zhang, Jiankang Deng, Chao Ma, and Rolan-
+dos Alexandros Potamias. HaWoR: World-space hand mo-
+tion reconstruction from egocentric videos. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition, pages 1805–1815, 2025. 12
+9
+
+
+Learning from Incomplete Actions: Interval Motion Supervision for
+Vision-Language-Action Policies
+Supplementary Material
+A. Interval-only FM at 30% missingness
+This study combines action and interval FM with blocked
+missing keys.
+Interval observations align with interval
+starts. Tables S1 and S2 report settings and mean success.
+Table S1. Settings for the interval-only comparison. “Missing
+width” counts unavailable pose samples. Endpoint span counts
+affected action differences.
+Setting
+Short gap
+Long gap
+Missing width (10 Hz)
+5 / 0.5 s
+12 / 1.2 s
+Endpoint span
+6 steps
+13 steps
+Nominal events/min
+30
+180/13
+Missing action coverage
+30.0%
+30.1%
+Complete bridges
+2,745
+1,271
+Action horizon
+10
+10
+Training runs
+2
+2
+Updates / action batch
+5,000 / 256
+5,000 / 256
+Table S2. Interval-only results at approximately 30% missing
+actions. Mean success (%) over two independent training runs,
+with 800 evaluation episodes per model. Columns indicate gap
+width. Hold and Linear use filled labels. Mask and Interval FM
+only both block missing action keys. All omit composition loss.
+Method
+0.5 s
+1.2 s
+Hold
+80.4
+67.2
+Linear
+89.7
+82.3
+Mask
+88.8
+87.9
+Interval FM only
+90.0
+87.6
+Interval prediction averages 90.0% on short gaps and
+87.6% on long gaps. Relative to Mask, the differences are
++1.2% and −0.3%.
+B. LIBERO implementation details
+All LIBERO studies use the fixed 20% subset:
+40
+tasks, 339 demonstrations, and 53,712 ordinary windows.
+The optimizer is AdamW with moment-decay coefficients
+(0.9, 0.95), numerical stabilizer 10−8, weight decay 10−10,
+and gradient clipping at 1. The base recipe uses BF16, eight
+GPUs, two data-loader workers, 256 ordinary windows per
+update, and 5,000 updates. The learning-rate schedule has
+10,000-step warmup, peak and decay-end rates 5 × 10−5,
+and decay horizon 106. The reported checkpoints therefore
+remain within warmup.
+With batch size B and action horizon H, the pretrained
+interface uses padded action dimension da = 32. It projects
+[B, H, 32] inputs to [B, H, 1024] tokens. The range MLP
+has 128 hidden units, and the interval output projection pre-
+dicts six coordinates. Auxiliary calls retain H inactive ac-
+tion slots in the static suffix. Adding the interval token gives
+a suffix of [B, H + 1, 1024], or [B, 11, 1024] for H = 10,
+while preserving pretrained tensor shapes. Backpropaga-
+tion recomputes auxiliary activations.
+For an interval of L actions, let δpi denote physical trans-
+lation increments and Dp their net displacement. The map
+Dp = PL
+i=1 δpi has rank three and nullity 3(L−1) over un-
+constrained 3L-dimensional increments. Sequences (1, 1)
+and (3, −1) have equal sums but different paths.
+The composition study uses the 1.2-second gap width
+with nominal frequency 420/13 events/min.
+Its 70.5%
+missing-action manifest contains 2,977 complete bridges.
+The main-paper matrix compares three missing-action in-
+puts and four composition settings.
+For H10-first selec-
+tion, bridge groups are deduplicated within each update and
+capped at 32. For a bridge [103, 116), the grouped windows
+[100, 110) and [110, 120) contribute action offsets 3–9 and
+0–5 to the composition. Each window uses its own start-
+ing observation. The group shares one sampled time and
+computation graph, with independent noise per window. Its
+endpoint loss contributes to one optimizer update, and extra
+grouped rows contribute only composition loss.
+Reg-Read uses a learned query with the same range en-
+coding and a linear six-dimensional output head. Its target
+uses the interval branch’s normalization, and mean squared
+error replaces interval FM. At each of ten action sampling
+steps, actions can read this query. NoRead retains inter-
+val denoising and its shared-parameter gradients, while dis-
+abling action-to-interval attention throughout training and
+inference. Both keep zero-reference missing inputs and ob-
+served bridge composition, with interval and composition
+loss weights of one. Full, Reg-Read, and NoRead each use
+256 ordinary action windows per update and 5,000 updates,
+with one paired training run per model.
+The exposure control replays ordinary and extra obser-
+vation starts with the same augmentation keys and records
+repeated reads.
+It combines reliable-action errors across
+the ordinary batch and additional windows, normalizing by
+valid action coordinates.
+Duplicate extra windows con-
+tribute supervised loss once per update. Both models use
+10
+
+
+5,000 updates with 256 ordinary windows per update, giv-
+ing 1,280,000 ordinary window reads. The full sampling
+record gives 433,654 additional reads for Ours, which Mask
+matches through stepwise replay. Training costs are 279.18
+L20-equivalent GPU-hours for Ours and 279.36 for Mask.
+Command-integrated endpoints.
+For controlled exper-
+iments, we first integrate the recorded control commands
+into a command-space pose sequence using translation
+scale 0.05 and rotation scale 0.5. We then remove interior
+pose samples, keep the designated reliable endpoints, and
+mark affected action differences as missing. For LIBERO,
+let pcmd
+i
+, Rcmd
+i
+denote command-integrated position and ro-
+tation, and cp
+i , cR
+i
+the unnormalized translation and rota-
+tion commands. Translation adds in world axes, pcmd
+i+1 =
+pcmd
+i
++ 0.05cp
+i , and rotation composes by left multiplica-
+tion, Rcmd
+i+1 = Exp(0.5cR
+i )Rcmd
+i
+. Interval targets use the
+permitted command-trajectory endpoints. RoboTwin uses
+local-frame composition in the rigid-motion group SE(3).
+These simulation targets encode the motion obtained by in-
+tegrating recorded control commands. The real-robot study
+uses visually labeled Ego data.
+Flow inputs and normalization.
+Following the base
+training path, draw ξ ∼Beta(1.5, 1) and set τ = 0.001 +
+0.999ξ. Superscripts p and R select translation and rotation
+components. With frozen translation-action centering and
+scale vectors bp, sp, normalization is
+zp = Dp/0.05 −Lbp
+Lsp
+,
+zR = Log(RvR⊤
+u )∨
+π
+,
+(S1)
+Division is coordinate-wise.
+Translation uses the action
+statistics and duration, while rotation uses its angular range.
+Token embeddings and attention.
+The pretrained pro-
+jection embeds each action as a token. Let hD be the inter-
+val embedding, WD, bD its input projection and bias, and
+eD its learned type embedding. A multilayer perceptron
+(MLP) encodes the range normalized by horizon:
+hD = WDdτ + bD + MLP(q/H) + eD.
+(S2)
+Joint sampling.
+At deployment, let C be the current ob-
+servation and k the integration-step index. The action state
+x(k) and interval state d(k)
+H start from independent standard
+Gaussian noise in normalized coordinates. Set q = (0, H)
+and activate all action tokens and the main interval token.
+For K = 10 Euler steps indexed by k = 0, . . . , K −1, set
+τk = 1 −k/K and jointly integrate
+x(k+1) = x(k) −K−1vA
+θ (C, x(k), d(k)
+H , τk),
+(S3)
+d(k+1)
+H
+= d(k)
+H −K−1vD
+θ (C, d(k)
+H , q, τk).
+(S4)
+Action tokens read the interval hidden features at each de-
+noising step. The controller executes the resulting action se-
+quence. In LIBERO, inference uses ten Euler evaluations of
+the shared action–interval expert, matching the integration-
+step count of the baseline sampler.
+In the three-input study, training and inference both ex-
+pose all action keys. Pure-noise missing inputs follow the
+initial sampler distribution. During deployment, subsequent
+inputs evolve through the learned velocity field.
+C. Additional LIBERO comparisons
+The predicted-interval composition and D-free studies use
+1.2-second gaps and 70.5% missing actions. Training and
+evaluation follow the shared LIBERO protocol.
+Table S3. Mean success with predicted-interval composition.
+LIBERO, 1.2-second gaps, 70.5% missing actions, 5,000 updates.
+Mean success (%) over three independent training runs, with 800
+evaluation episodes per model.
+Input
+Mean success (%)
+Zero reference
+85.5
+Pure noise
+85.6
+Linear reference
+87.9
+Mean success is 87.9% with linear reference, 85.5% with
+zero reference, and 85.6% with pure noise.
+Table S4. Interval-branch ablation with observed bridge com-
+position. LIBERO, 5,000 updates. Success (%), 800 episodes per
+model. D-free removes the interval token, head, FM loss, and ded-
+icated interval-view forward.
+Input
+With D
+D-free
+Difference
+Zero reference
+87.8
+84.5
++3.3
+Pure noise
+87.4
+83.3
++4.1
+Linear reference
+85.3
+85.0
++0.3
+The interval branch improves observed-target composi-
+tion for all three inputs in this comparison, by 3.3%, 4.1%,
+and 0.3% for zero, noise, and linear reference.
+Interval FM without composition has mixed benefits
+across gap regimes. At 1.2-second width, its mean success
+exceeds Mask by 2.3% and 1.1% at 50% and 70% missing
+actions. At 2.0-second width, the corresponding gains are
+0.3% and 2.5%.
+At 1.2-second width and 50% missing actions, predicted-
+interval composition averages 89.6% success, compared
+with 81.9% for Mask and 84.1% for interval FM alone. Lin-
+ear averages 74.6% at 1.2 seconds and 58.6% at 2.0 seconds
+under 50% missing actions.
+11
+
+
+Table S5. Mean success across gap settings. Success (%) av-
+eraged over two independent training runs, with 800 episodes per
+model. Widths are missing-pose durations. Missing-action frac-
+tions are targets. Ours uses predicted-interval composition.
+Method
+Mean success (%)
+1.2-second gaps, 50% missing actions
+Mask
+81.9
+Interval FM only
+84.1
+Ours
+89.6
+Linear
+74.6
+1.2-second gaps, 70% missing actions
+Mask
+76.9
+Interval FM only
+78.0
+2.0-second gaps, 50% missing actions
+Mask
+80.7
+Interval FM only
+80.9
+Linear
+58.6
+2.0-second gaps, 70% missing actions
+Mask
+72.6
+Interval FM only
+75.1
+76.3%
+13.8%
+7.5%
+Count share
+33.1%
+22.7%
+25.0%
+13.8%
+Duration share
+Width (s)
+Count (%)
+Time (%)
+≤0.5
+76.3
+33.1
+0.5–1
+13.8
+22.7
+1–2
+7.5
+25.0
+2–5
+2.1
+13.8
+5–10
+0.3
+4.6
+10–20
+0.0
+0.8
+>20
+0.0
+0.0
+Figure S1.
+Real Ego gap widths, weighted by event count
+and missing duration. The 45,722 segments are maximal non-
+green runs counted separately for each hand, including episode-
+boundary runs. Left: fraction of segments. Right: fraction of their
+summed durations. Widths sum missing-pose time cells.
+D. Gap structure in real Ego data
+HaWoR [17] supplies 3D hand geometry, and a hand de-
+tector trained on Lightwheel Ego data [10] supplies image
+boxes for label screening. Wrist poses define end-effector
+motion. Thumb and index fingertips represent the gripper.
+Robot data provide recorded state. Missing Ego states are
+interpolated between available states. Actions use a sepa-
+rate reliability mask. Deployment uses robot state.
+We characterize missing pose labels in 1,249 demon-
+strations across towel folding, flower picking, paper-roll
+pickup, trash pickup, and block stacking.
+Plate-wiping
+recordings are excluded because their pose tracks fail as-
+sociation and geometric-validity checks.
+Many short gaps, substantial long-gap time.
+Gaps at
+most 0.5 s account for 76.3% of events but only 33.1% of
+missing duration. The 1–2 s bin contributes 7.5% of events
+and 25.0% of duration. Gaps above 2 s contribute 2.4% of
+events and 19.2% of duration. The mean is 0.44 s, median
+0.22 s, and maximum 18.00 s. The 90th, 95th, and 99th per-
+centiles (P90, P95, P99) are 1.00, 1.56, and 3.11 s.
+Quality filtering and duration definitions.
+Green de-
+notes accepted pose labels, and non-green denotes insuf-
+ficient evidence or geometric inconsistency.
+The analy-
+sis combines existing validity annotations with additional
+geometric checks on selected long-gap candidates. These
+checks use a 10-pixel reprojection threshold and detector
+confidence 0.60. Accepting a candidate also requires stereo
+support at wrist, thumb, and index points, at least 11 sup-
+ported points per view, and finite, nondegenerate poses and
+adjacent increments.
+Existing validity annotations deter-
+mine acceptance outside the selected candidate set.
+The distribution is evaluated at sampled timestamps (ap-
+proximately 0.111 s apart). Missing duration sums the cells
+bounded by neighboring timestamp midpoints, clipped at
+episode limits. A complete interval instead spans the reli-
+able poses before and after the run. Of 45,722 non-green
+runs, 43,284 are internal runs with two green endpoints.
+The remaining 2,438 runs touch episode boundaries. Using
+these endpoints for robot supervision requires valid poses
+expressed in the controller’s coordinate convention.
+The three-point rule requires valid 3D coordinates and
+image projections for the wrist, index fingertip, and thumb
+tip. All three projections must lie within the corresponding
+hand box in the original left image, including its boundary.
+The label-statistics comparison uses the same 800 record-
+ings and 283,010 sampled hand-frames for both rules, with
+hands counted separately. Complete-gap durations use the
+same timestamp-cell convention as the distribution analy-
+sis. This sample is drawn from the quality-control archive
+described above. The original filter gives higher task suc-
+12
+
+
+0%
+25%
+50%
+75%
+100%
+Fold towels
+Pick flowers
+Pick up paper rolls
+Pick up trash
+Stack blocks
+71.5%
+72.6%
+76.3%
+77.6%
+83.1%
+14.2%
+13.4%
+14.9%
+14.5%
+11.6%
+Count share
+0%
+25%
+50%
+75%
+100%
+22.7%
+27.0%
+37.4%
+38.1%
+47.8%
+17.1%
+18.6%
+26.5%
+27.4%
+26.0%
+21.7%
+26.5%
+28.1%
+26.5%
+22.1%
+20.9%
+24.9%
+15.2%
+Duration share
+≤0.5 s
+0.5–1 s
+1–2 s
+2–5 s
+5–10 s
+10–20 s
+>20 s
+Figure S2. Task-dependent Ego gap structure. Each task is normalized separately by its total gap count (left) or summed gap duration
+(right), using the width bins in Figure S1. Long gaps occupy more missing time in towel folding and flower picking than in block stacking.
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Normalized demonstration progress (%)
+Fold towels
+Pick flowers
+Pick up paper rolls
+Pick up trash
+Stack blocks
+Prepare
+Grip edges
+& first fold
+Second fold
+& press
+Release
+Prepare
+Reach
+& lift
+Lower
+& place
+Reach
+& lift
+Lower
+& place
+Release
+Prepare
+Pick up roll
+Hand off
+roll
+Align & place
+Release
+Prepare
+Open lid
+Grasp
+Drop
+into bin
+Grasp
+Drop
+into bin
+Close lid & finish
+Prepare
+Pick &
+move
+Place &
+stack
+Pick &
+move
+Place &
+stack
+Reset
+Place &
+stack
+Release
+0
+25
+50
+75
+100
+Gray-label rate (%)
+Gray labels across task progress
+Both hands pooled. Demonstrations weighted equally.
+Phase boundaries estimated from four annotated demonstrations per task.
+Figure S3. Label unavailability over normalized task progress and approximate action phases. Background color shows the gray-
+label fraction in 5%-progress bins, merging both hands within each demonstration and then weighting demonstrations equally. Gray
+denotes insufficient label evidence. The bridge plots also include other non-green states. Overlaid phase bands summarize four sampled
+demonstrations per task, with eight image anchors per demonstration (20 demonstrations, 160 images). Coarse phase boundaries are
+estimated from these sparse anchors and rounded to the 5% grid.
+cess across all five tasks, while three-point screening yields
+more accepted labels and fewer complete gaps.
+Real-robot hardware.
+We use a DexTeleop TeleAvatar
+Lite with two 7-DoF arms and DexTeleop custom paral-
+lel grippers (Figure S4). A head-mounted binocular fish-
+eye module provides a 180◦field of view and 3840 × 1080
+video. Two wrist-mounted RGB-D cameras capture 1280×
+720 video. The head module and both wrist cameras ac-
+quire images at 30 Hz. The teleoperation hardware includes
+a VR headset, tracking sensors, and handheld controllers.
+Real-robot training and control.
+We fine-tune all pa-
+rameters of a π0 policy for 20,000 updates with batch size
+128, using AdamW. The cosine learning-rate schedule uses
+a 1,000-step warmup, peak rate 2.5 × 10−5, decay-end rate
+2.5 × 10−6, and decay horizon of 30,000 steps. The pol-
+icy predicts 30 actions per chunk, and the controller runs
+at 20 Hz. Each task uses 20 robot demonstrations and 160
+Ego demonstrations, sampled with equal probability from
+the two sources.
+The wrist frame corresponds to the mounting face be-
+tween the arm and gripper, and successive wrist poses
+13
+
+
+Table S6. Label screening in real-robot learning. Success (%)
+for the main method with the original quality filter and with three-
+point box screening.
+Both use 20 robot and 160 Ego demon-
+strations per task, with equal source sampling. Each condition is
+trained once per task and evaluated over 50 episodes per model.
+Task
+Original filter
+Three-point
+Towels
+42.0
+34.0
+Flowers
+54.0
+52.0
+Rolls
+78.0
+68.0
+Trash
+66.0
+60.0
+Blocks
+58.0
+52.0
+Mean
+59.6
+53.2
+Table S7.
+Screening statistics on 800 Ego recordings.
+A
+stratified quality-control sample contains 160 recordings per task.
+Both rules use the same sampled hand-frames. Width measures
+missing-pose duration within gaps bounded by accepted poses.
+Statistic
+Original filter
+Three-point
+Reliable hand-frames (%)
+57.7
+66.8
+Complete gaps
+28,494
+23,148
+Median width (s)
+0.22
+0.22
+P90 width (s)
+1.00
+0.89
+P95 width (s)
+1.56
+1.33
+P99 width (s)
+3.22
+2.78
+stereo fisheye camera
+high-performance 
+7-DoF robotic arm
+quick-change 
+end-effector gripper
+omnidirectional 
+mobile base
+Figure S4. Real-robot platform. The TeleAvatar Lite bimanual
+robot and VR teleoperation equipment used for data collection.
+provide incremental motion.
+Missing Ego state inputs
+use interpolation between available states, with spherical
+linear interpolation (SLERP) for rotations.
+Controller-
+coordinate mapping follows RoboTwin’s end-effector-local
+SE(3) convention. Both screening conditions use the same
+recordings. For each task, each condition is trained once
+and each model is evaluated over 50 episodes.
+Missingness depends on task progress.
+The gray-label
+fraction peaks at 77.6% around 65–70% progress in towel
+folding, 74.6% around 80–85% in flower picking, and
+59.7% around 50–55% in paper-roll pickup.
+The phase
+bands place these regions near the second fold/press, flower
+placement, and paper-roll handover, respectively. These as-
+sociations motivate transferring gap patterns within corre-
+sponding task phases.
+E. Ego-informed bimanual simulation
+The RoboTwin 2.0 comparison tests Ego-derived gaps on
+ten tasks, using 25 training and 25 held-out demonstra-
+tions per task (250 each). Paired left/right missingness frag-
+ments are transferred between coarse corresponding phases
+without time stretching. Source phases use sparse image
+anchors.
+Target phases use gripper events, end-effector
+motion, and task structure.
+Pairing preserves within-
+fragment widths, spacings, and simultaneous loss. Cooper-
+ative grasping and held-object manipulation use coarse ana-
+logues. Episode and phase boundaries can truncate runs.
+76.9%
+12.6%
+8.1%
+Count share
+34.7%
+20.9%
+27.0%
+15.7%
+Duration share
+Width (s)
+Count (%)
+Time (%)
+≤0.5
+76.9
+34.7
+0.5–1
+12.6
+20.9
+1–2
+8.1
+27.0
+2–5
+2.4
+15.7
+5–10
+0.1
+1.7
+10–20
+0.0
+0.0
+>20
+0.0
+0.0
+Figure S5. Ego-transferred gap widths in RoboTwin. Count-
+and duration-weighted distributions of 5,767 per-arm runs in 250
+training demonstrations, including boundary-open runs.
+Width
+counts missing pose samples at nominal 0.06 s spacing, exclud-
+ing reliable endpoints. Colors and bins match the real-Ego plots.
+Transferred gap distribution.
+There are 5,767 per-arm
+gaps and 49.1% missing 6DoF actions. Coverage and cen-
+tral width quantiles are close to the source. Gaps longer than
+14
+
+
+0%
+25%
+50%
+75%
+100%
+Grab roller
+Lift pot
+Place container
+Adjust bottle
+Stack bowls
+Place cup
+Place on stand
+Hand over mic
+Can in basket
+Empty bin
+74.7%
+70.8%
+81.5%
+73.5%
+76.8%
+76.0%
+81.6%
+78.2%
+78.0%
+74.7%
+12.7%
+16.4%
+11.4%
+13.4%
+13.7%
+13.4%
+12.4%
+11.9%
+Count share
+0%
+25%
+50%
+75%
+100%
+26.0%
+27.4%
+42.8%
+27.1%
+35.7%
+35.0%
+40.3%
+40.9%
+38.7%
+30.0%
+15.9%
+22.1%
+19.1%
+15.4%
+23.4%
+24.1%
+19.1%
+25.1%
+23.4%
+16.9%
+20.9%
+26.2%
+28.3%
+21.7%
+29.9%
+32.2%
+23.4%
+25.7%
+30.1%
+25.8%
+28.6%
+15.1%
+35.7%
+17.2%
+24.3%
+Duration share
+≤0.5 s
+0.5–1 s
+1–2 s
+2–5 s
+5–10 s
+10–20 s
+>20 s
+Figure S6. Task-dependent gap widths after transfer. Each task pools both arms of 25 demonstrations and is normalized by its own gap
+count (left) or missing duration (right). Long gaps occupy different fractions of missing time across tasks.
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Normalized demonstration progress (%)
+Grab roller
+Lift pot
+Place container
+Adjust bottle
+Stack bowls
+Place cup
+Place on stand
+Hand over mic
+Can in basket
+Empty bin
+Approach & grasp roller
+Prepare
+Grasp handles & lift pot
+Pick up & move container
+Place
+Release
+Reach & lift bottle
+Adjust bottle
+Pick &
+move
+Place
+Reset
+Pick & move
+Stack
+Release
+Prepare
+Pick up & move cup
+Place cup
+Release
+Pick up & move object
+Place
+Release
+Pick up & move mic
+Align
+Approach
+Hand off
+Hold
+Pick up & move can
+Place can
+Reset & grip basket
+Pick up & move bin
+Tilt & empty bin
+0
+25
+50
+75
+100
+Missing-pose rate (%)
+Missing labels across task progress
+Both arms pooled. Demonstrations weighted equally.
+Subtask windows estimated from pose/gripper rules across 25 demos per task.
+Figure S7. Transferred missingness over task progress in RoboTwin. Color gives the missing-pose fraction in each 5%-progress bin,
+pooling both arms within a demonstration and then averaging the 25 demonstrations equally. Subtask boxes summarize the majority
+trajectory/gripper phase across demonstrations at each bin. Short ready/reset display runs are merged into the following phase. The boxes
+provide coarse phase descriptions derived from trajectory and gripper rules.
+15
+
+
+Table S8. RoboTwin training tasks. Each row has 25 training
+demonstrations. Missing fractions (%) are measured over all train-
+ing demonstrations of that task. Only the six pose coordinates per
+arm are masked, while recorded robot gripper labels are retained.
+Task
+Pose
+Action 6DoF
+Grab roller
+44.3
+48.9
+Lift pot
+50.6
+56.2
+Place container on plate
+36.9
+43.0
+Adjust bottle
+52.1
+57.5
+Stack two bowls
+41.0
+47.3
+Place cup on coaster
+39.8
+45.6
+Place object on stand
+37.7
+43.5
+Handover microphone
+43.0
+49.7
+Place can in basket
+41.2
+47.6
+Dump small bin
+48.6
+54.3
+Table S9. Ego and transferred RoboTwin gap distributions.
+Both distributions use a common nominal 0.06 s grid, with Ego
+statistics recomputed on that grid.
+Statistic
+Ego
+RoboTwin
+Missing pose fraction (%)
+42.7
+43.1
+Both hands missing (%)
+23.1
+23.2
+Events / hand-minute
+58.2
+62.1
+Mean width (s)
+0.44
+0.42
+Median / P90 (s)
+0.24 / 1.02
+0.24 / 1.02
+P95 / P99 (s)
+1.56 / 3.12
+1.56 / 2.76
+Maximum (s)
+18.00
+5.52
+Missing time in gaps > 5 s (%)
+5.4
+1.7
+5 s account for 1.7% of transferred missing time, compared
+with 5.4% in the source (Table S9).
+Bimanual labels and model.
+Actions contain two six-
+dimensional pose increments and two gripper commands,
+with per-coordinate, per-arm masks. A missing pose inval-
+idates both adjacent differences. The bimanual suffix has
+50 joint-action tokens and two six-dimensional interval to-
+kens with side identifiers and a shared head. Each interval
+reads its starting observation without access to action keys.
+Actions can read main-interval tokens. Bridge targets and
+composition are arm-specific.
+At nominal 0.06 s spacing, the 50-action horizon (H50)
+spans 3 s.
+Of 5,295 complete bridges, 30 require two
+bridge-aligned windows. The 472 boundary-open gaps have
+no interval target. Valid endpoints exist for 34.7% of these
+per-arm interval slots. Grouped actions share one computa-
+tion graph and one optimizer update. The other arm’s reli-
+able labels remain active. Each method uses 5,000 updates
+and 800 evaluation episodes.
+Closed-loop comparisons.
+Clean restores labels on the
+same training demonstrations.
+Other methods share one
+bridge manifest. Hold/Linear use completed poses for FM
+inputs and targets, including rotation interpolation for Lin-
+ear. Mask and interval-only models block missing action
+keys. The composition model uses readable keys and linear-
+reference missing inputs. Composition targets are stopped-
+gradient interval predictions. A separate control uses ob-
+served endpoint motion. Initialization, ordinary sampling,
+controller, updates, and evaluation conditions are common.
+Interval and grouped-action views add observations to the
+ordinary action batch.
+Table 6 compares all seven methods.
+Transferred widths and task variation.
+Gaps up to 0.5 s
+account for 76.9% of transferred events and 34.7% of miss-
+ing duration (Figure S5), versus 76.3% and 33.1% in native-
+time Ego data. The bottle-adjustment 2–5 s bin contains
+7.2% of events and 35.7% of missing duration (Figure S6).
+Gaps follow task phases (Figure S7).
+16
+
+
+F. Bimanual pose-label gaps
+Figure 1(a) in the main paper uses towel folding to illustrate how observations remain available while supervision differs
+between hands. Figure S8 extends this illustration to four additional tasks, linking each selected image to its state on the left-
+and right-hand tracks.
+Stack blocks — bimanual pose-label gaps
+(a) Both aligned
+4.99 s
+(b) Left partly outside
+8.99 s
+(c) Both partly outside
+12.88 s
+(d) Right partly outside
+16.66 s
+(e) Both recovered
+21.10 s
+Left hand
+Right hand
+Illustrative progression
+Accepted
+Filtered (gap)
+3D pose projection
+Pick flowers — bimanual pose-label gaps
+(a) Both aligned
+3.42 s
+(b) Left partly outside
+8.31 s
+(c) Both partly outside
+11.98 s
+(d) Right partly outside
+15.53 s
+(e) Both recovered
+18.87 s
+Left hand
+Right hand
+Illustrative progression
+Accepted
+Filtered (gap)
+3D pose projection
+Pick up paper rolls — bimanual pose-label gaps
+(a) Both aligned
+2.10 s
+(b) Left partly outside
+4.32 s
+(c) Both partly outside
+5.65 s
+(d) Right partly outside
+7.65 s
+(e) Both recovered
+9.65 s
+Left hand
+Right hand
+Illustrative progression
+Accepted
+Filtered (gap)
+3D pose projection
+Pick up trash — bimanual pose-label gaps
+(a) Both aligned
+9.66 s
+(b) Left partly outside
+18.77 s
+(c) Both partly outside
+26.21 s
+(d) Right partly outside
+34.88 s
+(e) Both recovered
+44.10 s
+Left hand
+Right hand
+Illustrative progression
+Accepted
+Filtered (gap)
+3D pose projection
+Figure S8. Bimanual gap illustrations across four Ego tasks. From top to bottom: block stacking, flower picking, paper-roll pickup, and
+trash pickup. Real frames retain matched hand boxes and five projected 3D landmarks per hand. Red examples apply small, constructed
+pose-label offsets. The paired tracks use task-specific illustrative intervals. Each selected image matches its displayed left/right state.
+17

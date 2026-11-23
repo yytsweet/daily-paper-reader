@@ -1,0 +1,4605 @@
+MIXFOLD: SUB-4-BIT MIXED-PRECISION LLM INFERENCE VIA
+OUTPUT-CHANNEL GROUPING ON MOBILE NPUS
+Vinnam Kim 1 Seong Hoon Seo 2 1 * Junhan Kim 1 Jaeseong You 1 An Chen 1
+1 Qualcomm AI Research, Qualcomm Technologies, Inc., San Diego, CA, USA
+2 Seoul National University, Seoul, Republic of Korea
+ABSTRACT
+Sub-4-bit quantization allows mobile devices to run larger LLMs, but its memory savings do not always translate
+into faster decoding on mobile NPUs. Their matrix units support only a few native integer datatypes, and
+converting unsupported weight formats on the vector unit can erase the gains from fewer bits. Mixed precision
+faces an additional constraint: each matrix-unit tile uses one datatype. MixFold executes 3-bit and perfectly
+symmetric 2-bit weights using native integer operations without expanding the weights to wider datatypes during
+decoding. MixFold then assigns datatypes to output-channel groups aligned with the matrix-unit tiles, enabling
+finer-than-layer assignment without disrupting matrix-unit execution. We compare MixFold with llama.cpp
+Hexagon backend on the Qualcomm Hexagon NPU of a Snapdragon 8 Elite Gen 5. Across the Qwen3 model
+family, MixFold achieves comparable or higher accuracy than llama.cpp’s sub-4-bit formats at matched bits per
+weight, while decoding 1.16–1.41× faster and generating 1.5–4.3× more tokens per joule.
+1
+INTRODUCTION
+Sub-4-bit quantization, below 4 bits per weight (BPW) on
+average, allows a mobile device to hold a larger LLM.
+Larger LLMs can better support on-device AI use cases
+involving personal data such as contacts, photos, calendar
+events, and messages. Two levers can improve accuracy
+under a sub-4-bit budget. The first is a better datatype, such
+as the perfectly symmetric 2-bit grid (Liu et al., 2025) or
+3-bit weights. The second is mixed precision (MP), which
+assigns more bits to sensitive weights and fewer bits to the
+rest. With these additional format choices, MP can further
+improve accuracy at a given BPW.
+However, on mobile NPUs, the most accurate sub-4-bit con-
+figurations save memory, but their decode time may not be
+as fast as their bytes promise. This is because the matrix
+unit of a mobile NPU admits only a few datatypes directly
+in hardware. We call these datatypes native. In contrast,
+non-native datatypes require converting the weights on the
+vector unit before the matrix unit execution. For example,
+a straightforward approach expands perfectly symmetric
+2-bit and 3-bit weights to native 4-bit values on the vec-
+tor unit before matrix-unit execution. A GPU could hide
+such conversion with a powerful general computing capabil-
+* Work performed while Seong Hoon Seo was an intern at
+Qualcomm Technologies, Inc.
+Correspondence: vinnkim@qti.qualcomm.com
+Preprint.
+ity (Frantar et al., 2025; Xia et al., 2024; Zeng et al., 2025),
+but on a mobile NPU, one vector-unit thread delivers two to
+three orders of magnitude less throughput than the matrix
+unit (Hao et al., 2026). MP faces a constraint driven by the
+matrix unit as well. Each matrix unit tile uses one datatype,
+so mixing bitwidths within a tile breaks the native layout.
+The two levers thus set two requirements. Every datatype
+in the mix must execute natively, and each weight tile must
+hold one bitwidth. Existing approaches do not fulfill both
+requirements at once. llama.cpp converts the weights on the
+vector unit before every multiplication (The ggml authors,
+2023). T-MAN skips the conversion with lookup tables
+(LUTs) on the vector unit, but it leaves the matrix unit idle
+at decode (Wei et al., 2025b). Hao et al. (2026) align 4-bit
+quantization groups with the matrix-unit tile, but they still
+dequantize the weights to floating point. MP methods assign
+bitwidths per layer (Dong et al., 2020; Yao et al., 2026), per
+channel (Zheng et al., 2026), or per salient group (Huang
+et al., 2024). Per-layer assignment keeps each tile in one
+bitwidth but ignores the sensitivity variation within a layer.
+The finer two may assign different bitwidths within a tile.
+In this paper, we propose MixFold, which satisfies both re-
+quirements at the finest granularity permitted by the NPU’s
+tiled architecture. At decode, MixFold executes perfectly
+symmetric 2-bit weights using native 2-bit codes by folding
+the correction into the bias. For 3-bit weights, it uses bit-
+plane decomposition, processing the 2-bit and 1-bit planes
+on the matrix and vector units in parallel. For MP, MixFold
+arXiv:2611.26976v1  [cs.AI]  20 Nov 2026
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+VTCM
+X
+q
+m, :
+activation
+W
+p
+n, :
+weight
+W
+p
+n + 1, :
+prefetch
+αn, bin
+n , bout
+n
+requantization
+Y
+q
+m, n
+output
+DRAM
+Xq
+(Wp)T
+Yq
+α, bin, bout
+DMA
+HMX
+Accumulate over K
+HW Saturation
+HVX
+pre/post-process
+Figure 1. Quantized MMA dataflow on the Hexagon NPU for one
+T × T output tile Y q
+m,n. DMA stages the activation row block
+Xq
+m,:, the weight tile W p
+n,:, and the requantization parameters from
+DRAM in VTCM while the next weight tile is prefetched. HVX
+pre- and post-processes VTCM buffers. HMX accumulates over
+K, then applies αn, bin
+n , and bout
+n
+with hardware saturation.
+assigns bitwidths to output-channel groups aligned with
+these tiles, enabling finer-than-layer assignment aligned
+with the matrix unit’s tile-level scheduling. This MP strat-
+egy also incorporates the non-native datatypes to further
+enhance the model accuracy at lower BPW. We test this
+synergy on Qualcomm Hexagon NPU of a Snapdragon 8
+Elite Gen 5 across the Qwen3 model family. At matched
+BPW, MixFold achieves comparable or higher accuracy than
+llama.cpp’s sub-4-bit formats, decodes 1.16–1.41× faster,
+and generates 1.5–4.3× more tokens per joule.
+This paper makes the following contributions:
+• Decode paths that run perfectly symmetric 2-bit and 3-
+bit weights on native integer MMA without converting
+the weights (Section 3).
+• Mixed precision over hardware-aligned output-channel
+groups with both non-native formats effective on the
+lower BPW (Section 4).
+• An evaluation on a commercial mobile NPU showing
+that sub-4-bit weights now decode as fast as their bytes
+promise, that mixes add negligible overhead, and that
+the richer datatypes and finer granularity raise accuracy
+at the same BPW (Section 5).
+2
+BACKGROUND AND MOTIVATION
+2.1
+Integer MMA Execution on Mobile NPUs
+Quantization for Integer MMA. Weight quantization en-
+codes each weight as a low-bit integer rather than a floating-
+point (FP) value, which reduces both the memory footprint
+and the amount of data read per generated token. Quanti-
+zation also saves energy when the arithmetic operates on
+the low-bit integers directly. Low-precision integer arith-
+metic can reduce energy per operation relative to FP arith-
+metic (Horowitz, 2014; Noh et al., 2025), motivating inte-
+−0.2
+−0.1
+0.0
+0.1
+0.2
+FP weight value
+0
+50
+100
+count
+W2
+W2-SEQ
+0
+10
+20
+output SQNR (dB)
+W2
+W2-SEQ
+W3
+W4
+13.2
+14.4
+19.5
+24.2
+Figure 2. (Left) Histogram of row 0 of the layer-0 gate projection
+of Qwen3-0.6B, with its W2 and W2-SEQ grids (markers). (Right)
+Output SQNR of the whole layer on WikiText-2 test activations,
+with per-channel scales fitted on WikiText-2 train activations.
+Table 1. Energy (millijoules, mJ) of one K = N = 2048 MMA.
+W4A16 takes 16-bit activation codes in either row-major format
+(converted inside the kernel) or the tiled HMX layout.
+M = 32
+M = 512
+Kernel
+MMA
+mJ
+vs. FP16
+mJ
+vs. FP16
+llama.cpp Q4 0
+FP16
+0.378
+–
+2.248
+–
+W4A16, row-major
+INT
+0.156
+−59%
+1.479
+−34%
+W4A16, tiled
+INT
+0.144
+−62%
+1.303
+−42%
+ger matrix multiply-accumulate (MMA) support in mobile
+NPUs (Park et al., 2023). On Qualcomm Hexagon NPU of a
+Snapdragon 8 Elite Gen 5, Table 1 shows that a W4A16 in-
+teger MMA uses 34–62% less SoC energy than llama.cpp’s
+Q4 0 (The ggml authors, 2023), which stores the weights at
+a similar 4.5 bits but performs the matrix multiplication in
+FP16.
+Low-precision integer arithmetic is realized with uniform
+weight–activation quantization (Nagel et al., 2021), which
+represents both the weights and the activations as integers
+on a uniform grid. Consider a linear layer Y = XW T + b,
+where Y ∈RM×N is the output corresponding to the input
+activation matrix X ∈RM×K, W ∈RN×K is the weight
+matrix, and b ∈RN is the bias. Here, M, K, and N denote
+the number of activation vectors, input channels, and output
+channels, respectively. Assuming per-tensor asymmetric
+quantization for the activations and per-channel symmetric
+quantization for the weights, the activations and the weights
+are quantized as
+Xm,k ≈sa
+ Xq
+m,k −za
+
+,
+Wn,k ≈sw,nW p
+n,k,
+(1)
+where Xq
+m,k and W p
+n,k are the unsigned q-bit and signed
+p-bit integer codes of the activations and the weights, re-
+spectively. Here, all activations share a scale sa and a zero
+point za, while all weights in output channel n share a scale
+sw,n.
+Using these quantized codes, the integer MMA first com-
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+putes the raw integer accumulation
+Pm,n =
+K
+X
+k=1
+Xq
+m,kW p
+n,k,
+(2)
+which is then requantized to the output code through per-
+channel rescaling and affine correction:
+Y q
+m,n = Requant
+ Pm,n; αn, bin
+n
+
+= clip
+ 
+αn(Pm,n −bin
+n ) + bout
+n
+
+,
+(3)
+where clip(·) saturates the result to the output code range
+[0, 2q −1] and
+αn = sasw,n
+sy
+,
+bin
+n = za
+K
+X
+k=1
+W p
+n,k,
+bout
+n
+= bn
+sy
++ zy.
+(4)
+Here, sy and zy are the scale and zero point of the output,
+which is quantized in the same way as the activations. We
+list only the scale and input bias as arguments of Requant,
+since MixFold mainly modifies these two (Section 3); the
+output bias remains bout
+n
+unless stated otherwise.
+Execution on Mobile NPUs. Figure 1 illustrates how a
+mobile NPU executes Integer MMA, using Qualcomm’s
+Hexagon NPU (Mahurin, 2023) as a representative exam-
+ple. The NPU comprises four components: Hexagon Ma-
+trix eXtensions (HMX), a matrix unit that performs the
+MMA; Hexagon Vector eXtensions (HVX), a vector unit for
+general-purpose computation; Vector Tightly Coupled Mem-
+ory (VTCM), a software-managed on-chip memory shared
+by HMX and HVX; and a direct memory access (DMA)
+engine that moves data between main memory (DRAM) and
+VTCM (Qualcomm Technologies, Inc., 2026; 2025).
+HMX operates on tiles: it multiplies an activation tile by a
+weight tile and accumulates the products into a T ×T output
+tile. The weights, activations, and requantization parameters
+reside in main memory. Since the capacity of the on-chip
+memory is limited, they are staged by DMA for one output
+tile at a time, which spans T activation vectors and T output
+channels, and the data for the next output tile are prefetched
+during the current MMA (The ggml authors, 2023). For
+each output tile, the matrix unit loads successive activation
+and weight tiles along the K dimension into its registers,
+accumulates their products (see (2)), and then applies the
+requantization with one set of parameters per output channel
+(see (3) and (4)).
+We call a format native when its datatype and tiled layout
+match the operands consumed by the matrix unit, thereby
+leading to a seamless flow of MMA and requantization;
+otherwise, it is called non-native. A prime example of
+a non-native format is llama.cpp’s Q4 0, which packs 32
+consecutive 4-bit integer codes with a scale. This format
+requires the vector unit to convert weights into a native
+datatype (such as FP16) before they reach the matrix unit.
+Table 2. Effective weight bandwidth (weight bytes over latency)
+at M
+= 1, aggregated over four projections of Qwen3-4B
+(QKV+O+Up/Gate+Down), against the DMA ceiling, a bulk copy
+of the same bytes with no computation at all.
+GB/s
+% of ceiling
+DMA ceiling
+84.1
+100
+Native W4
+76.4
+91
+Native W4 excluding HMX
+79.2
+94
+llama.cpp Q4 0
+67.2
+80
+T-MAN INT4
+71.0
+84
+2.2
+Challenges in Sub-4-Bit Quantization
+Non-Native Weight Representations. Weight bitwidths
+below 4 bits, namely 3 and 2 bits, reduce the memory foot-
+print further. However, 3-bit weights are non-native, since
+HMX provides no native MMA for 3-bit weights. Indeed,
+3-bit quantization is commonly unsupported across most
+NPUs, not just Hexagon, because compute units are fun-
+damentally optimized for power-of-two data widths (Xia
+et al., 2024; Zeng et al., 2025; Park et al., 2023). In con-
+trast, 2-bit weights are native, but their grid limits accuracy.
+The native 2-bit grid is the conventional signed integer grid
+{−2, −1, 0, 1}, which is asymmetric about zero and cov-
+ers a narrower range of positive weights than of negative
+ones. Stretched Elastic Quantization (SEQ) was proposed
+by ParetoQ (Liu et al., 2025) for such extreme low-bit quan-
+tization and instead maintains a perfectly symmetric grid
+{−3, −1, 1, 3} at 2 bits. We call this format W2-SEQ; un-
+suffixed W2, W3, and W4 denote the signed integer grids.
+ParetoQ reported that W2-SEQ outperforms W2 in per-
+channel QAT. Figure 2 also shows that W2-SEQ yields
+a higher output signal-to-quantization-noise ratio (SQNR)
+than W2, and W3 comes close to W4.
+Even though W3 and W2-SEQ can improve model qual-
+ity under sub-4-bit quantization, their non-native repre-
+sentations require runtime conversion. Since the W3 grid
+{−4, . . . , 3} and the W2-SEQ grid are both contained in
+the W4 grid {−8, . . . , 7}, the vector unit can expand their
+weights to native W4. However, the matrix unit cannot start
+the MMA until the less powerful vector unit (Hao et al.,
+2026) completes this expansion. The expanded weights can-
+not be retained in the limited on-chip memory, while storing
+W4 copies in DRAM would forfeit the savings of fewer bits.
+Consequently, the expansion must be repeated for every for-
+ward pass, and its cost is amortized only over M activation
+vectors: many during prefill, but one or a few during decode.
+HVX also serves camera and vision workloads (Codrescu,
+2015). With few HVX threads, this expansion falls behind
+the weight stream at decode.
+In Table 2, the native W4 kernel streams its weights at
+91% of the DMA ceiling. When the HMX computation is
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 3. Per-call work of each path at its production M. Only the
+expand path touches entire NK weights on HVX.
+Path
+M
+HVX work
+HMX MACs
+Expand
+any
+O(NK)
+MNK
+W2-SEQ
+bias-fold
+1
+O(K+N)
+MNK
+accumulator-fold 2–32 O(M(K+S)+N)
+MN(K+S)
+W3 activation-fold
+HVX-assist
+1
+O(K), NK/4 lookups MN(K+S)
+HMX-only
+2–32 O(MK)
+2MNK
+removed, the native W4 kernel reaches 94% of the DMA
+ceiling, indicating that HMX computation costs only 3%.
+The work around the HMX, such as the per-call setup and
+the chunked DMA pipeline, costs the remaining 6%. In
+contrast, llama.cpp’s Q4 0 reaches only 80% of the DMA
+ceiling. At M = 1, the kernel runs on HVX, which unpacks
+the 4-bit codes and rescales each block of 32 weights during
+execution. T-MAN (Wei et al., 2025b) instead performs
+decode using lookup tables (LUTs) on HVX. We run its
+public 4-bit decode kernel on the DMA pipeline and thread
+pool of llama.cpp’s Hexagon backend. The resulting kernel
+reaches 84% of the DMA ceiling. Neither approach matches
+the performance of the native W4 kernel.
+Hardware-aligned MP. MP benefits mobile NPU inference
+only when latency scales with bits per weight (BPW). For
+example, a 3.0-BPW model that mixes W2 and W4 should
+decode approximately halfway between the uniform W2 and
+W4 models. This requires that each datatype MP utilizes
+achieve byte-proportional execution and that dispatching
+different formats incur negligible overhead. Within these
+constraints, the assignment granularity should be as fine as
+possible. Layer-wise assignment (Dong et al., 2020; Yao
+et al., 2026) meets both requirements but ignores sensitivity
+variation within a layer. Per-channel assignment (Zheng
+et al., 2026) captures this variation but may assign different
+bitwidths to channels within the same weight tile, which the
+matrix unit cannot process directly. Regrouping channels by
+bitwidth may keep each tile in a single bitwidth, but HMX
+would produce output channels in the regrouped order, re-
+quiring an additional pass to restore the original channel
+order. Consequently, per-channel assignment introduces
+repeated conversion or reordering overhead, preventing la-
+tency from scaling with BPW.
+3
+EXECUTING NON-NATIVE WEIGHTS
+WITH NATIVE INTEGER MMA
+As mentioned in Section 2.2, W2-SEQ and W3 lack a native
+HMX MMA path. A naive approach to execute both for-
+mats is to expand their weights to signed W4 when loading
+them into VTCM (Section B.3); we call this the expand
+path. However, the expand path makes every MMA wait
+for weight conversion, and decode offers little weight reuse
+to amortize this overhead. Instead, our approach keeps the
+weights in native low-bit layouts and folds the remaining
+work into operands whose cost scales with the activations
+rather than the weights. We call these the fold paths.
+3.1
+W2-SEQ via a Row-Sum Fold
+Offline encoding.
+W2-SEQ can be encoded in native
+signed W2 as f
+W 2 = 2W 2 + 1. We encode and pack the
+weights as W 2 = (f
+W 2 −1)/2 in the native tile layout,
+retaining the original SEQ scales and the SEQ input bias
+ebin
+n = za
+P
+k f
+W 2
+n,k.
+Runtime correction.
+Using f
+W 2 = 2W 2 + 1, the W2-
+SEQ product can be rewritten in terms of the native W2
+accumulator P 2
+m,n as
+X
+k
+Xq
+m,kf
+W 2
+n,k = 2P 2
+m,n + Rm,
+Rm =
+X
+k
+Xq
+m,k.
+(5)
+Here, Rm is the sum of activation row m and thus depends
+on the input row rather than the output channel. By folding
+the factor of two into the requantization scale, we obtain
+Y q
+m,n ≈Requant
+ P 2
+m,n; 2αn, (ebin
+n −Rm)/2
+
+.
+(6)
+This formulation enables HMX to execute W2-SEQ using
+its native W2 MMA. However, the required input-bias cor-
+rection (ebin
+n −Rm)/2 varies across rows, whereas HMX
+applies a single input bias per output channel to every row
+in an output tile (see (3)). A general solution is the output-
+correction form described in Section B.1, which applies
+the row-dependent correction after Requant and then satu-
+rates the output again. This approach requires an additional
+HVX pass over all M × N outputs and may lose precision
+because of repeated output saturation. The two fold paths
+below avoid both issues by correcting before Requant.
+Bias-fold.
+When M = 1, there is only one activation row,
+so R1 is shared across all output channels and (ebin
+n −R1)/2
+remains a valid per-channel input bias. We therefore fold
+R1 into the input bias, which we call the bias-fold:
+Y q
+1,n ≈Requant
+ P 2
+1,n; 2αn, (ebin
+n −R1)/2
+
+.
+(7)
+Per call, HVX computes R1 by reducing the activation row
+and updates the N per-channel input-bias entries. HMX
+then runs the native W2 MMA and writes the output.
+Accumulator-fold.
+When M > 1, the bias-fold is not
+applicable because Rm varies across rows. We instead
+incorporate the row-dependent correction into the HMX
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+DMA
+HVX
+HMX
+C1
+C2
+C3
+C4
+C1
+C2
+C3
+C4
+36.2 µs
+W3 expand
+DMA
+HVX
+HMX
+C1
+C2
+C3
+C4
+C1
+C2
+C3
+C4
+18.4 µs
+W3 HMX-only activation-fold (ours)
+DMA
+HVX
+HMX
+C1
+C2
+C3
+C4
+C1
+C2
+C3
+C4
+20.1 µs
+W2-SEQ expand
+0
+5
+10
+15
+20
+25
+30
+35
+µs from kernel entry (Qwen3-0.6B, Down projection, M = 1)
+DMA
+HVX
+HMX
+C1
+C2
+C3
+C4
+12.2 µs
+W2-SEQ bias-fold (ours)
+Weight DMA
+HVX weight
+conversion
+HVX activation/
+output stages
+HMX MAC
+Figure 3. The fold paths take the HVX workload off the critical path. All kernels utilize single-thread HVX. C1–C4 number the chunks.
+accumulator, which we call the accumulator-fold. Since Rm
+is the sum of multiple q-bit activation codes, the required
+correction Rm/2 can exceed the range of a single q-bit
+code. We therefore decompose it as Rm/2 = Rc/2 + Lm,
+where Rc is a per-call constant that can be folded into the
+per-channel input bias, and Lm is a small row-dependent
+remainder. To add Lm to the accumulator, we append S
+correction columns Λ whose row m sums to Lm to Xq and
+S corresponding columns of +1, a native W2 value, to W 2:
+P 2 + L 1⊤
+N =
+
+Xq  Λ
+
+W 2  1N×S
+⊤,
+Y q
+m,n ≈Requant
+ P 2
+m,n + Lm; 2αn, (ebin
+n −Rc)/2
+
+.
+(8)
+Before the first multiply-accumulate (MAC), HVX com-
+putes the row sums of the activation block and sets Rc such
+that every Lm is non-negative. HVX then chooses the small-
+est S for which each Lm can be represented as the sum of
+S q-bit codes, writes Λ, and folds Rc into the input bias
+(see Section B.4). HMX then accumulates over the resulting
+K + S columns and writes the final output using a single
+Requant. The only approximation occurs when Rm −Rc
+is odd and the division by two must be rounded down.
+3.2
+W3 via a Bit-Plane Fold
+Representation.
+Each W3 weight is split into a signed W2
+plane and an unsigned W1 plane, so that W 3 = 2W 2 + W 1
+exactly:
+W 2
+n,k =
+
+W 3
+n,k/2
+
+,
+W 1
+n,k = W 3
+n,k −2W 2
+n,k.
+(9)
+Storing the two planes back-to-back requires three bits per
+weight physically without padding (see Section B.2).
+Activation-fold.
+By linearity, P 3 = 2P 2 + P 1. A naive
+solution would requantize the two plane products separately,
+add the resulting outputs, and saturate the sum again, as in
+the output-correction form of W2-SEQ (see Section B.1).
+However, this approach requires an additional output pass
+and may lose precision because of repeated saturation. We
+therefore propose the activation-fold, which folds the factor
+of two into the activation rather than the output, allowing
+both plane products to share a single accumulator:
+ˆP 3
+m,n = P 2
+m,n + ˆP 1
+m,n = P 3
+m,n −δm,n
+2
+,
+ˆP 1
+m,n =
+X
+k
+W 1
+n,k
+j
+Xq
+m,k/2
+k
+,
+δm,n =
+X
+k
+W 1
+n,k (Xq
+m,k mod 2).
+(10)
+Applying Requant with a doubled scale then yields
+Y q
+m,n ≈Requant
+  ˆP 3
+m,n; 2αn, ˆbin,3
+n
+
+,
+ˆbin,3
+n
+= 1
+2za
+X
+k
+W 3
+n,k −1
+4
+X
+k
+W 1
+n,k,
+(11)
+where the first term in ˆbin,3
+n
+is half of the W3 input bias
+defined in (4) and the second term compensates for the
+expected value of δm,n/2, assuming that odd and even ac-
+tivation codes are equally likely. At runtime, the vector
+unit halves each activation once per call. Since the output
+is requantized and saturated only once, the activation-fold
+avoids the precision loss caused by repeated saturation. Its
+main approximation is dropping the activation LSB in the
+W1-plane product, and the second term in (11) compensates
+for its expected error, leaving at most half an LSB of error
+per activation code (see Section D.10).
+Parallel execution of the activation-fold.
+Although the
+activation-fold uses native low-bit operations, HMX must
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+compute both P 2
+m,n and ˆP 1
+m,n, resulting in 2MNK MACs.
+At decode size, weight movement hides most, but not all,
+of this additional computation. We therefore compute ˆP 1
+1,n
+on HVX at M = 1, in parallel with the W2-plane MMA
+on HMX. We call this the HVX-assisted activation-fold and
+refer to the variant that computes both planes on HMX as
+the HMX-only activation-fold.
+Since the W1 plane is binary, HVX replaces multiplications
+with lookup-table (LUT) operations (Wei et al., 2025a;b).
+Concretely, HVX takes four activations ⌊Xq
+1,k/2⌋and pre-
+computes all 24 subset sums. The four W1 weights then
+index this table. The table is built once per call and shared
+across all N output channels, reducing the computation for
+each channel from K MACs to K/4 lookups. The result-
+ing W1-plane products are added to the shared accumulator
+through extra tiles, like Λ in (8), allowing a single Requant
+to produce the final output. Since the HVX computation
+cost grows with M, we compare the HVX-assisted and
+HMX-only activation-folds across M in Section D.5.
+3.3
+Pipelined Execution and Path Selection
+Pipelined execution.
+For each activation-row block, the
+kernel streams its weights in chunks of output-channel tiles.
+DMA prefetches up to three chunks ahead into ring slots in
+VTCM, and HMX multiplies a chunk once it is ready. HVX
+prepares the activation layout and materializes each chunk’s
+outputs. It also converts the weight chunks in the expand
+path and computes the intermediate terms of the fold paths.
+From HVX-bound to memory-bound.
+Figure 3 shows
+how the three units overlap at decode size (M = 1). In the
+expand path, every chunk must pass through HVX before
+HMX can use it. Converting a chunk takes about 1.9×
+its DMA time for W3 and 1.4× for W2-SEQ. HMX idles
+between chunks, and DMA stalls because a ring slot is freed
+only after its chunk is converted and multiplied. The fold
+paths remove this stage, so DMA feeds encoded low-bit
+tiles directly to HMX. For W3, HMX multiplies both planes
+into one accumulator (HMX-only). For W2-SEQ, HVX
+computes the row sum and updates the input bias once,
+before the first MAC. Both kernels are thus weight-stream-
+bound, like native kernels (Table 2). The fold paths reduce
+W3 and W2-SEQ latencies from 36.2 to 18.4 µs and from
+20.1 to 12.2 µs, respectively. The expand path reaches the
+weight-stream bound only with multiple HVX threads and
+large layers, as in Qwen3-4B (Section B.3).
+Cost across M and path selection.
+Table 3 generalizes
+this comparison to any M. The expand path converts all
+NK weights on HVX in every call, regardless of M. The
+fold paths never convert weights. In exchange, HMX does
+more MACs than the MNK of a native kernel. The W2-
+SEQ accumulator-fold and the W3 HVX-assisted activation-
+fold performs MN(K+S) MACs, where one extra tile
+(S = T) suffices in practice, so the overhead is T/K. Even
+the 2MNK of the W3 HMX-only activation-fold is cheap,
+since HMX delivers two to three orders of magnitude more
+throughput than an HVX thread (Hao et al., 2026). The
+trade therefore favors the fold paths at small M. As M
+grows, the NK conversion is amortized over more rows,
+while the activation-side work and the extra MACs keep
+growing with M. The crossover therefore depends on the
+MMA shape, motivating shape-dependent path selection in
+MixFold (Figure 5).
+4
+OUTPUT-CHANNEL GROUP-WISE MP
+4.1
+Hardware-Aligned MP Granularity
+HMX multiplies each weight tile in a single datatype (Fig-
+ure 1). A weight tile spans T contiguous output channels.
+Tiles along K add into the same accumulator (see (2)), so
+in principle they could use different bitwidths. However, all
+tiles of an output channel share one weight scale (see (4)).
+Sharing a scale across tiles of different bitwidths prevents
+each bitwidth from using an independently calibrated quan-
+tization grid, which can introduce large quantization error.
+We therefore assign bitwidths along the output channels.
+The finest granularity that keeps the native tiled layout is
+a group of T contiguous output channels. Each group of
+a layer independently selects W2-SEQ, W3, or W4. All
+tiles of a group share its bitwidth, and each output channel
+keeps one scale across K. This meets both requirements of
+Section 2.2.
+4.2
+Profile Search
+We select the bitwidth of each output-channel group by min-
+imizing the estimated quantization-induced loss increase
+under a target BPW budget. We first estimate the cost of as-
+signing each candidate bitwidth to each group, analyze how
+this cost varies within a layer, and then solve the resulting
+allocation problem using an integer linear program (ILP).
+Group-wise quantization cost
+Following prior Hessian-
+aware quantization methods (e.g., HAWQ-V2 (Dong et al.,
+2020)), we use a second-order approximation to estimate
+the task loss increase induced by quantization.1 Following
+SqueezeLLM (Kim et al., 2024), we approximate the Hes-
+sian with the diagonal empirical Fisher, yielding the cost of
+assigning bitwidth p to output-channel group g:
+ϵg,p =
+X
+(n,k)∈g
+EDcal
+"
+∂L
+∂Wn,k
+2# 
+∆W p
+n,k
+2
+,
+(12)
+1∆L ≈1
+2∆w⊤H∆w where H is the Hessian with respect
+to the full-precision weights. In the sequel, we omit the common
+factor 1
+2, as it does not affect the resulting bitwidth assignment.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+10
+9
+10
+8
+10
+7
+10
+6
+Group-wise quantization
+cost g, p
+(a) Cost g, p per bitwidth p
+p=2
+p=3
+p=4
+0
+1
+2
+3
+0
+1
+2
+3
+0
+1
+2
+3
+Group-wise
+(ours)
+Layer-wise
+3
+4
+2
+4
+2
+4
+3
+4
+2
+4
+2
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+Head 0
+Head 3
+Head 9
+(b) Assigned bitwidth at 3.0 BPW
+Figure 4. Group-wise quantization sensitivity and bitwidth assign-
+ment for the query projection in the 12th Transformer block of
+Qwen3-4B (model.layers.11.self attn.q proj). (a)
+Quantization cost ϵg,p varies substantially across hardware-aligned
+output-channel groups. (b) Under a 3.0-BPW budget, the layer-
+wise profile assigns W3 uniformly, whereas the group-wise profile
+allocates different bitwidths according to group sensitivity.
+where L is the task loss, Dcal is the calibration set, and
+∆W p
+n,k = sp
+w,nW p
+n,k −Wn,k is the perturbation introduced
+by quantizing Wn,k to p-bit. This cost jointly captures the
+sensitivity of each weight to the task loss and the magnitude
+of the perturbation introduced by the candidate bitwidth.
+Figure 4(a) shows the quantization costs ϵg,p of hardware-
+aligned groups from several attention heads within the same
+layer. Although lower bitwidths generally incur higher costs,
+the absolute cost at each bitwidth varies substantially across
+groups. Some groups exhibit low quantization costs at W2-
+SEQ, whereas others incur high costs even at W4. A uniform
+bitwidth per layer may thus over-allocate precision to groups
+with low quantization costs or under-allocate it to groups
+with high ones.
+Bitwidth allocation
+Let P be the palette, the set of can-
+didate formats, e.g., {W2-SEQ, W3, W4}, and let bp be
+the bitwidth of format p ∈P. Let xg,p ∈{0, 1} indicate
+whether group g is assigned format p, and ng the number of
+weights in group g. Given a target BPW budget B, we solve
+min
+x
+X
+g,p
+ϵg,pxg,p
+s.t.
+X
+g,p
+p ngxg,p ≤B
+X
+g
+ng,
+X
+p
+xg,p = 1 ∀g.
+(13)
+The first constraint enforces the target average BPW, while
+the second assigns exactly one format to each output-
+channel group. Solving the ILP yields a bitwidth assignment
+that minimizes the additive second-order loss surrogate un-
+der the specified BPW budget. Because the fold paths in-
+troduced in Section 3 run W2-SEQ and W3 as efficiently
+as native W4, the palette can include them, and groups of
+different formats are mixed within a single layer.
+Figure 4(b) illustrates the resulting bitwidth assignments
+under a 3.0-BPW budget. While the layer-wise profile uni-
+formly assigns W3 to all groups, our group-wise profile
+assigns W2-SEQ to groups with lower quantization costs,
+W4 to groups with higher costs, and W3 to the remain-
+ing groups. This allocation better accounts for group-wise
+sensitivity variation under the same BPW budget.
+5
+EVALUATION
+We evaluate MixFold with three questions. (Q1) Do the fold
+paths run W3 and W2-SEQ as close to the DMA ceiling
+as native kernels, and up to which M (Section 5.2)? (Q2)
+Do group-wise mixed-precision kernels scale with BPW in
+latency and energy (Section 5.3)? (Q3) Does group-wise
+allocation improve accuracy over layer-wise allocation at the
+same BPW, and do W2-SEQ and W3 add to it (Section 5.4)?
+Section 5.5 then compares MixFold with llama.cpp end to
+end on the same NPU.
+5.1
+Setup
+Platform and models.
+We built a dedicated runtime for
+MixFold from scratch to implement fully static integer quan-
+tization, while reusing some operators, such as FlashAt-
+tention (Dao et al., 2022), from the llama.cpp Hexagon
+backend. All latencies are measured on a mobile equipped
+with the Qualcomm Hexagon NPU of a Snapdragon 8 Elite
+Gen 5 (SM8850, Hexagon v81). We mainly use Qwen3
+family models for evaluation: Qwen3-0.6B, 1.7B, 4B, and
+8B (4B is an instruct model). Kernel evaluations cover four
+projection shapes from Qwen3 decoder layers: QKV, O,
+Up/Gate, and Down projections. We quantize the models us-
+ing integer 16-bit activations (A16) and per-channel integer
+weights: uniform precision W4-, W3-, W2-, and W2-SEQ-
+A16, as well as mixed-precision profiles (MP-A16) with
+an output-channel-group size of T = 32. We also apply
+PrefixQuant (Chen et al., 2026) to reduce the activation
+quantization error caused by the wide activation ranges of
+prefix tokens (Section E.1). FlashAttention is excluded from
+integer quantization and uses an FP16 KV cache.
+End-to-end metrics.
+We report decode (tg128, 128 gen-
+erated tokens) throughput in tokens per second on the NPU.
+Accuracy of the quantized models is measured using GPU
+simulation with Qualcomm AIMET (Siddegowda et al.,
+2022), because running the full benchmark suite on the NPU
+is prohibitively time-consuming. We validate the simulation
+by comparing its WikiText-2 (Merity et al., 2016) perplexity
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 4. Qwen3 aggregate (QKV+O+Up/Gate+Down) decode-size
+(M = 1) latency (µs), and the effective weight bandwidth as % of
+the DMA ceiling in Table 2. Bold marks the fold paths (bias-fold
+for W2-SEQ and activation-fold for W3).
+0.6B
+1.7B
+4B
+8B
+Format
+Path
+µs
+%
+µs
+%
+µs
+%
+µs
+%
+W2
+native
+69
+72
+193
+79
+372
+82
+668
+86
+W2-SEQ
+expand
+104
+47
+276
+55
+526
+58
+976
+59
+fold
+75
+66
+194
+79
+372
+82
+672
+86
+W4
+native
+114
+84
+345
+87
+667
+91
+1247
+92
+W3
+expand
+185
+39
+532
+43
+1046
+44
+1995
+43
+fold
+94
+77
+270
+84
+516
+88
+954
+91
+(PPL) with on-target runs on the NPU (Section E.2). Using
+lm-evaluation-harness (Gao et al., 2024), we report zero-
+shot commonsense reasoning (CSR) accuracy averaged over
+ARC-Challenge, ARC-Easy, HellaSwag, OpenBookQA,
+PIQA, and WinoGrande (Clark et al., 2018; Zellers et al.,
+2019; Mihaylov et al., 2018; Bisk et al., 2020; Sakaguchi
+et al., 2019). We also report MMLU accuracy (Hendrycks
+et al., 2020) and IFEval (Zhou et al., 2023).
+5.2
+Non-Native Kernel Latency
+Decode kernel latency.
+Table 4 reports the sum of the
+four projection latencies during decoding (M = 1) across
+all evaluated combinations of weight formats and execution
+paths on the four Qwen3 models. Overall, the proposed
+fold path-based execution, which avoids weight expansion,
+enables W2-SEQ and W3 to achieve decode efficiency com-
+parable to their native counterparts. Specifically, W2-SEQ
+with the fold path nearly matches the decode latency of
+native W2. Their effective weight bandwidth relative to
+the DMA ceiling differs less than 1% except Qwen3-0.6B,
+whose small weight stream does not hide the per-call cor-
+rection. In contrast, W2-SEQ with the expand path, in
+which the weights are expanded to W4 before the MMA, is
+1.41–1.52× slower than native W2. Similarly, W3 with the
+expand path is 1.55–1.63× slower than native W4, whereas
+the fold path reduces its latency to 0.77–0.82× that of na-
+tive W4, approximately in proportion to the reduction in
+weight bytes. Against the DMA ceiling, the fold path keeps
+W3 within 3 points of W4 except Qwen3-0.6B (7 points on
+0.6B), while the expand path falls to 39–59%. The same
+performance trends carry over to end-to-end decoding on
+tg128 (Section D.1).
+Behaviour across M.
+We next examine the range of M
+over which the fold path is beneficial, as its cost generally
+scales with M. Figure 5 extends the preceding kernel-level
+analysis from decode to prefill sizes. The fold path remains
+faster than the expand path for both W2-SEQ and W3 up
+1
+32
+64
+128 256 512
+M (rows)
+1.0
+1.2
+1.4
+normalized latency
+W2-SEQ
+1
+32
+64
+128 256 512
+M (rows)
+1.0
+1.5
+2.0
+W3
+fold
+expand
+W2 / W4
+byte-proportional W3
+Figure 5. Qwen3-4B aggregate latency versus M: W2-SEQ nor-
+malized to W2 (left) and W3 normalized to W4 (right). Shaded:
+sizes where the fold path runs faster than the expand path. Dashed
+line: byte-proportional ideal of W3 (0.75 of W4).
+to M = 32 (see the other models in Figure 11). As M
+increases, computation accounts for a larger fraction of la-
+tency relative to HMX MACs rather than weight movement.
+Consequently, the relative latency of W3 deviates from the
+byte-proportional line because W3 requires twice as many
+HMX MACs as native W4. Nevertheless, W3 remains faster
+than native W4 for M ≤32, except on Qwen3-0.6B, where
+the smaller weight stream limits the benefit of reducing
+weight traffic. Based on this analysis, we configure the ker-
+nel dispatcher in MixFold to select an appropriate path for
+each MMA operation according to M.
+Comparison with T-MAN.
+We reproduce T-MAN’s ker-
+nels (Wei et al., 2025b) in Section D.6. On Qwen3-4B,
+W2-SEQ is 1.13× faster at M = 1, where both are bound
+by the weight stream, and 4.4–4.6× faster for 8 ≤M ≤32,
+where T-MAN converts its bit-serial weights to FP16 before
+HMX.
+5.3
+Mixed Precision Kernel Latency and Power
+At decode (M = 1), the latency of an ideal mixed-precision
+kernel should scale with its BPW. This requires that dis-
+patching them across output-channel groups incurs negli-
+gible overhead. Figure 6 tests this on Qwen3-4B with two
+palettes, {W2, W4} and {W2-SEQ, W3, W4}, from 2.5 to
+3.5 BPW (see Section D.7 for other models). Each group
+contains T = 32 output channels. A marker placed on the
+interpolation line means the proper latency–BPW scaling.
+We can find MixFold scales both {W2, W4} and {W2-SEQ,
+W3, W4} palettes well. Furthermore, the {W2-SEQ, W3,
+W4} palette which includes non-native formats scales well
+enough like {W2, W4}.
+Energy follows the interpolation line less closely in the right
+panel of Figure 6, because MixFold’s W3 fold path spends
+extra computation on the W1-plane product. W3 thus does
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+2
+3
+4
+bits per weight
+0.6
+0.7
+0.8
+0.9
+1.0
+Normalized latency
+2
+3
+4
+bits per weight
+0.6
+0.8
+1.0
+Normalized energy
+W2
+W2-SEQ
+W3
+W4
+{W2, W4} mixed
+{W2-SEQ, W3, W4} mixed
+W2–W4 line
+Figure 6. Mixed-precision kernels follow BPW in latency (left)
+and, with an offset for W2-SEQ and W3, in energy (right). Qwen3-
+4B, M = 1, all projections aggregated, normalized to W4. Hollow
+markers are single-width kernels. The solid line interpolates W2
+and W4.
+57.5
+60.0
+62.5
+65.0
+67.5
+70.0
+Uniform W4
+3.0
+3.2
+3.4
+3.6
+3.8
+BPW
+41
+Uniform W3
+Group
+Layer
+3.0
+3.2
+3.4
+3.6
+3.8
+BPW
+{W2-SEQ, W3, W4}
+{W2-SEQ, W4}
+{W2, W4}
+Accuracy
+Figure 7. Accuracy (average of CSR, MMLU, and IFEval) ver-
+sus BPW of weight-only GPTQ MP profiles on Qwen3-4B. Left:
+output-channel-group-wise versus layer-wise allocation using the
+{W2-SEQ, W3, W4} palette.
+Right: comparison of differ-
+ent bitwidth palettes using output-channel-group-wise allocation,
+where W2 denotes the conventional two’s-complement format.
+not lie halfway between W2 and W4. The same holds for
+W2-SEQ, which needs extra computation for folding. This
+additional cost makes the {W2-SEQ, W3, W4} palette less
+energy-efficient than the pure native palette {W2, W4}.
+Nevertheless, both palettes scale with BPW, even though
+their slopes deviate from the W2–W4 line. Section 5.4
+shows the accuracy this extra energy buys.
+5.4
+Mixed Precision Model Accuracy
+Figure 7 demonstrates the importance of both allocation
+granularity and bitwidth palette using weight-only mixed-
+precision profiles of Qwen3-4B. As shown in the left panel,
+finer-grained allocation pushes the accuracy–BPW Pareto
+frontier outward. Specifically, output-channel-group-wise
+allocation consistently outperforms layer-wise allocation,
+with a larger accuracy gain at lower BPW. Enriching the
+bitwidth palette further improves the accuracy–BPW Pareto
+frontier (see the right panel). Replacing W2 with the sym-
+metric W2-SEQ format improves accuracy at the same BPW,
+and adding W3 provides an additional gain. The gain from
+adding W2-SEQ to the palette grows at lower BPW, as Pare-
+toQ reports (Liu et al., 2025). The fold paths of Section 3 let
+these non-native formats improve accuracy at a given BPW
+without sacrificing decode throughput.
+5.5
+End-to-End Accuracy and Efficiency
+Baseline.
+We evaluate Q2 K, Q3 K S, Q3 K M, and
+Q4 0 using the llama.cpp Hexagon backend (build b11444),
+where the first three are sub-4-bit formats and Q4 0 is a
+near-4-bit format. We match each MP-A16 profile’s target
+BPW to the corresponding sub-4-bit llama.cpp baseline.
+Protocol.
+Following llama-bench practice (The ggml au-
+thors, 2023), we repeat five thermally controlled runs and
+report the median (see Section C.2 for details).
+Decode throughput.
+As shown in the left panel of Fig-
+ure 8, MixFold achieves higher decode throughput than
+the corresponding llama.cpp baselines at matched BPW
+across all model sizes. Moreover, the decode throughput
+of MixFold increases as BPW decreases. This contrasts
+with llama.cpp, where sub-4-bit formats offer only limited
+speedups over Q4 0. For example, Q2 K uses only 65% of
+the weight storage of Q4 0 but achieves just 1.03–1.09×
+the decode throughput of Q4 0.
+Energy efficiency.
+Figure 8 (middle) compares decode
+energy efficiency during tg128, measured in tokens per joule
+(J): a higher value indicates lower energy consumption per
+generated token. We measure the power consumption of
+the entire system, including the CPU, NPU, and memory,
+throughout each run. At matched BPW, MixFold achieves
+1.5–4.3× higher energy efficiency than llama.cpp.
+Accuracy–throughput optimality.
+For this evaluation,
+we quantize the weights according to each MP profile using
+FlexRound (Lee et al., 2023), replacing the GPTQ-based
+quantization used in Figure 7. FlexRound helps compen-
+sate for the accuracy loss caused by the coarser per-channel
+quantization used by MixFold, compared with the group-
+wise quantization used by llama.cpp. As shown in the right
+panel of Figure 8, MixFold achieves competitive model ac-
+curacy to llama.cpp at matched BPW (from -0.4 to +10.4).
+Moreover, MixFold achieves accuracy–throughput Pareto
+optimality. These results suggest that, despite using coarser
+per-channel quantization, MixFold can achieve compara-
+ble or higher accuracy to llama.cpp at matched BPW by
+combining fine-grained mixed precision with an appropriate
+PTQ method, while maintaining high runtime efficiency.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+0.2
+0.5
+1
+2
+decoder linear weights (GB)
+10
+20
+50
+100
+200
+tg128 (tokens/s)
+0.6B
+1.7B
+4B
+8B
+1.23–1.33×
+1.16–1.27×
+1.22–1.36×
+1.18–1.41×
+0.2
+0.5
+1
+2
+decoder linear weights (GB)
+1
+2
+5
+10
+20
+tg128 tokens per joule
+0.6B
+1.7B
+4B
+8B
+3.92–4.29×
+2.56–2.75×
+1.83–2.04×
+1.53–1.91×
+20
+50
+100
+tg128 (tokens/s)
+40
+50
+60
+70
+accuracy (avg. of CSR,
+MMLU, IFEval)
+0.6B
+1.7B
+4B
+8B
++1.0–10.4
++1.8–8.3
++0.0–1.7
+−0.4 to −0.1
+MixFold MP
+llama.cpp (sub-4-bit)
+llama.cpp Q4_0
+Figure 8. End-to-end decode throughput (Left), energy efficiency (Middle), and accuracy–throughput optimality (Right). Pairs matching
+BPW between MixFold and llama.cpp are connected in a line.
+6
+RELATED WORK
+Executing low-bit weights.
+On GPUs, weight-only quan-
+tizers such as GPTQ and AWQ dequantize weights to FP16
+before the GEMM (Frantar et al., 2022; Lin et al., 2024), and
+later kernels hide that cost behind the tensor cores (Frantar
+et al., 2025; Xia et al., 2024; Zeng et al., 2025) or fold it into
+table lookups (Park et al., 2024; Guo et al., 2024). Atom and
+QServe keep the arithmetic in integers but at the bitwidths
+the tensor cores provide (Zhao et al., 2024; Lin et al., 2025).
+On CPUs, T-MAC and bitnet.cpp replace the multiplication
+with table lookups (Wei et al., 2025a; Wang et al., 2025).
+On mobile NPUs, the llama.cpp Hexagon backend converts
+packed weights to FP16 before the MMA (The ggml authors,
+2023). llm.npu keeps the NPU on its native INT8 path for
+prefill and runs decode on the CPU (Xu et al., 2025), and
+PowerInfer-2 splits decode between the NPU and the CPU
+by activation density (Xue et al., 2024). MobileQuant and
+Quant.npu adapt the quantizer to the NPU’s integer arith-
+metic but stay at 4 bits or above (Tan et al., 2024; Zhang
+et al., 2026). T-MAN multiplies low-bit weights by table
+lookup on the NPU’s vector cores, which frees it from na-
+tive datatypes but leaves the matrix unit idle at decode (Wei
+et al., 2025b). We compare its kernel with ours in Sec-
+tion 5.2. Hao et al. (2026) expose the NPU’s tile shape to
+the quantizer. ParetoQ shows that the symmetric W2-SEQ
+grid is more accurate than the two’s-complement grid, but
+gives no way to execute it (Liu et al., 2025). MixFold neither
+converts weights nor leaves the matrix unit idle: W2-SEQ
+and W3 run as native integer MMA, and the vector unit
+never converts weights at decode.
+Mixed-precision allocation.
+Mixed precision trades al-
+location granularity against hardware fit. HAWQ and its
+successors assign a bitwidth per layer from Hessian sensitiv-
+ity, and HAWQ-V3 solves the assignment as an ILP (Dong
+et al., 2019; 2020; Yao et al., 2021). HAQ learns the as-
+signment from measured latency (Wang et al., 2019), and
+differentiable relaxations search it by gradient (Wu et al.,
+2018; Yang & Jin, 2021); both decide per layer. For LLMs,
+SqueezeLLM, SpQR, and OWQ keep sensitive weights or
+columns at a higher precision (Kim et al., 2024; Dettmers
+et al., 2023; Lee et al., 2024), SliM-LLM allocates per group
+by salience (Huang et al., 2024), MixLLM allocates per out-
+put channel (Zheng et al., 2026), and GAMMA learns a
+global allocation under a bit budget (Yao et al., 2026). Mix-
+Fold admits the non-native W2-SEQ and W3 into the palette
+and adopts hardware-aware finer granularity to move the
+accuracy–throughput frontier outward.
+7
+CONCLUSION
+We presented MixFold, which runs sub-4-bit and mixed-
+precision LLM weights on a mobile NPU without native low-
+bit support. It executes W2-SEQ and W3 on native integer
+MMA without converting the weights, and combines them
+with hardware-aware output-channel group-wise mixed pre-
+cision. On the Qualcomm Hexagon NPU of a Snapdragon 8
+Elite Gen 5 (SM8850, Hexagon v81), MixFold moves the
+accuracy–throughput frontier beyond llama.cpp’s sub-4-bit
+formats while improving power efficiency. All these gains
+follow from nativeness: no weight is converted before the
+matrix unit, so decode is bound by weight bytes and the
+arithmetic stays in integers. Hexagon is a representative
+case rather than a special one. Mobile NPUs keep few na-
+tive datatypes to save area and power, so sub-4-bit formats
+are non-native on most of them. MixFold needs only native
+2-bit integer MMA, per-channel requantization with a bias
+set at run time, and a vector unit that shares on-chip memory
+with the matrix unit. NPUs with these features can adopt
+the same execution paths.
+REFERENCES
+Bisk, Y., Zellers, R., Bras, R. L., Gao, J., and Choi, Y.
+Piqa: Reasoning about physical commonsense in natural
+language. In Thirty-Fourth AAAI Conference on Artificial
+Intelligence, 2020.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Chen, M., Liu, Y., Wang, J., Bin, Y., Shao, W., and Luo, P.
+PrefixQuant: Eliminating outliers by prefixed tokens for
+large language models quantization. IEEE Transactions
+on Pattern Analysis and Machine Intelligence, 2026.
+Clark, P., Cowhey, I., Etzioni, O., Khot, T., Sabharwal, A.,
+Schoenick, C., and Tafjord, O. Think you have solved
+question answering? try arc, the ai2 reasoning challenge.
+arXiv:1803.05457v1, 2018.
+Codrescu, L. Architecture of the hexagon™680 dsp for
+mobile imaging and computer vision. In 2015 IEEE
+Hot Chips 27 Symposium (HCS), pp. 1–26, 2015. doi:
+10.1109/HOTCHIPS.2015.7477329.
+Dao, T., Fu, D., Ermon, S., Rudra, A., and R´e, C. Flashat-
+tention: Fast and memory-efficient exact attention with
+io-awareness. Advances in neural information processing
+systems, 35:16344–16359, 2022.
+Dettmers, T., Svirschevski, R., Egiazarian, V., Kuznedelev,
+D., Frantar, E., Ashkboos, S., Borzunov, A., Hoefler, T.,
+and Alistarh, D. Spqr: A sparse-quantized representation
+for near-lossless llm weight compression. arXiv preprint
+arXiv:2306.03078, 2023.
+Dong, Z., Yao, Z., Gholami, A., Mahoney, M. W., and
+Keutzer, K. Hawq: Hessian aware quantization of neural
+networks with mixed-precision. In Proceedings of the
+IEEE/CVF international conference on computer vision,
+pp. 293–302, 2019.
+Dong, Z., Yao, Z., Arfeen, D., Gholami, A., Mahoney,
+M. W., and Keutzer, K. HAWQ-V2: Hessian aware trace-
+weighted quantization of neural networks.
+Advances
+in Neural Information Processing Systems, 33:18518–
+18529, 2020.
+Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D. Gptq:
+Accurate post-training quantization for generative pre-
+trained transformers. arXiv preprint arXiv:2210.17323,
+2022.
+Frantar, E., Castro, R. L., Chen, J., Hoefler, T., and Alis-
+tarh, D. Marlin: Mixed-precision auto-regressive parallel
+inference on large language models. In Proceedings of
+the 30th ACM SIGPLAN Annual Symposium on Princi-
+ples and Practice of Parallel Programming, pp. 239–251,
+2025.
+Gao, L., Tow, J., Abbasi, B., Biderman, S., Black, S., DiPofi,
+A., Foster, C., Golding, L., Hsu, J., Le Noac’h, A., Li,
+H., McDonell, K., Muennighoff, N., Ociepa, C., Phang,
+J., Reynolds, L., Schoelkopf, H., Skowron, A., Sutawika,
+L., Tang, E., Thite, A., Wang, B., Wang, K., and Zou, A.
+The language model evaluation harness, 07 2024. URL
+https://zenodo.org/records/12608602.
+Guo, H., Brandon, W., Cholakov, R., Ragan-Kelley, J., Xing,
+E., and Kim, Y. Fast matrix multiplications for lookup
+table-quantized llms. In Findings of the Association for
+Computational Linguistics: EMNLP 2024, pp. 12419–
+12433, 2024.
+Hao, Z., Wei, J., Wang, T., Huang, M., Jiang, H., Jiang,
+S., Cao, T., and Ren, J. Scaling LLM test-time compute
+with mobile NPU on smartphones. In Proceedings of
+the 21st European Conference on Computer Systems, pp.
+2157–2172, 2026.
+Hendrycks, D., Burns, C., Basart, S., Zou, A., Mazeika,
+M., Song, D., and Steinhardt, J.
+Measuring mas-
+sive multitask language understanding. arXiv preprint
+arXiv:2009.03300, 2020.
+Horowitz, M. 1.1 computing’s energy problem (and what we
+can do about it). In 2014 IEEE international solid-state
+circuits conference digest of technical papers (ISSCC),
+pp. 10–14. Ieee, 2014.
+Huang, W., Qin, H., Liu, Y., Li, Y., Liu, Q., Liu, X., Benini,
+L., Magno, M., Zhang, S., and Qi, X. Slim-llm: Salience-
+driven mixed-precision quantization for large language
+models. arXiv preprint arXiv:2405.14917, 2024.
+Kim, S., Hooper, C., Gholami, A., Dong, Z., Li, X., Shen, S.,
+Mahoney, M. W., and Keutzer, K. SqueezeLLM: Dense-
+and-sparse quantization. In International Conference on
+Machine Learning, 2024.
+Lee, C., Jin, J., Kim, T., Kim, H., and Park, E. Owq: Outlier-
+aware weight quantization for efficient fine-tuning and
+inference of large language models. In Proceedings of the
+AAAI Conference on Artificial Intelligence, volume 38,
+pp. 13355–13364, 2024.
+Lee, J. H., Kim, J., Kwon, S. J., and Lee, D. FlexRound:
+Learnable rounding based on element-wise division for
+post-training quantization. In Krause, A., Brunskill, E.,
+Cho, K., Engelhardt, B., Sabato, S., and Scarlett, J. (eds.),
+Proceedings of the 40th International Conference on Ma-
+chine Learning, volume 202 of Proceedings of Machine
+Learning Research, pp. 18913–18939. PMLR, 23–29 Jul
+2023. URL https://proceedings.mlr.press/
+v202/lee23h.html.
+Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M., Wang,
+W.-C., Xiao, G., Dang, X., Gan, C., and Han, S. Awq:
+Activation-aware weight quantization for on-device llm
+compression and acceleration. Proceedings of machine
+learning and systems, 6:87–100, 2024.
+Lin, Y., Tang, H., Yang, S., Zhang, Z., Xiao, G., Gan, C., and
+Han, S. Qserve: W4a8kv4 quantization and system co-
+design for efficient llm serving. Proceedings of Machine
+Learning and Systems, 7, 2025.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Liu, Z., Zhao, C., Huang, H., Chen, S., Zhang, J., Zhao,
+J., Roy, S., Jin, L., Xiong, Y., Shi, Y., Xiao, L., Tian,
+Y., Soran, B., Krishnamoorthi, R., Blankevoort, T.,
+and Chandra, V. Paretoq: Improving scaling laws in
+extremely low-bit llm quantization.
+In Belgrave, D.,
+Zhang, C., Lin, H., Pascanu, R., Koniusz, P., Ghassemi,
+M., and Chen, N. (eds.), Advances in Neural Informa-
+tion Processing Systems, volume 38, Main Conference,
+pp. 91311–91336. Curran Associates, Inc., 2025. doi:
+10.52202/085713-3055.
+Mahurin, E. Qualcomm Hexagon NPU. In 2023 IEEE
+Hot Chips 35 Symposium (HCS), pp. 1–19, 2023. doi:
+10.1109/HCS59251.2023.10254715.
+Merity, S., Xiong, C., Bradbury, J., and Socher, R. Pointer
+sentinel mixture models, 2016.
+Mihaylov, T., Clark, P., Khot, T., and Sabharwal, A. Can a
+suit of armor conduct electricity? a new dataset for open
+book question answering. In EMNLP, 2018.
+Nagel, M., Fournarakis, M., Amjad, R. A., Bondarenko,
+Y., Van Baalen, M., and Blankevoort, T. A white pa-
+per on neural network quantization.
+arXiv preprint
+arXiv:2106.08295, 2021.
+Noh, S.-H., Kim, S., Kim, S., Kim, D., Kung, J., and Kim,
+Y. Jack unit: An area- and energy-efficient multiply-
+accumulate (MAC) unit supporting diverse data formats.
+In 2025 IEEE/ACM International Symposium on Low
+Power Electronics and Design (ISLPED), pp. 1–7. IEEE,
+2025.
+Park, G., park, b., Kim, M., Lee, S., Kim, J., Kwon, B.,
+Kwon, S. J., Kim, B., Lee, Y., and Lee, D. Lut-gemm:
+Quantized matrix multiplication based on luts for effi-
+cient inference in large-scale generative language mod-
+els. In Kim, B., Yue, Y., Chaudhuri, S., Fragkiadaki, K.,
+Khan, M., and Sun, Y. (eds.), International Conference
+on Learning Representations, volume 2024, pp. 38069–
+38086, 2024.
+Park, J., Park, C., Kwon, S., Jeon, T., Kang, Y., Lee, H., Lee,
+D., Kim, J., Kim, H., Lee, Y., Park, S., Kim, M., Ha, S.,
+Bang, J., Park, J., Lim, S., and Kang, I. A multi-mode 8k-
+mac hw-utilization-aware neural processing unit with a
+unified multi-precision datapath in 4-nm flagship mobile
+soc. IEEE Journal of Solid-State Circuits, 58(1):189–202,
+January 2023. ISSN 0018-9200. doi: 10.1109/JSSC.2022.
+3205713. Publisher Copyright: © 2022 IEEE.
+Qualcomm Technologies, Inc. Qualcomm Hexagon V79
+HVX Programmer’s Reference Manual.
+Qualcomm
+Technologies, Inc., 2025.
+URL https://docs.
+qualcomm.com/doc/80-N2040-61/.
+Qualcomm Technologies, Inc.
+Qualcomm Hexagon
+V81 HMX Programmer’s Reference Manual.
+Qual-
+comm Technologies, Inc., rev. aa edition, March
+2026.
+URL https://docs.qualcomm.com/
+doc/80-N2040-62/80-N2040-62_REV_AA_
+Qualcomm_Hexagon_V81_HMX_Programmers_
+Reference_Manual.pdf.
+Sakaguchi, K., Bras, R. L., Bhagavatula, C., and Choi, Y.
+Winogrande: An adversarial winograd schema challenge
+at scale. arXiv preprint arXiv:1907.10641, 2019.
+Siddegowda, S., Fournarakis, M., Nagel, M., Blankevoort,
+T., Patel, C., and Khobare, A. Neural network quantiza-
+tion with ai model efficiency toolkit (aimet), 2022. URL
+https://arxiv.org/abs/2201.08442.
+Tan, F., Lee, R., Dudziak, Ł., Hu, S. X., Bhattacharya, S.,
+Hospedales, T., Tzimiropoulos, G., and Martinez, B. Mo-
+bilequant: Mobile-friendly quantization for on-device
+language models. In Findings of the Association for Com-
+putational Linguistics: EMNLP 2024, pp. 9761–9771,
+2024.
+The
+ggml
+authors.
+llama.cpp:
+LLM
+inference
+in C/C++.
+https://github.com/ggml-org/
+llama.cpp, 2023. GitHub repository.
+Wang, J., Zhou, H., Song, T., Cao, S., Xia, Y., Cao, T.,
+Wei, J., Ma, S., Wang, H., and Wei, F.
+Bitnet. cpp:
+Efficient edge inference for ternary llms. In Proceed-
+ings of the 63rd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers), pp.
+9305–9322, 2025.
+Wang, K., Liu, Z., Lin, Y., Lin, J., and Han, S.
+Haq:
+Hardware-aware automated quantization with mixed pre-
+cision. In 2019 IEEE/CVF conference on computer vision
+and pattern recognition (CVPR), pp. 8604–8612. IEEE,
+2019.
+Wei, J., Cao, S., Cao, T., Ma, L., Wang, L., Zhang, Y., and
+Yang, M. T-mac: Cpu renaissance via table lookup for
+low-bit llm deployment on edge. In Proceedings of the
+Twentieth European Conference on Computer Systems,
+pp. 278–292, 2025a.
+Wei, J., Li, Q., Cao, S., Ma, L., Hao, Z., Zhang, Y., Hu,
+X., and Cao, T. T-man: Enabling end-to-end low-bit llm
+inference on npus via unified table lookup. arXiv preprint
+arXiv:2511.11248, 2025b.
+Wu, B., Wang, Y., Zhang, P., Tian, Y., Vajda, P., and Keutzer,
+K. Mixed precision quantization of convnets via dif-
+ferentiable neural architecture search. arXiv preprint
+arXiv:1812.00090, 2018.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Xia, H., Zheng, Z., Wu, X., Chen, S., Yao, Z., Youn, S.,
+Bakhtiari, A., Wyatt, M., Zhuang, D., Zhou, Z., Ruwase,
+O., He, Y., and Song, S. L. Fp6-llm: Efficiently serv-
+ing large language models through fp6-centric algorithm-
+system co-design, 2024. URL https://arxiv.org/
+abs/2401.14112.
+Xu, D., Zhang, H., Yang, L., Liu, R., Huang, G., Xu, M.,
+and Liu, X. Fast on-device llm inference with npus. In
+Proceedings of the 30th ACM International Conference
+on Architectural Support for Programming Languages
+and Operating Systems, Volume 1, pp. 445–462, 2025.
+Xue, Z., Song, Y., Mi, Z., Zheng, X., Xia, Y., and Chen, H.
+Powerinfer-2: Fast large language model inference on a
+smartphone. arXiv preprint arXiv:2406.06282, 2024.
+Yang, L. and Jin, Q. Fracbits: Mixed precision quanti-
+zation via fractional bit-widths. In Proceedings of the
+AAAI Conference on Artificial Intelligence, volume 35,
+pp. 10612–10620, 2021.
+Yao, Z., Dong, Z., Zheng, Z., Gholami, A., Yu, J., Tan,
+E., Wang, L., Huang, Q., Wang, Y., Mahoney, M.,
+and Keutzer, K.
+Hawq-v3: Dyadic neural network
+quantization. In Meila, M. and Zhang, T. (eds.), Pro-
+ceedings of the 38th International Conference on Ma-
+chine Learning, volume 139 of Proceedings of Machine
+Learning Research, pp. 11875–11886. PMLR, 18–24 Jul
+2021. URL https://proceedings.mlr.press/
+v139/yao21a.html.
+Yao, Z., Zhao, H., Wang, H., Huang, T., Zhang, L., and
+Han, X.
+GAMMA: Global bit allocation for mixed-
+precision models under arbitrary budgets. arXiv preprint
+arXiv:2605.18475, 2026.
+Zellers, R., Holtzman, A., Bisk, Y., Farhadi, A., and Choi,
+Y. Hellaswag: Can a machine really finish your sen-
+tence? In Proceedings of the 57th Annual Meeting of the
+Association for Computational Linguistics, 2019.
+Zeng, C., Liu, S., Xie, Y., Liu, H., Wang, X., Wei, M.,
+Yang, S., Chen, F., and Mei, X. Abq-llm: Arbitrary-bit
+quantized inference acceleration for large language mod-
+els. In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 39, pp. 22299–22307, 2025.
+Zhang, J., Xu, D., Wang, C., Xie, W., Qi, T., Ma, Y., Xu, M.,
+and Huang, G. Quant. npu: Enabling efficient mobile npu
+inference for on-device llms via fully static quantization.
+arXiv preprint arXiv:2605.20295, 2026.
+Zhao, Y., Lin, C.-Y., Zhu, K., Ye, Z., Chen, L., Zheng, S.,
+Ceze, L., Krishnamurthy, A., Chen, T., and Kasikci, B.
+Atom: Low-bit quantization for efficient and accurate llm
+serving. Proceedings of Machine Learning and Systems,
+6:196–209, 2024.
+Zheng, Z., Song, X., and Liu, C. MixLLM: LLM quantiza-
+tion with global mixed-precision between output-features
+and highly-efficient system design. Proceedings of Ma-
+chine Learning and Systems, 8:1771–1785, 2026.
+Zhou, J., Lu, T., Mishra, S., Brahma, S., Basu, S., Luan,
+Y., Zhou, D., and Hou, L. Instruction-following evalu-
+ation for large language models, 2023. URL https:
+//arxiv.org/abs/2311.07911.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+AI USAGE DISCLOSURE
+Generative AI tools (Claude Code and Claude, Anthropic)
+were used in producing this work as follows.
+Code generation. An LLM-based coding assistant was used
+extensively to implement and debug the runtime under the
+authors’ direction: the DSP-side HVX and HMX kernels,
+the host runtime, the unit tests and the weight exporter. The
+authors specified the designs, reviewed every change, and
+validated it with the bit-exact unit tests and the on-device
+measurements reported in the paper.
+Experiments and data processing. The benchmark drivers,
+the result archive and the scripts that produce the tables
+and figures from the archived measurements were written
+with the same assistant. All measurements were taken by
+the authors on the device described in Section 5.1. No
+experimental data were generated or altered by an AI tool.
+Writing. The authors wrote the draft text, captions and
+tables from their notes and the code. The LLM assistant
+was used to check the equations against the implementa-
+tion, and to proofread the English. The authors wrote the
+problem framing and the claims, reviewed the text, and
+are responsible for its content. At the authors’ request, the
+LLM assistant also drafted and rephrased sentences, mainly
+during revision.
+Ideation, experiment design, and literature search. The
+authors performed the ideation and experiment design with-
+out the use of AI tools. Literature search was performed
+with the help of the LLM assistant which was used to iden-
+tify relevant references. The authors reviewed the references
+and selected the relevant ones for inclusion in the paper.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+A
+LIMITATIONS
+Effectiveness in single-thread vector unit.
+The perfor-
+mance advantage of our fold methods is established against
+single-thread weight expansion. In this setting, the vector
+unit converts unsupported weight formats before the ma-
+trix unit can consume them, and this conversion can lie on
+the critical path. Folding removes the expansion stage and
+allows the reduced weight traffic to translate into lower la-
+tency. However, processing throughput increase by multiple
+vector threads can reduce the conversion time and narrow
+or eliminate this advantage.
+Unverified end-to-end gains for multi-row decoding.
+Our end-to-end evaluation covers single-stream autoregres-
+sive decoding at M = 1. We have not verified the end-
+to-end effectiveness of MixFold for M > 1 decoding, in-
+cluding speculative decoding and concurrent decoding of
+multiple sequences. Evaluating the fold paths and mixed-
+precision profiles within these workloads remains future
+work.
+B
+IMPLEMENTATION DETAILS
+B.1
+Output-Correction Form
+Equation (6) needs the row-dependent input bias (ebin
+n −
+Rm)/2. The output-correction form instead requantizes
+with a reference row sum ¯R, fixed from the calibration set,
+and adds the remainder after the conversion:
+Y q
+m,n ≈clip
+ bYm,n + ⌊Cm,n⌉
+
+,
+bYm,n = Requant
+ P 2
+m,n; 2αn, (ebin
+n −¯R)/2
+
+,
+(14)
+with Cm,n = αn(Rm −¯R). HMX writes bYm,n, and HVX
+computes Rm from the activation tiles and adds Cm,n to all
+M × N outputs.
+Intermediate clipping.
+bYm,n is saturated to [0, 2q −1]
+before Cm,n is added. An output whose final value lies in
+the code range but whose intermediate does not is therefore
+clipped, and the correction cannot recover it. The bias-fold
+and the accumulator-fold apply the correction before HMX
+saturates the output, so they saturate once and have no such
+clipping.
+B.2
+W3 Plane Packing
+A W3 code with bits c2c1c0 is stored as the raw W2 code
+(c2 ≪1) | c1 and the raw W1 code c0. The W2 raw code is
+interpreted as signed two’s complement by the native HMX
+kernel, so raw codes 0, 1, 2, and 3 represent 0, 1, −2, and
+−1, respectively. The W1 plane is unsigned. HMX reads
+the W2 plane in its signed 2-bit weight mode and the W1
+plane in its unsigned 1-bit weight mode, so neither plane is
+widened. All W2 tiles are stored first and all W1 tiles second.
+For N and K divisible by 32, the total weight payload is
+N
+32
+K
+32(256 + 128) = 3NK
+8
+bytes.
+(15)
+B.3
+Expand Baseline
+Algorithm 1 gives the expand path used as the baseline in
+Section 3, and Algorithm 2 gives the fold paths in the same
+form. W2-SEQ and W3 share the packed DRAM repre-
+sentation of their fold paths. The difference is that HVX
+expands each weight tile to W4 before HMX consumes
+it. For M ≤32, one HVX thread converts the weights.
+For larger M, the conversion is split over the HVX threads
+(Section D.4).
+Table 5 gives the decode expansion up to seven HVX threads.
+At M = 1, expand takes 1.06–1.24× the latency of the
+W3 HVX-assisted activation-fold with the same number of
+threads on Qwen3-0.6B and 1.00–1.30× on Qwen3-4B. The
+W2-SEQ folds and the W3 HMX-only activation-fold use
+no HVX thread for weights. On Qwen3-4B, expand matches
+them with three threads, except W2-SEQ at M = 32. With
+seven threads it takes 0.88–0.90× their latency for W3 and
+0.97–0.98× for W2-SEQ at M ≤8. On Qwen3-0.6B, it
+needs three to four threads for W3 at M ≤8 and never
+matches the W2-SEQ folds or W3 at M = 32. We did not
+measure the energy of the multi-thread expand.
+Algorithm 1 Expand-path execution of W2-SEQ and W3
+through the native W4 path.
+Require: Activation codes Xq; packed weights in repre-
+sentation r ∈{W2-SEQ, W3}; per-channel αn, bout
+n ,
+and the input bias bin
+n of the represented weights (ebin
+n
+for W2-SEQ, za
+P
+k W 3
+n,k for W3).
+Ensure: Y q ∈ZM×N.
+1: for each activation-row block and 32-channel output
+group G do
+2:
+for each reduction tile along K do
+3:
+if r = W2-SEQ then
+4:
+DMA: stage the W 2 tile; HVX: W 4 ←2W 2 +
+1
+5:
+else
+6:
+DMA: stage the W 2 and W 1 tiles; HVX:
+W 4 ←2W 2 + W 1
+7:
+end if
+8:
+HVX: write the W 4 tile to VTCM in the HMX
+layout
+9:
+HMX: accumulate Pm,G with the native W4 prod-
+uct
+10:
+end for
+11:
+HMX: Y q
+m,n ←Requant(Pm,n; αn, bin
+n ), n ∈G
+12: end for
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 5. Decode latency with more HVX threads, over the fold without HVX weight work (Fold: the W2-SEQ bias- and accumulator-folds
+and the W3 HMX-only activation-fold), summed over QKV, O, Up/Gate, and Down. n counts the HVX threads on weight work. Expand
+with n = 1 converts on the issuing thread.
+Latency over Fold, n HVX threads
+Model
+Format
+M
+Path
+Fold (µs)
+1
+2
+3
+4
+5
+6
+7
+0.6B
+W2-SEQ
+1
+Expand
+75
+1.41
+1.13
+1.07
+1.05
+1.04
+1.04
+1.04
+8
+Expand
+83
+1.41
+1.15
+1.09
+1.08
+1.06
+1.07
+1.06
+32
+Expand
+116
+1.28
+1.37
+1.34
+1.32
+1.32
+1.32
+1.32
+W3
+1
+Expand
+108
+1.72
+1.09
+1.01
+0.97
+0.95
+0.93
+0.93
+1
+HVX-assisted fold
+108
+1.39
+0.93
+0.88
+0.88
+0.87
+0.87
+0.87
+8
+Expand
+121
+1.66
+1.06
+0.97
+0.94
+0.92
+0.91
+0.91
+32
+Expand
+160
+1.45
+1.17
+1.11
+1.09
+1.07
+1.07
+1.06
+4B
+W2-SEQ
+1
+Expand
+372
+1.42
+1.03
+1.00
+0.98
+0.97
+0.97
+0.97
+8
+Expand
+390
+1.41
+1.03
+1.00
+0.98
+0.98
+0.98
+0.98
+32
+Expand
+437
+1.43
+1.10
+1.06
+1.05
+1.04
+1.04
+1.05
+W3
+1
+Expand
+577
+1.81
+1.04
+0.94
+0.91
+0.90
+0.90
+0.90
+1
+HVX-assisted fold
+577
+1.40
+0.92
+0.90
+0.90
+0.90
+0.89
+0.89
+8
+Expand
+593
+1.82
+1.04
+0.94
+0.92
+0.91
+0.90
+0.90
+32
+Expand
+685
+1.70
+1.00
+0.91
+0.90
+0.89
+0.88
+0.88
+Algorithm 2 Fold-path execution of W2-SEQ and W3
+(M ≤32, the decode scheduler’s path).
+Require: Xq; native W 2 (and W 1 for W3) tiles; 2αn, bout
+n ,
+and the input biases of Sections 3.1 and 3.2.
+Ensure: Y q.
+1: for each activation-row block do
+2:
+HVX, once: Rm and, if M > 1, the correction
+columns carrying Lm and the Rc fold (W2-SEQ),
+or ⌊Xq/2⌋(W3, and at M = 1 each chunk’s W1
+product Sn as its tiles land).
+3:
+for each 32-channel output group, as DMA streams
+its tiles do
+4:
+HMX: accumulate P 2,q (W2-SEQ, plus Lm over
+the S correction columns if M > 1), or ˆP 3 with a
+W2 and a W1 pass per K tile (W3, Equation (10)),
+at M = 1 the W2 pass plus one tile carrying Sn.
+5:
+if W3 then
+6:
+HMX: Y q ←Requant( ˆP 3; 2αn,ˆbin,3
+n
+).
+7:
+else if M = 1 then
+8:
+HMX: Y q
+←
+Requant(P 2,q; 2αn, (ebin
+n −
+R1)/2).
+9:
+else
+10:
+HMX: Y q ←Requant(P 2,q+Lm; 2αn, (ebin
+n −
+Rc)/2).
+11:
+end if
+12:
+end for
+13: end for
+B.4
+W2-SEQ Accumulator-Fold for 2 ≤M ≤32
+The output-correction form (Section B.1) costs an HVX
+pass over all M × N outputs and a headroom in which
+large corrections are clipped. The bias-fold avoids both at
+M = 1 because the single row sum R1 can enter the per-
+channel input bias. For M > 1 the correction differs per row
+and cannot enter a per-channel bias. The accumulator-fold
+instead lets the HMX accumulation add it through correction
+columns appended to both operands.
+Algebra.
+By Equation (5), the exact SEQ output is
+Requant
+ P 2
+m,n + Rm/2; 2αn, ebin
+n /2
+
+. Equation (8) splits
+Rm/2 = Lm + Rc/2 with a constant Rc per call and
+Lm = (Rm −Rc)/2. The input bias is that of the bias-
+fold (Equation (7)) with R1 replaced by Rc, so the same
+routine builds it, once per call for every output channel. The
+row term Lm is identical for every output channel, so it
+is the product of an activation row whose entries sum to
+Lm with a weight column of ones. We append E tiles, i.e.,
+S = TE columns (T = 32 on HMX), to both operands
+along K: row m of the M × S block Λ sums to Lm and the
+appended weights are +1, a native signed W2 value. One
+HMX accumulation over K + S thus yields P 2
+m,n + Lm,
+and one conversion with the bias of Equation (8) gives the
+final code, without an intermediate output, a headroom, or
+an HVX correction pass.
+Filling the correction columns.
+Activation entries are
+unsigned q-bit codes, so a row term of up to (2q−1)S can be
+spread over S entries. To keep Lm non-negative and within
+that bound, Rc is chosen per call from the row sums of the
+block: with the midpoint c = ⌊(minm Rm+maxm Rm)/2⌋
+and H = (2q−1 −1)S, we set Rc = c −2H, so that
+Lm = ⌊(Rm−c)/2⌋+H lies in [0, (2q−1)S] whenever the
+spread maxm Rm −minm Rm is at most 4(2q−1 −1)S −4.
+Entry j of row m holds ⌊Lm/S⌋+[ j < Lm mod S ], so the
+entries of a row sum to Lm exactly, each one is a valid code,
+and each lies within one of 2q−1 −1 + ⌊(Rm −c)/(2S)⌋,
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+the middle of the code range plus the row’s half-deviation
+per entry. E is the smallest power of two up to 8 that
+covers the spread of the block. On synthetic activations
+with calibration-like statistics, E = 1 in all 4,500 sampled
+blocks (K from 1024 to 12288, M from 2 to 32). The floor
+of an odd Rm −c is the only approximation, at most half an
+accumulator unit before rounding. Against the exact integer
+result the measured maximum error is one 16-bit output
+code (two in mixed kernels with W3 groups), versus two to
+nine for the output-correction form.
+Execution.
+Once per call, HVX computes the row sums
+from the packed activation tiles, writes the Λ tiles and the
+constant +1 weight tiles into VTCM, and folds Rc into the
+input bias of every output channel. HMX appends the E
+correction-column tile pairs to the accumulation of each
+output tile, so an output tile takes K/T + E tile products
+instead of K/T: for E = 1, 3% more HMX work at K =
+1024 and 0.8% at K = 4096.
+Latency.
+The accumulator-fold is the default W2-SEQ
+path for 2 ≤M ≤32, for homogeneous W2-SEQ and
+for the W2-SEQ groups of mixed kernels. Across the 12
+projection shapes and M ∈{2, 4, 8, 16, 32} it stays within
+1% of the native W2 kernel up to M = 8 on Qwen3-4B
+and 8B (at most 23% above it, on the smallest Qwen3-0.6B
+shapes from M = 8 on).
+B.5
+Operand View of the Execution Paths
+Figure 9 complements Figure 3 with an operand view of the
+paths.
+C
+MEASUREMENT METHODOLOGY
+C.1
+Kernel Measurement Protocol
+Each kernel latency in Sections 5.2 and 5.3 and Section D
+is the median over two to five device processes, run in
+randomized order over all kernels of a measurement set.
+Each process allocates the weights in the deployed layout,
+warms up once, and averages 32 repetitions. A mixed kernel
+repeats a fixed pattern of formats over its 32-channel groups
+(e.g., W2-SEQ, W3, W4, W4), and its BPW is the mean of
+the pattern.
+C.2
+End-to-End Measurement Protocol
+Both runtimes are measured on the same phone with the
+procedure of llama.cpp’s llama-bench. Each run is a
+fresh process that loads the model, runs one warm-up pass
+(a prompt and one generated token), and then five repetitions
+of one workload: tg128 (128 generated tokens), pp512 (a
+512-token prompt), or pp512+tg128 (both). The run value
+is the mean tokens per second of the five repetitions. Every
+configuration and workload runs five times, and the configu-
+rations take turns. A run starts only when the hottest CPU
+and NPU sensor is within 10 ◦C of its idle temperature. We
+report the median of the five runs. Their spread (maximum
+minus minimum over the median) is at most 3.6% for Mix-
+Fold and 7.5% for llama.cpp. The llama.cpp runs use the
+same procedure in separate sessions on the same phone.
+Models.
+Latencies use latency-equivalent models whose
+weights are random but whose byte layout and metadata
+match the exported checkpoints. The group pattern of every
+synthetic MP profile follows the statistics of the real Qwen3-
+0.6B MP3.4 profile. The real Qwen3-4B W3 and Qwen3-
+0.6B W4 checkpoints run within 0.2% of their latency-
+equivalent models at tg128, and the real Qwen3-0.6B MP3.4
+checkpoint within 2% for all three workloads.
+Power.
+Energy is measured on a development device with
+the same SoC, whose power monitors cover every rail. The
+sum of all rails is sampled at 10 Hz over each run, with the
+screen off and no other process running, and idle power is
+not subtracted. Energy is the integrated power over a run
+divided by its generated tokens (end to end) or kernel calls
+(kernels), and we report the median of five runs.
+C.3
+llama.cpp Baselines
+The llama.cpp rows use publicly released GGUF files (Ta-
+ble 6). All of them were quantized with an importance
+matrix computed by the publisher on its own calibration
+text: Unsloth’s for every file except the Qwen3-8B Q4 0,
+which Unsloth does not release and which comes from bar-
+towski. The throughput runs for Qwen3-4B-Instruct-2507
+use the unsloth/Qwen3-4B-GGUF files of the same for-
+mats, which match its GGUFs tensor by tensor in type and
+size. The k-quant presets keep some projections at higher
+precision: Q2 K stores the value, output, and down projec-
+tions in Q3 K or Q4 K, so its decoder linear weights average
+2.93–2.96 BPW rather than the 2.63 BPW of a Q2 K block.
+We place llama.cpp at this decoder-linear BPW, the same
+population of weights our BPW counts. Token embeddings
+and the LM head are excluded on both sides. Our BPW
+counts the weight codes. The per-group requantization pa-
+rameters and the extra data of the W2-SEQ and W3 decode
+paths add 0.03–0.12 BPW on Qwen3-4B and 8B and up to
+about 0.3 BPW on 0.6B (Table 9), whereas the GGUF BPW
+includes the block scales.
+C.4
+Time Breakdown of the Decode Kernels
+Figure 10 and the timelines of Figure 3 come from a build
+of the same kernels with timing counters, which change the
+latency by at most 1.2%. All other latencies come from
+the build without counters. Figure 10 splits the time of the
+issuing thread by the unit it waits for. In the expand paths,
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+(a) Expand
+(b) W2-SEQ bias-fold
+(c) W3 activation-fold
+x
+1 × K
+W
+N × K
+y
+x
+1 × K
+W
+N × K
+y
+row sum R
+x
+1 × K
+W2
++W1
+N × K
+y
+halve ⌊x/2⌋
+HVX elements / token
+6.3M
+HVX elements / token
+7.2K
+HVX elements / token
+7.2K + 6.3M
+expand
+to W4
+HVX: expand NK
+HMX: W4 MMA
+native W2
+HVX: R, bias
+HMX: W2 MMA
+native W2
+(+ W1 on HVX)
+HVX: ⌊x/2⌋, W1
+HMX: W2 MMA
+one-bit W1, beside HMX
+Figure 9. Operand view of the execution paths at decode size (M = 1). Orange marks the data HVX must process and blue the operands
+HMX consumes natively. The expand path rewrites all NK weights on HVX before HMX can start, whereas the W2-SEQ bias-fold
+touches only the activation row and the bias. The W3 activation-fold halves the activation row and reads the one-bit W1 plane by table
+lookups beside the HMX W2 product (hatched), and its product joins the W2 product in one HMX accumulator that writes y directly
+(Section 3.2). The meters give the HVX elements per token for the fused Up/Gate projection of Qwen3-0.6B (K = 1024, N = 6144) on
+a common linear scale. Operand glyphs are schematic.
+0
+25
+50
+75
+100
+125
+150
+175
+µs per call
+W4
+W3 expand
+W3 activation-fold
+MP3.0 fold
+W2-SEQ expand
+W2-SEQ bias-fold
+Qwen3-0.6B (M = 1, sum of 4 projections)
+0
+200
+400
+600
+800
+1000
+µs per call
+Qwen3-4B (M = 1, sum of 4 projections)
+HVX W1 product (workers, overlaps)
+issuing-thread total
+HMX busy (overlaps)
+weight DMA wait
+HMX wait
+W4 expansion (HVX)
+activation/output stages (HVX)
+other DMA waits
+Figure 10. Time per call of the decode kernels at M = 1 (sum of the four projections), measured with timing counters. Bars stack the
+waits and HVX stages of the thread that issues the DMA and HMX work. The tick marks that thread’s total and the circle the HMX busy
+time, which overlaps the waits. The diamond marks the HVX W1 product of the fold paths, which runs on the worker threads and also
+overlaps the waits.
+HVX weight conversion dominates: 132 of 179 µs for W3
+on Qwen3-0.6B and 861 of 1039 µs on Qwen3-4B, while
+HMX is busy for only 25 and 182 µs. In W4 and in the fold
+paths, the largest share is waiting for weight DMA, i.e. the
+kernels are bound by weight streaming. The exception is the
+W2-SEQ bias-fold on Qwen3-0.6B, whose per-call HVX
+stages take longer than its DMA wait.
+D
+ADDITIONAL RESULTS
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 6. GGUF files of the llama.cpp baselines: quantization type of each decoder linear projection (q, k, v, o, gate, up, down), their
+average BPW including block scales, and the token-embedding / LM-head types (tied when the model shares them). Source: the
+Hugging Face repositories unsloth/Qwen3-{0.6B,1.7B,8B}-GGUF, unsloth/Qwen3-4B-Instruct-2507-GGUF, and
+bartowski/Qwen Qwen3-8B-GGUF.
+Model
+Format
+Source
+Decoder linear tensors
+BPW
+Embed. / head
+Qwen3-0.6B
+Q2 K
+unsloth
+q,k,gate,up Q2 K; v,o,down Q3 K
+2.95
+Q6 K (tied)
+Q3 K S
+unsloth
+all Q3 K
+3.44
+Q6 K (tied)
+Q3 K M
+unsloth
+q,k,gate,up Q3 K; v Q4 K (Q5 K in 2 of 28 layers);
+o Q4 K; down Q4 K (Q5 K in 1 of 28 layers)
+3.87
+Q6 K (tied)
+Q4 0
+unsloth
+q,k,v,o,gate,up Q4 0; down Q4 0 (Q4 1 in 3 of 28
+layers)
+4.51
+Q6 K (tied)
+Qwen3-1.7B
+Q2 K
+unsloth
+q,k,gate,up Q2 K; v,o,down Q3 K
+2.93
+Q6 K (tied)
+Q3 K S
+unsloth
+all Q3 K
+3.44
+Q6 K (tied)
+Q3 K M
+unsloth
+q,k,gate,up Q3 K; v Q4 K (Q5 K in 2 of 28 layers);
+o Q4 K; down Q4 K (Q5 K in 1 of 28 layers)
+3.85
+Q6 K (tied)
+Q4 0
+unsloth
+q,k,v,o,gate,up Q4 0; down Q4 0 (Q4 1 in 3 of 28
+layers)
+4.51
+Q6 K (tied)
+Qwen3-4B-Instruct-2507
+Q2 K
+unsloth
+q,k,gate,up Q2 K; v Q4 K; o,down Q3 K
+2.96
+Q6 K (tied)
+Q3 K S
+unsloth
+all Q3 K
+3.44
+Q6 K (tied)
+Q3 K M
+unsloth
+q,k,gate,up Q3 K; v,down Q4 K (Q5 K in 2 of 36
+layers); o Q4 K
+3.85
+Q6 K (tied)
+Q4 0
+unsloth
+q,k,v,o,gate,up Q4 0; down Q4 0 (Q4 1 in 4 of 36
+layers)
+4.51
+Q6 K (tied)
+Qwen3-8B
+Q2 K
+unsloth
+q,k,gate,up Q2 K; v Q4 K; o,down Q3 K
+2.95
+Q2 K / Q6 K
+Q3 K S
+unsloth
+all Q3 K
+3.44
+Q3 K / Q6 K
+Q3 K M
+unsloth
+q,k,gate,up Q3 K; v,down Q4 K (Q5 K in 2 of 36
+layers); o Q4 K
+3.85
+Q3 K / Q6 K
+Q4 0
+bartowski
+q,k,v,o,gate,up Q4 0; down Q4 0 (Q4 1 in 4 of 36
+layers)
+4.51
+Q4 0 / Q6 K
+D.1
+End-to-End Ablation of the Decode Paths
+Table 7. End-to-end decode throughput (tg128, tokens/s) with the
+fold paths (default) and with the expand path forced at decode.
+Slowdown in parentheses. W4 is native and unaffected.
+Model
+Fmt
+tg128 fold
+expand
+0.6B
+W4
+142.4
+–
+0.6B
+W3
+157.4
+107.2 (1.47×)
+0.6B
+W2-SEQ
+168.5
+150.7 (1.12×)
+0.6B
+MP3.0
+160.5
+119.6 (1.34×)
+0.6B
+MP3.4
+151.2
+124.5 (1.22×)
+4B
+W4
+30.1
+–
+4B
+W3
+35.4
+21.6 (1.64×)
+4B
+W2-SEQ
+43.3
+36.2 (1.20×)
+4B
+MP3.0
+37.6
+28.0 (1.34×)
+4B
+MP3.4
+34.0
+29.7 (1.14×)
+Table 7 forces the expand path at decode in the end-to-end
+runtime. W3 and the MP profiles then decode slower than
+native W4, and W2-SEQ keeps only 1.06–1.20× the W4
+throughput instead of 1.18–1.44×.
+D.2
+End-to-End Throughput and Footprint
+Table 8 lists the end-to-end throughput behind Figure 8,
+including prefill.
+Weight footprint.
+The stored weights of every format are
+byte-proportional by construction (BPW · KN/8 per pro-
+jection plus per-channel scales and biases), so the decoder
+sections scale with BPW (Table 9). A DSP process holds the
+decoder weights, the KV cache, and the working buffers in
+one 32-bit address space, so the Qwen3-8B W4 and MP3.8
+decoders (3.1 GiB and more) run in two DSP processes and
+every other configuration in one.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 8. End-to-end throughput (tokens/s, median of five runs of five repetitions each, Section C.2) and ratio to our W4. MixFold rows use
+the latency-equivalent models of Section C.2.
+Model
+Runtime
+Format
+BPW
+tg128
+pp512
+pp512+tg128
+tg128 / W4
+pp512 / W4
+Qwen3-0.6B
+MixFold
+W2SEQ
+2.00
+169.9
+5686
+653.1
+1.19
+0.99
+Qwen3-0.6B
+MixFold
+MP
+2.95
+158.4
+5601
+624.1
+1.11
+0.97
+Qwen3-0.6B
+MixFold
+W3
+3.00
+157.8
+5715
+619.5
+1.11
+0.99
+Qwen3-0.6B
+MixFold
+MP
+3.44
+151.0
+5593
+600.5
+1.06
+0.97
+Qwen3-0.6B
+MixFold
+MP
+3.87
+145.6
+5620
+577.5
+1.02
+0.98
+Qwen3-0.6B
+MixFold
+W4
+4.00
+142.4
+5753
+580.2
+1.00
+1.00
+Qwen3-0.6B
+llama.cpp
+Q2 K
+2.95
+118.9
+5315
+495.2
+0.84
+0.92
+Qwen3-0.6B
+llama.cpp
+Q3 K S
+3.44
+122.8
+5409
+507.9
+0.86
+0.94
+Qwen3-0.6B
+llama.cpp
+Q3 K M
+3.87
+114.1
+5398
+475.0
+0.80
+0.94
+Qwen3-0.6B
+llama.cpp
+Q4 0
+4.51
+115.3
+5184
+481.5
+0.81
+0.90
+Qwen3-1.7B
+MixFold
+W2SEQ
+2.00
+79.4
+3526
+338.3
+1.30
+0.99
+Qwen3-1.7B
+MixFold
+MP
+2.93
+72.4
+3438
+313.6
+1.19
+0.97
+Qwen3-1.7B
+MixFold
+W3
+3.00
+68.5
+3542
+299.4
+1.13
+1.00
+Qwen3-1.7B
+MixFold
+MP
+3.44
+67.3
+3442
+294.3
+1.11
+0.97
+Qwen3-1.7B
+MixFold
+MP
+3.85
+63.6
+3441
+279.2
+1.04
+0.97
+Qwen3-1.7B
+MixFold
+W4
+4.00
+60.8
+3547
+271.6
+1.00
+1.00
+Qwen3-1.7B
+llama.cpp
+Q2 K
+2.93
+57.1
+3023
+253.5
+0.94
+0.85
+Qwen3-1.7B
+llama.cpp
+Q3 K S
+3.44
+58.1
+3072
+257.4
+0.96
+0.87
+Qwen3-1.7B
+llama.cpp
+Q3 K M
+3.85
+53.8
+3177
+239.5
+0.88
+0.90
+Qwen3-1.7B
+llama.cpp
+Q4 0
+4.51
+53.1
+3185
+237.9
+0.87
+0.90
+Qwen3-4B-Instruct-2507
+MixFold
+W2SEQ
+2.00
+43.3
+1569
+179.2
+1.44
+1.00
+Qwen3-4B-Instruct-2507
+MixFold
+MP
+2.96
+37.5
+1543
+160.0
+1.25
+0.98
+Qwen3-4B-Instruct-2507
+MixFold
+W3
+3.00
+35.5
+1564
+152.1
+1.18
+0.99
+Qwen3-4B-Instruct-2507
+MixFold
+MP
+3.44
+34.2
+1539
+146.5
+1.14
+0.98
+Qwen3-4B-Instruct-2507
+MixFold
+MP
+3.85
+31.4
+1542
+136.5
+1.05
+0.98
+Qwen3-4B-Instruct-2507
+MixFold
+W4
+4.00
+30.1
+1573
+131.5
+1.00
+1.00
+Qwen3-4B-Instruct-2507
+llama.cpp
+Q2 K
+2.96
+27.6
+1382
+120.9
+0.92
+0.88
+Qwen3-4B-Instruct-2507
+llama.cpp
+Q3 K S
+3.44
+28.1
+1409
+122.6
+0.93
+0.90
+Qwen3-4B-Instruct-2507
+llama.cpp
+Q3 K M
+3.85
+25.4
+1429
+113.0
+0.84
+0.91
+Qwen3-4B-Instruct-2507
+llama.cpp
+Q4 0
+4.51
+25.3
+1470
+112.0
+0.84
+0.93
+Qwen3-8B
+MixFold
+W2SEQ
+2.00
+26.8
+1040
+114.8
+1.60
+1.00
+Qwen3-8B
+MixFold
+MP
+2.95
+22.2
+1021
+97.2
+1.33
+0.98
+Qwen3-8B
+MixFold
+W3
+3.00
+21.0
+1031
+92.7
+1.25
+0.99
+Qwen3-8B
+MixFold
+MP
+3.44
+19.7
+1023
+88.0
+1.18
+0.99
+Qwen3-8B
+MixFold
+MP
+3.85
+17.4
+1009
+78.3
+1.04
+0.97
+Qwen3-8B
+MixFold
+W4
+4.00
+16.7
+1038
+75.6
+1.00
+1.00
+Qwen3-8B
+llama.cpp
+Q2 K
+2.95
+15.7
+769.0
+70.3
+0.94
+0.74
+Qwen3-8B
+llama.cpp
+Q3 K S
+3.44
+16.0
+772.6
+71.1
+0.96
+0.74
+Qwen3-8B
+llama.cpp
+Q3 K M
+3.85
+14.8
+792.5
+66.0
+0.88
+0.76
+Qwen3-8B
+llama.cpp
+Q4 0
+4.51
+14.4
+839.8
+64.7
+0.86
+0.81
+Table 9. Decoder section size (GiB) of the exported models. †Runs
+in two DSP processes.
+Model
+W2-SEQ
+W3
+MP3.0
+MP3.4
+MP3.8
+W4
+0.6B
+0.12
+0.17
+0.17
+0.19
+0.21
+0.21
+4B
+0.89
+1.32
+1.33
+1.50
+1.66
+1.71
+8B
+1.67
+2.49
+2.50
+2.82
+3.14†
+3.26†
+D.3
+Per-Projection Decode Kernels
+Tables 10 and 11 give the per-projection latencies, and Ta-
+ble 4 gives the aggregate against the DMA ceiling. Native
+W2 stays 7–21% above the byte-proportional ideal (half the
+W4 latency), a fixed per-kernel cost (DMA start-up, pipeline
+fill, per-chunk output stage) that weighs most on the small
+Qwen3-0.6B shapes. The W3 activation-fold, whose W1
+product runs on HVX beside the W2 product, stays within
+2–10% of its ideal (0.75 of the W4 latency).
+D.4
+Latency versus M and Path Selection
+Figure 5 follows both formats from decode to prefill sizes,
+and Table 12 lists the plotted values. The runtime runs the
+fold paths for M ≤32. For larger M it runs the expand path,
+whose conversion cost is amortized over the activation rows.
+At M = 32 the W3 activation-fold runs at 0.88 (8B) to
+1.18× (0.6B) W4. At M = 32 the W2-SEQ accumulator-
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+1.0
+1.2
+1.4
+1.6
+W2-SEQ
+normalized latency
+Qwen3-0.6B
+1.0
+1.2
+1.4
+Qwen3-1.7B
+1.0
+1.2
+1.4
+Qwen3-8B
+1
+32
+64
+128
+256
+512
+M (rows)
+0.75
+1.00
+1.25
+1.50
+1.75
+W3
+normalized latency
+1
+32
+64
+128
+256
+512
+M (rows)
+1.0
+1.5
+1
+32
+64
+128
+256
+512
+M (rows)
+1.0
+1.5
+2.0
+fold
+expand
+W2 (top) / W4 (bottom)
+byte-proportional W3
+Figure 11. Figure 5 for Qwen3-0.6B, 1.7B, and 8B: W2-SEQ normalized to W2 (top) and W3 normalized to W4 (bottom).
+Table 10. W2-SEQ projection latency at decode size (M = 1) in
+µs. The bias-fold is the default path.
+Model
+Projection
+W2
+Expand
+Output-correction
+Bias-fold
+W4
+Qwen3-0.6B
+QKV
+18.8
+27.7
+20.0
+20.8
+30.3
+Qwen3-0.6B
+O
+10.2
+15.9
+11.4
+11.1
+16.0
+Qwen3-0.6B
+Up/Gate
+26.4
+39.1
+28.1
+29.1
+45.0
+Qwen3-0.6B
+Down
+13.4
+21.7
+14.7
+13.8
+22.6
+sum
+68.8
+104.3
+74.2
+74.7
+113.9
+Qwen3-1.7B
+QKV
+32.8
+49.3
+34.1
+33.0
+58.1
+Qwen3-1.7B
+O
+17.3
+27.4
+18.4
+17.5
+30.5
+Qwen3-1.7B
+Up/Gate
+97.0
+126.3
+99.9
+97.4
+170.9
+Qwen3-1.7B
+Down
+46.0
+72.9
+48.3
+46.2
+85.1
+sum
+193.2
+275.9
+200.7
+194.1
+344.6
+Qwen3-4B
+QKV
+59.7
+86.5
+61.7
+60.0
+109.3
+Qwen3-4B
+O
+39.2
+61.2
+41.1
+39.4
+71.6
+Qwen3-4B
+Up/Gate
+181.4
+243.8
+183.5
+180.5
+325.7
+Qwen3-4B
+Down
+91.4
+134.2
+93.7
+91.7
+160.5
+sum
+371.8
+525.6
+379.9
+371.6
+667.1
+Qwen3-8B
+QKV
+94.2
+131.3
+96.0
+94.5
+169.7
+Qwen3-8B
+O
+62.5
+94.5
+64.3
+62.7
+115.2
+Qwen3-8B
+Up/Gate
+338.2
+488.5
+340.2
+339.7
+641.0
+Qwen3-8B
+Down
+173.5
+261.7
+175.4
+173.7
+320.9
+sum
+668.4
+975.9
+675.8
+670.6
+1246.8
+fold runs at 1.00–1.14× native W2 (Section B.4). From
+M = 64 on, each linear layer is split into at least four
+chunks along N, so that the weight DMA of one chunk
+overlaps HMX on the previous one. The eight HVX threads
+of this NPU expand each chunk to W4, each a contiguous
+range of its tiles, while HMX works on the previous chunk.
+The expanded W3 kernel then runs within 5% of W4 (0.95–
+1.04× on the four models for M = 64 to 512), the expanded
+W2-SEQ kernel at 0.99–1.05× native W2, and the three-
+kind mixed kernel ({W2-SEQ, W3, W4} in equal shares) at
+1.03–1.07× W4 on Qwen3-4B and 1.10–1.21× on 0.6B.
+Table 11. W3 projection latency at decode size (M = 1) in µs. The
+activation-fold (act.-fold) is the default path. Byte-proportional
+act.-fold/W4 would be 0.75.
+Model
+Projection
+Expand
+Act.-fold
+W4
+Act.-fold/W4
+Act.-fold/Expand
+Qwen3-0.6B
+QKV
+49.1
+25.2
+30.3
+0.83
+0.51
+Qwen3-0.6B
+O
+26.8
+13.7
+16.0
+0.86
+0.51
+Qwen3-0.6B
+Up/Gate
+71.7
+36.7
+45.0
+0.82
+0.51
+Qwen3-0.6B
+Down
+37.7
+18.1
+22.6
+0.80
+0.48
+sum
+185.3
+93.8
+113.9
+0.82
+0.51
+Qwen3-1.7B
+QKV
+92.3
+45.8
+58.1
+0.79
+0.50
+Qwen3-1.7B
+O
+49.0
+23.9
+30.5
+0.78
+0.49
+Qwen3-1.7B
+Up/Gate
+253.9
+134.0
+170.9
+0.78
+0.53
+Qwen3-1.7B
+Down
+137.3
+66.1
+85.1
+0.78
+0.48
+sum
+532.5
+269.9
+344.6
+0.78
+0.51
+Qwen3-4B
+QKV
+166.8
+85.4
+109.3
+0.78
+0.51
+Qwen3-4B
+O
+115.8
+55.6
+71.6
+0.78
+0.48
+Qwen3-4B
+Up/Gate
+497.9
+249.3
+325.7
+0.77
+0.50
+Qwen3-4B
+Down
+265.1
+125.5
+160.5
+0.78
+0.47
+sum
+1045.5
+515.8
+667.1
+0.77
+0.49
+Qwen3-8B
+QKV
+262.0
+132.0
+169.7
+0.78
+0.50
+Qwen3-8B
+O
+178.6
+89.6
+115.2
+0.78
+0.50
+Qwen3-8B
+Up/Gate
+1017.4
+489.4
+641.0
+0.76
+0.48
+Qwen3-8B
+Down
+536.7
+243.1
+320.9
+0.76
+0.45
+sum
+1994.7
+954.1
+1246.8
+0.77
+0.48
+Fold paths beyond M = 32.
+The fold points of Fig-
+ure 5 at M ≥64 are forced. The runtime does not run
+the fold paths beyond M = 32. Over M = 64 to 512 the
+W3 activation-fold takes 1.32–1.99× the expand latency on
+the four models. Its second HMX pass doubles the HMX
+work, which no longer hides behind the weight stream once
+that stream is amortized over many rows. The W2-SEQ
+accumulator-fold takes 0.96–1.04× the expand latency.
+D.5
+HVX-Assisted versus HMX-Only W3
+Activation-Fold
+Table 13 compares the two W3 activation-folds across M.
+The HVX-assisted form is 0.87–0.93× the HMX-only la-
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 12. Aggregate (QKV+O+Up/Gate+Down) latency in µs versus M (values of Figure 5). The runtime runs the fold paths for M ≤32
+and the expand path from M = 64. The fold values at M ≥64 are forced. W2-SEQ/W2 uses the default path.
+Model
+M
+W2 W2-SEQ fold W2-SEQ expand W2-SEQ/W2
+W4 W3 fold W3 expand
+Qwen3-0.6B
+1
+68.6
+74.8
+104.3
+1.09
+113.9
+93.8
+185.3
+Qwen3-0.6B
+32
+103.1
+117.2
+148.0
+1.14
+137.1
+162.3
+231.3
+Qwen3-0.6B
+64
+161.9
+174.7
+168.9
+1.04
+196.8
+257.8
+188.1
+Qwen3-0.6B 128
+261.0
+278.4
+268.2
+1.03
+275.7
+424.6
+277.1
+Qwen3-0.6B 256
+470.5
+495.2
+486.5
+1.03
+486.2
+774.6
+490.3
+Qwen3-0.6B 512
+962.2
+986.2
+955.1
+0.99
+977.0
+1547.8
+967.0
+Qwen3-1.7B
+1
+193.2
+194.1
+275.9
+1.00
+344.6
+269.9
+532.5
+Qwen3-1.7B
+32
+237.5
+250.9
+338.5
+1.06
+380.0
+385.4
+598.9
+Qwen3-1.7B
+64
+381.6
+383.9
+384.5
+1.01
+470.4
+630.3
+445.8
+Qwen3-1.7B 128
+658.8
+648.4
+652.8
+0.99
+684.5
+1131.2
+669.3
+Qwen3-1.7B 256 1216.9
+1232.1
+1223.9
+1.01 1256.3
+2168.2
+1243.4
+Qwen3-1.7B 512 2387.0
+2442.5
+2381.1
+1.00 2406.5
+4303.6
+2383.0
+Qwen3-4B
+1
+372.0
+371.7
+525.6
+1.00
+667.1
+515.8
+1045.5
+Qwen3-4B
+32
+427.4
+440.6
+623.6
+1.03
+721.3
+695.0
+1172.0
+Qwen3-4B
+64
+684.3
+670.2
+685.3
+1.00
+860.0
+1172.4
+844.7
+Qwen3-4B
+128 1204.5
+1190.7
+1187.5
+0.99 1234.9
+2141.5
+1202.0
+Qwen3-4B
+256 2303.5
+2304.3
+2269.5
+0.99 2309.5
+4277.3
+2284.0
+Qwen3-4B
+512 4459.5
+4568.1
+4661.3
+1.05 4680.1
+8388.8
+4698.3
+Qwen3-8B
+1
+672.1
+671.8
+975.9
+1.00 1246.8
+954.1
+1994.7
+Qwen3-8B
+32
+733.8
+734.6
+1083.5
+1.00 1315.3
+1155.1
+2146.9
+Qwen3-8B
+64 1156.4
+1160.2
+1204.6
+1.04 1557.5
+2088.6
+1586.1
+Qwen3-8B
+128 2106.4
+2120.4
+2102.8
+1.00 2149.6
+3927.2
+2132.6
+Qwen3-8B
+256 4064.3
+4114.1
+4068.6
+1.00 4096.2
+7714.6
+4261.9
+Qwen3-8B
+512 7972.2
+8346.5
+8176.3
+1.03 8144.3 16669.4
+8362.2
+tency at M = 1 but already 1.02–1.09× at M = 2. Each
+further row costs it another HMX pass and another set of
+lookups, so its latency grows linearly with M. The runtime
+therefore runs the HVX-assisted activation-fold at M = 1
+and the HMX-only one for 2 ≤M ≤32.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 13. W3 activation-fold latency versus M (µs, sum over QKV,
+O, Up/Gate, and Down). The HVX-assisted form at M ≥2 is
+measured for comparison only. Bold marks the fastest W3 path,
+and W4 is the native reference.
+Model
+M
+HVX-assisted
+HMX-only
+W4
+0.6B
+1
+93.7
+107.2
+113.6
+2
+123.7
+113.0
+116.7
+4
+218.8
+114.5
+117.8
+8
+411.5
+120.3
+120.7
+16
+790.6
+132.4
+126.0
+32
+1517
+159.8
+137.4
+1.7B
+1
+270.3
+308.8
+344.0
+2
+324.4
+316.3
+349.5
+4
+589.2
+319.1
+352.3
+8
+1132
+322.2
+356.1
+16
+2212
+338.8
+363.5
+32
+4318
+385.7
+380.2
+4B
+1
+515.6
+576.3
+667.6
+2
+604.3
+586.7
+675.2
+4
+1119
+589.1
+679.7
+8
+2173
+592.6
+684.4
+16
+4257
+614.3
+697.1
+32
+8332
+682.7
+719.1
+8B
+1
+953.2
+1020
+1250
+2
+1058
+1034
+1258
+4
+2013
+1036
+1262
+8
+3940
+1043
+1269
+16
+7777
+1074
+1283
+32
+18545
+1154
+1312
+D.6
+Comparison with T-MAN
+Table 14. Latency of the reproduced T-MAN 2-bit kernel (asym-
+metric, group size 64, 2.5 BPW) and of W2-SEQ on the fold path
+(2.0 BPW) on Qwen3-4B, each summed over QKV, O, Up/Gate,
+and Down at M activation rows. T-MAN takes its faster path
+per projection, the LUT kernel once per row or FP16 conversion
+with HMX. Ratio is T-MAN over W2-SEQ. Per byte divides each
+latency by its weight bytes first (2.5 BPW for T-MAN, 2 bits plus
+16 B per output channel for W2-SEQ).
+M Path
+T-MAN (µs) W2-SEQ (µs) Ratio Per byte
+1 LUT
+419
+372
+1.13
+0.92
+2 LUT
+735
+380
+1.93
+1.58
+4 LUT
+1362
+384
+3.55
+2.89
+8 FP16 + HMX
+1777
+390
+4.56
+3.72
+16 FP16 + HMX
+1809
+402
+4.50
+3.67
+32 FP16 + HMX
+1930
+439
+4.40
+3.59
+T-MAN stores one bit-serial copy of the weights (asymmet-
+ric, group size 64, 2.5 BPW at 2 bits) and has two kernel
+paths. Its public LUT kernel (precompute, linear, and final-
+ize of its ExecuTorch fork) handles one activation row. We
+run it unmodified on that layout, once per row for M > 1
+while each weight chunk is streamed into VTCM once. Its
+path for M > 1 is not public, so we implement it as its
+paper describes on the DMA pipeline and thread pool of
+llama.cpp’s Hexagon backend. HVX repacks each bit-serial
+weight chunk to bit-parallel and converts it to FP16 with
+a two-level LUT, and HMX multiplies in FP16, pipelined
+with the DMA. Both paths match a CPU reference on every
+Qwen3 projection shape. Table 14 takes the faster path per
+projection and M, which is the LUT kernel up to M = 4
+and the FP16 path from M = 8. We could not obtain cor-
+rect end-to-end output from T-MAN’s public runtime on
+this NPU, so we compare kernels.
+D.7
+Mixed Kernels per Projection
+Figure 12 and tables 15 and 16 give the measurements
+behind Figure 6 per projection and per mix, against the
+composition-weighted prediction from the homogeneous
+kernels.
+Issuing the HMX work of a mixed kernel one 32-channel
+group at a time, instead of one run of same-kind groups at
+a time, changes its latency by at most 0.4% on the Qwen3-
+0.6B projections with K ≥2048.
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+2
+3
+4
+0.6
+0.7
+0.8
+0.9
+1.0
+Normalized latency
+0.6B QKV
+K=1024, N=4096
+2
+3
+4
+0.7
+0.8
+0.9
+1.0
+0.6B O
+K=2048, N=1024
+2
+3
+4
+0.6
+0.7
+0.8
+0.9
+1.0
+0.6B Up/Gate
+K=1024, N=6144
+2
+3
+4
+0.6
+0.7
+0.8
+0.9
+1.0
+0.6B Down
+K=3072, N=1024
+2
+3
+4
+0.6
+0.8
+1.0
+Normalized latency
+4B QKV
+K=2560, N=6144
+2
+3
+4
+0.6
+0.8
+1.0
+4B O
+K=4096, N=2560
+2
+3
+4
+0.6
+0.8
+1.0
+4B Up/Gate
+K=2560, N=19456
+2
+3
+4
+0.6
+0.8
+1.0
+4B Down
+K=9728, N=2560
+2
+3
+4
+bits per weight
+0.6
+0.8
+1.0
+Normalized latency
+8B QKV
+K=4096, N=6144
+2
+3
+4
+bits per weight
+0.6
+0.8
+1.0
+8B O
+K=4096, N=4096
+2
+3
+4
+bits per weight
+0.6
+0.8
+1.0
+8B Up/Gate
+K=4096, N=24576
+2
+3
+4
+bits per weight
+0.6
+0.8
+1.0
+8B Down
+K=12288, N=4096
+W2
+W2-SEQ
+W3
+W4
+{W2, W4} mixed
+{W2-SEQ, W3, W4} mixed
+W2–W4 line
+Figure 12. Mixed-precision kernel latency per projection at decode size (M = 1), normalized to the W4 kernel of the same projection.
+Markers and line as in Figure 6.
+Table 15. Deviation of mixed kernels from the composition-weighted sum of the homogeneous kernels (M = 1). Points are mixes ×
+projections. The last column is the range over the family’s mixes of the aggregate deviation.
+Model
+Family
+Mixes Points Mean dev. Max |dev.| Agg. dev. range
+Qwen3-0.6B W2–W4
+5
+20
++1.0%
+6.6%
+-0.3 / +0.9%
+Qwen3-0.6B W2-SEQ–W4
+3
+12
+-1.3%
+7.0%
+-4.0 / -1.3%
+Qwen3-0.6B W3–W4
+3
+12
++0.2%
+2.6%
+-0.5 / -0.1%
+Qwen3-0.6B W2-SEQ/W3/W4
+3
+12
++0.2%
+6.2%
+-0.8 / -0.5%
+Qwen3-4B
+W2–W4
+5
+20
+-4.4%
+7.7%
+-5.2 / -3.0%
+Qwen3-4B
+W2-SEQ–W4
+3
+12
+-3.9%
+7.5%
+-4.0 / -2.6%
+Qwen3-4B
+W3–W4
+3
+12
+-2.2%
+6.3%
+-1.6 / -1.1%
+Qwen3-4B
+W2-SEQ/W3/W4
+3
+12
+-3.2%
+6.5%
+-3.3 / -2.4%
+Qwen3-8B
+W2–W4
+5
+20
+-2.7%
+5.6%
+-2.7 / -1.6%
+Qwen3-8B
+W2-SEQ–W4
+3
+12
+-2.6%
+5.3%
+-2.4 / -1.5%
+Qwen3-8B
+W3–W4
+3
+12
+-3.7%
+7.1%
+-2.2 / -1.9%
+Qwen3-8B
+W2-SEQ/W3/W4
+3
+12
+-4.0%
+7.5%
+-2.9 / -2.3%
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 16. Aggregate latency of every mixed kernel at M = 1 and its composition-weighted prediction from the homogeneous kernels.
+Model
+Family
+Mix
+BPW Measured (µs) Predicted (µs)
+Dev.
+Qwen3-0.6B W2–W4
+w2:w2:w2:w4
+2.50
+80.1
+80.1
+-0.0%
+Qwen3-0.6B W2–W4
+w2:w2:w4
+2.67
+83.7
+83.9
+-0.2%
+Qwen3-0.6B W2–W4
+w2:w4
+3.00
+92.2
+91.4 +0.9%
+Qwen3-0.6B W2–W4
+w2:w4:w4
+3.33
+99.0
+98.9 +0.1%
+Qwen3-0.6B W2–W4
+w2:w4:w4:w4
+3.50
+102.3
+102.6
+-0.3%
+Qwen3-0.6B W2-SEQ–W4
+w2seq:w2seq:w4
+2.67
+84.2
+87.7
+-4.0%
+Qwen3-0.6B W2-SEQ–W4
+w2seq:w4
+3.00
+92.4
+94.3
+-2.0%
+Qwen3-0.6B W2-SEQ–W4
+w2seq:w4:w4
+3.33
+99.5
+100.8
+-1.3%
+Qwen3-0.6B W3–W4
+w3:w3:w4
+3.33
+99.8
+100.3
+-0.5%
+Qwen3-0.6B W3–W4
+w3:w4
+3.50
+103.5
+103.7
+-0.3%
+Qwen3-0.6B W3–W4
+w3:w4:w4
+3.67
+107.0
+107.1
+-0.1%
+Qwen3-0.6B W2-SEQ/W3/W4 w2seq:w3:w4
+3.00
+93.3
+94.0
+-0.8%
+Qwen3-0.6B W2-SEQ/W3/W4 w2seq:w3:w4:w4
+3.25
+98.5
+99.0
+-0.5%
+Qwen3-0.6B W2-SEQ/W3/W4 w2seq:w3:w4:w4:w4:w4
+3.50
+103.4
+104.0
+-0.6%
+Qwen3-4B
+W2–W4
+w2:w2:w2:w4
+2.50
+422.3
+445.6
+-5.2%
+Qwen3-4B
+W2–W4
+w2:w2:w4
+2.67
+446.4
+470.2
+-5.1%
+Qwen3-4B
+W2–W4
+w2:w4
+3.00
+498.4
+519.5
+-4.1%
+Qwen3-4B
+W2–W4
+w2:w4:w4
+3.33
+549.7
+568.7
+-3.3%
+Qwen3-4B
+W2–W4
+w2:w4:w4:w4
+3.50
+575.3
+593.3
+-3.0%
+Qwen3-4B
+W2-SEQ–W4
+w2seq:w2seq:w4
+2.67
+451.5
+470.1
+-4.0%
+Qwen3-4B
+W2-SEQ–W4
+w2seq:w4
+3.00
+503.0
+519.3
+-3.2%
+Qwen3-4B
+W2-SEQ–W4
+w2seq:w4:w4
+3.33
+553.8
+568.6
+-2.6%
+Qwen3-4B
+W3–W4
+w3:w3:w4
+3.33
+556.9
+566.2
+-1.6%
+Qwen3-4B
+W3–W4
+w3:w4
+3.50
+584.0
+591.4
+-1.3%
+Qwen3-4B
+W3–W4
+w3:w4:w4
+3.67
+609.8
+616.7
+-1.1%
+Qwen3-4B
+W2-SEQ/W3/W4 w2seq:w3:w4
+3.00
+501.0
+518.1
+-3.3%
+Qwen3-4B
+W2-SEQ/W3/W4 w2seq:w3:w4:w4
+3.25
+540.8
+555.4
+-2.6%
+Qwen3-4B
+W2-SEQ/W3/W4 w2seq:w3:w4:w4:w4:w4
+3.50
+578.2
+592.6
+-2.4%
+Qwen3-8B
+W2–W4
+w2:w2:w2:w4
+2.50
+791.2
+813.0
+-2.7%
+Qwen3-8B
+W2–W4
+w2:w2:w4
+2.67
+840.7
+861.2
+-2.4%
+Qwen3-8B
+W2–W4
+w2:w4
+3.00
+938.2
+957.6
+-2.0%
+Qwen3-8B
+W2–W4
+w2:w4:w4
+3.33
+1036.6
+1054.0
+-1.7%
+Qwen3-8B
+W2–W4
+w2:w4:w4:w4
+3.50
+1084.3
+1102.2
+-1.6%
+Qwen3-8B
+W2-SEQ–W4
+w2seq:w2seq:w4
+2.67
+841.5
+862.5
+-2.4%
+Qwen3-8B
+W2-SEQ–W4
+w2seq:w4
+3.00
+939.9
+958.6
+-2.0%
+Qwen3-8B
+W2-SEQ–W4
+w2seq:w4:w4
+3.33
+1038.6
+1054.7
+-1.5%
+Qwen3-8B
+W3–W4
+w3:w3:w4
+3.33
+1028.8
+1052.3
+-2.2%
+Qwen3-8B
+W3–W4
+w3:w4
+3.50
+1078.3
+1100.9
+-2.0%
+Qwen3-8B
+W3–W4
+w3:w4:w4
+3.67
+1127.7
+1149.5
+-1.9%
+Qwen3-8B
+W2-SEQ/W3/W4 w2seq:w3:w4
+3.00
+929.5
+957.4
+-2.9%
+Qwen3-8B
+W2-SEQ/W3/W4 w2seq:w3:w4:w4
+3.25
+1002.3
+1029.7
+-2.7%
+Qwen3-8B
+W2-SEQ/W3/W4 w2seq:w3:w4:w4:w4:w4
+3.50
+1077.0
+1102.1
+-2.3%
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+D.8
+Accuracy across Model Sizes
+Figure 13 repeats the comparison of Figure 7 across the
+Qwen3 model sizes. The ordering {W2, W4} < {W2-SEQ,
+W4} < {W2-SEQ, W3, W4} holds on Qwen3-4B and 8B.
+On the smaller models, where all three palettes stay at 30–38
+points at 3.0 BPW, it does not: {W2-SEQ, W4} falls below
+{W2, W4} on Qwen3-1.7B (31.1 versus 34.9), and adding
+W3 lowers the average on Qwen3-0.6B (29.8 versus 30.9).
+D.9
+Accuracy versus llama.cpp GGUF
+Table 17 lists the pairs of the accuracy panel of Figure 8:
+each llama.cpp GGUF of Section C.3 next to the Mix-
+Fold MP profile at its BPW (FlexRound weights with Pre-
+fixQuant, in the AIMET simulation of Section 5.1). The met-
+rics follow Section E.1. The GGUFs are also calibrated with
+30
+40
+50
+60
+Accuracy
+Group
+Layer
+0.6B
+1.7B
+4B
+8B
+Size
+30
+40
+50
+60
+Accuracy
+{W2-SEQ, W3, W4}
+{W2-SEQ, W4}
+{W2, W4}
+Model Family: Qwen3
+Figure 13. Accuracy (average of CSR, MMLU, and IFEval) of the
+weight-only GPTQ MP profiles at 3.0 BPW across Qwen3 model
+sizes. Panels as in Figure 7.
+an importance matrix, keep some projections at a higher type
+(Q2 K stores v, o, and down in Q3 K or Q4 K), and quantize
+the embedding and the LM head, which the decoder-linear
+BPW does not count.
+At the BPW of Q2 K, Q3 K S, and Q3 K M, the MP pro-
+files reach a lower perplexity and a higher Avg. on Qwen3-
+0.6B and 1.7B, by 1.0 to 10.4 points of Avg. On Qwen3-
+4B-Instruct-2507 their Avg. is equal or higher (by up to 1.7
+points) at a higher perplexity. On Qwen3-8B the GGUFs
+reach the lower perplexity at every BPW, and the two are
+within 0.4 points of Avg.
+D.10
+Numerical Fidelity
+The fold paths round slightly differently from the expand
+path (Sections B.4 and 3.2). Table 18 measures the effect at
+model level. The runtime scores one 4096-token WikiText-2
+window of the real Qwen3-0.6B MP3.4-A16 checkpoint in
+calls of M tokens, so every linear runs at that M, with the
+W2-SEQ and W3 groups on the fold or the forced expand
+path. The perplexity changes by less than 0.01.
+E
+ACCURACY EVALUATION
+E.1
+Evaluation Setup
+Table 19 lists the accuracy setup. PrefixQuant prepends
+a fixed prefix whose KV cache is computed once in full
+
+
+MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs
+Table 17. Accuracy of the llama.cpp GGUFs (rows named by their
+type) and of the MixFold MP profile at the same BPW (MP), the
+pairs of Figure 8. Bold marks the better value in each pair.
+Method
+BPW
+PPL
+CSR
+MMLU
+IFEval
+Avg.
+Qwen3-0.6B
+Q2 K
+2.95
+38.60
+40.7
+30.8
+40.4
+37.3
+MP
+2.95
+26.34
+44.2
+41.7
+57.2
+47.7
+Q3 K S
+3.44
+25.93
+43.6
+40.2
+54.2
+46.0
+MP
+3.44
+23.04
+45.9
+44.2
+59.1
+49.7
+Q3 K M
+3.87
+22.24
+46.3
+43.3
+61.4
+50.3
+MP
+3.87
+21.18
+47.7
+44.5
+61.8
+51.3
+Qwen3-1.7B
+Q2 K
+2.93
+21.37
+49.9
+47.9
+55.1
+51.0
+MP
+2.93
+20.83
+53.5
+55.0
+69.3
+59.3
+Q3 K S
+3.44
+20.01
+52.6
+53.2
+58.3
+54.7
+MP
+3.44
+18.84
+55.3
+57.5
+72.9
+61.9
+Q3 K M
+3.85
+16.75
+54.4
+56.5
+67.9
+59.6
+MP
+3.85
+16.09
+57.4
+58.0
+68.7
+61.4
+Qwen3-4B-Instruct-2507
+Q2 K
+2.96
+11.58
+60.6
+65.2
+82.6
+69.5
+MP
+2.96
+12.52
+62.3
+67.9
+83.5
+71.2
+Q3 K S
+3.44
+10.40
+63.8
+68.9
+83.8
+72.2
+MP
+3.44
+11.21
+64.5
+70.0
+84.9
+73.1
+Q3 K M
+3.85
+9.99
+65.0
+70.4
+85.0
+73.4
+MP
+3.85
+10.30
+65.5
+70.5
+84.4
+73.4
+Qwen3-8B
+Q2 K
+2.95
+9.99
+63.4
+69.8
+85.1
+72.8
+MP
+2.95
+11.15
+64.4
+69.9
+83.8
+72.7
+Q3 K S
+3.44
+9.73
+64.7
+71.8
+85.7
+74.1
+MP
+3.44
+10.09
+65.7
+72.1
+84.1
+74.0
+Q3 K M
+3.85
+9.39
+65.6
+73.4
+85.1
+74.7
+MP
+3.85
+10.17
+65.2
+72.1
+85.5
+74.3
+Table 18. WikiText-2 perplexity over one 4096-token window of
+the real Qwen3-0.6B MP3.4-A16 checkpoint with its W2-SEQ
+and W3 groups on the fold paths or forced onto the expand path.
+The first row scores the window one token per call and the second
+32 tokens per call, the call sizes at which the runtime selects these
+fold paths.
+W2-SEQ / W3 fold path
+Fold
+Expand
+Bias-fold / HVX-assisted act.-fold
+20.675
+20.678
+Accumulator-fold / HMX-only act.-fold
+20.667
+20.660
+precision. The calibration, the AIMET simulation, and the
+on-target runs use the same prefixes. On the NPU, the prefix
+KV cache (FP16, keys after RoPE) is stored with the model
+and placed at the start of the KV cache, so the prefix never
+passes through the quantized layers and is not scored.
+E.2
+Simulated versus On-Target Perplexity
+Table 20 checks the GPU simulation behind the accuracy
+results against the NPU. The on-target perplexity of the
+MixFold MP profiles is within 1.8% of the simulated one
+Table 19. Accuracy evaluation setup.
+Item
+Setting
+Simulation
+AIMET GPU simulation of the A16 MP
+profiles (Section 5.1)
+Harness
+lm-evaluation-harness, thinking mode off
+Chat template
+IFEval only (none for WikiText-2, CSR,
+and MMLU)
+Prefix (no template)
+<|endoftext|>\n (2 tokens), for
+WikiText-2, CSR, and MMLU
+Prefix (template)
+<|im start|>user (2 tokens), for
+IFEval
+WikiText-2
+perplexity at a 4096-token context
+CSR
+zero-shot mean over ARC-Challenge,
+ARC-Easy, HellaSwag, OpenBookQA,
+PIQA, and WinoGrande, acc norm
+except WinoGrande (acc)
+MMLU
+five-shot accuracy
+IFEval
+zero-shot mean of its four subscores
+(prompt- and instruction-level, strict and
+loose)
+Avg.
+mean of CSR, MMLU, and IFEval
+Table 20. WikiText-2 perplexity of the MixFold MP profiles with
+PrefixQuant at the BPW of llama.cpp’s Q2 K, Q3 K S, and
+Q3 K M. On-target runs on the NPU over the full test set (73
+windows of 4096 tokens). Simulation is the AIMET GPU simula-
+tion of Section 5.1. ∆is on-target over simulation.
+Model
+BPW
+On-target
+Simulation
+∆
+0.6B
+2.95
+25.88
+26.34
+−1.7%
+0.6B
+3.44
+22.64
+23.04
+−1.7%
+0.6B
+3.87
+20.94
+21.18
+−1.1%
+1.7B
+2.93
+20.79
+20.83
+−0.2%
+1.7B
+3.44
+18.78
+18.84
+−0.3%
+1.7B
+3.85
+16.01
+16.09
+−0.5%
+4B
+2.96
+12.57
+12.52
++0.4%
+4B
+3.44
+11.29
+11.21
++0.8%
+4B
+3.85
+10.36
+10.30
++0.6%
+8B
+2.95
+11.04
+11.15
+−1.0%
+8B
+3.44
+10.09
+10.09
++0.0%
+8B
+3.85
+10.16
+10.17
+−0.1%
+at every model and BPW. Both sides score WikiText-2 with
+a 4096-token context and apply PrefixQuant (Section E.1),
+and the on-target runs cover the full test set. The perplex-
+ity of Section D.10 scores only one window of a different
+checkpoint and is not comparable with these values.

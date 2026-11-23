@@ -1,0 +1,978 @@
+PonderPounce-WM: When Does Predicting the Future
+Help Context-Dependent Robot Control?
+Jaeyoon Jung1
+Suhwan Choi1,2
+Yunsung Lee1†
+Youngjae Yu2†
+1MAUM.AI
+2Seoul National University
+Abstract
+How does future prediction affect context-dependent robot control? We intro-
+duce PONDERPOUNCE-WM, extending PONDERPOUNCE with three future tokens
+supervised to predict visual-feature changes. Its pretrained MLLM, PONDER, inte-
+grates history and demonstrations into continuous cognition for the action model,
+POUNCE. We investigate token ordering and delivery to distinguish predictive su-
+pervision from direct future conditioning. On RoboMME, cognition-first ordering
+with cognition-only delivery improves success from 60.83% to 67.42%. With the
+same ordering, direct future-token delivery yields 64.00% success. Probes show
+increased future information in cognition while the tested past-event attributes
+remain largely decodable. Across four real-robot tasks, PONDERPOUNCE-WM
+achieves 67.44% mean success under asynchronous execution, compared with
+60.98% for PONDERPOUNCE. These results suggest that future prediction can im-
+prove context-dependent control through auxiliary supervision without delivering
+future tokens to the action model.
+1
+Introduction
+Context-dependent robot control requires retaining past events that are no longer observable and
+using demonstrations to interpret the current task. Predicting future observations may help learn such
+control representations, but the information needed to anticipate visual changes need not coincide
+with what an action model needs to act. Prior work combines observation history or explicit memory
+with future prediction for control [1, 2, 3]. Building on PONDERPOUNCE’s use of a pretrained
+MLLM’s native causal context as episode memory [4], we investigate how predictive supervision
+shapes this continuous context representation, called cognition. We introduce PONDERPOUNCE-WM,
+which adds future tokens supervised to predict visual-feature changes at multiple horizons, drawing
+on FLARE [5] and InternW0-∆[6]. This retains the MLLM context engine rather than introducing a
+video-generation backbone for pixel prediction.
+PONDERPOUNCE-WM retains the dual-system architecture: PONDER integrates episode context, and
+POUNCE generates actions conditioned on cognition. Our focus is how predictive supervision changes
+a representation already responsible for episode memory: whether it improves control, whether direct
+future conditioning adds a benefit, and whether past-event information remains decodable. We vary
+the causal ordering of cognition and future tokens and whether POUNCE receives cognition alone
+or also the future tokens. On RoboMME [7], future supervision with cognition-first ordering and
+cognition-only delivery improves success from 60.83% to 67.42%, while direct future-token delivery
+reduces the gain (Table 1). Future and past-event probes, together with inference-time token removal,
+examine how predictive learning changes cognition and its utility for control. Across four real-robot
+tasks under asynchronous execution, PONDERPOUNCE-WM achieves 67.44% mean success versus
+60.98% for PONDERPOUNCE, supporting real-world applicability (Table 4).
+†Co-corresponding authors.
+Preprint.
+arXiv:2611.26996v1  [cs.RO]  20 Nov 2026
+
+
+Figure 1: PONDERPOUNCE-WM architecture. PONDER appends one cognition token and three future tokens,
+with the latter trained to predict future visual-feature changes. The two axes are token order within PONDER
+(cog-first or fut-first) and delivery to POUNCE (cognition alone or all four tokens).
+2
+PONDERPOUNCE-WM
+We study world modeling as auxiliary prediction of future visual features from episode context, rather
+than action-conditioned rollout for planning.
+Base system.
+PONDERPOUNCE [4] couples a pretrained MLLM, PONDER, which retains the task
+instruction, demonstrations, and execution history in its native causal context, with an action model,
+POUNCE. At query t, it appends observation Ot, optional text describing a new subgoal, and a learned
+cognition token. This token’s final hidden state ct ∈RH, with MLLM width H, is the continuous
+context representation passed to POUNCE. At invocation j, POUNCE combines its current observation,
+proprioception, and task with the prefix [e∆(j), Wcecj] to predict an action chunk. Here Wc projects
+the newest ready cognition ecj to the action model’s width, and e∆(j) encodes its age from the source
+observation. POUNCE reuses this state until a newer PONDER output is ready. Both systems train end
+to end: action flow-matching loss propagates through the prefix, while grounding token cross-entropy
+enters through PONDER’s LM head. Action gradients into PONDER are scaled by 0.5, following the
+base recipe.
+Future prediction.
+We add three learned future tokens Fi, indexed by slot i ∈{1, 2, 3},
+giving K=4 tokens per query including cognition.
+Each slot predicts at horizon hi, with
+(h1, h2, h3) = (0.5, 1, 2) s in simulation and (1, 2, 3) s on the real robot (Appendix F). Let ϕ be
+POUNCE’s frozen SigLIP encoder [8] and It the third-person image. The target is the feature change
+∆t,h = pool4×4ϕ(It+h) −pool4×4ϕ(It), where pooling retains 16 spatial features. A shared linear
+head maps the hidden state ft,i of slot Fi to b∆t,hi ∈R16×1152. The auxiliary loss Lfut is the mean
+squared prediction error over valid query–horizon pairs, excluding targets beyond the episode end.
+We optimize L = Lfm + 0.1Lground + 5Lfut. Future-loss gradients update PONDER’s shared param-
+eters and, when future tokens attend to cognition, flow through cognition as well. Thus predictive
+supervision can shape cognition without delivering future tokens to POUNCE. The prediction head is
+not needed for action generation.
+Token ordering and delivery.
+The orders are [cog, F1, F2, F3] (cog-first) and [F1, F2, F3, cog]
+(fut-first). Causal attention lets cognition read same-query future tokens only in fut-first. Both retain
+previous queries’ tokens. Independently of order, POUNCE receives cognition alone or all four hidden
+states through shared Wc, giving four configurations (Figure 1).
+2
+
+
+3
+Experiments
+Setup.
+RoboMME [7] has 16 tabletop tasks requiring counting, event memory, or following
+an in-context video demonstration, with 50 evaluation episodes each (800 per repeat). We use
+Qwen3.5-9B [9] for PONDER and π0.5 [10] for POUNCE. All checkpoints follow the same base
+PONDERPOUNCE training recipe [4], apart from the slot and supervision settings under study
+(Appendix G). RoboMME success rates (%) average three closed-loop evaluations per checkpoint.
+Main results.
+Table 1 shows that future supervision with cog-first ordering and cognition-only
+delivery reaches 67.42%, compared with 60.83% for PONDERPOUNCE (K=1) and 60.00% for four
+slots without future supervision. The K=4 control disables future supervision and delivers all four
+slots to POUNCE. All four serve as cognition tokens trained end to end through the action loss. Relative
+to K=1, gains concentrate in Counting and Imitation, with a smaller improvement in Permanence
+and little change in Reference. The largest gains occur on RouteStick and VideoUnmaskSwap, but
+MoveCube and PickHighlight decline by 10 and 9 pt, respectively (Appendix A). Holding cog-first
+ordering fixed, direct delivery of future slots lowers success to 64.00% (−3.42 pt). With fut-first
+ordering, the corresponding difference is 64.17% to 63.17% (−1.00 pt). Direct delivery thus yields
+a lower observed mean in both layouts, and the ordering difference is larger with cognition-only
+delivery. Paired episode-bootstrap 95% intervals exclude zero for the cog-first delivery difference
+and the improvement over the K=4 no-future-loss control, but include zero for the fut-first delivery
+difference (Appendix B).
+Table 1: RoboMME success rate. Each family averages four tasks. FrameSamp+Modul and MemER results
+are from RoboMME [7]; the K=1 reference is from Choi et al. [4]. Best values per column are bold.
+Method
+Slot order
+POUNCE reads
+Counting
+Permanence
+Reference
+Imitation
+Average
+FrameSamp+Modul [7]
+–
+–
+65.22
+25.11
+36.33
+51.39
+44.51
+MemER [11]
+–
+–
+48.83
+53.16
+38.00
+29.50
+42.38
+PONDERPOUNCE (K=1) [4]
+–
+1 cog
+74.67
+62.83
+72.17
+33.67
+60.83
+PONDERPOUNCE (K=4)
+–
+4 cog
+74.33
+61.33
+66.50
+37.83
+60.00
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog + fut
+77.67
+60.33
+69.83
+44.83
+63.17
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog
+79.00
+61.00
+75.50
+41.17
+64.17
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog + fut
+77.50
+59.33
+73.00
+46.17
+64.00
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog
+84.83
+68.83
+72.00
+44.00
+67.42
+Future information in cognition.
+To test whether cognition carries more predictive information,
+we fit linear probes to future-feature changes on 192 held-out episodes. Table 2 shows that 1 s
+explained variance rises from 0.25 to 0.31–0.34 and near-time discrimination from 0.63 to 0.67–0.69.
+Thus future information becomes more linearly decodable from cognition, even when future tokens
+are not delivered to POUNCE. Removing execution history lowers explained variance at 1 s by
+0.10–0.14 across variants, indicating that context contributes to these predictions. Probe scores do
+not rank the variants in the same order as control success.
+Table 2: Future-feature read-out from cognition. Scores are explained variance versus no change. “Near” is
+two-way accuracy. Definitions are in Appendix H.
+Method
+Slot order
+POUNCE reads
+0.5 s
+1 s
+2 s
+1 s, no history
+near
+PONDERPOUNCE (K=1)
+–
+1 cog
+0.103
+0.253
+0.349
+0.116
+0.63
+PONDERPOUNCE (K=4)
+–
+4 cog
+0.098
+0.239
+0.329
+0.115
+0.62
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog + fut
+0.168
+0.340
+0.460
+0.224
+0.69
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog
+0.161
+0.321
+0.438
+0.221
+0.67
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog + fut
+0.158
+0.313
+0.409
+0.207
+0.67
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog
+0.172
+0.336
+0.436
+0.209
+0.69
+Past information in cognition.
+We test whether past-event information remains decodable after
+future supervision. On 100 recorded held-out episodes per task, we probe hidden-container location,
+repetition ordinal, and per-colour counts of cubes already binned, using cognition at subgoal tran-
+sitions (Appendix C). Table 3 shows accuracies of 0.91–1.00 for container location, 0.99–1.00 for
+3
+
+
+repetition ordinal, and 0.62–0.67 for BinFill colour counts, all above both current-frame features and
+current-observation cognition. Relative to K=1, future-supervised variants lose 1.5–4.5 pt in mean
+container accuracy, with bootstrap intervals excluding zero for two variants, while counting-group
+differences remain unresolved (Table 7). The tested attributes remain largely decodable, but location
+read-outs show some degradation. Near-ceiling location and ordinal scores limit conclusions about
+broader memory preservation.
+Table 3: Past-event read-out at subgoal transitions. Held-out accuracy (0–1). The last row removes
+demonstrations and execution history from all six models and reports their accuracy ranges. Group means weight
+tasks equally. Probe details are in Appendix C.
+hidden container (location)
+counting (ordinal / colour counts)
+group mean
+Method
+Video
+Unmask
+Button
+Unmask
+Pick
+Xtimes
+Swing
+Xtimes
+Bin
+Fill
+container
+counting
+chance
+0.27
+0.27
+0.33
+0.33
+0.32
+0.27
+0.33
+mean position / majority class
+0.41
+0.40
+0.46
+0.49
+0.37
+0.41
+0.44
+current frame (frozen SigLIP, no PONDER)
+0.41
+0.41
+0.80
+0.66
+0.55
+0.41
+0.67
+PONDERPOUNCE (K=1)
+1.00
+0.99
+1.00
+1.00
+0.63
+0.99
+0.88
+PONDERPOUNCE (K=4)
+0.99
+0.98
+1.00
+1.00
+0.62
+0.98
+0.87
+PONDERPOUNCE-WM (K=4), fut-first / cog+fut
+0.98
+0.97
+1.00
+1.00
+0.67
+0.97
+0.89
+PONDERPOUNCE-WM (K=4), fut-first / cog
+0.94
+0.99
+1.00
+1.00
+0.66
+0.96
+0.89
+PONDERPOUNCE-WM (K=4), cog-first / cog+fut
+0.91
+0.99
+1.00
+0.99
+0.62
+0.95
+0.87
+PONDERPOUNCE-WM (K=4), cog-first / cog
+1.00
+0.96
+1.00
+1.00
+0.65
+0.98
+0.88
+All six models (range)
+Task + current observations only
+0.42–0.42
+0.30–0.38
+0.75–0.80
+0.60–0.65
+0.49–0.55
+0.36–0.40
+0.62–0.66
+Real-robot evaluation.
+We evaluate PONDERPOUNCE-WM (cog-first / cog) on the same four
+RoboMME-inspired tasks and held-out scenes as the prior PONDERPOUNCE evaluation [7, 4], using
+wall-clock asynchronous execution (Appendix F). Table 4 compares the new results with the reported
+baselines: mean success increases from 60.98% to 67.44%, with gains on Put Fruits, Track Cube,
+and Draw Pattern, but a decline on Repick Block (5/14 vs. 6/14). These results support real-world
+applicability, but separate evaluation sessions and differing cognition ages prevent isolating predictive
+supervision’s effect. With 14–16 trials per task, task-level comparisons remain imprecise.
+Table 4: Real-robot success rates. Entries show successes/trials (rounded %). Average weights tasks equally.
+Prior results are from Choi et al. [4].
+Method
+Put Fruits
+(Counting)
+Track Cube
+(Permanence)
+Repick Block
+(Reference)
+Draw Pattern
+(Imitation)
+Average
+π0.5
+9/14 (64%)
+4/16 (25%)
+0/14 (0%)
+1/15 (7%)
+23.99%
+FrameSamp+Modul
+7/14 (50%)
+5/16 (31%)
+3/14 (21%)
+9/15 (60%)
+40.67%
+PONDERPOUNCE
+11/14 (79%)
+10/16 (63%)
+6/14 (43%)
+9/15 (60%)
+60.98%
+PONDERPOUNCE-WM
+(cog-first / cog)
+12/14 (86%)
+12/16 (75%)
+5/14 (36%)
+11/15 (73%)
+67.44%
+4
+Conclusion
+PONDERPOUNCE-WM reaches 67.42% success on RoboMME and 67.44% across four real-robot
+tasks, versus 60.83% and 60.98% for PONDERPOUNCE. Predictive supervision increases future-
+feature decodability while largely retaining tested past-event attributes, with some location degra-
+dation. Direct delivery yields lower observed success, while cog-first retains most gains without
+future tokens at inference (Appendix D). These findings connect predictive learning and control
+utility [12, 13, 14] in an episode-memory setting. Comparisons cover one architecture and future
+targets from one encoder and camera view, without isolating future prediction from other auxiliary
+visual objectives or establishing the delivery-penalty mechanism and broader memory preservation.
+Within this scope, predictive supervision helps without delivering future tokens to the action model.
+4
+
+
+Acknowledgments and Disclosure of Funding
+This work was supported by Institute of Information & communications Technology Planning
+& Evaluation (IITP) grant funded by the Korea government (MSIT) (No. RS-2026-25522885,
+Development of a World Foundation Model for Training and Deployment of Physical AI Systems).
+References
+[1] H. Wu, Y. Jing, C. Cheang, G. Chen, J. Xu, X. Li, M. Liu, H. Li, and T. Kong. Unleashing large-
+scale video generative pre-training for visual robot manipulation. In International Conference
+on Learning Representations, volume 2024, pages 10641–10662, 2024.
+[2] H. Shi, W. Li, B. Xie, Y. Wang, R. Zhou, T. Wang, X. Zhang, P. Luo, and G. Huang. Memo-
+ryvla++: Temporal modeling via memory and imagination in vision-language-action models.
+arXiv preprint arXiv:2606.09827, 2026.
+[3] W. Huang, B. Zhang, C. Liu, I. Liu, S. Yang, W. Mao, L. Wang, Y. Xiao, W. Lin, Q. Hu, et al.
+Long-wam: Scaling the context of world-action models. arXiv preprint arXiv:2610.10528,
+2026.
+[4] S. Choi, J. Jung, S. Kim, Y. Lee, and Y. Yu. Ponderpounce: A pretrained mllm as an episode
+context engine for robot control. arXiv preprint arXiv:2608.24115, 2026.
+[5] R. Zheng, J. Wang, S. Reed, J. Bjorck, Y. Fang, F. Hu, J. Jang, K. Kundalia, Z. Lin, L. Magne,
+et al. Flare: Robot learning with implicit world modeling. arXiv preprint arXiv:2505.15659,
+2025.
+[6] X. Miao, Z. Li, B. Fang, K. Song, T. Wang, H. Zhang, Y. Wang, X. Li, Y. He, X. Wei, et al.
+InternW0-∆: A world action model bridging predictive dynamics and actions with 20k+ hours
+of open data. arXiv preprint arXiv:2609.31394, 2026.
+[7] Y. Dai, H. Fu, J. Lee, Y. Liu, H. Zhang, J. Yang, C. Finn, N. Fazeli, and J. Chai. Robomme:
+Benchmarking and understanding memory for robotic generalist policies. arXiv preprint
+arXiv:2603.04639, 2026.
+[8] X. Zhai, B. Mustafa, A. Kolesnikov, and L. Beyer. Sigmoid loss for language image pre-training.
+In 2023 IEEE/CVF International Conference on Computer Vision (ICCV), pages 11941–11952.
+IEEE, 2023.
+[9] Q. Team. Qwen3.5: Towards native multimodal agents, February 2026. URL https://qwen.
+ai/blog?id=qwen3.5.
+[10] P. Intelligence, K. Black, N. Brown, J. Darpinian, K. Dhabalia, D. Driess, A. Esmail, M. Equi,
+C. Finn, N. Fusai, et al. π0.5: a vision-language-action model with open-world generalization.
+arXiv preprint arXiv:2504.16054, 2025.
+[11] A. Sridhar, J. Pan, S. Sharma, and C. Finn. Scaling up memory for robotic control via experience
+retrieval. In International Conference on Learning Representations, volume 2026, pages 97142–
+97166, 2026.
+[12] T. Yuan, Z. Dong, Y. Liu, and H. Zhao. Fast-wam: Do world action models need test-time
+future imagination? arXiv preprint arXiv:2603.16666, 2026.
+[13] Q. Gu, J. Li, B. Gao, R. Chen, J. Tang, X. Chu, and J. Zhao. The right future for action: Learning
+action-relevant predictive states in world action models. arXiv preprint arXiv:2609.23369,
+2026.
+[14] Y. Yang, J. Peng, X. Wang, Y. Zhang, and Z. Fang. Mt-wam: Reorienting the one-pass predictive
+representation toward action generation. arXiv preprint arXiv:2609.21474, 2026.
+5
+
+
+A
+Per-task results
+Table 5 shows the task-level changes behind the family averages. Relative to the K=1 baseline,
+cog-first with cognition-only delivery gains on RouteStick (+39 pt), VideoUnmaskSwap (+25 pt),
+SwingXtimes (+19 pt), BinFill (+11 pt), VideoRepick (+10 pt), and StopCube (+5 pt), but loses
+on MoveCube (−10 pt) and PickHighlight (−9 pt), with smaller declines on ButtonUnmask (−4 pt),
+VideoUnmask (−2 pt), and VideoPlaceOrder (−2 pt) (differences rounded to whole percentage
+points). The largest gains are concentrated in RouteStick and VideoUnmaskSwap, so the overall
+improvement does not imply uniform gains across tasks. With cog-first ordering, delivering future
+slots to POUNCE raises RouteStick further to 86% but reduces performance on the swap and bin
+tasks. The fut-first/cognition-only variant retains 86% on PickHighlight but also performs worse
+on both swap tasks than cog-first/cognition-only. Neither alternative preserves the full pattern of
+improvements.
+Table 5: Per-task RoboMME success rates (%). Tasks are grouped by memory family, with abbreviations
+following RoboMME. Baseline results are from RoboMME [7]. Best values per column are bold.
+Method
+Counting
+Permanence
+Reference
+Imitation
+Average
+Bin
+Fill
+Pick
+Xtimes
+Swing
+Xtimes
+Stop
+Cube
+Video
+Umsk
+Button
+Umsk
+Video
+UmskS
+Button
+UmskS
+Pick
+HighL
+Video
+Repick
+Video
+PlcBtn
+Video
+PlcOrd
+Move
+Cube
+Insert
+Peg
+Pattern
+Lock
+Route
+Stick
+FrameSamp+Modul
+39.6
+87.3
+92.0
+42.0
+32.7
+25.1
+24.4
+18.2
+22.9
+30.4
+60.0
+32.0
+77.8
+7.6
+53.6
+66.7
+44.5
+MemER
+56.7
+79.3
+59.3
+0.0
+81.3
+72.0
+38.0
+21.3
+70.7
+25.3
+30.0
+26.0
+82.7
+6.7
+16.7
+12.0
+42.4
+PONDERPOUNCE (K=1) 50.7
+93.3
+72.0
+82.7
+94.7
+97.3
+25.3
+34.0
+85.3
+40.7
+83.3
+79.3
+81.3
+6.0
+12.7
+34.7
+60.8
+PONDERPOUNCE (K=4) 56.7
+97.3
+76.0
+67.3
+92.0
+90.7
+27.3
+35.3
+68.0
+32.7
+81.3
+84.0
+78.7
+8.7
+18.0
+46.0
+60.0
+PONDERPOUNCE-WM
+fut-first / cog+fut 54.7
+97.3
+84.7
+74.0
+92.0
+93.3
+27.3
+28.7
+78.7
+42.0
+78.0
+80.7
+70.7
+12.0
+18.7
+78.0
+63.2
+PONDERPOUNCE-WM
+fut-first / cog 61.3
+94.7
+76.7
+83.3
+89.3
+94.0
+33.3
+27.3
+86.0
+46.7
+82.7
+86.7
+75.3
+5.3
+15.3
+68.7
+64.2
+PONDERPOUNCE-WM
+cog-first / cog+fut 56.7
+91.3
+78.7
+83.3
+89.3
+97.3
+24.7
+26.0
+70.7
+52.7
+82.0
+86.7
+74.7
+6.0
+18.0
+86.0
+64.0
+PONDERPOUNCE-WM
+cog-first / cog 62.0
+98.7
+90.7
+88.0
+92.7
+93.3
+50.7
+38.7
+76.0
+50.7
+84.0
+77.3
+71.3
+13.3
+17.3
+74.0
+67.4
+B
+Paired bootstrap intervals for the main differences
+Every evaluation repeat of every checkpoint runs the same 800 evaluation slots (16 tasks × 50
+episode indices). For each slot we take a model’s success rate over its three repeats, form the per-slot
+difference between two models, and resample the 800 slots with replacement (2,000 draws, the same
+draws for every comparison) to obtain a percentile 95% interval of the mean difference (Table 6).
+The intervals cover evaluation-slot sampling with repeat noise folded into the per-slot averages; they
+do not cover training seeds, and are not adjusted for multiple comparisons. The published K=1
+reference is available only as per-task percentages, so it is not paired here; its three repeats span
+59.62–62.25% (Appendix H). The improvement over the K=4 no-future-loss control, the cog-first
+delivery difference, and the ordering difference under cognition-only delivery exclude zero; the
+fut-first delivery difference and the ordering difference under all-slot delivery do not. An interval
+covering zero means the difference is not resolved by three repeats of 800 episodes, not that the
+variants perform the same.
+Table 6: Paired episode-bootstrap differences in success rate. Percentage points, A −B, with percentile 95%
+intervals over 2,000 resamples of the 800 evaluation slots; each slot’s rate averages three repeats per model.
+comparison
+A
+B
+mean
+95% interval
+Best configuration vs. K=4 control
+cog-first / cog
+PONDERPOUNCE (K=4)
++7.42
+[+4.75, +10.21]
+Delivery (cog-first)
+cog-first / cog
+cog-first / cog + fut
++3.42
+[+1.08, +5.92]
+Delivery (fut-first)
+fut-first / cog
+fut-first / cog + fut
++1.00
+[−1.46, +3.50]
+Ordering (cog)
+cog-first / cog
+fut-first / cog
++3.25
+[+0.71, +5.79]
+Ordering (cog + fut)
+cog-first / cog + fut
+fut-first / cog + fut
++0.83
+[−1.54, +3.12]
+C
+Past-event probe: protocol and uncertainty
+Query selection.
+We replay 100 held-out episodes per task through the serving path, retaining task
+instructions, demonstrations sampled at 1 fps, and execution observations sampled at 1 Hz. PONDER
+6
+
+
+generates its own subgoal text, without ground-truth text in its context. We extract cognition at the
+first query at or after each annotated subgoal transition. Recorded observations are shared across
+checkpoints.
+Targets and scoring.
+We probe three past-event attributes:
+• Hidden-container location. VideoUnmask uses the first execution query, and ButtonUn-
+mask the first query at the transition from button pressing to container picking. Ridge
+regression predicts the hidden container’s image coordinate from cognition, using the
+recorded annotation as the target. A prediction is correct if its nearest container is the target.
+Candidate positions use a calibrated world-to-image affine map. Chance averages the inverse
+candidate count, and the constant reference predicts the mean target position.
+• Repetition ordinal. PickXtimes and SwingXtimes queries are labelled by repetition index
+(first, second, or third). SwingXtimes includes both legs of each swing. A ridge read-out
+predicts one-hot labels and is scored by argmax.
+• BinFill colour counts.
+At each pick-subgoal transition, the label is the tuple
+(nred, ngreen, nblue) of cubes already binned, identified from simulator actor identities,
+colours, and disappearance after earlier visibility, including cubes introduced during exe-
+cution. Each tuple is a class, and accuracy requires an exact tuple match. There are 269
+queries from 100 episodes. Chance is uniform over tuples allowed by the task’s colour
+targets, excluding the completed state.
+Labels are used only for probe fitting and scoring. Counting tasks additionally use a majority-class
+reference.
+Read-out and references.
+Ridge probes use three-fold cross-validation by episode, with penalties
+selected on an inner training split. Inputs are cognition hidden states, excluding future slots. The
+K=4 no-future-loss control averages its four cognition slots. The same procedure probes current-
+frame SigLIP features (4×4 pooled) and each checkpoint’s cognition given only task instructions
+and current observations, with no demonstrations or execution history. Group scores average tasks
+equally.
+Uncertainty.
+Table 7 reports paired percentile 95% intervals from 2,000 episode-bootstrap re-
+samples within each task. Resampling retains all queries of an episode and uses identical draws
+across checkpoints, with fixed out-of-fold predictions. Intervals cover episode sampling, not training
+seeds or probe fitting, and are not adjusted for multiple comparisons. Container accuracy declines
+are resolved for two future-supervised variants relative to K=1, while counting differences remain
+unresolved. Intervals containing zero do not establish equivalence.
+Table 7: Paired episode-bootstrap differences in past-event read-out. Percentage points with 95% intervals.
+Positive favours the future-supervised variant.
+vs. PONDERPOUNCE (K=1)
+vs. PONDERPOUNCE (K=4)
+future-supervised variant
+hidden container
+counting
+hidden container
+counting
+fut-first / cog+fut
+−2.0 [−4.5, 0.5]
++1.2 [−0.7, 3.0]
+−1.0 [−4.0, 2.0]
++1.5 [−0.4, 3.3]
+fut-first / cog
+−3.0 [−6.0, −0.5]
++0.8 [−1.0, 2.5]
+−2.0 [−5.0, 0.5]
++1.1 [−0.6, 2.8]
+cog-first / cog+fut
+−4.5 [−8.0, −1.5]
+−0.8 [−2.2, 0.6]
+−3.5 [−6.5, −0.5]
+−0.5 [−2.1, 1.1]
+cog-first / cog
+−1.5 [−4.0, 0.5]
++0.5 [−1.1, 2.2]
+−0.5 [−3.0, 2.0]
++0.9 [−0.9, 2.5]
+D
+Future-token removal at inference
+Following work that separates predictive training from test-time future generation [12, 14], we
+omit all three future tokens from PONDER without retraining. Both checkpoints were trained with
+cognition-only delivery, so POUNCE’s input remains one cognition slot. Success changes from
+67.42% to 66.17% for cog-first and from 64.17% to 8.75% for fut-first (Table 8). Cog-first retains
+most of its gain, but removal changes the accumulated context and token positions in both layouts,
+and additionally removes same-query future-token access in fut-first. The intervention therefore does
+not isolate these sources of dependence.
+7
+
+
+Table 8: Removing future slots at inference. RoboMME success (%) without retraining. The inference column
+lists tokens computed by PONDER. POUNCE always receives cognition only.
+Training order
+PONDER inference
+Counting
+Permanence
+Reference
+Imitation
+Average
+fut-first
+Cognition + future
+79.00
+61.00
+75.50
+41.17
+64.17
+fut-first
+Cognition only
+6.83
+7.67
+7.83
+12.67
+8.75
+cog-first
+Cognition + future
+84.83
+68.83
+72.00
+44.00
+67.42
+cog-first
+Cognition only
+80.00
+68.17
+72.50
+44.00
+66.17
+E
+Horizon-matched future-slot probes
+For each frozen checkpoint, a separate ridge probe predicts ∆t,hi from only future slot Fi, with
+(h1, h2, h3) = (0.5, 1, 2) s. Slots are not concatenated, and the probes are fitted independently of the
+trained prediction head. We use the cognition probes’ 192 episodes, query selection, targets, and
+cross-validation protocol (Appendix H).
+Table 9 gives explained variance of approximately 0.39, 0.52, and 0.59 across the three horizons,
+exceeding the corresponding cognition read-outs. Scores differ by at most 0.004 across configurations.
+Cross-horizon read-out degrades with distance from a slot’s trained horizon, consistent with horizon-
+specific predictive information.
+Table 9: Horizon-matched future-slot read-out. Held-out explained variance versus no change, using only the
+future slot for each target horizon.
+Method
+Slot order
+POUNCE reads
+F1 →0.5 s
+F2 →1 s
+F3 →2 s
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog + fut
+0.390
+0.521
+0.592
+PONDERPOUNCE-WM (K=4)
+fut-first
+cog
+0.390
+0.521
+0.592
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog + fut
+0.388
+0.517
+0.592
+PONDERPOUNCE-WM (K=4)
+cog-first
+cog
+0.389
+0.520
+0.590
+F
+Real-robot experiments
+Platform and tasks.
+We follow the prior PONDERPOUNCE setup [4], using the right arm of a
+Trossen ALOHA Stationary AI Kit with external and wrist RGB views and proprioception. The
+four RoboMME-inspired tasks [7] are PutFruits (transfer a specified number of fruits and press a
+stop button), TrackCube (select the cup hiding the specified-colour cube), RepickBlock (pick blocks
+in the demonstrated order), and DrawPattern (reproduce a demonstrated path). The latter three use
+pre-execution demonstration videos.
+Data and models.
+The 710 teleoperated episodes have human-annotated subgoals but no demon-
+stration reasoning. Training-episode/held-out-scene counts are 104/14, 195/16, 206/14, and 205/15
+for the four tasks above. Evaluation scenes and demonstration clips are held out from training. The
+first three rows of Table 4 are prior results [4]. We train PONDERPOUNCE-WM (cog-first / cog) with
+the simulation recipe in Appendix G, using future horizons of 1, 2, and 3 s, subgoal-only grounding,
+30-step action chunks, and a 16K training context.
+Evaluation and timing.
+PONDER and POUNCE target 1 Hz on separate H100 GPUs, with 30 Hz
+action playback and a 131K serving context cap. POUNCE uses the latest ready cognition and its
+age. A human judges success or failure under a two-minute limit. Each held-out scene contributes
+one trial, and the reported average weights the four task rates equally. Table 10 pools server-side
+timing samples across 59 trials per model. PONDER compute time includes transition-triggered text
+decoding. Cognition age runs from its source observation to the POUNCE invocation using it, and
+action observation age from the POUNCE observation to action delivery. Clock phase can affect
+cognition age, so these deployment measurements do not isolate future-token overhead.
+8
+
+
+Table 10: Real-robot asynchronous deployment timing. Milliseconds, with percentiles pooled over samples
+from 59 trials per model. PONDERPOUNCE measurements use the prior deployment’s recordings [4] and the
+same aggregation procedure. Cognition age excludes post-freeze samples.
+PONDERPOUNCE
+PONDERPOUNCE-WM (cog-first / cog)
+System
+Metric
+Median
+p95
+Median
+p95
+System 1 (POUNCE)
+Invocation interval
+1,000
+1,001
+1,000
+1,001
+Compute time
+181
+241
+204
+254
+Non-null cognition age
+1,797
+2,003
+1,022
+1,039
+System 2 (PONDER)
+Invocation interval
+1,000
+1,001
+1,000
+1,002
+Compute time
+187
+537
+223
+584
+Action delivery
+Observation age
+776
+1,223
+777
+1,224
+G
+Training configuration
+We follow the PONDERPOUNCE recipe [4] on RoboMME’s 1,587-episode base split with grounded
+subgoals and demonstration reasoning. Training uses 4,320 steps, global batch 32 on 32 H100 GPUs,
+learning rate 2×10−5 with 100 warm-up steps followed by a constant schedule, gradient clipping at
+1.0, and ZeRO-2. Both backbones use public pretrained weights, with newly initialized carrier tokens
+and projections. Training samples POUNCE invocations every 100 ms and PONDER queries every 1 s
+with a simulated 300 ms delay. All four future-supervised configurations share the data, objectives,
+schedule, and training seed. The K=4 control sets the future-loss weight to zero and delivers all four
+slots to POUNCE. Real-robot differences are listed in Appendix F.
+H
+Compute and evaluation details
+Simulation evaluation.
+The K=1 reference uses the prior three-repeat result of 60.83% (range
+59.62–62.25%) under the same serving protocol [4]. Both systems run at 1 Hz in simulated time with
+a 300 ms cognition delay. POUNCE uses 10 flow-matching steps and plays 20-step chunks at 20 Hz,
+starting after the first cognition is ready. Each checkpoint is evaluated three times on the same 50
+episodes per task, capped at 1,300 environment steps.
+Future-probe protocol and metrics.
+Probes use 192 held-out episodes and 2,752 queries, exclud-
+ing targets beyond episode end. Three-fold cross-validation splits by episode, with ridge penalties
+selected on an inner training split. Explained variance is 1 −MSE(b∆, ∆)/ MSE(0, ∆), averaged
+over held-out folds, with zero matching no-change prediction. The 1 s, no history condition removes
+earlier execution observations, subgoals, and carrier tokens but retains the task, demonstrations,
+current observations, and current-query grounding text. Near is two-way accuracy comparing the
+predicted 1 s delta with the true target and a same-episode distractor offset by one or two queries. The
+no-change predictor scores 0.51.
+9

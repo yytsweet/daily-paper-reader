@@ -1,0 +1,1493 @@
+BeyondEgo: Learning to Act Beyond Egocentric
+Perception via Humanoid Ego-Exo Foresight
+Zhaoshan Yang1,*
+Chenglei Li2,*
+Haoyu Lei2,*
+Yutao Zhang3
+Yuyu Yang2
+Zhuo Chen2
+Ling Ding2
+Zhongxing Ren2
+Yi Gu2
+Heyang Zhang2
+Peng Su2
+Jin Pan4
+1Tongji University
+2Yingwang Intelligent Technology
+3Université de Montréal
+4The Chinese University of Hong Kong
+Abstract
+Humanoid loco-manipulation requires coordinating whole-body motion to perform manipulation
+tasks in complex environments. Yet egocentric vision-language-action (VLA) policies can miss critical
+body–scene relationships, and action imitation alone provides no explicit supervision for future scene
+evolution. We propose BeyondEgo to extend VLA perception in space and time. Spatially, we encode a
+synchronized exocentric view with frozen DINOv3 and concatenate the resulting tokens with egocentric
+VLM tokens to condition the action expert. Temporally, we use future observations from both views
+as privileged supervision for a residual adapter on task-conditioned VLM features. A foresight expert
+regresses DINOv3 representations of both views 0.6 s ahead. At deployment, the foresight expert is
+discarded and the 4.2M-parameter adapter is retained. We also introduce HELM, to our knowledge, the
+first closed-loop humanoid loco-manipulation benchmark with synchronized egocentric and exocentric
+views across five whole-body tasks. On HELM, BeyondEgo improves success from 48.0% to 92.0% in
+distribution and from 23.5% to 65.0% on 200 held-out scenes with layout, asset, material, and lighting
+shifts. Ablations show that dual-view DINOv3 foresight yields the best transfer results.
+1
+Introduction
+Humanoid robots offer the potential to extend manipulation beyond fixed workspaces, enabling tasks that
+require coordinating object interaction with whole-body locomotion. For example, carrying a box through
+a narrow gap requires maintaining a stable grasp while aligning the torso and limbs with the opening and
+avoiding surrounding obstacles. Such behaviors depend on understanding the spatial relationship between
+the robot’s body and the environment, as well as anticipating how this relationship will evolve during motion.
+Recent humanoid vision-language-action (VLA) models make these behaviors increasingly learnable from
+demonstrations and language instructions, typically by combining a vision-language backbone (System-2), a
+fast action generator (System-1), and a learned whole-body controller (System-0) [1–3].
+Despite this progress, humanoid VLA policies typically rely on head-mounted egocentric cameras, which
+provide limited cues for whole-body spatial awareness and future-oriented decision-making. The limitation
+is both spatial and temporal. Spatially, the egocentric view moves with the robot and can be occluded
+by its arms or carried objects, making it difficult to infer critical body–scene relationships, such as the
+distance between the shoulders and nearby obstacles, the alignment of the body with a narrow opening, or the
+robot’s position relative to a junction. Temporally, policies are typically conditioned on current observations
+without explicit supervision for how these spatial relationships evolve as the robot moves. However, successful
+∗Equal contribution.
+1
+arXiv:2611.27047v1  [cs.RO]  20 Nov 2026
+
+
+Ego-Exo foresight
+DINOv3 targets
+Future ego
+Future exo
+Training only
+Spatiotemporal 
+representation
+Action expert
+Task success rate (%)
+0
+50
+100
+23.5%
+49.5%
+55.0%
+65.0%
+Ego-only
+VLM
+fusion
+Feature
+fusion
+BeyondEgo
+Ego view
+Beyond the ego view
+Exo view
+BeyondEgo
+Figure 1: Learning to act beyond egocentric perception in space and time. Egocentric and exocentric
+observations provide complementary spatial information, while DINOv3 features from both views 0.6 s ahead provide
+temporal supervision during training. BeyondEgo integrates these signals into a shared spatiotemporal representation
+for action generation. It achieves the highest task success rate among the evaluated methods.
+loco-manipulation requires anticipating the consequences of ongoing motion, rather than relying solely on
+what is visible in the current frame. These observations motivate extending the policy’s perception beyond
+the egocentric view in both space and time. No existing benchmark fits this setting: ego-exo datasets are
+human and offline, while robot multi-view benchmarks target tabletop manipulation.
+We propose BeyondEgo, which combines exocentric spatial context with dual-view foresight. For the
+spatial extension, we introduce a synchronized view from an additional exocentric camera. We encode this
+view with frozen DINOv3 [4] and concatenate the resulting tokens with egocentric VLM tokens as input to
+the action expert (Fig. 1). This provides additional visual context about the scene layout and the robot’s
+body relative to its surroundings. For the temporal extension, we use future observations from both views as
+privileged training supervision [5]. A residual adapter refines VLM latent features before they are passed
+to the action expert. A foresight expert reads the adapted features together with exocentric features and
+predicts frozen DINOv3 representations of both views 0.6 s ahead (Fig. 1). The foresight loss supervises the
+observation interface, while the action expert is trained with flow matching. At deployment, we discard the
+foresight expert and retain the 4.2M-parameter adapter.
+We therefore build HELM, a benchmark of five simulated humanoid loco-manipulation tasks, with 50
+paired in-distribution trials and 200 held-out scenes spanning layout, asset, material, lighting, and combined
+shifts. We evaluate our designs in closed-loop simulation over this benchmark. BeyondEgo achieves 92.0%
+in-distribution and 65.0% under distribution shift, improving over both the egocentric Ψ0 baseline (48.0%
+and 23.5%) and the no-foresight Feature fusion baseline (84.0% and 55.0%). Target-space ablations show that
+predicting DINOv3 features of both views provides the strongest transfer, whereas predicting VLM features
+does not improve over the no-foresight baseline.
+In summary, our contributions are:
+• A spatial extension to humanoid VLAs through exocentric observations, supported by a comparison of two
+fusion strategies. We show that action-expert-level fusion provides stronger generalization than VLM-level
+fusion under the tested distribution shifts.
+• A dual-view foresight objective that uses future observations as privileged supervision to embed future
+dynamics in VLM latent features. The foresight expert is removed at deployment, while the learned feature
+2
+
+
+adaptation supports action generation with the standard flow-matching objective.
+• HELM, to our knowledge, the first closed-loop humanoid loco-manipulation benchmark with synchronized
+ego-exo views, featuring five whole-body tasks that require cues beyond the egocentric view, controlled
+distribution shifts, and per-stage metrics. Our analyses show that the feature space used for fusion and
+foresight strongly affects closed-loop generalization.
+2
+Related Work
+Humanoid VLAs and multi-view perception.
+Vision-language-action (VLA) models map visual
+observations and language to robot actions [6–8], often using flow-matching action experts to generate
+continuous action chunks [8,9]. Hierarchical architectures combine vision-language backbones (System-2)
+with fast action generators (System-1) [1,3,10], while humanoid and legged systems further employ learned
+whole-body or locomotion controllers [2,3,11–13], supported by teleoperation-based data collection [14–17].
+Recent systems also leverage egocentric human videos and humanoid demonstrations for pre-training [3,18],
+together with real-time action chunking [19, 20]. Beyond egocentric perception, multi-view manipulation
+policies combine wrist-mounted and third-person cameras [8, 21, 22], with different viewpoints exhibiting
+distinct generalization trade-offs [23]. Synchronized views enable self-supervised learning [24, 25], while
+ego-exo datasets provide paired first- and third-person observations [26–28]. These capture human activity
+offline, unlike our robot setting. Geometric representations, such as point clouds, have also been injected
+directly into VLA action experts [29,30]. We study exocentric feature fusion in hierarchical humanoid VLAs,
+exploit future observations from both views as training supervision, and contribute HELM, a benchmark
+with synchronized ego-exo views and closed-loop evaluation under controlled shifts.
+Predictive learning and privileged foresight. World models predict future observations under actions [31,
+32], increasingly in latent spaces learned by self-supervised encoders [33,34]; self-predictive learning similarly
+trains encoders to predict future representations [35]. In robot learning, foresight is commonly coupled with
+action generation, either by conditioning policies on predicted frames, subgoals, or world representations [36–
+40], or by jointly predicting future observations and actions [41–44]. Closest to our setting, ω-0 [45] predicts
+future visual latents for humanoid loco-manipulation and accepts either an egocentric or an exocentric view. It
+uses a single view per task, and its action branch still attends to the future-prediction queries at inference; we
+fuse both views at every step and remove the foresight expert entirely at deployment. FLARE [46] aligns policy
+features with future observation embeddings, while other auxiliary objectives align or reconstruct current
+inputs using frozen visual features [47,48] or image regions [49]. Learning using privileged information [5]
+provides another perspective: prior robot learning methods distill privileged simulator states into sensor-based
+policies [50–52] or use them in asymmetric critics [53]. In contrast, BeyondEgo treats frozen DINOv3
+features of future dual-view frames as privileged regression targets, without requiring simulator states or
+a state-based teacher policy. Specifically, it supervises the observation interface consumed by the action
+expert and leaves the action expert’s flow-matching objective intact, rather than supervising the policy’s
+internal representations [46] or sharing a generator between prediction and action [41,43], while discarding
+the foresight expert at deployment. Our ablations further show that the choice of foresight target space
+strongly affects closed-loop transfer.
+Visual representations and closed-loop evaluation. Pre-trained visual representations are widely used
+in robot learning [54,55], with self-supervised vision transformers [4,56] providing dense features that capture
+3D properties such as depth and surface orientation [57]. Prior VLMs and VLAs fuse such visual features
+with language-aligned representations inside the backbone [7,58]; we instead inject DINOv3 features directly
+into the action expert and use the same feature space for future supervision. For evaluation, robot policy
+generalization is increasingly assessed in closed-loop settings under controlled environmental shifts [59], with
+simulation providing useful proxies for real-world performance [60].
+3
+
+
+Training only
+Ego
+Exo
+Task prompt l
+Adapter Wα
+Projection Pψ
++
+State st
+Observation Zt
+Shared
+context
+Action expert vθ
+System 1
+ϵ
+Action chunk
+Hands
+Arms
+Body
+Foresight expert F
+Predicted
+Target
+Δ = 0.6 s
+Ego
+t+Δ
+t+Δ
+DINOv3
+frozen
+ego
+exo
+ego
+exo
+ℒfuture
+Token cosine
+Removed at deployment
+Exo
+zero-init
+AMO
+System 0
+ω 
+DINOv3
+System 2
+VLM
+System 2
+Figure 2: BeyondEgo architecture. Frozen VLM and DINOv3 encoders process the ego image with the instruction
+and the exo image, respectively. Adapted ego tokens, projected exo tokens, and robot state condition the action
+expert. Hand and arm targets are executed directly, while AMO translates body commands into waist and leg joint
+targets. During training, the foresight expert predicts dual-view features 0.6 s ahead, supervised by frozen DINOv3
+targets through token-wise cosine loss. The foresight branch is removed at deployment.
+3
+Method: BeyondEgo
+We introduce BeyondEgo, a VLA model for humanoid loco-manipulation. Given a natural language task
+instruction ℓ, and synchronized egocentric and exocentric observations together with the robot’s proprioceptive
+state ot = (Iego
+t
+, Iexo
+t
+, st) at time t, our model predicts the whole-body action chunk at:t+H of horizon H.
+The action a ∈R36 inherits the definition from Ψ0 [3] as {qhand, qarm, torsorpy, hb, vx, vy, vyaw, pyaw}, where
+qhand, qarm ∈R14, torsorpy ∈R3 is the torso roll, pitch and yaw. The remaining five dimensions specify base
+height, horizontal linear velocities, angular velocity and the target yaw rotation. An RL-based tracking policy
+executes those commands on the lower-body and torso joints.
+We build on a triple-system humanoid VLA model [3,45] (Sec. 3.1) and extend its perception beyond a
+single egocentric observation, spatially through an exocentric camera (Sec. 3.2) and temporally with dual-view
+foresight (Sec. 3.3). Figure 2 shows the complete model.
+3.1
+Model Architecture
+Our model organizes humanoid control into three systems [3, 45]. System-2 processes observation ot
+and provides semantic and geometric understanding through its hidden features. We use Qwen3-VL-2B-
+Instruct [61] to encode the egocentric image Iego
+t
+and language task instruction ℓ, and DINOv3 [4] to encode
+the exocentric image Iexo
+t
+, providing additional spatial context. System-1 consists of a foresight expert Fω
+and an action expert. The foresight expert, used only during training, enriches System-2’s hidden features
+with information about future dynamics through a residual block trained with future-frame supervision.
+The action expert, implemented as a multimodal diffusion transformer (MM-DiT), is trained with flow
+matching to predict future whole-body action chunks at:t+H conditioned on these spatiotemporally augmented
+features and the proprioceptive states st. System-0 is an RL-based control policy that converts the predicted
+actions into robot control commands. Following Ψ0, we use AMO [16] to map the lower-body commands
+{torsorpy, hb, vx, vy, vyaw, pyaw} to leg and waist joint targets.
+4
+
+
+3.2
+Spatial Extension
+To help the model complete challenging tasks that require more spatial context, we introduce a synchronized
+exocentric observation Iexo
+t
+captured by an additional camera. This view provides geometric evidence about
+the scene layout and the spatial relation between the robot’s body and its surroundings, offering additional
+cues for action prediction. Alongside the VLM, which encodes the egocentric observation Iego
+t
+and language
+task instruction ℓ, we use a frozen DINOv3 [4] encoder to extract spatial context features:
+Zego
+t
+= EVLM(Iego
+t
+, ℓ),
+(1)
+Zexo
+t
+= Pψ(EDINOv3(Iexo
+t
+)),
+(2)
+where Pψ is a trainable projection that maps the DINOv3 features to the same embedding dimension as Zego
+t
+.
+An alternative is to feed both images directly into the VLM to produce a unified representation:
+Zuni
+t
+= EVLM(Iego
+t
+, Iexo
+t
+, ℓ).
+(3)
+This approach emphasizes joint semantic understanding of the two views, but shows suboptimal performance
+in our experiments. We compare and discuss the two designs in Sec. 4.3.
+3.3
+Temporal Extension
+Standard VLMs are good at visual understanding, but often have limited awareness of how observations
+evolve over time. To address this limitation, we use future-frame supervision during training to embed
+information about future dynamics in System-2’s encoded features. We supervise predictions in feature space
+rather than pixel space to focus on high-level dynamics. Specifically, we encode the future egocentric and
+exocentric frames Iego
+t+∆t and Iexo
+t+∆t using the same frozen DINOv3 encoder and use the resulting features
+ˆZego
+t+∆t, ˆZexo
+t+∆t as prediction targets. We also evaluate predicting future features in Qwen3-VL image feature
+space and report the comparison in Sec. 4.3.
+Residual dynamics adapter. We use a learnable residual adapter [62,63] to incorporate future dynamics
+into the encoded features. Since only the VLM receives the task instruction and reasons about the intended
+action, we apply the adapter to its features Zego
+t
+:
+eZego
+t
+= Zego
+t
++ Wα(Zego
+t
+),
+(4)
+where Wα is the learned residual branch, zero-initialized to preserve the original features. We then concatenate
+the adapted features with the unmodified exocentric features Zexo
+t
+and feed them to the foresight expert Fω
+along with the proprioceptive states st. We jointly train the adapter and Fω to predict future features from
+both views using a cosine-similarity loss:
+Lfut = E
+
+1 −cos
+
+[ bZego
+t+∆t; bZexo
+t+∆t], Fω([ eZego
+t
+; Zexo
+t
+], st)
+
+.
+(5)
+At inference, only the learned adapter is kept, and the foresight expert is dropped.
+The action expert in System-1 reads the adapted features during both training and inference. The
+flow-matching training objective is
+Lact = E
+hvθ([ eZego
+t
+; Zexo
+t
+], st, aσ
+t , σ) −(ϵ −at)
+2
+2
+i
+,
+(6)
+where ϵ is Gaussian noise, σ ∈[0, 1] is the flow time, and aσ
+t = (1 −σ)at + σϵ is the noised action; at test
+time we integrate vθ from σ = 1 to 0 to produce the action chunk.
+5
+
+
+3.4
+Implementation and Training Details
+Implementation.
+We use Qwen3-VL-2B-Instruct [61] as the VLM backbone in System-2, with feature
+width d = 2048. DINOv3 ViT-L/16 [4] extracts features from observation images at 224 × 384 pixels. We
+retain its class token and apply 2 × 2 average pooling to the patch-token grid, yielding 85 tokens of dimension
+1024. The adapter Wα is a single linear projection layer with 4.2M parameters. The foresight expert is a
+Transformer with hidden dimension 512 and approximately 19.2M parameters. We set the future prediction
+horizon ∆t to 0.6 s. The System-1 action expert is a 500M-parameter multimodal diffusion transformer with
+hidden dimension 1536, trained with flow matching. It predicts chunks of H = 30 commands for execution at
+50 Hz, covering the same 0.6 s horizon. We connect modules of different feature widths using learnable MLP
+projectors.
+Exocentric dropout. To reduce over-reliance on the external view and strengthen the use of egocentric
+cues, we apply exocentric observation dropout during training. With probability 0.1, we mask exocentric
+tokens in all attention blocks and exclude the corresponding exocentric targets from the future prediction
+loss. This requires the policy to also learn action prediction without access to the external view.
+Real-time action chunking. We adopt the training-time real-time chunking (RTC) procedure in [20],
+where they condition each prediction on the previously committed action chunk to maintain consistency
+across successive chunks. At test time, we use 10 sampling steps and execute the first 15 commands of each
+chunk before replanning, using RTC [19] with an inference delay of seven control steps.
+Training details.
+We follow the training recipe of Ψ0 [3] and initialize the VLM and action expert
+from its released pre-trained and post-trained checkpoints, respectively. The VLM is pre-trained through
+autoregressive prediction of FAST-tokenized single-step actions, first on EgoDex and then on Humanoid
+Everyday. The action expert is subsequently post-trained on Humanoid Everyday using flow matching in joint
+space, with the VLM frozen. For our target tasks, we keep the VLM and DINOv3 frozen and jointly optimize
+the action expert, residual adapter, foresight expert, and learnable projectors using the action prediction and
+future-feature supervision losses
+Ltrain = Lact + λLfut,
+(7)
+where we set λ = 1.0. We train for 40k steps per task with a global batch size of 128 on eight B200 GPUs. We
+use AdamW with β1 = 0.95, β2 = 0.999, and weight decay 10−6. The learning rate reaches 10−4 after 1,000
+warm-up steps and then follows a cosine decay schedule. Training uses BF16 mixed precision and gradient
+clipping with a maximum norm of 1.0. We normalize states and actions using their respective minimum
+and maximum values and sample flow timesteps uniformly from [0, 1]. We also apply the training-time RTC
+procedure described above.
+4
+Experiments
+We evaluate BeyondEgo and the underlying spatial and temporal extensions on five humanoid loco-
+manipulation tasks, focusing on three questions: How much does the complete method improve task success
+and generalization? Which spatial fusion strategy and training-time foresight components contribute to
+these gains? How do the target feature space, supervised views, and exocentric camera placement affect task
+execution?
+4.1
+Experimental Setup
+Tasks and data. We introduce HELM (Humanoid Ego-Exo Loco-Manipulation), a closed-loop benchmark
+for perception beyond the egocentric view. It comprises five tasks in Isaac Sim on a 29-DoF Unitree G1 with
+Dex3 hands (Fig. 3), each built so the decisive cue lies outside or ahead of the head-mounted view. All tasks
+require picking up a cookie box, moving to the target table, and placing the box into a designated container.
+T1 (Back Out and Turn) requires walking backward along a corridor and turning toward the target table
+at its end; the challenge is to adapt the turning location to the corridor length and select the correct left or
+6
+
+
+T1
+Back Out and Turn
+back out; choose a turn
+T2
+Turn and Search
+find the tray behind
+T3
+Choose the Right
+Passage
+choose a path around
+furniture
+T4
+Sidestep and Turn
+sidestep before turning
+T5
+Sideways Passage
+align and pass sideways
+Figure 3: Five humanoid loco-manipulation tasks. All tasks require picking up, carrying, and placing an object,
+but pose different locomotion challenges. Each column shows the robot carrying the box during the demonstration of
+the corresponding task. The top row shows exocentric images captured by an additional external camera, while the
+bottom row shows simultaneous egocentric images from a head-mounted camera. The two views provide complementary
+observations of the carried object, the surrounding environment, and the robot’s position relative to obstacles.
+right branch. Backing up turns the head camera away from the branch. T2 (Turn and Search) places the
+target tray on one of three tables behind the robot, requiring it to turn, locate the tray outside its initial
+field of view, and approach the correct table. The tray starts behind the robot, out of view. T3 (Choose
+the Right Passage) places furniture between the robot and the target table after the robot turns. The
+furniture occludes the target from the egocentric view, and only one of the two passages around it leads to
+the table holding the target container. The head camera cannot see which passage is correct. T4 (Sidestep
+and Turn) requires a lateral step before turning toward the target table, because turning immediately can
+cause the robot to trip over low obstacles near its feet. These obstacles sit below the head camera. T5
+(Sideways Passage) requires moving laterally to a narrow passage, aligning with its entrance, and adjusting
+body orientation to pass through sideways. Body–entrance alignment is hard to see from the head camera.
+We develop an automated data pipeline: CuRobo generates arm, navigation, and whole-body control
+commands, trajectories are rolled out in MuJoCo and recorded at 50 Hz, and validated trajectories are
+replayed in Isaac Sim to render synchronized egocentric and exocentric images at 640 × 360. In total, 500
+valid demonstrations are collected across five tasks.
+Evaluation protocols and metrics. We evaluate in SIMPLE [64] (Isaac Sim rendering, MuJoCo physics,
+AMO motion control). All five tasks have a 35 s episode limit. A trial succeeds if the robot follows the
+prescribed route and leaves the box stably inside the target container. For in-distribution evaluation, we
+sample scenes from the training distribution using a fixed random seed and conduct 10 trials per task, yielding
+50 trials in total. For generalization, we freeze 40 scenes per task across five shift families (layout, asset,
+material, lighting, and combined), eight scenes each, 200 in total. All scenes are frozen and hash-pinned, so
+every method sees identical conditions. We report per-task and mean success rates, and for T1 the grasp,
+correct-branch, and placement counts for stage-wise analysis.
+Baselines and compared variants. For all policies, the vision-language model (VLM) and action expert
+are initialized from the pre-trained weights of Ψ0. We compare four configurations: the Ψ0 baseline uses
+only the egocentric view; VLM fusion feeds both views jointly into the VLM; Feature fusion concatenates
+exocentric features extracted by a frozen DINOv3 encoder with egocentric observation tokens and feeds them
+directly into the action expert; and BeyondEgo extends Feature fusion with a zero-initialized egocentric
+adapter and training-only dual-view foresight supervision. VLM fusion further pre-trains the backbone
+for approximately 145,000 steps on the existing 500 dual-view demonstrations, then freezes the backbone
+and fine-tunes the action expert. This reuses the demonstration data but requires additional pre-training
+computation; Feature fusion does not require this backbone adaptation stage. BeyondEgo sets the foresight
+7
+
+
+T1
+Back Out and Turn
+T2
+Turn and Search
+T3
+Choose the Right Passage
+T4
+Sidestep and Turn
+T5
+Sideways Passage
+Mean
+0
+25
+50
+75
+100
+Success rate (%)
+(a) In-distribution: 10 trials per task
+Mean gain vs. ª0: +44 pp
+40
+40
+50
+70
+40
+48
+80
+90
+70
+70
+60
+74
+90
+100
+80
+90
+60
+84
+100
+100
+90
+90
+80
+92
+T1
+Back Out and Turn
+T2
+Turn and Search
+T3
+Choose the Right Passage
+T4
+Sidestep and Turn
+T5
+Sideways Passage
+Mean
+0
+25
+50
+75
+100
+Success rate (%)
+(b) Generalization: 40 shifted scenes per task
+Mean gain vs. ª0: +41.5 pp
+37.5
+10.0
+17.5
+32.5
+20.0
+23.5
+62.5
+50.0
+42.5
+75.0
+17.5
+49.5
+67.5
+52.5
+47.5
+87.5
+20.0
+55.0
+77.5
+62.5
+60.0
+85.0
+40.0
+65.0
+ª0 (ego only)
+VLM fusion (exo → VLM)
+Feature fusion (exo → action expert)
+BeyondEgo (ours)
+Figure 4: Task success across five humanoid loco-manipulation tasks. (a) In-distribution evaluation with 10
+trials per task. (b) Generalization evaluation on 40 held-out scenes per task, covering five types of scene variation
+with eight scenes per type. VLM fusion and Feature fusion introduce the exocentric view through the VLM and the
+action expert, respectively; BeyondEgo adds training-only dual-view foresight to Feature fusion.
+Table 1: Training-seed consistency on T1. Three independently trained BeyondEgo models (training seeds
+1234, 5678, and 292285), each evaluated five times on the same 40 shifted generalization scenes (ID: 10 trials); all 15
+evaluations fall within 75.0–82.5%. ± denotes the SD across the five evaluations of each seed, and across seed means
+in the last row.
+Seed
+ID (%)
+Generalization (%)
+Mean (%)
+1
+2
+3
+4
+5
+Seed 1
+100.0
+75.0 80.0 80.0 77.5
+80.0
+78.5 ± 2.2
+Seed 2
+100.0
+75.0 77.5 80.0 75.0
+77.5
+77.0 ± 2.1
+Seed 3
+100.0
+75.0 82.5 80.0 80.0
+77.5
+79.0 ± 2.9
+All seeds
+100.0
+all 15 evals within 75.0–82.5 78.2 ± 1.0
+loss weight to 1 and uses dual-view visual features ∆t = 0.6 s into the future as supervision targets. The
+foresight expert is removed after training, while the trained adapter is retained for deployment.
+4.2
+Overall Performance and Generalization
+Overall task performance. BeyondEgo achieves the highest mean success rate among the four configurations
+in both evaluation suites (Fig. 4). In distribution, it reaches 92.0%, improving over the egocentric-only Ψ0
+baseline (48.0%) by 44.0 percentage points. With the exocentric view, VLM fusion and Feature fusion reach
+74.0% and 84.0%, respectively. BeyondEgo further improves upon the stronger Feature fusion baseline by 8.0
+percentage points, demonstrating the performance benefits of combining spatial and temporal extensions.
+Generalization to scene variations. Across 200 generalization scenes, BeyondEgo achieves the highest
+success rate of 65.0%, exceeding the 23.5%, 49.5%, and 55.0% achieved by Ψ0, VLM fusion, and Feature
+fusion, respectively. It succeeds approximately 2.8 times as often as Ψ0 and improves upon Feature fusion
+by 10.0 percentage points, demonstrating the generalization benefits of the complete method under scene
+variations. These gains extend across multiple tasks: BeyondEgo outperforms Feature fusion on four of the
+five tasks, with the largest improvement on T5 and further gains on T1, T2, and T3. On T4, however, Feature
+fusion achieves a slightly higher success rate (87.5% versus 85.0%).
+8
+
+
+Grasp
+Correct branch
+Final placement
+0
+20
+40
+60
+80
+100
+Reached scenes (%)
+Generalization · 40 shifted scenes
+In-dist.
+(final)
+(a) Which future views matter?
+40/40
+39/40
+36/40
+35/40
+31/40
+27/40
+24/40
+10/10
+9/10
+10/10
+0
+20
+40
+60
+80
+100
+Final success rate (%)
+Qwen3-VL (ego only)
+Qwen3-VL (exo only)
+Qwen3-VL (ego + exo)
+DINOv3 (ego only)
+DINOv3 (exo only)
+BeyondEgo (ego + exo)
+Generalization · 40 shifted scenes
+In-dist.
+(/10)
+(b) Which feature space transfers better?
+42.5% (17/40)
+55.0% (22/40)
+62.5% (25/40)
+60.0% (24/40)
+67.5% (27/40)
+77.5% (31/40)
+8/10
+9/10
+9/10
+10/10
+9/10
+10/10
+DINOv3 (ego only)
+DINOv3 (exo only)
+BeyondEgo (ego + exo)
+(c) Exocentric camera placement on T1
+Egocentric (shared)
+identical for all
++
+Left
+60.0%
+Central (BeyondEgo)
+77.5%
+Right
+72.5%
+Generalization success rate (counts /40)
+Figure 5: T1 ablations: prediction targets, execution behavior, and exocentric camera placement. (a)
+Cumulative completion of grasping, correct branch selection, and placement across 40 generalization scenes under
+egocentric-only, exocentric-only, and dual-view DINOv3 supervision. (b) Generalization success rates for different
+combinations of feature targets and supervised views. (c) All three configurations share the egocentric view (left) and
+add one exocentric camera (+) at different placements; the central one (orange) is BeyondEgo’s deployed view, and
+values below give generalization success over the 40 shifted scenes.
+Random seeds. We independently train BeyondEgo on T1 with three random seeds and evaluate each
+model five times on the same 40 generalization scenes (15 evaluations, 600 shifted episodes in total; Tab. 1).
+All three models achieve 100% (10/10) in-distribution success. Under shift, all 15 evaluations fall within
+75.0%–82.5% (30/40–33/40), averaging 78.2% ± 1.0% across seeds. These results indicate consistent T1
+performance across the tested training seeds.
+4.3
+Ablation Studies
+Spatial fusion. Feature fusion improves success rates over VLM fusion by 10.0 and 5.5 percentage points
+in the in-distribution and generalization evaluations, respectively (Fig. 4). It achieves higher success rates
+on all five tasks under generalization and matches or exceeds VLM fusion in distribution. We hypothesize
+that the additional pre-training in VLM fusion may alter the original VLM feature distribution, whereas
+Feature fusion supplements exocentric information through a separate DINOv3 branch, helping maintain
+compatibility between the original visual features and the pre-trained action expert. Given its higher success
+rates and absence of additional backbone pre-training, we adopt Feature fusion for the temporal extension.
+Foresight supervision. By adding dual-view foresight to Feature fusion, BeyondEgo improves mean success
+rates by 8.0 and 10.0 percentage points in the in-distribution and generalization evaluations, respectively.
+Future supervision may help the policy anticipate changes in the scene and the robot’s position, leading
+to better action decisions. Both policies receive the same current observations at deployment; BeyondEgo
+9
+
+
+removes the foresight expert and retains the trained adapter as its only additional component.
+Supervised views. For the T1 task, dual-view foresight with DINOv3 targets achieves a higher success
+rate than either single-view variant or the Feature fusion baseline without foresight (Figs. 4 and 5a). This
+advantage may result from complementary future information: the egocentric view captures local scene
+changes, while the exocentric view captures changes in the robot’s position within the environment. Predicting
+both types of future change may help the policy coordinate local manipulation with whole-body motion and
+improve task completion.
+Target feature space. We compare future feature targets from two frozen teacher models, DINOv3 and
+Qwen3-VL, on T1. For each target space, we use egocentric-only, exocentric-only, and dual-view supervision,
+yielding six variants. All variants receive current dual-view observations at deployment and differ only in the
+future supervision used during training. In the generalization evaluation, DINOv3 targets yield higher task
+success rates than Qwen3-VL targets under all three supervision settings (Fig. 5b). We argue that DINOv3
+features may better preserve spatial relationships between the robot and its environment, providing more
+useful future supervision for turning and route selection. These results support using DINOv3 features as
+prediction targets for our method.
+Exocentric camera placement. We compare left, right, and central exocentric camera placements on
+T1, training and evaluating a separate model with each placement (Fig. 5c). Neither side camera covers
+the full task scene, and the left view is more heavily occluded; the central placement covers the entire task
+area. All three configurations achieve 100% (10/10) in-distribution success, while generalization performance
+varies: the central camera achieves the highest success rate of 77.5% (31/40), followed by the right camera at
+72.5% (29/40) and the left camera at 60.0% (24/40). Broader scene coverage may provide more complete
+spatial context for route selection and whole-body motion. These results support selecting exocentric camera
+positions that cover the full task scene with minimal occlusion.
+5
+Conclusion
+We introduce BeyondEgo, which extends the perception of hierarchical humanoid VLAs in both space
+and time. We compare ways of integrating the exocentric view and use dual-view future supervision to
+improve the observations fed to the action expert. To evaluate perception beyond the egocentric view, we
+also introduce HELM, a closed-loop humanoid loco-manipulation benchmark with synchronized ego-exo
+views and controlled scene shifts. Experiments show that directly integrating exocentric information into
+the action expert yields better performance, while the temporal extension with an adapter and foresight
+supervision further improves overall task success and generalization to scene variations. BeyondEgo uses
+future information as training supervision; at deployment, the foresight expert is removed, and only the
+lightweight adapter is retained. More broadly, our results suggest that privileged signals available only during
+training, such as future observations from both views, can yield deployable gains through representation-level
+supervision. We hope this combination of exocentric perception and dual-view future supervision can inform
+loco-manipulation across robots and sensors.
+Limitations. BeyondEgo requires external camera coverage and synchronized dual-view images; large-scale
+movement may limit exocentric observations, and dual-view demonstrations increase data-collection cost.
+Future work could explore multi-camera coordination, more flexible placement, and foresight horizons beyond
+one action chunk.
+LLM Usage Statement
+The authors wrote the manuscript. After drafting, we used LLM-based assistants in the Cursor editor
+(Anthropic Claude and OpenAI Codex) to polish wording and grammar, to check and format bibliography
+entries, and to help write LaTeX and plotting code for figures and tables. The research ideas, method design,
+experiments, and results are entirely the authors’ own. The authors reviewed every suggested change and
+take full responsibility for the content of this paper.
+10
+
+
+References
+[1] NVIDIA, Johan Bjorck, Fernando Castañeda, Nikita Cherniadev, Xingye Da, Runyu Ding, Linxi Fan,
+Yu Fang, et al. GR00T N1: An open foundation model for generalist humanoid robots. arXiv preprint
+arXiv:2503.14734, 2025. 1, 3
+[2] Haoran Jiang, Jin Chen, Qingwen Bu, Li Chen, Modi Shi, Yanjie Zhang, Delong Li, Chuanzhe Suo,
+Chuang Wang, Zhihui Peng, and Hongyang Li. WholeBodyVLA: Towards unified latent VLA for
+whole-body loco-manipulation control. In International Conference on Learning Representations (ICLR),
+2026. 1, 3
+[3] Songlin Wei, Hongyi Jing, Boqian Li, Zhenyu Zhao, Jiageng Mao, Zhenhao Ni, Sicheng He, Sheng Zang,
+Xiawei Liu, Kaidi Kang, Jie Liu, Weiduo Yuan, Marco Pavone, Di Huang, and Yue Wang. Ψ0: An open
+foundation model towards universal humanoid loco-manipulation. In Robotics: Science and Systems
+(RSS), 2026. 1, 3, 4, 6, 16
+[4] Oriane Siméoni, Huy V. Vo, Maximilian Seitzer, Federico Baldassarre, Maxime Oquab, Cijo Jose, Vasil
+Khalidov, Marc Szafraniec, et al. DINOv3. Transactions on Machine Learning Research (TMLR), 2026.
+2, 3, 4, 5, 6, 16
+[5] Vladimir Vapnik and Akshay Vashist. A new learning paradigm: Learning using privileged information.
+Neural Networks, 22(5–6):544–557, 2009. 2, 3
+[6] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Xi Chen, Krzysztof Choromanski,
+Tianli Ding, Danny Driess, et al. RT-2: Vision-language-action models transfer web knowledge to robotic
+control. In Conference on Robot Learning (CoRL), 2023. 3
+[7] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael
+Rafailov, Ethan P. Foster, Pannag R. Sanketi, Quan Vuong, Thomas Kollar, Benjamin Burchfiel, Russ
+Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-source
+vision-language-action model. In Conference on Robot Learning (CoRL), 2024. 3
+[8] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo
+Fusai, Lachy Groom, et al. π0: A vision-language-action flow model for general robot control. In Robotics:
+Science and Systems (RSS), 2025. 3
+[9] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matthew Le. Flow matching
+for generative modeling. In International Conference on Learning Representations (ICLR), 2023. 3
+[10] Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, et al.
+π0.5: a vision-language-action model with open-world
+generalization. In Conference on Robot Learning (CoRL), 2025. 3
+[11] Pengxiang Ding, Jianfei Ma, Xinyang Tong, Binghong Zou, Xinxin Luo, Yiguo Fan, Ting Wang, Hongchao
+Lu, Panzhong Mo, Jinxin Liu, Yuefan Wang, Huaicheng Zhou, Wenshuo Feng, Jiacheng Liu, Siteng
+Huang, and Donglin Wang. Humanoid-VLA: Towards universal humanoid control with visual integration.
+arXiv preprint arXiv:2502.14795, 2025. 3
+[12] Haoru Xue, Xiaoyu Huang, Dantong Niu, Qiayuan Liao, Thomas Kragerud, Jan Tommy Gravdahl,
+Xue Bin Peng, Guanya Shi, Trevor Darrell, Koushil Sreenath, and Shankar Sastry. LeVERB: Humanoid
+whole-body control with latent vision-language instruction. arXiv preprint arXiv:2506.13751, 2025. 3
+[13] An-Chieh Cheng, Yandong Ji, Zhaojing Yang, Zaitian Gongye, Xueyan Zou, Jan Kautz, Erdem Bıyık,
+Hongxu Yin, et al. NaVILA: Legged robot vision-language-action model for navigation. arXiv preprint
+arXiv:2412.04453, 2024. 3
+11
+
+
+[14] Tairan He, Zhengyi Luo, Xialin He, Wenli Xiao, Chong Zhang, Weinan Zhang, Kris M. Kitani, Changliu
+Liu, and Guanya Shi. OmniH2O: Universal and dexterous human-to-humanoid whole-body teleoperation
+and learning. In Conference on Robot Learning (CoRL), 2024. 3
+[15] Zipeng Fu, Qingqing Zhao, Qi Wu, Gordon Wetzstein, and Chelsea Finn. HumanPlus: Humanoid
+shadowing and imitation from humans. In Conference on Robot Learning (CoRL), 2024. 3
+[16] Jialong Li, Xuxin Cheng, Tianshu Huang, Shiqi Yang, Ri-Zhao Qiu, and Xiaolong Wang. AMO: Adaptive
+motion optimization for hyper-dexterous humanoid whole-body control. In Robotics: Science and Systems
+(RSS), 2025. 3, 4, 16
+[17] Qingwei Ben, Feiyu Jia, Jia Zeng, Junting Dong, Dahua Lin, and Jiangmiao Pang. HOMIE: Humanoid
+loco-manipulation with isomorphic exoskeleton cockpit. arXiv preprint arXiv:2502.13013, 2025. 3
+[18] Ruihan Yang, Qinxi Yu, Yecheng Wu, Rui Yan, Borui Li, An-Chieh Cheng, Xueyan Zou, Yunhao Fang,
+et al. EgoVLA: Learning vision-language-action models from egocentric human videos. arXiv preprint
+arXiv:2507.12440, 2025. 3
+[19] Kevin Black, Manuel Y. Galliker, and Sergey Levine. Real-time execution of action chunking flow policies.
+In Advances in Neural Information Processing Systems (NeurIPS), 2025. 3, 6, 17
+[20] Kevin Black, Allen Z. Ren, Michael Equi, and Sergey Levine. Training-time action conditioning for
+efficient real-time chunking. arXiv preprint arXiv:2512.05964, 2025. 3, 6, 17
+[21] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn.
+Learning fine-grained bimanual
+manipulation with low-cost hardware. In Robotics: Science and Systems (RSS), 2023. 3
+[22] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin C. M. Burchfiel, and Shuran
+Song. Diffusion policy: Visuomotor policy learning via action diffusion. In Robotics: Science and Systems
+(RSS), 2023. 3
+[23] Kyle Hsu, Moo Jin Kim, Rafael Rafailov, Jiajun Wu, and Chelsea Finn. Vision-based manipulators need
+to also see from their hands. In International Conference on Learning Representations (ICLR), 2022. 3
+[24] Pierre Sermanet, Corey Lynch, Yevgen Chebotar, Jasmine Hsu, Eric Jang, Stefan Schaal, and Sergey
+Levine. Time-contrastive networks: Self-supervised learning from video. In IEEE International Conference
+on Robotics and Automation (ICRA), 2018. 3
+[25] Younggyo Seo, Junsu Kim, Stephen James, Kimin Lee, Jinwoo Shin, and Pieter Abbeel. Multi-view
+masked world models for visual robotic manipulation. In International Conference on Machine Learning
+(ICML), 2023. 3
+[26] Gunnar A. Sigurdsson, Abhinav Gupta, Cordelia Schmid, Ali Farhadi, and Karteek Alahari. Actor and
+observer: Joint modeling of first and third-person videos. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2018. 3
+[27] Kristen Grauman, Andrew Westbury, Lorenzo Torresani, Kris Kitani, Jitendra Malik, Triantafyllos
+Afouras, Kumar Ashutosh, Vijay Baiyya, et al. Ego-Exo4D: Understanding skilled human activity from
+first- and third-person perspectives. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2024. 3
+[28] Yifei Huang, Guo Chen, Jilan Xu, Mingfang Zhang, Lijin Yang, Baoqi Pei, Hongjie Zhang, Lu Dong, et al.
+EgoExoLearn: A dataset for bridging asynchronous ego- and exo-centric view of procedural activities in
+real world. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2024. 3
+12
+
+
+[29] Chengmeng Li, Junjie Wen, Yan Peng, Yaxin Peng, Feifei Feng, and Yichen Zhu. PointVLA: Injecting
+the 3D world into vision-language-action models. arXiv preprint arXiv:2503.07511, 2025. 3
+[30] Lin Sun, Bin Xie, Yingfei Liu, Hao Shi, Tiancai Wang, and Jiale Cao. GeoVLA: Empowering 3D
+representations in vision-language-action models. arXiv preprint arXiv:2508.09071, 2025. 3
+[31] Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap. Mastering diverse domains through
+world models. arXiv preprint arXiv:2301.04104, 2023. 3
+[32] Amir Bar, Gaoyue Zhou, Danny Tran, Trevor Darrell, and Yann LeCun. Navigation world models. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025.
+3
+[33] Gaoyue Zhou, Hengkai Pan, Yann LeCun, and Lerrel Pinto. DINO-WM: World models on pre-trained
+visual features enable zero-shot planning. In International Conference on Machine Learning (ICML),
+2025. 3
+[34] Mido Assran, Adrien Bardes, David Fan, Quentin Garrido, Russell Howes, Mojtaba Komeili, Matthew
+Muckley, Ammar Rizvi, et al. V-JEPA 2: Self-supervised video models enable understanding, prediction
+and planning. arXiv preprint arXiv:2506.09985, 2025. 3
+[35] Max Schwarzer, Ankesh Anand, Rishab Goel, R. Devon Hjelm, Aaron Courville, and Philip Bachman.
+Data-efficient reinforcement learning with self-predictive representations. In International Conference on
+Learning Representations (ICLR), 2021. 3
+[36] Yilun Du, Sherry Yang, Bo Dai, Hanjun Dai, Ofir Nachum, Josh Tenenbaum, Dale Schuurmans, and
+Pieter Abbeel. Learning universal policies via text-guided video generation. In Advances in Neural
+Information Processing Systems (NeurIPS), 2023. 3
+[37] Yang Tian, Sizhe Yang, Jia Zeng, Ping Wang, Dahua Lin, Hao Dong, and Jiangmiao Pang. Predictive
+inverse dynamics models are scalable learners for robotic manipulation. In International Conference on
+Learning Representations (ICLR), 2025. 3
+[38] Yucheng Hu, Yanjiang Guo, Pengchao Wang, Xiaoyu Chen, Yen-Jen Wang, Jianke Zhang, Koushil
+Sreenath, Chaochao Lu, and Jianyu Chen. Video prediction policy: A generalist robot policy with
+predictive visual representations. In International Conference on Machine Learning (ICML), 2025. 3
+[39] Qingqing Zhao, Yao Lu, Moo Jin Kim, Zipeng Fu, Zhuoyang Zhang, Yecheng Wu, Zhaoshuo Li, Qianli
+Ma, Song Han, Chelsea Finn, Ankur Handa, Tsung-Yi Lin, Gordon Wetzstein, Ming-Yu Liu, and Donglai
+Xiang. CoT-VLA: Visual chain-of-thought reasoning for vision-language-action models. In Proceedings
+of the Computer Vision and Pattern Recognition Conference (CVPR), 2025. 3
+[40] Wenyao Zhang, Hongsi Liu, Zekun Qi, Yunnan Wang, Xinqiang Yu, Jiazhao Zhang, Runpei Dong, Jiawei
+He, He Wang, Zhizheng Zhang, Li Yi, Wenjun Zeng, and Xin Jin. DreamVLA: A vision-language-action
+model dreamed with comprehensive world knowledge. In Advances in Neural Information Processing
+Systems (NeurIPS), 2025. 3
+[41] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen, Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang
+Li, and Tao Kong. Unleashing large-scale video generative pre-training for visual robot manipulation. In
+International Conference on Learning Representations (ICLR), 2024. 3
+[42] Jianke Zhang, Yanjiang Guo, Yucheng Hu, Xiaoyu Chen, Xiang Zhu, and Jianyu Chen. UP-VLA: A
+unified understanding and prediction model for embodied agent. In International Conference on Machine
+Learning (ICML), 2025. 3
+13
+
+
+[43] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng Huang, Jiayan Guo, Xin Li, Yibing Song,
+Hao Luo, Fan Wang, Deli Zhao, and Hao Chen. WorldVLA: Towards autoregressive action world model.
+arXiv preprint arXiv:2506.21539, 2025. 3
+[44] Chuan Qin, Shaoting Zhu, Siyuan Luo, Siqiao Huang, Hongyu Zhao, Shanaka Baduge, and Hang Zhao.
+Wb-wam: Heterogeneous body-hand pre-training for humanoid loco-manipulation, 2026. 3
+[45] Zhe Li, Zhenzhe Zhang, Yangyang Wei, Wenjie Zhang, Xichen Yuan, Peiyuan Zhi, Gen Li, Xinying Guo,
+Fengjie Gao, Jianfei Yang, and Shanghang Zhang. ω-0: A Latent Predictive World Action Model for
+Concurrent Humanoid Loco-Manipulation. arXiv preprint arXiv:2608.06375, 2026. 3, 4
+[46] Ruijie Zheng, Jing Wang, Scott Reed, Johan Bjorck, Yu Fang, Fengyuan Hu, Joel Jang, Kaushil Kundalia,
+et al. FLARE: Robot learning with implicit world modeling. In Conference on Robot Learning (CoRL),
+2025. 3
+[47] Sihyun Yu, Sangkyung Kwak, Huiwon Jang, Jongheon Jeong, Jonathan Huang, Jinwoo Shin, and Saining
+Xie. Representation alignment for generation: Training diffusion transformers is easier than you think.
+In International Conference on Learning Representations (ICLR), 2025. 3
+[48] Fuhao Li, Wenxuan Song, Han Zhao, Jingbo Wang, Pengxiang Ding, Donglin Wang, Long Zeng, and
+Haoang Li. Spatial forcing: Implicit spatial representation alignment for vision-language-action model.
+arXiv preprint arXiv:2510.12276, 2025. 3
+[49] Wenxuan Song, Ziyang Zhou, Han Zhao, Jiayi Chen, Pengxiang Ding, Haodong Yan, Yuxin Huang,
+Feilong Tang, et al. ReconVLA: Reconstructive vision-language-action model as effective robot perceiver.
+arXiv preprint arXiv:2508.10333, 2025. 3
+[50] Dian Chen, Brady Zhou, Vladlen Koltun, and Philipp Krähenbühl. Learning by cheating. In Conference
+on Robot Learning (CoRL), 2019. 3
+[51] Joonho Lee, Jemin Hwangbo, Lorenz Wellhausen, Vladlen Koltun, and Marco Hutter.
+Learning
+quadrupedal locomotion over challenging terrain. Science Robotics, 5(47):eabc5986, 2020. 3
+[52] Ashish Kumar, Zipeng Fu, Deepak Pathak, and Jitendra Malik. RMA: Rapid motor adaptation for
+legged robots. In Robotics: Science and Systems (RSS), 2021. 3
+[53] Lerrel Pinto, Marcin Andrychowicz, Peter Welinder, Wojciech Zaremba, and Pieter Abbeel. Asymmetric
+actor critic for image-based robot learning. In Robotics: Science and Systems (RSS), 2018. 3
+[54] Suraj Nair, Aravind Rajeswaran, Vikash Kumar, Chelsea Finn, and Abhinav Gupta. R3M: A universal
+visual representation for robot manipulation. In Conference on Robot Learning (CoRL), 2022. 3
+[55] Arjun Majumdar, Karmesh Yadav, Sergio Arnaud, Yecheng Jason Ma, Claire Chen, Sneha Silwal, Aryan
+Jain, Vincent-Pierre Berges, Tingfan Wu, Jay Vakil, Pieter Abbeel, Jitendra Malik, Dhruv Batra, Yixin
+Lin, Oleksandr Maksymets, Aravind Rajeswaran, and Franziska Meier. Where are we in the search
+for an artificial visual cortex for embodied intelligence? In Advances in Neural Information Processing
+Systems (NeurIPS), 2023. 3
+[56] Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy V. Vo, Marc Szafraniec, Vasil Khalidov,
+Pierre Fernandez, Daniel Haziza, et al. DINOv2: Learning robust visual features without supervision.
+Transactions on Machine Learning Research (TMLR), 2024. 3
+[57] Mohamed El Banani, Amit Raj, Kevis-Kokitsi Maninis, Abhishek Kar, Yuanzhen Li, Michael Rubinstein,
+Deqing Sun, Leonidas Guibas, et al. Probing the 3D awareness of visual foundation models. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 3
+14
+
+
+[58] Siddharth Karamcheti, Suraj Nair, Ashwin Balakrishna, Percy Liang, Thomas Kollar, and Dorsa Sadigh.
+Prismatic VLMs: Investigating the design space of visually-conditioned language models. In International
+Conference on Machine Learning (ICML), 2024. 3
+[59] Wilbert Pumacay, Ishika Singh, Jiafei Duan, Ranjay Krishna, Jesse Thomason, and Dieter Fox. THE
+COLOSSEUM: A benchmark for evaluating generalization for robotic manipulation. In Robotics: Science
+and Systems (RSS), 2024. 3
+[60] Xuanlin Li, Kyle Hsu, Jiayuan Gu, Karl Pertsch, Oier Mees, Homer Rich Walke, Chuyuan Fu, Ishikaa
+Lunawat, et al. Evaluating real-world robot manipulation policies in simulation. In Conference on Robot
+Learning (CoRL), 2024. 3
+[61] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei
+Ding, et al. Qwen3-VL technical report. arXiv preprint arXiv:2511.21631, 2025. 4, 6, 16
+[62] Peng Gao, Shijie Geng, Renrui Zhang, Teli Ma, Rongyao Fang, Yongfeng Zhang, Hongsheng Li,
+and Yu Qiao. Clip-adapter: Better vision-language models with feature adapters. arXiv preprint
+arXiv:2110.04544, 2021. 5
+[63] Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Morrone, Quentin De Laroussilhe, Andrea
+Gesmundo, Mona Attariyan, and Sylvain Gelly. Parameter-efficient transfer learning for NLP. In Kamalika
+Chaudhuri and Ruslan Salakhutdinov, editors, Proceedings of the 36th International Conference on
+Machine Learning, volume 97 of Proceedings of Machine Learning Research, pages 2790–2799. PMLR,
+09–15 Jun 2019. 5
+[64] Songlin Wei, Zhenhao Ni, Jie Liu, Zhenyu Zhao, Junjie Ye, Hongyi Jing, Junkai Xia, Xiawei Liu,
+Michael Leong, Liang Heng, Di Huang, and Yue Wang. SIMPLE: Simulation-based policy learning and
+evaluation for humanoid loco-manipulation. In Conference on Robot Learning (CoRL), 2026. Code:
+https://github.com/physical-superintelligence-lab/SIMPLE. 7, 17
+[65] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj Nair, Quan Vuong, Oier Mees, Chelsea
+Finn, and Sergey Levine. FAST: Efficient action tokenization for vision-language-action models. In
+Robotics: Science and Systems (RSS), 2025. 16
+15
+
+
+These appendices provide implementation details (Appendix A), the data and benchmark protocol
+(Appendix B), additional results (Appendix C), the verification that the foresight expert can be removed
+(Appendix D), pseudo-code (Appendix E) and further discussion (Appendix F).
+Appendix A
+Implementation details
+Table 2: Architecture. Trained: updated during task fine-tuning. Deployed: part of the inference graph. The
+trainable action path (projection, adapter and action expert) has 497.6M parameters.
+Component
+Configuration
+Params
+Trained
+Deployed
+VLM (System-2)
+Qwen3-VL-2B-Instruct [61] with Ψ0 pre-training [3];
+egocentric image at 256 × 448 and instruction
+2B
+–
+✓
+Exocentric encoder EDINOv3
+DINOv3 ViT-L/16 [4] at 224 × 384; class token and
+2 × 2 average-pooled 7 × 12 patch tokens (85 tokens
+of width 1024); register tokens dropped
+0.3B
+–
+✓
+Exocentric projection Pψ
+1024 →2048
+–
+✓
+✓
+Ego adapter
+eZego = Zego + Wα LN(Zego), Wα ∈R2048×2048
+zero-initialized
+4.2M
+✓
+✓
+Action expert (System-1)
+Ψ0 flow-matching MM-DiT, initialized from Ψ0
+pre-training; chunk 30 × 36
+≈0.5B
+✓
+✓
+Foresight expert Fω
+Width 512. Memory: ego and exo tokens (LN,
+linear 2048 →512), state token (two-layer MLP),
+learned null token. Per view: 85 learned queries, 2
+blocks of query self-attention, cross-attention to the
+memory and FFN (8 heads, FFN width 2048,
+GELU, pre-LN, dropout 0.1), linear 512 →1024
+19.2M
+✓
+–
+Foresight teacher
+The frozen EDINOv3 applied to Iego
+t+∆t and Iexo
+t+∆t
+with the same tokenization; stop-gradient
+shared
+–
+–
+System-0
+AMO whole-body controller [16]
+–
+–
+✓
+Architecture.
+Table 2 lists all components. The egocentric VLM tokens and the projected exocentric
+tokens form the observation sequence of the action expert (Eq. (6)); when the exocentric view is dropped
+during training, its tokens are masked out of the attention of both the action expert and the foresight expert
+Fω, and the null token of Fω keeps its memory non-empty.
+Action and state.
+Each of the 30 commands in a chunk has 36 dimensions: 14 hand joint targets, 14 arm
+joint targets, torso roll, pitch and yaw, torso height, forward, lateral and yaw velocity, and a target heading.
+The last eight dimensions are tracked by the AMO controller [16], which outputs the leg and waist joint
+targets. Actions and states are normalized with statistics of the training data.
+VLM fusion.
+Both views are rendered into a single VLM prompt. The backbone is initialized from the Ψ0
+pre-trained VLM and further pre-trained for about 145K steps on the 500 dual-view demonstrations of the five
+tasks (100 per task), i.e., the demonstrations that are also used for task fine-tuning, by next-token prediction
+of FAST action tokens [65]. It is then frozen; the last-layer tokens of each view are linearly projected and
+concatenated as the observation sequence of the action expert, which is trained with the recipe of Tab. 3.
+This variant uses no DINOv3 features.
+Qwen3-VL teacher.
+For the teacher ablation (Fig. 5b), the frozen Qwen3-VL backbone encodes both
+future frames at 224 × 384 together with the current instruction in one prompt. For each view we take the
+16
+
+
+Table 3: Training and evaluation hyperparameters, shared by all methods unless noted.
+Parameter
+Value
+Optimizer
+AdamW, β = (0.95, 0.999), weight decay 10−6
+Learning rate
+10−4, 1000 warm-up steps, cosine decay
+Training steps / batch
+40,000 / 128 (16 per GPU, 8 B200 GPUs)
+Flow matching
+1000 discrete flow times in training; 10 Euler steps at test time
+Action chunk
+H = 30 commands at 50 Hz (0.6 s)
+Real-time chunking
+training: random clean prefix of up to 8 commands [20]; test: execute 15 commands per
+chunk, inference delay 7 [19]
+Exocentric dropout
+0.1 (Feature fusion and BeyondEgo)
+Foresight (BeyondEgo)
+λ = 1, linear ramp over the first 10% of steps; ∆t = 0.6 s (30 frames); cosine loss
+Training time
+8–11.5 h per task on 8 B200 GPUs (BeyondEgo)
+Evaluation
+SIMPLE [64]; 35 s episode limit on all five tasks; collisions logged, not terminal
+In-distribution suite
+10 trials per task, fixed seed, paired across methods
+Generalization suite
+40 frozen scenes per task, 8 per shift family
+last-layer hidden states at its 7 × 12 merged image-token positions and prepend their mean in place of a class
+token, which gives 85 × 2048 targets with the same layout as the DINOv3 targets; the output heads of Fω are
+widened to 2048 accordingly, and all other settings are unchanged.
+Appendix B
+Data and benchmark
+Table 4: Demonstration data. 50 Hz, 640 × 360, egocentric head camera and fixed oblique exocentric camera.
+Length: mean episode duration. T3 covers five layouts.
+Task
+Name
+Episodes
+Frames
+Length
+T1
+Back Out and Turn
+100
+122,512
+24.5 s
+T2
+Turn and Search
+100
+95,128
+19.0 s
+T3
+Choose the Right Passage
+100
+137,133
+27.4 s
+T4
+Sidestep and Turn
+100
+118,483
+23.7 s
+T5
+Sideways Passage
+100
+170,548
+34.1 s
+All
+500
+643,804
+25.8 s
+Demonstrations.
+Table 4 summarizes the data. All 500 demonstrations are used for training; the offline
+metrics (Tabs. 6 and 8) are computed on the last 10 episodes of each task. Every episode starts with the box
+on a table and ends with the box in the tray. The simulator records four cameras; we use the head-mounted
+egocentric camera and one fixed oblique exocentric camera.
+Closed-loop evaluation.
+The policy server runs the deployed graph; the client runs SIMPLE [64] (Isaac
+Sim rendering, MuJoCo physics) with the AMO controller in the loop and no privileged inputs to the policy.
+Success is evaluated by a task-specific predicate on the final state: for T1, the box must rest stably supported
+near the center of the tray; for T2–T5, the box must have been released into the tray. Collisions are checked
+at 200 Hz and recorded, but do not terminate a trial or disqualify success. The T1 stage funnel of Fig. 5a
+records whether the box was grasped, whether the robot took the branch of the junction that leads to the
+tray, and whether the trial succeeded.
+17
+
+
+Generalization suite.
+For each task we freeze 40 scenes, 8 per shift family: layout (arrangements with
+parameters outside the training ranges, such as narrower channels and tighter obstacle gaps), asset (unseen
+object and furniture meshes), material (unseen textures), lighting (intensity scaled by 0.55 or 1.5 and color
+temperature 3400 K or 8800 K) and combined shifts. Only visual bindings, materials, lighting and layout
+parameters change; collision geometry and scoring are untouched. Every layout and combined scene passes a
+static route-feasibility check, and no scene duplicates a training episode or another scene of the suite. Scene
+files are frozen and identified by SHA-256 hashes, so all methods face identical scenes.
+Appendix C
+Additional results
+Table 5: Closed-loop success per task (counts behind Fig. 4). In-distribution: successes in 10 paired trials per task.
+Generalization: successes in 40 frozen shifted scenes per task. Mean: success rate (%) over all 50 and 200 episodes,
+with its 95% Wilson score interval. Best per column in bold.
+In-distribution (/10)
+Generalization (/40)
+Method
+T1
+T2
+T3
+T4
+T5
+Mean [95% CI]
+T1
+T2
+T3
+T4
+T5
+Mean [95% CI]
+Ψ0
+4
+4
+5
+7
+4
+48.0 [34.8, 61.5]
+15
+4
+7
+13
+8
+23.5 [18.2, 29.8]
+VLM fusion
+8
+9
+7
+7
+6
+74.0 [60.4, 84.1]
+25
+20
+17
+30
+7
+49.5 [42.6, 56.4]
+Feature fusion
+9
+10
+8
+9
+6
+84.0 [71.5, 91.7]
+27
+21
+19
+35
+8
+55.0 [48.1, 61.7]
+BeyondEgo
+10
+10
+9
+9
+8
+92.0 [81.2, 96.8]
+31
+25
+24
+34
+16
+65.0 [58.2, 71.3]
+Table 6: What to foresee (T1; numbers behind Fig. 5). Cos: offline cosine similarity between predicted and target
+features over all frames of the last 10 T1 episodes (ego/exo). ID: in-distribution successes (/10). Generalization:
+shifted scenes (/40) in which the box is grasped, the robot takes the correct branch, and the box is placed successfully.
+Feature fusion has no foresight.
+Generalization (/40)
+Supervised views
+Cos
+ID Grasp Branch Succ.
+Feature fusion
+–
+9
+–
+–
+27
+DINOv3 teacher
+ego
+.951/–
+10
+40
+35
+24
+exo
+–/.978
+9
+40
+36
+27
+both (BeyondEgo) .951/.977
+10
+40
+39
+31
+Qwen3-VL teacher
+ego
+.946/–
+8
+40
+33
+17
+exo
+–/.824
+9
+40
+37
+22
+both
+.946/.830
+9
+39
+34
+25
+Per-task counts.
+Tables 5 and 6 list the counts plotted in Figs. 4 and 5.
+Statistical uncertainty.
+Table 5 also reports Wilson intervals for the mean success rates. Under shift, the
+intervals of Ψ0 and of every exocentric method are disjoint, and BeyondEgo’s interval lies mostly above that
+of Feature fusion. Because all methods are evaluated on the same frozen scenes, paired tests on per-scene
+outcomes are more powerful than these unpaired intervals.
+18
+
+
+Table 7: T1 generalization by shift family (successes out of 8 scenes per family) for the foresight variants of Fig. 5
+whose per-family results are available.
+Teacher
+Views Layout Asset Material Light Comb. All
+DINOv3
+ego
+4
+3
+8
+7
+2
+24
+DINOv3
+exo
+6
+3
+8
+7
+3
+27
+Qwen3-VL ego
+1
+3
+6
+5
+2
+17
+Qwen3-VL exo
+3
+5
+7
+5
+2
+22
+Qwen3-VL both
+3
+3
+8
+7
+4
+25
+Layout
+Asset
+Material
+Lighting
+Combined
+0
+2
+4
+6
+8
+Successes (of 8 scenes)
+4
+3
+8
+7
+2
+6
+3
+8
+7
+3
+1
+3
+6
+5
+2
+3
+5
+7
+5
+2
+3
+3
+8
+7
+4
+DINOv3 / ego
+DINOv3 / exo
+Qwen3-VL / ego
+Qwen3-VL / exo
+Qwen3-VL / ego + exo
+Figure 6: T1 generalization by shift family for the foresight variants of Fig. 5 whose per-family results are
+available.
+Shift families.
+Table 7 and Fig. 6 break the T1 generalization results down by shift family. Material and
+lighting shifts are the easiest; layout, asset and combined shifts are the hardest. Exocentric DINOv3 foresight
+is the best single-view variant on layout shifts, which change the body–scene geometry along the route.
+Table 8: Offline action errors over all five tasks (final training step, sampled batches from the last 10 episodes of
+each task, mean over T1–T5; de-normalized MAE ×10−3).
+Method
+Hand Arm
+vx
+vy
+vyaw
+Ψ0
+1.26
+4.52
+11.68 13.78 21.48
+Feature fusion
+1.28
+5.20
+11.18 11.74
+7.80
+BeyondEgo
+1.28
+5.36
+10.44 12.08
+7.70
+Offline errors across tasks.
+Table 8 compares the egocentric baseline, Feature fusion and BeyondEgo
+offline. The exocentric view mainly reduces the yaw-rate error (by about 2.8×), consistent with heading
+decisions that depend on the body–scene relation; hand errors are nearly identical, and the egocentric baseline
+has a slightly lower arm error. The foresight expert of BeyondEgo reaches an offline cosine similarity of 0.963
+(ego) and 0.984 (exo) to the 0.6 s-ahead DINOv3 features at the final training step, averaged over the five
+tasks (per task: ego 0.950, 0.971, 0.955, 0.970, 0.967; exo 0.975, 0.981, 0.990, 0.986, 0.986).
+Appendix D
+The foresight expert is removable
+We verify the deployment claim of Sec. 3.3 with three tests, run for each foresight configuration (DINOv3
+targets on both views or on the egocentric view only, and Qwen3-VL targets on both views). (i) Target
+tampering: shuffling the future frames across the batch and rescaling them, or omitting them altogether,
+leaves the generated action chunks bit-identical under fixed noise. (ii) Stripping: deleting Fω from the model
+19
+
+
+leaves the generated action chunks bit-identical. (iii) Loading: after the weights of Fω are removed (95 tensors
+with two supervised views, 52 with one), the checkpoint loads into the deployment configuration, which does
+not build Fω, with zero missing and zero unexpected parameters. Together these show that no part of the
+action path reads Fω or the future frames, so foresight acts on the policy only through the trained weights of
+the adapter and the exocentric projection.
+Appendix E
+Algorithms
+Algorithm 1 BeyondEgo training step
+Require: batch of (Iego
+t
+, Iexo
+t
+, ℓ, st, at) with future frames Iv
+t+∆t and validity masks
+1: Zego
+t
+←EVLM(Iego
+t
+, ℓ); Zexo
+t
+←Pψ(EDINOv3(Iexo
+t
+))
+▷encoders frozen
+2: eZego
+t
+←Zego
+t
++ Wα LN(Zego
+t
+)
+▷exo masked w.p. 0.1
+3: sample σ, ϵ, RTC prefix; aσ
+t ←(1 −σ)at + σϵ, with at normalized
+4: Lact ←∥vθ([ eZego
+t
+; Zexo
+t
+], st, aσ
+t , σ) −(ϵ −at)∥2
+▷Eq. (6)
+5: bZv
+t+∆t ←sg[EDINOv3(Iv
+t+∆t)] for v ∈{ego, exo}
+6: Lfut ←masked mean of 1 −cos
+  bZv
+t+∆t, F v
+ω([ eZego
+t
+; Zexo
+t
+], st)
+
+▷Eq. (5)
+7: back-propagate Lact + λ(s)Lfut
+▷∇θLfut = 0
+Algorithm 2 BeyondEgo deployment
+1: delete Fω
+▷no future frames are needed
+2: loop
+3:
+observe Iego
+t
+, Iexo
+t
+, st; compute eZego
+t
+and Zexo
+t
+as in training
+4:
+integrate vθ in 10 Euler steps from σ = 1 to 0, with the RTC prefix of the previous chunk, and
+denormalize to obtain at
+5:
+execute the first 15 commands through AMO
+6: end loop
+Algorithms 1 and 2 summarize training and deployment. Because Fω reads only the observation interface,
+a single backward pass of the total loss suffices: the gradient of Lfut with respect to the action expert is zero
+by construction.
+Appendix F
+Further discussion
+Why not feed the predicted future to the policy?
+An alternative is to inject the output of Fω into
+the action expert as extra tokens. This makes Fω part of the inference graph, so it can no longer be removed,
+and it lets the action expert rely on its own forecasts, whose errors may compound in closed loop. BeyondEgo
+instead uses foresight only to shape the representation the policy reads.
+Limitations.
+Beyond the limitations in Sec. 5, the exocentric camera is calibrated and fixed in all
+experiments, the deployed model retains the 4.2M-parameter adapter trained with the foresight loss, and the
+benchmark covers one robot and five tasks in simulation.
+Broader impact.
+More reliable humanoid loco-manipulation can assist logistics and household work.
+Exocentric cameras observe the environment and possibly people in it; deployments should follow privacy
+regulations and inform the people being recorded.
+20

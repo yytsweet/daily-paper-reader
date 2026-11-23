@@ -1,0 +1,5111 @@
+Beyond Linear Decodability: Understanding and Improving Instruction Following
+in World Action Models
+Bokai Ji1*
+Jiapeng Chen2∗
+Yi Zhang3∗
+Zeyuan Ding3
+Yong Dai3
+Xiaozhu Ju3
+Jian Tang3
+Lemao Liu2
+Dejing Dou2
+Yong Li1†
+1Renmin University of China
+2Fudan University
+3Beijing Humanoid Robot Innovation Center
+Project Homepage: https://ruflect-intelligence.github.io/LDS-Homepage/
+Abstract
+World action models (WAMs) exhibit strong manipulation
+capabilities yet often fail to follow test-time language in-
+structions. Prior work shows that non-following (NF) WAMs
+encode information about the instructed target, but this in-
+formation does not control their behavior. By comparing
+NF WAM with its instruction-following (IF) counterpart, we
+find that target information is substantially more linearly
+decodable in IF WAMs, despite being encoded in both. Mo-
+tivated by this observation, we introduce linear decodability
+supervision (LDS), a simple yet effective auxiliary training
+objective that promotes the linear decodability of the in-
+structed target information. On LIBERO-CF, InternW0-∆
+with LDS achieves a success rate of 74.6% and a grounding
+rate of 89.2%, surpassing the strongest baseline by 26.8 and
+42.9 percentage points, respectively. The effectiveness of
+LDS challenges the prevailing interpretation that encoded
+target information does not contribute to WAMs’ behav-
+ior. To reconcile this apparent contradiction, we propose a
+prior–instruction competition mechanism, which explains
+NF and IF behavior as arising from the dominance of prior
+and instruction signals, respectively. We provide causal ev-
+idence for this mechanism by evaluating two training-free
+interventions derived from it. We reinterpret LDS through
+this mechanism, showing that it acts as a form of instruction
+signal enhancement. Finally, more comprehensive evalua-
+tions across diverse manipulation tasks and visual domains
+demonstrate the consistent effectiveness of LDS.
+1. Introduction
+Instruction following is a fundamental capability of vision-
+language-action (VLA) models and world action models
+*Equal contribution.
+†Corresponding author.
+(WAM), requiring them to manipulate objects according
+to natural language instructions. Despite their ability to
+perform complex manipulation tasks [10, 15, 17], recent
+works find that these models have a strong bias to execute
+training-time instruction, ignoring instructions given at test
+time [4, 5, 7]. Prior studies on VLAs [4, 18] address this
+issue by recalibrating attention toward instruction-relevant to-
+kens. However, the mechanisms underlying similar failures
+in WAMs remain unclear. In the WAM architecture we study,
+the ones employing Wan [14] as their backbone, language is
+injected into visual representations through cross-attention,
+rather than competing with visual tokens for attention mass
+within a shared self-attention operation.
+To study IF in WAMs, we start from training an IF WAM
+with collected counterfactual data and comparing its inter-
+nal states with its non-following (NF) counterparts. Similar
+to [8], we probe instruction-related information across differ-
+ent layers and internal components in WAMs and find both
+IF and NF WAMs encode such information. However, as
+shown in Figure 1, the IF WAM exhibit significantly stronger
+linear decodability of the instructed-target information than
+its NF counterpart. Motivated by such observation, we pro-
+pose Linear-Decodability Supervision (LDS) that directly
+improves the linear decodability of the intructed-target infor-
+mation as an auxiliary loss along side the flow-matching loss.
+InternW0-∆with LDS achieves a success rate of 74.6% and
+a grounding rate of 89.2%, surpassing the strongest baseline
+by 26.8 and 42.9 percentage points, respectively. Despite
+the effectiveness of LDS, these results challenges the pre-
+vailing interpretation that encoded target information does
+not contribute to WAMs’ behavior [8].
+We propose a prior–instruction competition mechanism
+to reconcile such contradiction. Specifically, there are two la-
+tent tags, a prior tag P and an instruction tag I, are attached
+to the prior-preferred and the instruction-specified visual
+1
+arXiv:2611.27401v1  [cs.AI]  20 Nov 2026
+
+
+(a) Phenomenon: A Surprising Effect
+(c) Rethink: Why Supervising Linear Probe Works?
+Put the tomato sauce in the basket.
+VAE
+WAN Block
+Linear Probe Head
+T5
+Prediction of Prior-Driven WAMs
+Yes
+No
+Does this patch contain target?
+Linear Decodability Supervision
+Put the cookie box in the basket.
+Put the tomato sauce in the basket.
+Put the soup in the basket.
+Other Targets in the scene.
+Supervise
+Baseline
+LDS
+5.1%
+65.1%
+LIBERO-CF
+Supervising Linear Decodability Improves Instruction Following
+Linear Probe Acc.
+Baseline
+LDS
+87.0%
+36.0%
+0
+15
+29
+0.5
+1.0
+Q
+K
+V
+Out
+Post
+Out
+Post
+Out
+Out
+S.A.
+C.A.
+FFN Block
+Layer
+Probe Accuracy
+Following
+Q
+K
+V
+Out
+Post
+Out
+Post
+Out
+Out
+S.A.
+C.A.
+FFN Block
+Stronger and More Widespread Target Decodability
+Non-Following
+SR / Grounding 
+14.4%
+90.3%
+(b) Mechanism: Spatially Localized Competing Tags
+Put the tomato sauce in the basket.
+Transit
+Enhance
+Instruction Tag
+Prior Tag
+In post-trained WAM
+WAM follows
+instead of
+Baseline
+50.8%
+53.0%
+3.8%
+Transit
+Enhance
+Baseline
+After Supervision
+Increased from 3.4 to 14.1
+remains largely stable
+Direction of both
+and
+maintains
+Supervising Linear Probe ≈ Enhance
+Figure 1. Overview. (a) A surprising phenomenon. Auxiliary LDS improves instruction-following success from 5.1% to 65.1%, despite
+removing the linear head at inference. (b) Prior–instruction competition. A weak instruction signal I competes with a prior-associated
+signal, and manipulating either signal substantially improves instruction following without training. (c) Why LDS works. Counterfactual
+grounding supervision amplifies the existing instruction signal I while largely preserving its direction.
+target, respectively. Here, tags refer to additive components
+of intermediate visual-token representations. Both of these
+two tags contribute to WAM’s behavior. They compete with
+each other, and the winning one finally determines the action.
+Therefore, NF and IF WAMs can be explained as the win-
+ning of prior tag P and instruction tag I, respectively. We
+validate our proposed hypothesis through two training-free
+interventions derived from it: (1) enhancing the instruction
+tag I; (2) transiting the prior tag P toward the instructed
+target. Remarkably, enhancing I improves OpenWAM’s
+success/grounding rate from 3.8/7.0% to 53.0/80.0%, while
+transiting P achieves 50.8/84.0%, on a picking-target subset
+of LIBERO-CF without updating the model’s parameters.
+Together, these results provide causal evidence supporting
+our proposed mechanism. We further revisit the effective-
+ness of LDS through this mechanistic lens. Since LDS aims
+to correctly identify the visual target under counterfactual
+instructions and the easiest way to do so is to exploit the
+existing I, LDS can be seen as a specific form of enhancing
+I. We evaluate the explanation by empirically measuring
+the magnitude and direction of I and P and find the result
+supports the above explanation. Specifically, the magnitude
+of I increases whereas the magnitude of P changes only
+modestly. Meanwhile, the direction of I and P before and
+after LDS remains approximately the same.
+Finally, we conduct more extensive experiments to evalu-
+ate the effectiveness of LDS. On LIBERO-CF, InternW0-∆
+equipped with LDS achieves a success/grounding rate of
+74.6/89.2%, outperforming the strongest baseline by 26.8
+and 42.9 percentage points, respectively. On LangGap and
+RoboTwin-IF, LDS further demonstrates its effectiveness
+in both object selection and placement-destination ground-
+ing, achieving success rates (SR) of 71.4% and 47.4% with
+InternW0-∆, respectively. This implies a more general
+prior-instruction competition mechanism of visual targets
+in WAMs. Experiments on RoboTwin-IF and real-world
+tasks further establish the effectiveness of LDS across di-
+verse visual domains beyond LIBERO-based benchmarks.
+Evaluations on held-out splits of LIBERO-CF and LangGap
+demonstrate strong generalization to unseen initial configu-
+rations, with LDS maintaining robust performance even in
+completely out-of-distribution scenes. Our main contribu-
+tions are summarized as follows:
+1. A simple yet effective way to improve IF in WAMs.
+We propose LDS, an auxiliary training objective that
+improves IF of WAMs without the need of counterfactual
+demonstrations collection. Experimental results show
+LDS outperforming existing methods by a large margin.
+2. A novel prior-instruction competing mechanism. We
+provide a novel way of understanding “encode but not
+control” phenomenon by introducing competition with
+prior signals. We evaluate the correctness of the proposed
+mechanism through causal interventions and explain the
+effectiveness of LDS under such mechanism.
+2. Related Works
+World Action Models. WAMs learn robot policies by jointly
+modeling visual dynamics and actions, often leveraging pre-
+trained video generation models. DreamZero [16] builds on
+Wan2.1 [14], while LingBot-VA [10], Fast-WAM [17], and
+OpenWAM [15] adopt Wan2.2. Their shared architectural
+2
+
+
+foundations motivate our investigation of how instruction
+information interacts with visual representations to influence
+action generation. Other WAMs, such as Cosmos Policy [9]
+and ImageWAM [20], employ different generative back-
+bones. Our mechanistic findings therefore primarily concern
+Wan-based WAMs.
+Instruction Following in Embodied Policies.
+Re-
+cent studies reveal that embodied policies may rely on
+visual shortcuts rather than faithfully following language
+instructions. LIBERO-CF [4], LangGap [7], and Instruct-
+Move [21] expose such failures through instruction-sensitive
+evaluations, while Counterfactual Action Guidance [4] and
+IGAR [19] seek to mitigate them. However, the underlying
+mechanisms in WAMs remain underexplored.
+Importantly, decodable information need not causally in-
+fluence model behavior [3]. Recent work [8] demonstrates
+this decodability-control gap in both VLAs and WAMs,
+where instructed targets remain encoded despite visually
+biased actions. Building on this finding, we investigate com-
+peting instruction-dependent and visual-prior-associated sig-
+nals in WAMs, establish their behavioral roles through repre-
+sentation interventions, and show how auxiliary linear-probe
+supervision strengthens IF by amplifying a behaviorally rel-
+evant instruction signal.
+3. Improving Instruction Following of WAMs
+via Linear Decodability Supervision
+In this section, we investigate whether the linear decodability
+of instructed target information in WAMs is relevant to IF
+behavior. We first construct IF WAMs through collecting
+and training on counterfactual demonstrations, enabling a
+controlled comparison with their NF counterparts. We find
+that IF WAMs exhibit substantially stronger linear decod-
+ability of instructed target information than NF WAMs, and
+that higher decodability is associated with higher IF success
+rates. Motivated by these observations, we introduce linear-
+decodability supervision (LDS) that explicitly promotes such
+linear decodability during training. We reveal that LDS leads
+to substantial IF improvements.
+3.1. Constructing Instruction-Following WAMs
+We start by constructing IF WAMs to enable direct com-
+parison on internal states with its NF counterpart. Previous
+studies suggest that IF failures can arise from insufficient
+counterfactual supervision [4, 5]. When actions and future
+are strongly predictable from the current visual observation,
+WAMs may exploit an observation-conditioned shortcut and
+ignore language instruction. To mitigate this shortcut, train-
+ing should expose models to situations where the same visual
+observation admits different target behaviors depending on
+the instruction, making language information necessary to
+distinguish the correct behavior.
+0.4
+0.5
+0.6
+0.7
+0.8
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Linear Probe Accuracy
+Success Rate
+SA Q
+SA K
+SA V
+SA out
+Post-SA
+CA out
+Post-CA
+FFN write
+Block out
+0
+5
+10
+15
+20
+25
+29
+0.0
+0.5
+Layer
+△ Linear Prob Accuracy
+(a)
+(b)
+Figure 2. Instruction-Following WAM show stronger and more
+wide spread linear decodability. (a) Layer- and site-wise gain
+in instruction-target decodability from RoboTwin-IF training. (b)
+Probe accuracy versus instruction success on the scenes in Dprobe.
+Each point is an instruction. The line shows the result of least-
+squares fit and the shaded band represents 95% confidence interval
+of the fitted mean. The trend is positive with a slope of 2.07.
+Therefore, we develop RoboTwin-IF, a pipeline built
+upon RoboTwin2.0 [2] to synthesize counterfactual tasks
+and demonstrations. Specifically, counterfactual demon-
+strations share the same scene and identical initial visual
+observations but differ in their language instructions and
+corresponding behaviors. For example, in a scene containing
+a red and a green cup, we include demonstrations of grasp-
+ing each cup under its respective instruction. This makes
+observation-only predictions insufficient to minimize train-
+ing loss, encouraging the model to condition its behavior on
+both visual observation and language instructions.
+We partition the scenes generated by RoboTwin-IF into
+disjoint training and held-out evaluation sets. We collect
+expert demonstrations for the training scenes, forming the
+counterfactual dataset DCF. Given a pre-trained NF WAM
+MNF, we construct its IF counterpart by fine-tuning on DCF
+MIF = FineTuneLFM(MNF, DCF)
+where LFM denotes the flow-matching (FM) training loss.
+For OpenWAM, SR on held-out RoboTwin-IF scenes in-
+creases from 11.05% to 47.76% after training, demonstrating
+a substantial improvement in IF capability. RoboTwin-IF
+and model details are in Appendix A and Appendix B.
+3.2. Stronger Linear Decodability
+Having WAMs m ∈{NF, IF}, we investigate whether the
+difference in IF capability is reflected in the linear decod-
+ability of information about instructed targets. Let xm,ℓ,c
+s,j,i be
+the activation of the token aligned with head-camera patch i
+when processing initial observation of scene s paired with
+instruction Lj that requires to manipulate candidate j. Here
+ℓindexes the block and c identifies the computation site
+within it. We read nine sites per block in following analysis:
+the SA query, key, and value projections before query/key
+normalization and rotary position encoding, the SA and CA
+3
+
+
+Video-Action Diffusion Backbone
+9
+19
+29
+Linear Decoding Head
+Supervise
+Ground Truth
+Prediction
+Yes
+No
+Pick up tomato sauce.
+Figure 3. Illustration of LDS. Auxiliary linear heads at selected
+layers predict fine-grained grounding maps, supervised to distin-
+guish the instructed target from other objects and background re-
+gions. The heads are discarded at inference time.
+attention outputs before their respective output projections,
+the Post-SA and Post-CA residual states, the gated FFN
+update, and the block output.
+We construct a probe panel of 515 instructions across 256
+RoboTwin-IF scenes. Each scene s pairs the same obser-
+vation Os with multiple instructions Lj selecting different
+manipulation targets j. We assign each patch to the candi-
+date that covers the largest fraction of it. For instruction Lj,
+the label ys,j,i is 1 if patch i belongs to the selected candi-
+date j and 0 if it belongs to another candidate. Switching
+the instruction changes which object patches are annotated
+as ys,j,i = 1 while holding Os and the patch grid fixed.
+For each probing point (m, ℓ, c), we fit a linear probe
+shared across all patches and instructions. Its logit for the
+label ys,j,i is
+zm,ℓ,c
+s,j,i = (wm,ℓ,c)⊤xm,ℓ,c
+s,j,i + bm,ℓ,c,
+zm,ℓ,c
+s,j,i ∈R1 (1)
+A patch is classified as target if its logit is positive, and
+as non-target otherwise.
+We fit only the probe parame-
+ters (wm
+ℓ,c, bm
+ℓ,c) with frozen xm,ℓ,c
+s,j,i . For each (Os, Lj), bi-
+directional accuracy averages target recall and non-target
+rejection. See Appendix B for more details.
+Figure 2(a) shows the IF WAM’s advantage to its NF
+counterpart in scene-averaged bi-directional accuracy at each
+layer and computation site. Averaged across layers and sites,
+bi-directional accuracy rises from 51.5% for NF WAM to
+77.5% for IF WAM which is a gain of 26.0 percentage points.
+Figure 2(b) further links linear decodability to SR. Instruc-
+tions with higher linear probe accuracy tend to achieve higher
+SR. This association suggests that linear decodability of in-
+structed target information is behaviorally relevant, although
+it does not establish causality. It motivates testing whether
+explicitly strengthening linear decodability of instructed tar-
+get information can improve IF of WAMs.
+3.3. Linear-Decodability Supervision
+To test this possibility, we introduce linear-decodability su-
+pervision (LDS), which uses the token-wise linear readout
+from Section 3.2 to provide auxiliary grounding supervi-
+sion during training. As in the diagnostic linear probe in
+Section 3.2, a shared linear head reads each visual token
+xm,ℓ,c independently to predict target membership in the cor-
+responding visual region. However, the unit of visual regions
+is a patch in the diagnostic probe. A single label summarizes
+the whole patch even when the target covers only a little
+part of it, making the supervision at coarse granularity. As
+illustrated in Figure 3, LDS further splits each patch to a
+4 × 4 grid and assigns labels to each cell. Therefore, the
+linear heads in LDS predicts a 4 × 4 grid of logits instead of
+a single one for each patch. At the first denoising step, LDS
+takes visual tokens from three layers chosen from each of
+the shallow, middel, and deep fraction of the DiT
+zℓ
+s,j,i = W ⊤
+ℓxm,ℓ,out
+s,j,i
++ bℓ,
+zℓ
+i ∈R16
+(2)
+Here xm,ℓ,out
+s,j,i
+is the block-output activation defined in Equa-
+tion 1. The head weights W and bias b are shared across
+token positions i, physical scenes s, and instructions Lj.
+To supervise the resulting predictions, we distinguish
+three spatial regions: the instructed target, alternative candi-
+date objects, and background. We adopt a region-balanced
+binary classification loss
+Laux =
+1
+|Ls|
+X
+ℓ∈Ls
+
+λ1L(ℓ)
+target + λ2L(ℓ)
+other + λ3L(ℓ)
+bg
+
+(3)
+where λ1, λ2, and λ3 are balancing coefficients and each
+regional loss is normalized by its corresponding spatial cov-
+erage. Similar to the diagnostic linear probe in Section 3.2,
+the objective emphasizes distinguishing the instructed tar-
+get from alternative objects, while assigning a small weight
+to background regions to discourage spurious predictions.
+The WAM is trained by jointly optimizing the original FM
+objective and the auxiliary loss
+Ltotal = LFM(Doriginal) + λLaux(Dground)
+(4)
+Importantly, the counterfactual data provide only target-
+grounding supervision, without corresponding action or
+future-video supervision. Note that unlike the diagnostic lin-
+ear probes, we allow parameter update of both the auxiliary
+heads and the WAM’s parameters. Further implementation
+details are provided in Appendix D. Despite supervising only
+intermediate instructed target representations, the auxiliary
+objective substantially improves downstream IF of WAMs.
+On LIBERO-CF, OpenWAM’s success rate increases from
+5.1% to 65.1%, accompanied by an improvement in ground-
+ing rate from 14.4% to 90.3% (Table 1).
+LDS v.s. Counterfactual Data Collection. Although we
+obtained the IF WAMs for comparison through collecting
+and training on counterfactual demonstrations at the begin-
+ning of this section, it is worth noting that LDS serves as a
+more efficient and practical way to obtain IF WAMs com-
+pare to collecting counterfactual demonstrations. Collecting
+4
+
+
+counterfactual demonstrations, as in describe in Section 3.1,
+presupposes the ability to revisit the states from which the
+original demonstrations were recorded. For publicly released
+robot datasets, access to the recordings does not guarantee
+access to the original environments or reconstruction of their
+initial states. When these states cannot be recreated, col-
+lecting counterfactual demonstrations is impossible. Even
+when the environments remain accessible, obtaining success-
+ful trajectories for additional instructions incurs substantial
+collection and curation costs [5]. LDS can augment these
+existing datasets offline by merely pairing recorded observa-
+tions with alternative instructions and target masks without
+collecting new demonstrations.
+4. Understanding Instruction Following of
+WAMs Through Competing Signals
+The effectiveness of LDS is surprising. Existing work [3,
+8]suggests that linearly decodable information may lie out-
+side the subspaces to which downstream readers are sensi-
+tive. However, the success of LDS raises the possibility that
+instruction-dependent information is already represented in
+directions that can influence downstream video-action gener-
+ation. In this section, we propose a prior-instruction competi-
+tion mechanism to reconcile these observations: instruction-
+dependent signals can influence behavior but are outweighed
+by competing learned priors. We evaluate the correctness
+of this mechanism by applying causal interventions derived
+from it. Experiments show that both interventions substan-
+tially improve IF success rate on LIBERO-CF, providing
+strong evidence on the correctness of our proposed mecha-
+nism. Finally, we revisit LDS through this mechanistic lens
+to explain why it can improve IF of WAMs.
+4.1. Prior-Instruction Competing Mechanism
+Consider the scene shown in Figure 1(b), where objects A
+and B are outlined in blue and orange, respectively. We
+assume that B is the object favored by the WAM’s learned
+prior. That is, an NF WAM consistently manipulates B
+regardless of the given instruction. We denote the represen-
+tations of the patches corresponding to object i in model m,
+at layer ℓand site c, given scene s and instruction Lj, as
+xm,ℓ,c
+s,j,i . For simplicity, we omit the model, layer, site, and
+scene indices and write xj,i. Thus, the representations of
+patches corresponding to objects A and B are denoted by
+xj,A and xj,B, respectively.
+We hypothesize two types of tags in x·,·: (1) a prior tag
+P, associated with the target favored by the model’s learned
+behavioral experience (object B in this case), and (2) an
+instruction tag I, associated with the target j specified by
+the language instruction Lj. Then we can decompose xj,i
+Neither
+Original
+Grounding
+Success
+79%
+14%
+51%
+33%
+15%
+53%
+27%
+17%
+76%
+24%
+Transit
+(    = 64)
+Baseline
+Enhance
+(    = 32)
+LDS
+Episodes (%)
+Figure 4. Compare SR of training-free interventions to baseline
+and LDS on LIBERO-CF picking-subset.
+under counterfactual instructions as
+(
+xA,A = vA + I,
+xA,B = vB + P
+xB,A = vA,
+xB,B = vB + P + I
+(5)
+where vA and vB denote the instruction-invariant visual rep-
+resentations (e.g., appearance). Here P and I competes
+with eachother, and the winner controls the WAMs’ policy.
+Thus, the NF behavior of WAMs can be explained as the
+dominance of P.
+4.2. Evaluation via Causal Interventions
+We evaluate our hypothesized prior-instruction competing
+mechanism via its induced training-free interventions. Ac-
+cording to our hypothesis, IF failures arise from the domi-
+nance of P in the competition with I, then two intervention
+strategies should redirect the NF WAM’s policy under LA
+1. Transit P: Redirect the prior tag P from B toward A,
+such that both P and I attach to the instructed target.
+2. Enhance I: Amplify the existing instruction tag I in A,
+allowing it to overcome the competing prior.
+These strategies probe complementary aspects of our hy-
+pothesis. If both strategies independently redirect behavior
+toward the instructed target, it provides evidence on not only
+both P and I causally influence downstream behavior but
+also the proposed competition mechanism.
+Given the same visual observation under LA and LB, we
+compute
+∆A = xA,A −xA,B = (vA −vB) −P + I
+∆B = xB,A −xB,B = (vA −vB) −P −I
+(6)
+Taking their difference and average gives I and U
+I = ∆A −∆B
+2
+,
+U = ∆A + ∆B
+2
+(7)
+where U = (vA −vB) −P. Notably, while the I can be
+isolated through paired counterfactual instructions, the prior
+tag P cannot be independently separated since it is bonded
+on the prior object. We therefore refer to U as the prior-
+associated component in the following analysis.
+5
+
+
+Under LA, we implement Enhance I as
+exA,A = xA,A + αI
+(8)
+Transit P uses the unit scene-averaged Base direction ˆU =
+¯U/∥¯U∥:
+exA,B = xA,B + β ˆU,
+exA,A = xA,A −β ˆU
+(9)
+Here, α and β control intervention strength (Appendix G.6).
+As shown in Figure 4, both interventions substantially
+improve IF SR on LIBERO-CF. Enhancing I increases Open-
+WAM’s success rate from 3.8% to 53.0% at α = 32, while
+transit P achieves 50.8% at β = 64. Success of both inter-
+ventions provide strong evidence on the correctness of our
+proposed prior-instruction competing mechansim. The NF
+WAMs correctly represent instructed target, but such signal
+is too weak to overcome the learned prior.
+4.3. Rethinking Linear Decodability Supervision
+We now revisit the unexpected success in Section 3.3. Con-
+sider a shared linear readout w that must distinguish the all
+candidate objects under counterfactual instructions. Since
+∆A = U + I,
+∆B = U −I
+(10)
+correctly predicting the instructed target under both LA and
+LB requires
+w⊤(U + I) > 0,
+w⊤(U −I) < 0
+(11)
+These conditions imply
+w⊤I > |w⊤U|
+(12)
+Remind that U remains invariant when the instruction
+changes, whereas I transits along with the instruction. Thus,
+amplifying the existing instruction-dependent component I
+provides a direct way to increase the classification margin
+under both counterfactual instructions.
+We compare U and I before and after LDS, reporting
+norms of scene-averaged vectors and cosines between these
+averages. At OpenWAM layer 8 on held-out scenes, ∥¯I∥
+rises from 3.4 to 14.1, while ∥¯U∥decreases from 26.1 to
+22.9. Base-to-LDS cosines are 0.95 ( ¯U) and 0.90 (¯I). This
+suggests that training predominantly enhances I rather than
+creating new representations. Complete results can be found
+in Appendix G.
+Beyond the effect of enhancing I, there is still an unex-
+plained performance gap to LDS. This can be probably ex-
+plained by adaption of out-of-distribution activations. Specif-
+ically, Training-free interventions modify hidden representa-
+tions using externally specified coefficients (e.g., α = 32),
+potentially moving activations away from the distribution en-
+countered during training. In contrast, LDS updates WAMs’
+parameters, allowing the downstream readers to adapt to the
+shifted activations.
+5. Simulation Experiments
+We evaluate whether LDS improves instruction following
+in varies of tasks, embodiment, and visual domains (RQ1),
+supports grounding and execution of new placement goals
+(RQ2), and generalizes to initial states and scenes excluded
+from grounding supervision (RQ3).
+5.1. Settings
+Benchmarks. We evaluate instruction following on three
+complementary simulation benchmarks: LIBERO-CF [4],
+LangGap [7], and RoboTwin-IF (Appendix A). LIBERO-
+CF and LangGap share LIBERO’s visual domain and third-
+person scene-camera view. LIBERO-CF assigns alternative
+feasible goals to LIBERO scenes, testing whether the policy
+follows the new instruction or repeats the original training
+task. LangGap introduces 59 tasks that vary the manipulated
+object, placement destination, spatial reference, or action
+within fixed scene layouts. Our RoboTwin-IF (Appendix A)
+uses RoboTwin’s distinct visual assets and first-person head-
+camera view in a dual-arm setting. We evaluate 25 Pick and
+25 Placement scenes with paired instructions that share iden-
+tical initial observations but specify different target objects
+or destinations, respectively.
+Training. For LIBERO-CF and LangGap, we use the
+released LIBERO checkpoints of OpenWAM, LingBot-VA,
+and InternW0-∆as Base models. For RoboTwin-IF, we ran-
+domly select one of the two instructions in each evaluated
+scene and fine-tune the released RoboTwin checkpoints on
+the corresponding trajectories to obtain Base models. We
+then fine-tune each Base model using the linear-probe su-
+pervision objective introduced in Section 3.3 for 1024 steps.
+We jointly optimize the native flow-matching loss and an
+auxiliary grounding loss weighted by λ = 0.25. We take
+layer ℓ∈{9, 19, 29} and (λ1, λ2, λ3) = (0.5, 0.45, 0.05).
+Evaluation. Success measures completion of the evalu-
+ated instruction. Grounding measures whether the gripper
+reaches the target object on LIBERO-CF and Pick-subset in
+RoboTwin-IF. For Placement, Grounding measures whether
+the grasped object reaches and remains in the instructed
+destination region. LIBERO-CF evaluates 50 tasks with 50
+initial states each and scores the instructed goal (Faithful, F.)
+and the original training goal (Biased, B.). LangGap uses
+10 initial states per extended task, and RoboTwin-IF uses 10
+episodes per instruction in each scene. We also evaluate the
+40 original LIBERO tasks with 10 episodes each to assess
+retention of the original task.
+5.2. RQ1: Unlocking Instruction Following
+On LIBERO-CF, LDS increases average faithful success
+and Grounding and reduces biased success across all WAMs
+(Table 1). This shift supports better instructed target selec-
+tion. InternW0-∆w/ LDS leads the leaderboard, achieving
+6
+
+
+Table 1. LIBERO-CF evaluation results (%). Blue bold values indicate the best result per column.
+Metric
+Type
+Model
+Setting
+CF-Spatial
+CF-Object
+CF-Long
+CF-OOD
+Average
+LIBERO
+F.↑
+B.↓
+F.↑
+B.↓
+F.↑
+B.↓
+F.↑
+B.↓
+F.↑
+B.↓
+SR↑
+Success
+VLA
+OpenVLA-OFT
+Base
+1.1
+80.7
+0.0
+97.6
+0.2
+54.4
+0.1
+81.7
+0.4
+78.6
+–
+TF [4]
+3.3
+73.3
+0.0
+94.4
+0.2
+54.0
+0.1
+83.5
+0.9
+76.3
+VA [4]
+7.9
+35.2
+0.0
+57.0
+0.4
+48.9
+0.1
+22.7
+2.1
+41.0
+π0
+Base
+34.4
+19.1
+0.0
+45.0
+1.1
+63.1
+2.7
+52.9
+9.6
+45.0
+–
+TF [4]
+33.5
+14.4
+0.6
+15.0
+2.0
+38.7
+2.1
+42.3
+9.6
+27.6
+VA [4]
+36.7
+6.1
+0.0
+29.2
+2.9
+48.7
+2.1
+19.2
+10.4
+25.8
+π0.5
+Base
+24.4
+56.9
+5.8
+66.8
+15.8
+50.4
+6.9
+69.6
+13.2
+60.9
+–
+TF [4]
+27.3
+33.3
+9.2
+41.4
+20.9
+36.7
+9.9
+62.7
+16.8
+43.5
+VA [4]
+31.6
+36.0
+18.0
+29.8
+26.7
+41.8
+10.3
+37.1
+21.7
+36.2
+SAM [18]
+55.3
+–
+26.2
+–
+55.4
+–
+54.1
+–
+47.8
+–
+WAM
+InternW0-∆
+Base
+24.0
+58.5
+3.0
+80.4
+39.8
+57.6
+27.2
+45.3
+23.5
+60.5
+96.0
+LDS (Ours)
+92.8
+3.3
+86.0
+8.8
+56.4
+36.4
+63.1
+0.5
+74.6
+12.3
+96.8
+LingBot-VA
+Base
+39.7
+30.8
+0.0
+43.6
+7.2
+77.2
+2.4
+40.9
+12.3
+48.1
+89.0
+LDS (Ours)
+54.9
+6.8
+0.4
+38.0
+17.8
+58.2
+46.1
+12.7
+29.8
+28.9
+88.2
+OpenWAM
+Base
+7.9
+68.9
+0.0
+87.2
+12.0
+79.2
+0.4
+88.1
+5.1
+80.9
+94.0
+LDS (Ours)
+88.3
+0.4
+72.6
+1.4
+31.4
+43.8
+68.3
+0.1
+65.1
+11.4
+89.2
+Grounding
+VLA
+OpenVLA-OFT
+Base
+6.8
+84.7
+2.0
+99.6
+4.0
+62.9
+6.0
+87.3
+4.7
+83.6
+TF [4]
+11.1
+78.5
+1.6
+100.0
+4.9
+61.1
+5.6
+88.1
+5.8
+81.9
+VA [4]
+26.5
+59.5
+3.8
+91.8
+6.9
+60.0
+7.9
+50.1
+11.3
+65.4
+π0
+Base
+70.9
+37.1
+6.0
+59.4
+20.4
+83.1
+18.0
+72.4
+28.8
+63.0
+TF [4]
+74.5
+32.5
+12.2
+50.6
+19.6
+81.8
+21.1
+72.4
+31.9
+59.3
+VA [4]
+85.2
+24.4
+13.8
+53.8
+22.7
+82.2
+27.6
+47.5
+37.3
+52.0
+π0.5
+Base
+39.3
+61.3
+11.4
+68.8
+51.6
+58.4
+20.7
+74.0
+30.8
+65.6
+TF [4]
+52.0
+45.3
+24.6
+65.2
+60.7
+56.7
+24.8
+71.9
+40.5
+59.8
+VA [4]
+50.7
+45.2
+34.0
+49.8
+64.2
+61.1
+36.4
+52.8
+46.3
+52.2
+WAM
+InternW0-∆
+Base
+34.7
+61.3
+9.2
+80.4
+52.8
+65.2
+52.4
+48.7
+37.3
+63.9
+LDS (Ours)
+96.4
+8.4
+91.4
+9.0
+69.6
+57.8
+99.5
+2.7
+89.2
+19.5
+LingBot-VA
+Base
+59.9
+43.5
+7.0
+51.8
+40.0
+86.8
+21.1
+57.3
+32.0
+59.9
+LDS (Ours)
+86.8
+16.0
+9.4
+51.2
+67.0
+67.8
+74.1
+22.7
+59.3
+39.4
+OpenWAM
+Base
+20.1
+72.9
+1.6
+89.2
+30.6
+84.8
+5.2
+90.4
+14.4
+84.3
+LDS (Ours)
+99.9
+7.6
+97.6
+5.2
+64.2
+61.6
+99.7
+4.0
+90.3
+19.6
+26.8 percentage points of faithful success and 42.9 percent-
+age points above the strongest baseline. These gains ex-
+tend to LangGap’s semantic changes, as shown in Table 2.
+InternW0-∆w/ LDS achieves the highest average success,
+29.7 percentage points above SAM. Across both benchmarks,
+all WAMs w/ LDS largely retain performance of their Base
+counterparts on the original LIBERO tasks.
+RoboTwin-IF results (Table 3) extend these gains to a
+different visual domain, camera viewpoint, and embodiment.
+All WAMs improve average success and Grounding on in-
+structions without trajectory demonstrations. OpenWAM
+w/ LDS gains 46.8 and 65.2 percentage points in average
+success and Grounding, respectively. Together, these re-
+sults support the effectiveness of LDS across models and
+environments, consistent with our prior-instruction competi-
+tion mechanism that strengthening I can counteract learned
+behavioral priors.
+5.3. RQ2: Supervision on Placement Destinations
+LDS extends target grounding from grasp targets to place-
+ment destinations. On both LangGap and RoboTwin-IF,
+InternW0-∆w/ LDS and OpenWAM w/ LDS consistently
+outperform their Base counterparts on these tasks (Tables 2
+and 3). For example, OpenWAM w/ LDS improves suc-
+cess over Base by 57.7 percentage points on LangGap’s 13
+destination-changing tasks and by 28.4 points on RoboTwin-
+IF Placement. Together with the Pick results, these gains
+support an instruction-defined target concept encompassing
+both objects and destinations, and suggest a shared prior-
+instruction competition mechanism for selecting either type
+of target.
+LingBot-VA w/ LDS shows limited transfer to placement
+tasks. On RoboTwin-IF Placement, destination Grounding
+improves from 16.0% to 20.0%, but task success decreases
+from 14.4% to 13.2%. Examining the grasping stage helps
+7
+
+
+Table 2. LangGap evaluation results (%). Blue bold values
+indicate the best result per column.
+Table 3. RoboTwin-IF evaluation results (%). Blue bold values
+indicate the best result per column.
+Type
+Model
+Setting
+LangGap
+LIBERO
+Spatial Object Goal Avg.
+SR↑
+VLA
+π0.5
+Base
+5.9
+37.7
+30.0 24.5
+–
+CFG [6]
+8.5
+35.8
+43.8 29.4
+–
+LangGap [7]
+10.2
+37.0
+27.2 24.8
+–
+LoRA [18]
+0.2
+0.3
+0.2
+0.2
+–
+SAM [18]
+19.7
+48.7
+56.7 41.7
+–
+WAM
+InternW0-∆Base
+6.4
+42.7
+63.3 37.5
+96.0
+LDS (Ours)
+57.5
+94.5
+62.2 71.4
+96.0
+LingBot-VA Base
+8.6
+35.9
+4.4
+16.3
+89.0
+LDS (Ours)
+18.2
+36.4
+10.0 21.5
+89.8
+OpenWAM
+Base
+1.1
+34.1
+24.4 19.9
+94.0
+LDS (Ours)
+62.9
+73.6
+45.6 60.7
+91.2
+Metric
+Model
+Setting
+Pick Placement Avg. Traj.-sup.
+Rate↑
+Rate↑
+Rate↑
+SR↑
+Success
+InternW0-∆Base
+0.0
+18.0
+9.0
+90.8
+LDS (Ours) 61.6
+33.2
+47.4
+92.0
+LingBot-VA Base
+4.8
+14.4
+9.6
+78.8
+LDS (Ours) 34.8
+13.2
+24.0
+78.6
+OpenWAM
+Base
+6.0
+9.2
+7.6
+99.0
+LDS (Ours) 71.2
+37.6
+54.4
+97.6
+Grounding
+InternW0-∆Base
+5.6
+18.0
+11.8
+LDS (Ours) 90.4
+34.0
+62.2
+LingBot-VA Base
+10.0
+16.0
+13.0
+LDS (Ours) 88.4
+20.0
+54.2
+OpenWAM
+Base
+6.4
+15.6
+11.0
+LDS (Ours) 99.6
+52.8
+76.2
+Table 4. Scene hold-out evaluation. Rates pool episodes within each group. Blue bold values indicate the best result per column.
+Model
+LIBERO-CF
+LangGap
+F. success↑
+B. success↓
+Success↑
+Sup.
+Unsup. init
+Unsup. scene
+Sup.
+Unsup. init
+Unsup. scene
+Sup.
+Unsup. init
+Unsup. scene
+InternW0-∆
+71.8
+79.1
+67.7
+14.5
+8.1
+9.4
+69.1
+76.1
+45.8
+LingBot-VA
+26.5
+32.0
+27.4
+31.6
+23.1
+24.1
+14.8
+24.8
+25.0
+OpenWAM
+61.5
+66.9
+49.6
+13.7
+4.8
+32.0
+65.4
+64.7
+39.2
+explain this discrepancy. The fraction of episodes with valid
+grasp acquisition drops from 95.2% for Base to 64.4% with
+LDS. We hypothesize that LingBot-VA’s shared FFN param-
+eters tightly couple video and action representations, making
+grasp execution sensitive to updates intended to improve
+target grounding.
+5.4. RQ3: Generalization Capability
+We evaluate whether WAMs w/ LDS follow instructions
+beyond the states and scenes used for grounding supervision
+on LIBERO-CF and LangGap. Held-out initial states (Unsup.
+init) use object poses absent from grounding supervision
+for otherwise supervised tasks and scenes. For held-out
+scenes (Unsup. scene), all grounding labels from a physical
+scene are removed. We train LDS models on the same split
+across model families. Appendix E gives split details and
+standardized rates.
+As shown in Table 4, on held-out initial states, InternW0-
+∆w/ LDS scores 79.1% on LIBERO-CF and 76.1% on Lang-
+Gap, versus 71.8% and 69.1% on supervised states. Instruc-
+tion following thus extends beyond supervised configura-
+tions, although group task compositions differ (Appendix E).
+Held-out scenes are more challenging: InternW0-∆w/ LDS
+Press the X button on the table.
+Place the X in its matching slot.
+0%
+0%
+40%
+100%
+100%
+100%
+OpenWAM
+LingBot-VA
+InternW0-△
++ LDS
++ LDS
++ LDS
+0%
+0%
+20%
+100%
+100%
+OpenWAM
+LingBot-VA
+InternW0-△
++ LDS
++ LDS
++ LDS
+Grounding / SR (%)
+60%
+80%
+Figure 5. Real-world instruction following evaluation.
+leads with 67.7% and 45.8% success on LIBERO-CF and
+LangGap, respectively; OpenWAM w/ LDS reaches 49.6%
+and 39.2%. One possible difficulty is grounding object iden-
+tities absent from LDS supervision.
+6. Real-World Experiments
+We test whether LDS improves instruction following when
+the trajectory-training data contain explicit visual shortcuts.
+8
+
+
+We compare Base and LDS variants of OpenWAM, LingBot-
+VA, and InternW0-∆on an AgileX Cobot Magic dual-arm
+robot using Press-Button and Place-in-Slot (Figure 5).
+6.1. Settings
+Both variants use the same biased trajectory data; LDS adds
+first-frame target-localization supervision. Each Base or
+LDS variant is evaluated for 10 trials per task. For Press-
+Button, there are red, green, and blue buttons on the table.
+Training data only contains trajectory of pressing the red
+button. At test-time, X ∈{green, blue} and we test five
+trials for each color. For Place-in-Slot, training data come
+from recordings with fixed piece combinations and place-
+ment orders. Consequently, the visible set of remaining
+pieces strongly predict which piece is placed next. At test
+time, X is randomly selected on each trial from carrot, egg-
+plant, broccoli, corn, and cucumber. Data preparation and
+annotation details are provided in Appendix C.
+6.2. Performance
+Figure 5 shows that LDS improves instruction following
+across all three WAMs despite the shortcuts in their trajectory
+data. On Press-Button, OpenWAM and LingBot-VA Base
+both achieve 0% success, while InternW0-∆Base achieves
+40%. With LDS, all three models reach 100% success on
+the green and blue targets, neither of which has a trajectory
+demonstration in the training set.
+On Place-in-Slot, Base success is 0% for OpenWAM and
+LingBot-VA and 20% for InternW0-∆. OpenWAM w/ LDS
+and InternW0-∆w/ LDS both reach 100% success; LingBot-
+VA w/ LDS reaches 80% Grounding and 60% success. To-
+gether, these results show that LDS can make real-robot
+behavior more responsive to the instruction while retaining
+the same biased training data.
+7. Conclusion
+We study why WAMs encode instructed targets yet act on
+learned visual priors.
+Our prior-instruction competition
+mechanism explains how an existing instruction signal can
+be outweighed by a stronger prior signal in downstream tar-
+get selection. Training-free interventions that amplify the
+instruction signal or redirect the prior-associated component
+provide causal support for this account. We also propose
+LDS and explain why it work through the lens of our pro-
+posed mechansim. Simulation and real-world experiments
+demonstrate improved target grounding with generalization.
+9
+
+
+A. The RoboTwin-IF Benchmark
+RoboTwin-IF is an instruction-following (IF) benchmark
+and training corpus for bimanual manipulation. It is built on
+top of the RoboTwin 2.0 simulation platform [2]. Because
+RoboTwin-IF has not yet been released, this appendix de-
+scribes how it is constructed, reports dataset statistics, and
+lists the task configuration we use to evaluate LDS in the
+main text.
+A.1. Motivation and Design Principle
+In most manipulation benchmarks, the initial observation
+largely determines the task. In a standard pick-and-place
+episode there is usually only one plausible object to grasp
+and one plausible receptacle. A policy can therefore achieve
+a high success rate while ignoring most of the instruction,
+and its success rate does not tell us whether it actually
+grounds language. Figure 6 illustrates how such shortcuts
+and underspecified instructions can hide failures of instruc-
+tion following. RoboTwin-IF instead follows the principle
+different goals, same initial observation.
+Every RoboTwin-IF scene is built so that several distinct
+goals are simultaneously legal and physically achievable
+from the same initial state, including the same robot config-
+uration. Only the instruction distinguishes between these
+goals. Two instructions that apply to the same scene and
+differ in exactly one controlled semantic factor form a coun-
+terfactual minimal pair. Because the two episodes share
+pixels, proprioception, and object poses, any systematic be-
+havioral difference must come from the language input.
+Platform.
+All scenes are simulated in SAPIEN with the
+RoboTwin 2.0 aloha-agilex embodiment. This is a
+dual-arm robot with two 6-DoF arms and parallel-jaw grip-
+pers. Its state and action space is a 14-dimensional joint-
+position vector, with six joints and one normalized gripper
+opening per arm. The observations are synchronized RGB
+streams from one head camera and two wrist cameras, each
+at 320 × 240 resolution. Physics is integrated at 250 Hz, and
+observations and actions are recorded at 25 Hz. We use the
+clean RoboTwin 2.0 rendering profile, without domain ran-
+domization, so that counterfactual pairs differ only in their
+instructions.
+Object
+library.
+RoboTwin-IF
+draws
+from
+the
+RoboTwin 2.0 object library:
+125 asset classes with
+575 object models. We review every model by hand and
+annotate its attributes, giving 2,386 reviewed descriptors
+over 552 models. The descriptors cover 101 object types, 13
+colors, 3 size classes, 8 shapes, and 6 materials. Every model
+is checked in simulation before it is used. A canonical-skill
+validation stage checks 796 asset–model–skill configura-
+tions with 2,544 physical attempts. A pair-validation stage
+certifies 11,285 subject–receiver terminal pairs and 4,114
+executable skill pairs for the in, on, and stack relations.
+In total, the released scenes contain 95 asset classes, 434
+distinct object models, and 75 semantic categories (Fig. 12).
+Instruction-following axes.
+RoboTwin-IF organizes lan-
+guage variation into six axes. Each axis names the single
+factor that differs between the two members of a minimal
+pair (Table 5). Axes D1a–D1c vary the referring expression,
+that is, which object is manipulated. D2a and D2b vary the
+goal, that is, which state or spatial relation must hold at the
+end of the episode. D4 varies the embodiment, that is, which
+arm must perform the action. Each axis takes values from
+a closed vocabulary of 174 cells in total. An abstract scene
+family can combine at most one D1 axis and at most one D2
+axis, with or without D4, all within a single manipulation
+step. This rule gives 23 legal axis signatures (6 single-axis,
+11 two-axis, and 6 three-axis).
+A.2. Counterfactual Data Generation Pipeline
+Many earlier generators are recipe-first: they sample a task
+template and then fill its slots one at a time. Slot-by-slot
+sampling breaks the counterfactual guarantees we need. For
+example, replacing a “red mug” with another red object can
+make the descriptor non-unique, change grasp feasibility,
+or invalidate the success checker. RoboTwin-IF is instead
+constraint-first. All semantic, geometric, and physical re-
+quirements of a contrast are written as an explicit constraint
+set. Scenes are then solved from these constraints, and every
+stage either proves that its output satisfies them or records
+a structured exclusion. Figure 7 summarizes the pipeline,
+which has eight stages.
+1. Asset and pair evidence.
+Every object model has re-
+viewed attributes, a canonical resting pose, and grasp contact
+annotations. In simulation we verify which skills each model
+supports, such as left-arm or right-arm grasping, articulation,
+pressing, clicking, and reorientation. We also verify which
+subject–receiver pairs can settle stably in each terminal rela-
+tion. Downstream stages may only use capabilities that have
+this physical evidence.
+2. Abstract scene families.
+An abstract scene family pairs
+an axis signature with an archetype and expands into a role
+graph. The nodes of the role graph are abstract roles, such
+as a subject, its contrast peers, a landmark, a receiver, or
+anchors. Its edges are flat, typed constraints, for example:
+the descriptor must be unique among the peers; the subject
+must be graspable by the specified arm; the receiver must
+accept the subject in the requested relation. Each family also
+declares its goal-variant schema, which is the set of goals
+10
+
+
+Shortcut Leakage
+Ambiguous Instruction
+Hand-Side Bias
+Invariant Target Order
+Unique Scene-Task Mapping
+Start with A, followed by B and C, placing them in order left to right.
+Blocks placed at x≈-0.085/0.000/0.085 with
+shared y in the order of A, B and C, respectively.
+Manipuland always appears on the same side as the required arm.
+Target order is fixed across ranking, stacking, and related tasks.
+Each object configuration corresponds to exactly one task.
+Goal
+False to induce
+Underspecified instructions force
+reliance on hidden dataset regularities.
+Hidden Rules
+High Success Rate Can be Misleading
+Unchanged Shortcut
+in Evaluation
+Same Task Set with
+Same Hidden Rules
+Over-Estimated Success Rate
+Memorization over Reasoning
+Instruction Ignorance
+Start with B, followed by C and A, placing them in order left to right.
+Instruction Perturbation
+VLA/WAM
+Desired Ranking Target
+Shortcut Ranking Target
+Follows training target, not user instruction.
+User
+Fake
+Figure 6. Motivation for RoboTwin-IF. Hand-side bias, fixed target orders, and one-to-one scene–task mappings can provide shortcuts,
+while underspecified instructions encourage reliance on hidden dataset rules. When evaluation preserves these regularities, high success
+rates can conceal a failure to respond to instruction changes, as illustrated by the ordering example. RoboTwin-IF tests instruction following
+by holding the initial observation fixed while varying the instructed goal.
+Table 5. Instruction-following axes in RoboTwin-IF. Each row lists the factor that changes within a minimal pair; all other aspects of the goal
+and the initial scene are held fixed. “Cells” counts the declared values of each axis.
+Code
+Name
+Values (examples)
+Cells
+D1a
+Attribute reference
+type (101), color (13), size (3), shape (8), material (6): “the white shoe”
+131
+D1b
+Spatial reference
+left/right/front/behind of a landmark, quadrants, in, on: “the remote left of the micro-
+phone”
+10
+D1c
+Ordinal reference
+leftmost/rightmost, smallest/largest, nearest/farthest to the robot or to a landmark
+8
+D2a
+Object state
+open/close, on/off, signed in-plane rotation ∈{±30◦, ±45◦, ±60◦, ±90◦}
+12
+D2b
+Terminal relation
+in, on, stack, left/right/front/behind, between, left/right of a pair
+11
+D4
+Arm choice
+left arm vs. right arm
+2
+1. Assets & pairs
+125 assets
+575 object models
+validated grasps
+2. Scene families
+6 axes, 174 cells
+43 families
+role graphs
+3. Assignment
+92.1M feasible
+47,269 realized
+families
+4. Goal variants
+161,296 variants
+164,850 declared
+minimal-pair edges
+5. Layout solving
+3 seeds / family
+81,396 scenes
+grasp witness
+6. Language
+208,155 tasks
+paraphrases
+unique reference
+7. Pair check
+one D-code
+changed
+135,081 sets
+8. Physical check
+cross-checked
+rollouts, ≥2/3
+68,214 tasks
+Symbolic generation (simulator-free)
+Scene-conditioned realization and verification
+Figure 7. The RoboTwin-IF counterfactual generation pipeline.
+Stages 1–4 are symbolic and simulator-free; stages 5–8 realize,
+verify, and physically validate concrete scenes. The counts are
+from the released generation run.
+the scene must support, and the minimal-pair edges between
+those goals. The current release defines 43 families.
+3. Combination-level assignment.
+A finite-domain solver
+enumerates complete role-to-model assignments that satisfy
+every semantic, asset, and pair constraint jointly. It never
+samples slot by slot. Across the 37 families with a non-empty
+domain there are 9.2×107 feasible assignments. We keep at
+most 2,048 assignments per family, chosen deterministically
+so that every marginal is covered: role–model, role–category,
+attribute value, and pair relation. This yields 47,269 realized
+families.
+4. Goal realization.
+Instantiating the variant schema of
+each realized family gives typed concrete goals. The release
+contains 161,296 goal variants, linked by 164,850 declared
+minimal-pair edges. Each goal is stored in a structured
+intermediate representation, from which the instruction, the
+success checker, and a symbolic skill plan are compiled.
+11
+
+
+5. Unit building and layout solving.
+Objects that must
+stay together, such as a subject and the receiver it rests in, are
+grouped into rigid units. A solver then places these units on
+the support plane under reachability, non-overlap, camera-
+visibility, and reservation constraints. For every goal variant,
+an exact-mesh motion planner must certify a collision-free
+grasp-and-lift for the arm that variant requires. The layout
+is sampled once per scene and shared by all goal variants.
+Choosing a variant never moves any object, so no variant-
+specific visual cue can leak the goal. Each realized family
+gets three independent layout seeds, giving 81,396 solved
+SceneSpecs. We also audit the dataset for layout shortcuts.
+For example, no single extreme position of the manipulated
+object (leftmost or rightmost) accounts for more than 43%
+of goal variants, and no single reachability zone accounts for
+more than 44%.
+6. Instructions and checkers.
+For each goal we write
+three or four natural-language paraphrase templates and sam-
+ple one with a seed. We check that the resulting reference
+picks out exactly one object, using the reviewed nouns and
+attributes of every object in the scene. Goals that fail this
+check (1,056 tasks, 0.5%) are excluded rather than repaired.
+Each task also receives an executable checker, expressed in
+the same goal representation, relative to the shared initial
+state. This stage produces 208,155 task records.
+7. Minimal-pair verification.
+For every declared edge we
+decompose both goals into typed D1a/D1b/D1c/D2a/D2b/D4
+projections and an invariant skeleton. The edge is accepted
+only if the two goals share the same SceneSpec and initial
+observation, differ in exactly one D-code, and have no se-
+mantic difference outside that code. Valid pairs are grouped
+into contrast sets, which are complete cliques of K goals
+that differ only along one axis. We find K = 2 for most
+families, K = 3 for the two-anchor D2b family (between,
+left of the pair, or right of the pair), and K = 4 for D1b
+quadrants. Of 158,628 declared edges, 157,668 are valid,
+and they form 135,081 complete contrast sets.
+8. Physical validation and cross-checking.
+Each task is
+executed in simulation with a scene-conditioned scripted ex-
+pert. Before execution, a descriptor gate renders the shared
+initial head camera view and requires each referenced ob-
+ject to be perceptually resolvable. The gate requires a mask
+area of at least 60 pixels and a bounding-box fill of at least
+0.12. For spatial and ordinal references it also requires an
+image separation of at least 8 pixels, and for depth rela-
+tions a depth difference of at least 10 mm. Size references
+require a projected area ratio of at least 1.12. After each
+rollout we evaluate the checkers of every goal in the scene,
+not just the instructed one, and classify the outcome as in-
+tended (only the instructed checker holds), other (a different
+D1a.color
+Shared initial observation
+“…lift the white shoe.”
+Goal variant A
+“…lift the brown shoe.”
+Goal variant B
+D2b.relation
+“…between the package
+and the phone-stand.”
+“…to the right of the pair
+(package, phone-stand).”
+Figure 8. Two counterfactual minimal pairs from RoboTwin-IF
+(head camera). Within each row, both goal variants start from
+the identical scene; only the instruction differs. Top (D1a, color):
+“Grasp and lift the white shoe.” vs. “Grasp and lift the brown shoe.”
+Bottom (D2b, relation): “Pick up the toycar and place it between
+the package and the phone-stand.” vs. “...to the right of the pair
+formed by the package and the phone-stand.”
+goal’s checker holds), ambiguous (several checkers hold),
+or failure (no checker holds). Every checker also includes a
+scene-integrity guard: objects that the goal does not mention
+may move by at most 4 mm and 3◦. A task is accepted only
+if the skill completes, the scene settles stably, and at least
+two of three execution seeds are classified as intended. The
+successful rollouts are exported as expert demonstrations.
+A.3. Dataset Statistics
+Table 6 and Fig. 9 report the size of the corpus after
+each stage. The base release has 68,214 accepted tasks
+and 203,148 expert demonstrations, containing 4.22 × 107
+frames, which is about 469 hours at 25 Hz. This total in-
+cludes a supplementary set of 2,172 demonstrations for D2a
+reorientation and for press/click actions. Figure 10 breaks
+the corpus down by axis subtype. A task can belong to
+several axes (for example, D1a+D4), so the per-axis counts
+overlap and do not add up to the total. Of the accepted tasks,
+58,043 are single-axis, 9,598 combine a D1 axis with D4,
+and 573 combine a D1 axis with D2b.
+A.4. Evaluation Protocol for LDS
+The main text reports LDS on a fixed panel of 50 RoboTwin-
+IF scenes. We chose the panel to make the comparison con-
+trolled: every scene comes with two instructions that form a
+verified minimal pair, and only one of the two instructions is
+ever paired with action supervision.
+Scene panel.
+The panel contains 25 Pick scenes and 25
+D2b (pick-and-place) scenes, all taken from the physically
+accepted training split. Each scene has two instructions that
+12
+
+
+Table 6. Size of RoboTwin-IF after each pipeline stage.
+Stage
+Count
+Remark
+Abstract scene families
+43
+23 axis signatures, 174 cells
+Feasible complete assignments
+9.2 × 107
+exact count, 37 non-empty families
+Realized scene families
+47,269
+≤2,048 per family, coverage-complete
+Goal variants
+161,296
+164,850 declared minimal-pair edges
+Solved SceneSpecs
+81,396
+27,132 families × 3 layout seeds
+Rendered task records
+208,155
+1,056 ambiguous references removed
+Valid minimal pairs
+157,668
+99.4% of declared edges
+Matrix-ready contrast sets
+135,081
+K=2/3/4
+Physically accepted tasks
+68,214
+≥2/3 seeds classified intended
+Expert demonstrations
+203,148
+42.2 M frames at 25 Hz
+10
+1
+10
+2
+10
+3
+10
+4
+10
+5
+10
+6
+Count (log scale)
+Abstract families
+Realized families
+Goal variants
+Solved SceneSpecs
+Rendered tasks
+Accepted tasks
+Expert episodes
+43
+47,269
+161,296
+81,396
+208,155
+68,214
+203,148
+Figure 9.
+Corpus size after
+each pipeline stage (log scale).
+Counts increase from families
+to goal variants because each
+realized family supports sev-
+eral goals, and from tasks to
+demonstrations because each ac-
+cepted task contributes up to
+three seeds.
+The main reduc-
+tions occur at layout solving and
+at physical validation.
+10
+0
+10
+2
+10
+4
+D1a material
+D2a orientation
+D1c robot
+D1c size
+D2b relation
+D1a size
+D1a shape
+D1c position
+D1c landmark
+D1a type
+D4 arm
+D1a color
+D1b spatial
+318
+supplement only
+648
+1,431
+53,733
+2,856
+2,430
+12,150
+5,574
+5,931
+7,725
+20,703
+21,582
+Contrast sets (generated)
+10
+2
+10
+3
+10
+4
+10
+5
+488
+682
+1,096
+1,472
+2,717
+2,918
+3,109
+3,153
+8,588
+9,130
+10,670
+14,161
+20,201
+Accepted tasks
+0
+5
+10
+15
+0.3
+0.6
+0.7
+0.9
+2.6
+1.8
+1.9
+2.0
+5.2
+5.5
+6.5
+8.7
+12.0
+Expert frames (M)
+Referential axes (D1a/D1b/D1c)
+Goal / embodiment axes (D2a/D2b/D4)
+Figure 10. Breakdown by axis subtype. Left: complete contrast sets
+produced by symbolic generation (stage 7). Middle: tasks accepted
+after physical validation. Right: expert frames. D2a reorientation
+tasks come from a separately validated supplement. Blue bars are
+referential axes; tan bars are goal and embodiment axes.
+form a minimal pair (Fig. 8), giving 100 instructions in total.
+Every scene and its expert videos were inspected manually.
+We removed scenes whose descriptors were visually am-
+biguous, along with scenes whose physical outcomes were
+questionable, adjacency (next to) goals, and near-duplicate
+object/reference combinations. The Pick scenes cover ten
+referential subtypes: color (5), type (3), size (2), material (2),
+shape (1), spatial relation (4), ordinal position (2), ordinal
+size (2), distance to the robot (1), and distance to a landmark
+(3). Each Pick scene keeps the descriptor contrast intact by
+1
+2
+3
+4
+5
+Objects per scene
+0
+10
+20
+30
+40
+50
+SceneSpecs (%)
+(a) Scene complexity
+10
+15
+Episode duration (s)
+10
+0
+10
+1
+10
+2
+10
+3
+10
+4
+10
+5
+Episodes
+median 8.0 s
+(Pick-dominated)
+D2b / transfer
+(b) Expert trajectories
+5
+10
+15
+Instruction length (words)
+0
+10
+20
+30
+Episodes (k)
+(c) Language
+Figure 11. (a) Number of objects per solved SceneSpec. (b) Dura-
+tion of the expert demonstrations (log scale). Two modes are visi-
+ble: single-step acquisition tasks (median 8.0 s) and object-transfer
+(D2b) tasks (about 12–18 s). (c) Instruction length in words; the
+corpus contains 18,270 distinct instruction strings.
+bottle
+box
+mug
+cup
+stapler
+bread
+trashbin
+bowl
+shoe
+can
+stamp
+toycar
+jar
+remote
+alarm-clock
+package
+scale
+speaker
+callbell
+bar
+fan
+sign
+mouse
+phone
+cube
+scanner
+sand-clock
+brush
+watering-can
+basket
+0
+10
+20
+30
+40
+Object instances (k)
+Figure 12. The 30 most frequent object categories, counted as
+object instances over all solved SceneSpecs; the scenes contain 75
+categories in total.
+using a different object model or geometry from every other
+Pick scene. The D2b scenes cover six destination contrasts:
+between vs. left of the pair (7), between vs. right of the pair
+(6), left vs. right of the pair (3), front vs. behind (3), left vs.
+right (3), and right vs. behind (3). We ranked expert diffi-
+culty within each pool and drew the scenes to be balanced
+across easy, medium, and hard terciles (Pick 7/10/8; D2b
+8/9/8). On average, the expert demonstrations last 8.3 s for
+Pick and 16.3 s for D2b.
+13
+
+
+Supervision split.
+For each scene, one of the two instruc-
+tions is drawn uniformly at random (Python random, seed
+42) and fixed for all models and runs. Only this instruction
+is paired with trajectories: its three accepted expert demon-
+strations, giving 50 instructions and 150 demonstrations in
+total. The counterpart instruction is never paired with an
+action trajectory. LDS adds linear-decodability supervision
+on top of this trajectory training, and it applies this supervi-
+sion to both instructions in each scene, 100 queries in total.
+For Pick scenes the target is the instructed object’s visible
+mask in the initial frame. For D2b scenes the target is the
+instructed destination region on the table, also labeled in the
+first input frame. Reference-object masks are never used as
+destination targets. The grounding objective and training
+procedure are described in Appendix D. The readout heads
+are used only during training and are discarded at inference.
+Both models start from the officially released RoboTwin
+checkpoint of their backbone. The trajectory-only baseline
+is trained on the 150 demonstrations with the model’s native
+loss. LDS continues from this checkpoint and keeps the same
+demonstrations and native loss on its action branch. Because
+LDS sees both instructions during localization training, we
+call the counterpart instructions localization-supervised, not
+language-out-of-distribution.
+Rollouts and metrics.
+Every instruction is evaluated with
+ten seeds (0–9), which control both simulator initialization
+and policy sampling noise. Each checkpoint is therefore
+evaluated on 50 × 2 × 10 = 1,000 closed-loop rollouts (500
+Pick and 500 D2b). For a given scene and seed, both instruc-
+tions start from the bit-identical initial state. Policies receive
+the three rendered RGB streams, the measured propriocep-
+tive state, and the instruction. They receive no expert action
+prefix and no auxiliary-head output. Each model runs with
+its native action chunking and denoising configuration at a
+25 Hz control rate. An episode lasts at most 1,000 control
+steps (40 s). We use the grasp-attachment physics and the
+canonical checkers from data collection without modifica-
+tion. We report three metrics:
+• Pick contact rate: the fraction of Pick rollouts in which a
+gripper physically touches the instructed object (summed
+contact impulse > 10−6) at any time. Contacts between
+objects, or between an object and the table, do not count.
+• Pick success rate: the fraction of Pick rollouts in which
+the canonical Pick checker succeeds. The checker requires
+the instructed object to be grasped, lifted off the table, and
+held stably, and it applies the scene-integrity guard. Either
+arm may be used.
+• D2b success rate: the fraction of D2b rollouts in which
+the canonical relation checker succeeds. The checker re-
+quires the subject to be grasped, transferred, released in
+the instructed destination relation, and settled stably, again
+under the scene-integrity guard.
+Rollouts are assigned to workers in complete (scene, seed)
+groups, so the two instructions of a minimal pair are always
+evaluated together. Infrastructure errors are retried and are
+never counted as task failures. A metric is reported only after
+all of its rollouts have completed.
+Task list.
+Tables 7 and 8 list all 100 evaluation instructions
+verbatim. Some instructions are grammatically awkward
+(e.g., “the farthest to the robot phone”); these come from the
+generation templates, and we did not edit them.
+B. Details of the Instruction-Target Probing
+Analysis
+This appendix describes the analysis behind the probing
+heatmaps in the main text. We explain how the stimuli and
+patch-level labels are built (§B.1), how the representations
+are extracted (§B.2), how the linear probes are fit (§B.3), and
+how they are evaluated and compared statistically (§B.4).
+We then relate probe accuracy to closed-loop success on a
+separate evaluation panel (§B.5) and compare cross-attention
+mass and spatial selectivity (§B.6).
+We use BASE for the original non-following (NF) check-
+point and IF for its instruction-following counterpart.
+B.1. Stimuli and Label Construction
+Controlled multi-instruction scenes.
+We build a panel
+of 256 scenes. Each scene contains a set of candidate ob-
+jects Cs = {o1, . . . , oKs} and comes with Ks instructions
+{ℓs,1, . . . , ℓs,Ks}, where instruction ℓs,k refers unambigu-
+ously to candidate ok. Of these scenes, 254 have two can-
+didates, one has three, and one has four, for 515 instruc-
+tions in total. The scenes cover all ten referring-expression
+sub-categories of the grounding dimension in roughly equal
+numbers (25–26 scenes each). These are color, material,
+shape, size, object type, spatial relation, landmark, absolute
+position, robot-relative position, and relative size. All in-
+structions in a scene share one initial observation: the first
+frame of an expert demonstration, with three RGB views and
+the proprioceptive state. We checked pixel by pixel that this
+observation is identical across the instructions of a scene.
+As a result, any change in the representation of a scene can
+only come from the language input. Each scene belongs to
+a different layout group, meaning a set of scenes that share
+the same object layout.
+Patch-level object ownership.
+We take a binary mask Mk
+for each candidate from the simulator’s instance segmenta-
+tion. These masks are used only to construct labels and are
+never given to the model. Each mask is resized to the head-
+camera region of the model input (256 × 320 pixels) with
+the model’s own preprocessing. We then area-pool it onto
+the 8 × 10 grid of visual tokens, where each token covers
+14
+
+
+Table 7. The 25 Pick evaluation scenes. Each row is one shared initial scene with its two minimal-pair instructions. † marks the instruction
+whose expert trajectories are used in training; the other instruction receives only LDS’s localization supervision.
+ID
+Contrast
+Instruction A
+Instruction B
+P01
+D1a color
+Grasp and lift the white shoe.†
+Grasp and lift the brown shoe.
+P02
+D1a color
+Lift the black scanner from the table.†
+Lift the multicolor scanner from the table.
+P03
+D1a color
+Pick up the brown cup.†
+Pick up the multicolor cup.
+P04
+D1a color
+Lift the red stapler from the table.†
+Lift the white stapler from the table.
+P05
+D1a type
+Lift the scanner from the table.†
+Lift the remote from the table.
+P06
+D1a type
+Grasp and lift the cards.†
+Grasp and lift the phone.
+P07
+D1a type
+Pick up the microphone.†
+Pick up the toycar.
+P08
+D1a size
+Lift the small bottle from the table.†
+Lift the medium bottle from the table.
+P09
+D1a size
+Grasp and lift the small stamp.†
+Grasp and lift the medium stamp.
+P10
+D1a material
+Lift the ceramic mug from the table.†
+Lift the metal mug from the table.
+P11
+D1a shape
+Lift the cuboid box from the table.†
+Lift the cube box from the table.
+P12
+D1b spatial
+Pick up the remote to the left of the microphone.†
+Pick up the remote to the right of the microphone.
+P13
+D1c size
+Lift the largest mouse from the table.†
+Lift the smallest mouse from the table.
+P14
+D1a material
+Pick up the metal bowl.†
+Pick up the ceramic bowl.
+P15
+D1b spatial
+Grasp and lift the cube to the right of the toycar.†
+Grasp and lift the cube to the left of the toycar.
+P16
+D1b spatial
+Grasp and lift the fan to the right of the mug.†
+Grasp and lift the fan to the left of the mug.
+P17
+D1c position
+Pick up the leftmost scanner.†
+Pick up the rightmost scanner.
+P18
+D1c position
+Pick up the rightmost jar.†
+Pick up the leftmost jar.
+P19
+D1b spatial
+Pick up the toycar to the left of the phone-stand.†
+Pick up the toycar to the right of the phone-stand.
+P20
+D1c size
+Lift the smallest trashbin from the table.†
+Lift the largest trashbin from the table.
+P21
+D1a color
+Pick up the blue bar.†
+Pick up the brown bar.
+P22
+D1c robot
+Lift the farthest to the robot phone from the table.†
+Lift the nearest to the robot phone from the table.
+P23
+D1c landmark
+Lift the nearest to the basket phone from the table.†
+Lift the farthest to the basket phone from the table.
+P24
+D1c landmark
+Grasp and lift the farthest to the bowl toycar.†
+Grasp and lift the nearest to the bowl toycar.
+P25
+D1c landmark
+Pick up the farthest to the stamp fan.†
+Pick up the nearest to the stamp fan.
+32×32 pixels. This gives the coverage ck,p ∈[0, 1] of patch
+p ∈{1, . . . , 80} by candidate k. Each patch is assigned an
+owner and a weight:
+ap =
+(
+arg maxk ck,p,
+maxk ck,p > 0,
+∅,
+otherwise,
+ωp = max
+k
+ck,p.
+(B.1)
+Here ∅denotes background. The weight ωp lowers the
+influence of patches that an object only partly covers. The
+mean weight over object-owned patches is about 0.39.
+Instruction-conditioned labels.
+For an instruction whose
+referent is ok⋆, the label of a non-background patch is
+yp = ⊮[ap = k⋆] ,
+ap̸ = ∅.
+(B.2)
+Patches of the target object are positives, and patches of the
+other candidates are negatives. Background patches get no
+label and are not used to fit the probe or to compute the main
+metric. On average, an instruction has about 7 target patches,
+7 non-target-object patches, and 66 background patches. We
+leave out background patches on purpose. Their label does
+not depend on the instruction, and they make up most of
+the image. A trivial reader that always predicts “not target”
+would already reach 91.1% per-patch accuracy over all 80
+tokens. Such a score would mainly measure object-versus-
+background discrimination, not grounding of the instruction.
+Within a scene, changing the instruction only swaps labels
+among the object patches. The instruction-dependent signal
+is therefore found only in the contrast between the target and
+the non-target objects.
+B.2. Representation Extraction
+We run the model with its standard inference configura-
+tion: the original multi-view input layout, prompt template,
+and 10-step denoising schedule, with a fixed random seed.
+Weights are not changed. We record activations with for-
+ward hooks. To confirm that the hooks do not alter com-
+putation, we checked that the predicted action chunk with
+hooks matches the original one exactly (maximum absolute
+difference 0).
+We read the 80 head-camera tokens of the clean first
+observation frame during the first denoising call. Under the
+model’s first-frame-causal attention mask, these tokens do
+not attend to future-frame or action tokens. Later denoising
+calls recompute them in the same way. The first call therefore
+fully determines the first-frame representation. Each token
+has dimension d = 3072. We record features at all L = 30
+transformer blocks and at nine sites per block (Table 9),
+15
+
+
+Table 8. The 25 D2b (pick-and-place) evaluation scenes. “Contrast” gives the destination relation of instructions A and B. All D2b contrasts
+vary only the terminal relation (axis D2b); the subject and reference objects are the same in both instructions. † as in Table 7.
+ID
+Contrast
+Instruction A
+Instruction B
+T01
+between / right of pair Pick up the toycar and place it between the package and the
+phone-stand.†
+Pick up the toycar and place it to the right of the pair formed
+by the package and the phone-stand.
+T02
+right of pair / between Pick up the bell, then set it to the right of the pair formed by
+the stamp and the mug.†
+Pick up the bell, then set it between the stamp and the mug.
+T03
+between / left of pair
+Transfer the cube so that it ends between the phone-stand and
+the cup.†
+Transfer the cube so that it ends to the left of the pair formed
+by the phone-stand and the cup.
+T04
+between / right of pair Pick up the bread, then set it between the pen holder and the
+phone.†
+Pick up the bread, then set it to the right of the pair formed
+by the pen holder and the phone.
+T05
+left of pair / between
+Pick up the phone, then set it to the left of the pair formed by
+the gong and the cup.†
+Pick up the phone, then set it between the gong and the cup.
+T06
+left of pair / between
+Transfer the remote so that it ends to the left of the pair
+formed by the toycar and the cube.†
+Transfer the remote so that it ends between the toycar and
+the cube.
+T07
+between / left of pair
+Transfer the rolling-pin so that it ends between the kettle and
+the potted-plant.†
+Transfer the rolling-pin so that it ends to the left of the pair
+formed by the kettle and the potted-plant.
+T08
+between / left of pair
+Transfer the bar so that it ends between the box and the cup.†
+Transfer the bar so that it ends to the left of the pair formed
+by the box and the cup.
+T09
+between / left of pair
+Transfer the small box so that it ends between the large box
+and the pen holder.†
+Transfer the small box so that it ends to the left of the pair
+formed by the large box and the pen holder.
+T10
+front / behind
+Pick up the cup and place it in front of the block.†
+Pick up the cup and place it behind the block.
+T11
+right of pair / between Transfer the stamp so that it ends to the right of the pair
+formed by the trashbin and the speaker.†
+Transfer the stamp so that it ends between the trashbin and
+the speaker.
+T12
+behind / front
+Pick up the mouse and place it behind the can.†
+Pick up the mouse and place it in front of the can.
+T13
+between / right of pair Pick up the box and place it between the potted-plant and the
+bell.†
+Pick up the box and place it to the right of the pair formed by
+the potted-plant and the bell.
+T14
+right / behind
+Move the sign to the right of the cube.†
+Move the sign behind the cube.
+T15
+front / behind
+Move the can in front of the bread.†
+Move the can behind the bread.
+T16
+right of pair / left of
+pair
+Pick up the toycar, then set it to the right of the pair formed
+by the bar and the bowl.†
+Pick up the toycar, then set it to the left of the pair formed by
+the bar and the bowl.
+T17
+between / right of pair Transfer the stamp so that it ends between the book and the
+box.†
+Transfer the stamp so that it ends to the right of the pair
+formed by the book and the box.
+T18
+left of pair / right of
+pair
+Transfer the stapler so that it ends to the left of the pair
+formed by the block and the sand-clock.†
+Transfer the stapler so that it ends to the right of the pair
+formed by the block and the sand-clock.
+T19
+between / left of pair
+Pick up the stapler and place it between the mug and the
+trophy.†
+Pick up the stapler and place it to the left of the pair formed
+by the mug and the trophy.
+T20
+left of pair / right of
+pair
+Pick up the stamp and place it to the left of the pair formed
+by the bottle and the remote.†
+Pick up the stamp and place it to the right of the pair formed
+by the bottle and the remote.
+T21
+left / right
+Pick up the toycar, then set it to the left of the package.†
+Pick up the toycar, then set it to the right of the package.
+T22
+right / behind
+Pick up the small speaker, then set it to the right of the
+medium speaker.†
+Pick up the small speaker, then set it behind the medium
+speaker.
+T23
+right / left
+Move the stapler to the right of the bread.†
+Move the stapler to the left of the bread.
+T24
+left / right
+Transfer the sign so that it ends to the left of the rack.†
+Transfer the sign so that it ends to the right of the rack.
+T25
+right / behind
+Move the speaker to the right of the can.†
+Move the speaker behind the can.
+giving 30 × 9 = 270 (layer, site) cells. Some sites lie on the
+residual stream and others are branch outputs before their
+output projection.
+B.3. Probe Optimization
+For every model and every (layer, site) cell, we fit an indepen-
+dent linear probe with logit f(x) = w⊤ex + b, suppressing
+the model, layer, and site indices. The probe is shared by all
+patch positions and all instructions. Here ex = (x−µ)⊘σ is
+the token activation standardized per dimension. The mean
+and standard deviation are computed on the training split
+only. The training objective is a class-balanced, coverage-
+weighted, ℓ2-regularized logistic loss:
+min
+w,b
+X
+i∈Dtrain
+αi BCE(f(xi), yi) + 1
+2∥w∥2
+2,
+αi = N
+2 ·
+ωi
+P
+j: yj=yi ωj
+.
+(B.3)
+where N is the number of labelled training patches. The
+weights αi give the two classes equal total weight, and within
+each class they are proportional to patch coverage. The
+bias is not regularized. With unit weights, this objective is
+16
+
+
+Table 9. Probing sites within each transformer block.
+Site
+Definition
+SA Q / SA K / SA V
+Self-attention query/key/value projections (before normalization and RoPE)
+SA out
+Attention-weighted values of self-attention, before Wo
+Post-SA
+Residual stream after the gated self-attention update
+CA out
+Attention-weighted values of text cross-attention, before Wo
+Post-CA
+Residual stream after the cross-attention update
+FFN write
+Gated FFN output added to the residual stream
+Block out
+Residual stream at the block output
+the same as standard ℓ2-regularized logistic regression with
+inverse regularization strength C = 1. We optimize it with
+full-batch L-BFGS: strong-Wolfe line search, history size 50,
+gradient tolerance 10−7, and at most 2000 iterations. The
+largest number of iterations used by any fit was 911. As a
+check, we compared one cell against a reference CPU solver,
+and 99.7% of test-split decisions were the same.
+Cross-validation.
+Probes are trained and scored with 5-
+fold grouped cross-validation, where the grouping variable is
+the layout group. All instructions of a scene, and all scenes
+sharing a layout, fall in the same fold. Every patch is scored
+by a probe fit on other scenes. The decision threshold is
+fixed at f(x) > 0.
+B.4. Evaluation
+Bi-directional accuracy.
+Let ˆyp = ⊮[f(xp) > 0]. For
+one instruction, let T be the set of target patches and O the
+set of patches owned by other candidates. We define
+TR =
+P
+p∈T ωp ˆyp
+P
+p∈T ωp
+,
+OR =
+P
+p∈O ωp (1 −ˆyp)
+P
+p∈O ωp
+,
+BA = 1
+2 (TR + OR) .
+(B.4)
+These are target recall (TR), other-object rejection (OR),
+and bi-directional accuracy (BA). BA is high only when
+the probe both accepts the referred object and rejects the
+object that was not referred to. We also report, separately,
+the unweighted false-positive rate on background patches. It
+is not part of BA.
+BA has an exact chance level of 0.5 for any reader that
+ignores the instruction, not only for random readers. In a
+two-candidate scene, every object patch is a positive under
+one instruction and a negative under the other. A reader that
+does not depend on the instruction, such as an “objectness”
+detector, therefore gets TR = 1, OR = 0 or the reverse,
+averaging 0.5 over the two instructions. We confirmed on
+synthetic features that an objectness reader scores 0.5 and a
+perfect reader scores 1.0.
+Aggregation.
+BA is computed for each instruction, aver-
+aged over the instructions of a scene, and then averaged over
+scenes to give the value of a (layer, site) cell in the heatmap.
+One scene is excluded for both models because only one
+of its two candidates is visible in the head view. In that
+scene, TR and OR cannot both be defined for any instruction.
+All reported statistics therefore use n = 255 scenes. Our
+summary metric for a model is the mean BA over all 270
+cells.
+Statistical testing.
+We fixed the testing protocol before
+running the comparison. Each scene gives one summary
+value per model. We test the difference between the two
+models with a paired, two-sided sign-flip permutation test
+that resamples layout groups (20,000 permutations), with
+p = (#{|∆(r)| ≥|∆|} + 1)/(R + 1). A layout-group
+bootstrap gives a 95% confidence interval, and we also report
+a Wilcoxon signed-rank test. For the cell-wise maps, we
+test each of the 270 cells with the same paired test (2,000
+permutations per cell). We control the false discovery rate at
+5% with the Benjamini–Hochberg procedure.
+Summary statistics.
+Table 10 reports the aggregate met-
+rics. TR and OR rise together under instruction-following
+training. This rules out a simple threshold shift, which would
+raise one and lower the other.
+Scope.
+The probe measures whether target identity can
+be decoded linearly from the visual tokens. It does not
+show that the policy uses this information causally when it
+generates actions. The two models share an architecture, and
+the IF checkpoint is initialized from the NF checkpoint. The
+probe panel is drawn from the IF fine-tuning corpus. The
+cross-validation split holds out layouts from the probe fit.
+B.5. Relation to Closed-Loop Instruction Following
+The analysis above shows that instruction-following training
+makes the instruction target linearly decodable from visual
+tokens. Decodability alone does not show that a policy uses
+this information when it acts. We therefore ask a weaker,
+correlational question: on scenes where the policy is actually
+17
+
+
+Table 10. Aggregate probing metrics, averaged over all 270 (layer, site) cells and 255 scenes. ∆is the paired difference (IF −BASE) with a
+layout-group bootstrap 95% CI.
+BASE
+IF
+Bi-directional accuracy (BA)
+0.515
+0.775
+Target recall (TR)
+0.520
+0.779
+Other-object rejection (OR)
+0.510
+0.770
+Background false-positive rate
+0.456
+0.272
+Scene-level BA, median [IQR]
+0.509 [0.503, 0.519]
+0.783 [0.755, 0.807]
+Cells with BA ≥0.9
+0/270
+91/270
+∆BA (95% CI)
++0.260 [+0.254, +0.267], p < 10−4
+Scenes improved / degraded
+253 / 2
+Cells significant at FDR 5%
+257/270 (all in favor of IF)
+Table 11. Association between first-frame probe accuracy and closed-loop success (36 instructions per model, 15 scenes, 20 rollouts per
+instruction). Intervals and p-values for Spearman correlations use scene-clustered bootstrap and permutation.
+Analysis
+Estimate
+95% CI
+p
+GEE, β1 (with model term)
+1.09 (OR 2.96/SD)
+[0.03, 2.15]
+0.045
+GEE, β1 (probe only)
+1.43 (OR 4.16/SD)
+[0.57, 2.28]
+0.001
+Spearman ρ, BASE
+0.32
+[−0.05, 0.59]
+0.136
+Spearman ρ, IF-S
+0.33
+[−0.11, 0.65]
+0.113
+Spearman ρ, pooled
+0.52
+[0.22, 0.74]
+–
+Spearman ρ, ∆¯
+BA vs. ∆SR
+0.36
+[−0.02, 0.65]
+0.081
+rolled out, does the probe’s accuracy on the shared first frame
+predict whether the instruction is executed successfully?
+Evaluation panel.
+We use a held-out closed-loop panel of
+16 single-object grasping scenes. Every instruction is rolled
+out with 20 random seeds and scored by the benchmark’s
+task-specific success checker. A rollout succeeds only if the
+robot grasps the referred object and holds it stably. Probe
+labels are defined by which object is selected. We therefore
+keep only the scenes whose instructions refer to at least two
+different objects. This removes one scene whose instruc-
+tions differ only in the arm to be used. The remaining 15
+scenes (14 with two candidates, one with three) contain 36
+instructions. Some instructions refer to the same object with
+different arms; they receive the same patch labels. Masks,
+patch ownership, and weights are built exactly as in §B.1.
+Models.
+We compare BASE with IF-S, which starts from
+BASE and is trained on the smaller instruction-following split
+for 10K steps. IF-S is used here because it has complete
+rollout results on this panel. Their closed-loop success rates
+over all 16 scenes are 11.1% and 47.8%. On the 36 probed
+instructions, they are 7.2% and 44.9%.
+Probe scores.
+Here we do not refit probes on the evaluation
+scenes. For each model and each (layer, site) cell, we fit one
+probe on all labelled patches of the 256-scene probing panel.
+We use the objective and optimizer of §B.3 and that model’s
+own features. We then extract features for the evaluation
+scenes with the protocol of §B.2. Again, the hooked forward
+pass reproduces the original actions exactly. The frozen
+probes are applied without any adaptation. The probe score
+of instruction j is its bi-directional accuracy averaged over
+all 270 cells. We write ¯
+BAj for this score and standardize it
+over the pooled table to get ˜zj; its pooled standard deviation
+is 0.103. Mean probe scores are 0.514 for BASE and 0.659
+for IF-S.
+Statistical analysis.
+The unit of analysis is the instruction.
+Instructions in one scene share an image and are not inde-
+pendent, so all inference treats the scene as a cluster. Before
+running the analysis, we chose as primary model a binomial
+generalized estimating equation (GEE) with exchangeable
+within-scene correlation:
+logit Pr(successjr = 1) = β0 + β1 ˜zj
++ β2 ⊮[model = IF-S], (B.5)
+where r indexes the 20 rollouts of instruction j. The model
+indicator absorbs the overall difference between the two
+models. The remaining coefficient β1 therefore measures
+how probe score relates to success after accounting for which
+model is used. As secondary analyses, we report Spearman
+correlations between ¯
+BAj and per-instruction success rate
+within each model. Confidence intervals come from a scene-
+18
+
+
+level cluster bootstrap (104 resamples). Two-sided p-values
+come from a scene-level permutation test that moves whole
+scene blocks of probe scores between scenes with the same
+number of instructions (104 permutations). We also correlate
+the paired change of each instruction, ∆¯
+BAj against ∆SRj,
+between the two models.
+Results.
+Table 11 summarizes the results. After control-
+ling for model identity, a higher probe score goes with a
+higher chance of success. One standard deviation of ˜z mul-
+tiplies the odds of success by 2.96 (ˆβ1 = 1.09, 95% CI
+[0.03, 2.15], p = 0.045). Within each model, the correla-
+tions are positive and of similar size (ρ ≈0.32–0.33). How-
+ever, with only 15 scenes they are not significant. Instruction-
+level changes between models show the same direction
+(ρ = 0.36, p = 0.081). Pooling both models without a
+model term gives a larger association (odds ratio 4.16 per
+SD, p = 0.001; ρ = 0.52). This estimate is partly driven
+by the difference between models, so we report it only for
+completeness.
+Interpretation.
+These results agree with the hypothesis
+that target information in the visual tokens supports instruc-
+tion following. The evidence, however, is limited. The pri-
+mary effect is only marginally significant, the within-model
+correlations are not significant, and the analysis is corre-
+lational. A causal claim would need interventions on the
+representation, which are outside the scope of this analysis.
+B.6.
+Cross-Attention
+Mass
+and
+Instruction-
+Following Success
+We
+examine
+whether
+cross-attention
+to
+instruction-
+discriminative words correlates with closed-loop instruction-
+following success. We then compare attention mass be-
+fore and after training, separately from its spatial selectivity
+across candidate objects. These observational comparisons
+address different questions; they do not test whether directly
+reallocating attention would improve behavior.
+Checkpoints and observations.
+On RoboTwin-IF, we
+compare the released OpenWAM RoboTwin-Full checkpoint
+with its counterfactually trained counterparts: IF after 50K
+updates on the larger split and IF-S after 10K updates on the
+smaller split. We reuse the 256-scene, 515-instruction prob-
+ing panel and the 15-scene, 36-instruction grasping panel
+from §B.1 and §B.5. All checkpoints receive the same first-
+frame observations and prompts, with inference seed 42. We
+analyze the first denoising call, all 30 blocks, 24 heads per
+block, and 80 head-camera queries, including background.
+Cross-attention probabilities are reconstructed from each
+checkpoint’s own normalized queries and keys, text projec-
+tion, and proprioceptive embedding; the UMT5 encoder is
+shared and frozen. A separate comparison uses the released
+LIBERO checkpoint and its 1,024-update LDS counterpart
+on 132 paired contexts in 23 layout groups (Appendix G).
+These are distinct training interventions and are reported
+separately.
+Discriminative tokens and mass.
+For instruction j in
+scene s, let Dsj contain token positions whose token IDs are
+absent from every other instruction in that scene. We exclude
+the tokenizer entries for the, it, and, the end-of-sequence
+token, and the proprioceptive token. An instruction with
+Dsj = ∅is omitted; scenes without an eligible instruction
+are omitted. This leaves 255 probing scenes and 12 grasping
+scenes; the LIBERO comparison retains all 132 contexts.
+This token-based filter is separate from the visibility filter
+used for probing. Writing asjℓhpt for the attention probabil-
+ity from head-camera patch p to key t at layer ℓand head h,
+we compute
+msj =
+1
+30 · 24 · 80
+X
+ℓ,h,p
+X
+t∈Dsj
+asjℓhpt,
+ms =
+1
+|Js|
+X
+j∈Js
+msj,
+(B.6)
+where Js is the set of eligible instructions. The softmax
+denominator contains all valid prompt and proprioceptive
+keys; we do not renormalize over Dsj. Each scene receives
+equal weight.
+Correlation with closed-loop success.
+The 12 eligible
+grasping scenes provide 24 instructions per model, giving 48
+model–instruction observations pooled over BASE and IF-S.
+Success rates use the 20 rollouts per instruction in §B.5. The
+Spearman correlation between per-instruction mass and suc-
+cess rate is ρ = −0.010, with a 95% CI of [−0.250, 0.212]
+from 5,000 scene-cluster bootstrap resamples. Each resam-
+pled scene retains all its instructions and both models. We
+therefore detect no significant correlation on this panel. This
+pooled analysis does not estimate a model-adjusted effect,
+and its wide interval does not establish independence. It also
+does not test the effect of an attention-only intervention.
+Paired inference.
+For each scene, we form ds
+=
+log(mtrained
+s
+/mBase
+s
+). We report R = exp(means ds) and
+a 95% interval from 5,000 bootstrap resamples of complete
+layout groups. Two-sided sign-flip tests flip whole groups,
+preserving the checkpoint pairing. On the RoboTwin panels
+each retained scene has its own layout group; the LIBERO
+panel has 23 groups. This protocol tests a mean log ratio,
+rather than the difference between arithmetic means in Ta-
+ble 12.
+19
+
+
+1.0
+1.5
+mass ratio, trained / base
+IF-S
+IF
+LDS
+a
+how much
+0
+10
+20
+layer
+−0.2
+0.0
+0.2
+0.4
+0.6
+target-vs-distractor
+selectivity S
+b
+where: RoboTwin-IF data
+RoboTwin-Full
+IF-S
+IF
+0
+10
+20
+layer
+−1.0
+−0.5
+0.0
+0.5
+1.0
+1.5
+2.0
+target-vs-distractor
+selectivity S
+c
+where: LDS supervision
+LIBERO base
+LDS
+Figure 13. Cross-attention mass and spatial selectivity before and after training. All measurements use OpenWAM’s first denoising call
+with matched inputs. (a) Geometric mean of paired trained-to-Base mass ratios, with 95% layout-group bootstrap CIs. IF-S and IF use
+255 eligible RoboTwin-IF scenes; LDS uses 132 LIBERO-CF contexts. The dashed line marks no change. (b,c) Mean target-versus-other-
+candidate log attention ratio at each layer for RoboTwin-IF training and LDS, respectively. IF-S/IF are the 10K/50K checkpoints; shaded
+bands mark zero-based layers 1–10.
+Table 12. Cross-attention mass on instruction-discriminative tokens. Base and trained values are arithmetic scene means, expressed as
+percentages of attention probability. The fold change R is the geometric mean of paired scene ratios, not the ratio of the displayed means.
+Intervals are layout-group bootstrap 95% CIs; p tests paired log ratios.
+Panel / trained model
+Scenes
+Base (%)
+Trained (%)
+R [95% CI]
+p
+RoboTwin-IF / IF
+255
+0.161
+0.112
+0.789 [0.753, 0.825]
+< 10−4
+RoboTwin-IF / IF-S
+255
+0.161
+0.143
+1.006 [0.961, 1.055]
+0.795
+Grasping / IF-S
+12
+0.147
+0.138
+1.051 [0.865, 1.316]
+0.683
+LIBERO-CF / LDS
+132
+11.163
+11.296
+1.173 [1.115, 1.226]
+< 10−4
+Mass changes depend on the training intervention.
+Fig-
+ure 13(a) visualizes the paired mass ratios. For IF-S, the
+paired change is not statistically significant on either the
+probing panel (p = 0.795) or the grasping panel (p = 0.683).
+For IF, however, mass decreases significantly (R = 0.789),
+despite its stronger target decodability. LDS on LIBERO
+produces a significant increase (R = 1.173). Thus, the
+evidence does not support a blanket claim that following
+and non-following models have indistinguishable attention
+mass. Nor does a non-significant test establish equivalence.
+These checkpoint comparisons describe training-induced
+changes, separately from the instruction-level correlation
+above. Absolute masses across panels are not directly com-
+parable because the prompts and discriminative-token sets
+differ.
+Spatial selectivity.
+We also measure which candidate’s
+patches attend to the discriminative tokens. Let qsjℓ(c) be
+their attention mass averaged over heads and over patches
+of candidate c, weighted by its fractional mask coverage. At
+each layer we take the log ratio between the target and the
+arithmetic mean of the other candidates:
+Ss =
+1
+30|Js|
+X
+j∈Js
+29
+X
+ℓ=0
+log
+qsjℓ(k⋆
+j )
+1
+Ks−1
+P
+c̸=k⋆
+j qsjℓ(c).
+(B.7)
+For two candidates, the denominator is simply the other
+object’s mass. Table 13 shows a positive paired change in
+all four comparisons, using the same group bootstrap and
+sign-flip procedure on Strained
+s
+−SBase
+s
+. This separates a
+more target-selective spatial distribution from an increase in
+total attention mass. Figure 13(b,c) shows the corresponding
+profiles across layers.
+Selectivity and scope.
+On the same 48 model–instruction
+observations, selectivity averaged over zero-based lay-
+20
+
+
+Table 13. Spatial selectivity of attention to discriminative tokens, averaged over all 30 blocks. S is the mean log target-to-other-candidate
+attention ratio; larger values indicate greater target preference. Intervals and tests use paired differences clustered by layout group.
+Panel / trained model
+Scenes
+Base S
+Trained S
+∆S [95% CI]
+p
+RoboTwin-IF / IF
+255
+0.011
+0.052
+0.042 [0.033, 0.050]
+< 10−4
+RoboTwin-IF / IF-S
+255
+0.011
+0.071
+0.061 [0.048, 0.073]
+< 10−4
+Grasping / IF-S
+12
+0.011
+0.109
+0.098 [0.065, 0.132]
+0.00025
+LIBERO-CF / LDS
+132
+0.028
+0.239
+0.211 [0.155, 0.268]
+< 10−4
+ers 1–10 also has no significant correlation with success:
+Spearman ρ = −0.021 (95% scene-cluster bootstrap CI
+[−0.297, 0.261]; 5,000 resamples). Thus, a mean shift be-
+tween checkpoints does not establish that the measure ranks
+individual instructions by success. This small panel cannot
+rule out an association. All measurements concern first-call
+cross-attention and average over heads and layers; they do
+not exclude effects in particular heads or layers. The absence
+of a detected correlation motivates studying downstream rep-
+resentations, without establishing that attention reallocation
+is ineffective.
+C. Real-Robot Data and Annotation
+This appendix describes the data used in our real-robot ex-
+periments. We cover the source recordings, the temporal and
+spatial annotations, and the procedure that turns long-horizon
+demonstrations into the single-stage, instruction-conditioned
+clips used for training. We study two tasks: pressing a col-
+ored button (Press-Button) and placing a vegetable-shaped
+puzzle piece into its matching slot (Place-in-Slot). Both tasks
+follow the design principle of RoboTwin-IF (Appendix A).
+The tabletop contains several objects that are legal targets,
+and only the instruction identifies the one the robot should
+act on.
+C.1. Platform and Source Recordings
+Embodiment and sensing.
+We collected all demonstra-
+tions on an AgileX Cobot Magic dual-arm platform. It
+has two 6-DoF arms with parallel-jaw grippers, which is
+the same morphology as the aloha-agilex embodiment
+used in simulation. Demonstrations were recorded through
+leader–follower teleoperation. At every time step we log the
+leader (“master”) arm commands and the measured follower
+(“puppet”) state. The proprioceptive stream contains six joint
+angles (rad) and one gripper opening (m) per arm, which
+gives a 14-dimensional state. Three calibrated RGB cam-
+eras record synchronously at 1280×720: one head-mounted
+camera and one camera on each wrist. Depth is also recorded
+but is not used in this work. All streams are time-aligned
+and stored at 30 Hz in the LeRobot v3 format [1]. Only
+successful demonstrations are kept.
+Long-horizon task families.
+The raw recordings are long-
+horizon, multi-stage demonstrations. Each one is condi-
+tioned on an ordered instruction.
+• Sequential button pressing. Three buttons (red, green,
+blue) are placed on the table. The robot first observes the
+scene and then presses four buttons in a prescribed color
+order, for example “Press the buttons in the order: red →
+green →blue →red.” Five collections (B1–B5) use five
+different orders.
+• Sequential slot placement. A wooden puzzle board has
+vegetable-shaped slots, and loose pieces from a pool of
+five categories (carrot, eggplant, broccoli, corn, cucumber)
+lie next to it. The robot inserts three pieces in a prescribed
+order, for example “Place the eggplant, then the corn, then
+the cucumber into their matching slots.” Five collections
+(S1–S5) use different object triples and orders.
+A third family (towel folding) was recorded in the same
+campaign. It has no discrete target choice, so we do not use
+it. In total, the ten collections for the two tasks contain 1,227
+demonstrations (about 13.1 hours of interaction). Table 14
+lists the individual collections.
+C.2. Temporal Subtask Annotation
+Every demonstration is manually segmented into contigu-
+ous, non-overlapping subtask intervals. Each interval has a
+start frame, an end frame, and a free-form label. The label
+vocabulary is task-specific.
+• Button pressing: observe and memorize the color se-
+quence; press the k-th target button (color c) for k ∈
+{1, . . . , 4}; and return arm to home pose. Each annotated
+episode has eight segments.
+• Slot placement: complete the k-th target puzzle (object
+o) for k ∈{1, 2, 3}, and return arm to home pose. Each
+annotated episode has four to six segments, depending
+on whether the operator returned the arm home between
+placements.
+The annotations are matched to the recordings through a
+platform-level episode identifier, not through the positional
+episode index, because the positional index changes when-
+ever episodes are removed during format conversion. We
+check every annotation automatically for missing segments,
+gaps, overlaps, and intervals that end before or after the
+recording. We also inspect annotations visually in a review
+21
+
+
+interface that plays the three camera streams in sync with
+the joint and gripper trajectories and the segment timeline.
+C.3.
+From
+Long-Horizon
+Demonstrations
+to
+Instruction-Conditioned Clips
+Our goal is to study instruction grounding at the level of
+a single target choice. We therefore split each demonstra-
+tion into single-stage clips. Each clip starts from a neutral
+arm configuration and ends when one target interaction is
+complete. Each clip is paired with a single-target instruction
+from a fixed template:
+“Press the red button.”
+“Place the ⟨object⟩into its matching slot.”
+We use the following selection rules.
+1. Target segments. For button pressing we keep only seg-
+ments whose target is the red button. For slot placement
+we keep every placement segment and map the object
+name in its label to the template. Observation and hom-
+ing segments are never kept as clips.
+2. Reset-start constraint. A segment is kept only if the
+segment immediately before it is a homing or observation
+segment, or if it is the first segment of the episode. This
+ensures that every clip starts from the home configuration
+and not halfway through a previous motion. In collec-
+tions S3 and S4 the operator returned home after every
+placement, so all placements qualify. In S2 and S5 some
+placements were chained without an intermediate reset,
+and those placements are discarded.
+3. Kinematic verification. Some annotations call a segment
+a reset even though the arm never returned home. To catch
+these cases, we require the joint configuration at the first
+frame of the clip to stay within 0.3 rad (max-norm over
+the 12 arm joints) of the episode’s initial configuration.
+4. Minimum length. Clips shorter than 33 frames (1.1 s)
+are discarded. This is the length of one action chunk plus
+its anchor frame in our policy parameterization.
+We exclude collection S1 entirely because part of it has
+no temporal annotation. Of the 1,101 demonstrations in
+the remaining nine collections, 65 have no annotation and
+are skipped. The selection yields 1,726 candidate segments.
+The kinematic check rejects 15 of them, and no segment
+fails the length check. The final dataset has 1,711 clips
+(353,878 frames, about 3.3 hours). We extract each clip with
+frame-exact boundaries from all three camera streams, and
+we record its provenance (source collection, episode, and
+frame range) so that every clip can be traced back to the
+original recording. Table 14 gives per-collection counts and
+Table 15 gives per-instruction statistics.
+Language–scene shortcuts in the training data.
+The re-
+sulting corpus deliberately keeps the shortcuts found in typ-
+ical real-robot data, and we use it as our biased training
+distribution. In the button task, every clip has the same in-
+struction, even though three equally reachable buttons are
+visible. The instruction therefore carries no information
+during training. In the placement task, the order of objects
+is fixed within each collection, so which piece is targeted
+correlates strongly with the scene and with which pieces are
+left on the table. In 245 placement clips only one candidate
+piece remains, and the scene alone determines the target. A
+policy can fit this data well without grounding the instruction,
+which makes it a demanding test of whether the localization
+supervision described below makes the policy attend to the
+referred object.
+C.4. First-Frame Target Localization Annotation
+For the localization objective used by LDS (Appendix D),
+every clip needs a pixel-level segmentation of the instructed
+target and of the competing candidate objects in the first head-
+camera frame. We obtain these masks with a detect–segment–
+classify pipeline built from frozen foundation models and
+then verify them with targeted human review.
+Automatic proposal.
+We take the first frame of each clip at
+the native 1280×720 resolution. Open-vocabulary detection
+with Grounding DINO [11] proposes candidate boxes.
+• For button clips, we query the three button colors. We
+keep boxes below an area limit and apply non-maximum
+suppression (IoU 0.5).
+• For placement clips, we query generic piece descriptions
+(“puzzle piece”, “small wooden puzzle piece”) and the five
+category names. We filter detections by absolute size and
+aspect. We also discard any detection that lies inside the
+detected puzzle board, so that pieces already inserted are
+not counted as candidates. We then apply non-maximum
+suppression (IoU 0.4) and resolve nested or merged boxes.
+If no piece is found, we repeat detection with relaxed
+thresholds.
+Each surviving box prompts SAM 2.1 [12] for an instance
+mask. Button identity comes directly from the color query.
+For each placement candidate, a zero-shot SigLIP 2 classi-
+fier [13] assigns one of the five vegetable categories from
+a crop around the candidate. The target mask is the candi-
+date whose class matches the instruction. All other detected
+candidates are kept as distractor masks.
+Human verification.
+A clip goes to a human review queue
+if any of the following holds: (i) the automatic stage flagged
+it, for example because no candidate matched the instruc-
+tion or the detections were suspected to be merged; (ii) any
+candidate’s class probability is below 0.7; or (iii) two candi-
+dates share a class, so the target is ambiguous. The reviewer
+sees every candidate mask overlaid on the frame. For each
+candidate, the reviewer either confirms or corrects its class
+22
+
+
+Table 14. Source collections and the clips extracted from each. “Labelled” counts demonstrations with temporal annotations. “Rejected”
+counts candidate segments that failed the kinematic reset check. Button colors: R(ed), G(reen), B(lue).
+ID
+Prescribed order
+Demos
+Labelled
+Clips
+Rejected
+Frames
+B1
+R →G →B →R
+113
+108
+216
+0
+22,628
+B2
+G →B →R →G
+106
+102
+101
+1
+9,710
+B3
+B →R →G →B
+121
+121
+121
+0
+13,941
+B4
+R →B →G →R
+125
+125
+123
+2
+11,074
+B5
+G →R →B →G
+172
+116
+116
+0
+14,953
+S1
+carrot →eggplant →broccoli
+126
+–
+excluded (incomplete annotation)
+S2
+eggplant →corn →cucumber
+120
+120
+238
+2
+74,812
+S3
+corn →broccoli →carrot
+120
+120
+354
+6
+98,483
+S4
+broccoli →cucumber →eggplant
+111
+111
+329
+4
+81,179
+S5
+cucumber →carrot →corn
+113
+113
+113
+0
+27,098
+Total (used collections)
+1,101
+1,036
+1,711
+15
+353,878
+Table 15. Instruction-level statistics of the real-robot training set. Clip durations are reported as mean ± standard deviation, with the range in
+brackets.
+Instruction
+Clips
+Duration (s)
+Press the red button.
+677
+3.56 ± 0.81 [1.9, 7.5]
+Place the broccoli into its matching slot.
+228
+9.08 ± 1.56 [5.6, 15.3]
+Place the carrot into its matching slot.
+117
+Place the corn into its matching slot.
+238
+Place the cucumber into its matching slot.
+223
+Place the eggplant into its matching slot.
+228
+Total
+1,711
+or marks it as a false detection. A clip is accepted only if ev-
+ery candidate has a verified class and exactly one candidate
+matches the instructed object. Clips with missed objects or
+broken masks are rejected and do not contribute a localiza-
+tion target. To help the reviewer, the interface also shows, for
+each candidate, how much its mask region changes between
+the first frame and the frame where the next subtask begins.
+This visual-change score is advisory and never used as a
+label.
+Outcome.
+All 677 button clips were resolved automati-
+cally, each with three candidates (one target and two dis-
+tractors). Of the 1,034 placement clips, 545 (52.7%) were
+sent to review. Reviewers removed false detections in 49
+clips and rejected 23 clips because an object was missed.
+This leaves 1,688 annotated clips (98.7% of the corpus).
+Because pieces are removed from the table as each episode
+progresses, placement clips contain three (421), two (345),
+or one (245) candidate pieces. Over all accepted clips, the
+masks contain 1,688 targets and 2,541 distractor instances.
+The masks are stored at native resolution. Each model resizes
+them to its own head-camera input resolution and projects
+them onto its own visual token grid, so all models share the
+same annotations.
+C.5. Action and Observation Representation
+All real-robot models are trained with the same action repre-
+sentation. At each anchor frame t, the state st ∈R14 is the
+measured follower joint configuration and gripper openings.
+The action target is a chunk of 32 future steps. Its joint
+dimensions are expressed relative to the current measured
+state,
+ajoint
+t,k = qleader
+t+k −qfollower
+t
+,
+k = 0, . . . , 31,
+(C.1)
+and its gripper dimensions are the absolute leader gripper
+openings. At deployment, each predicted step is converted
+to an absolute joint target, ˆqt+k = qfollower
+t
++ ˆajoint
+t,k . This
+avoids accumulating errors through integration. Using the
+leader commands rather than the follower trajectory keeps
+the operator’s intended motion, including small anticipatory
+corrections, which the follower tracks with some lag. Near
+the end of a clip, the action windows are padded by repeating
+the last value, and the padded steps are masked out of the
+loss. Normalization statistics are computed on the training
+split (1st and 99th percentiles per dimension). The visual
+context consists of the three RGB views sampled every four
+23
+
+
+frames over the action horizon. Each model consumes them
+in its native multi-view layout.
+D. Implementation Details of LDS
+This appendix details linear-decodability supervision (LDS):
+the auxiliary readout heads (§D.1), first-frame grounding
+labels (§D.2), region-balanced objective (§D.3), and joint
+optimization with the native flow-matching loss (§D.4–D.5).
+We apply LDS to OpenWAM, LingBot-VA, and InternW0-
+∆. The auxiliary heads are used only during training and
+are discarded for evaluation and deployment. Table 16 sum-
+marizes the settings, and Algorithm 1 outlines one training
+update.
+D.1. Readout Heads and Supervised Tokens
+Supervised representation.
+LDS acts on the visual to-
+kens associated with the first input frame, read at the first
+denoising call (step 0). Frame and denoising-step indices
+refer to different axes. The auxiliary loss is evaluated only
+at this call; the native flow-matching objective and inference
+schedule are retained. Appendix F presents the mechanistic
+rationale for this timing choice using an independent Motus
+case study. Let Hℓ∈RN×d contain the head-camera token
+representations at layer ℓ, where N = GhGw is the number
+of tokens in the head-view grid and d is the hidden width.
+The supervised layers are Ls = {9, 19, 29}. These are the
+same intermediate visual representations used by the policy;
+LDS does not change its visual tokenization or introduce a
+separate visual encoder.
+Sub-token predictions.
+Each token predicts a 4×4 grid of
+target-grounding logits. For each supervised layer, a linear
+map shared across token positions produces
+Zℓ= HℓWℓ+ bℓ,
+Wℓ∈Rd×16,
+Zℓ∈RN×16.
+(D.1)
+The bias bℓ∈R16 is broadcast across positions. Rearranging
+the 16 outputs of each token into its corresponding sub-
+cells yields a 4Gh × 4Gw grounding map. In the 8 × 10
+token layout illustrated in the main text, this gives a 32 × 40
+map and Zℓ∈R80×16. The sub-cell layout provides finer
+supervision for partially occupied patches while keeping the
+underlying visual tokens unchanged.
+Capacity of the heads.
+A head reads one token at a time
+and shares its weights across positions. It therefore cannot
+perform its own spatial attention or combine neighboring
+tokens. The auxiliary objective encourages the backbone to
+make the instruction-relevant target information accessible
+to this linear readout. Unlike the diagnostic probes in Ap-
+pendix B, the LDS heads are trained jointly with the WAM
+and propagate gradients into its representations.
+D.2. First-Frame Grounding Labels
+Each grounding query contains an initial observation o, an
+instruction c, a target region T , and alternative candidate
+regions O. Both object-target and placement-destination
+supervision are attached to the first input frame.
+• Object targets. The positive region is the instructed ob-
+ject’s visible mask in the first head-camera image. Other
+candidate objects form the negative object region. For
+RoboTwin-IF Pick, these are the objects that distinguish
+the paired instructions. The real-robot button and slot tasks
+use the first-frame instance masks described in §C.4.
+• Placement destinations. The positive region is the in-
+structed destination in the first input frame. For RoboTwin-
+IF Placement (D2b), paired instructions keep the manip-
+ulated object fixed and specify different destination rela-
+tions. The counterpart destination supplies an alternative
+region. A reference object defines the spatial relation; its
+visible mask is not used as the destination target.
+Alignment
+with
+the
+prediction
+grid.
+Target
+and
+alternative-region masks are aligned with the head-camera
+view used by the model and pooled to the sub-cell grid. Let
+ti and oi be the target and alternative-region coverages of
+sub-cell i, respectively, and let gi indicate background. The
+coverages lie in [0, 1] and are arranged in the same token and
+sub-cell order as Zℓ. Background consists of sub-cells with
+neither target nor alternative coverage. These spatial weights
+align the regional supervision with the prediction map.
+Supervision availability.
+Grounding labels do not add
+action demonstrations. The native trajectory training set
+remains unchanged, while grounding supervision can in-
+clude instructions without corresponding trajectories. In
+RoboTwin-IF, only one instruction per scene supplies demon-
+strations, while both members of the pair supply grounding
+labels (§A.4). The labels are training targets and are not
+provided as policy inputs at inference.
+D.3. Region-Balanced Grounding Objective
+The auxiliary objective separates the instructed target, alter-
+native candidates, and background. This prevents the large
+background area from dominating the supervision. Let z(ℓ)
+i
+denote a sub-cell logit from layer ℓ. For regions with nonzero
+coverage, the normalized losses are
+L(ℓ)
+target =
+P
+i ti softplus(−z(ℓ)
+i )
+P
+i ti
+,
+L(ℓ)
+other =
+P
+i oi softplus(z(ℓ)
+i )
+P
+i oi
+,
+L(ℓ)
+bg =
+P
+i gi softplus(z(ℓ)
+i )
+P
+i gi
+.
+(D.2)
+24
+
+
+Table 16. LDS training configuration. The grounding map resolution follows the model’s visual-token grid; the 8 × 10 example yields a
+32 × 40 map.
+Setting
+Value
+Models
+OpenWAM, LingBot-VA, InternW0-∆
+Supervised layers
+Ls = {9, 19, 29}
+Supervised observation
+First input frame
+Auxiliary denoising call
+First call (step 0) only
+Grounding targets
+Instructed object or placement destination
+Auxiliary head
+Position-shared linear map, d →16 per layer
+Sub-cell grid
+4 × 4 per visual token
+Target / alternative / background weights
+0.50 / 0.45 / 0.05
+Auxiliary loss weight
+λ = 0.25
+WAM / head learning rate
+10−5 / 3 × 10−4
+Optimizer separation
+WAM: combined loss; heads: grounding loss only
+Counterfactual trajectory supervision
+None for instructions without demonstrations
+Inference
+Auxiliary heads discarded
+Algorithm 1 One logical LDS update.
+Require: WAM fθ initialized from Base; auxiliary heads ϕ; separate WAM and head optimizers
+1: Draw a native batch Bnative from Doriginal.
+2: Draw first-frame grounding queries Bground from Dground.
+3: Compute the native loss LFM(Bnative; θ).
+4: Obtain first-frame Hℓat the first denoising call for each query and ℓ∈{9, 19, 29}.
+5: Predict Zℓ= HℓWℓ+ bℓand align the target, alternative, and background labels with its sub-cells.
+6: Compute Laux(Bground; θ, ϕ) using Eqs. (D.2)–(D.3).
+7: Form Ltotal = LFM + 0.25 Laux and backpropagate.
+8: Update θ with its optimizer at learning rate 10−5.
+9: Update ϕ with its optimizer at learning rate 3 × 10−4; only the grounding term depends on ϕ.
+Here softplus(−z) and softplus(z) are binary cross-entropy
+losses for positive and negative labels. Coverage weights the
+spatial contribution of each sub-cell within a region. It does
+not change the binary target into a soft label.
+The regional terms are combined using the weights in the
+main text:
+Laux =
+1
+|Ls|
+X
+ℓ∈Ls
+ 0.50 L(ℓ)
+target
++ 0.45 L(ℓ)
+other + 0.05 L(ℓ)
+bg
+
+.
+(D.3)
+The batch objective averages over grounding queries. The
+alternative-region term encourages the representation to dis-
+tinguish the instructed target from other plausible goals in
+the same observation. Background receives a smaller weight
+because object–background separation alone does not re-
+quire following the instruction. Equation (D.2) is stated for
+non-empty regions; an absent region contributes no spatial
+samples.
+D.4. Joint Training and Gradient Routing
+Native and auxiliary supervision.
+The WAM retains its
+native flow-matching objective on the original trajectory data,
+Doriginal. Grounding queries from Dground supervise the
+auxiliary heads and the intermediate visual representations.
+Following the main text, the total objective is
+Ltotal = LFM(Doriginal)
++ λLaux(Dground),
+λ = 0.25.
+(D.4)
+A grounding query without a trajectory contributes only to
+the auxiliary term. It supplies neither action nor future-video
+supervision. The observation and instruction are processed
+through the model’s visual and language conditioning, and
+the auxiliary heads read the selected first-frame visual to-
+kens.
+Parameter updates.
+Let θ denote the trainable WAM pa-
+rameters and ϕ = {Wℓ, bℓ}ℓ∈Ls the auxiliary-head param-
+eters. The WAM receives gradients from both terms of
+Eq. (D.4). The heads receive gradients only through the
+grounding objective, because they do not participate in na-
+tive action or video prediction. Shared parameters receive
+grounding gradients through their contribution to the super-
+vised visual representations.
+25
+
+
+D.5. Optimization and Model Integration
+Base checkpoints.
+For LIBERO-CF and LangGap, LDS
+starts from each model’s released LIBERO checkpoint. For
+RoboTwin-IF, a Base checkpoint is first obtained by fine-
+tuning the released RoboTwin checkpoint on demonstrations
+for one selected instruction per scene. LDS then contin-
+ues from that Base checkpoint while retaining its original
+trajectory supervision.
+Separate optimizers.
+The WAM and the auxiliary heads
+use separate optimizers. The WAM learning rate is 10−5,
+and the head learning rate is 3 × 10−4. The WAM optimizer
+uses the combined objective; the head optimizer uses only
+grounding gradients. Table 16 summarizes these settings,
+and Algorithm 1 gives the logical training update. This de-
+scription is independent of how native and grounding batches
+are distributed across devices.
+Model integration and inference.
+The same LDS objec-
+tive is applied to the three WAM families. Each model’s
+head-camera representations and label grid are aligned with
+its own visual layout. LDS adds auxiliary supervision to the
+native architecture; the linear heads do not supply inputs to
+the policy. Evaluation uses the updated WAM parameters
+with all auxiliary heads removed.
+E. Scene Hold-Out Protocol and Composition-
+Standardized Aggregation
+This appendix specifies the hold-out protocol behind the gen-
+eralization results of Table 4, which reports episode-pooled
+rates. It defines the units over which grounding supervi-
+sion is withheld and describes the split. As a supplementary
+comparison, we also report composition-standardized rates
+because the coverage groups contain different mixtures of
+task types.
+E.1. Units of Supervision
+Both benchmarks are built on LIBERO, and we distinguish
+four units.
+• Initial state. Each task comes with a fixed set of official
+initial states: 50 per task in LIBERO-CF and 10 in Lang-
+Gap. Initial states of the same task share the object set
+and layout and differ only in the randomized poses of the
+objects.
+• Task. A task is one BDDL specification paired with one
+instruction. An evaluation episode is a (task, initial state)
+pair.
+• Physical scene. A physical scene groups all tasks that
+share the same physical description, meaning the same
+object set and placement regions in the BDDL physical
+sections, or the same official initial-state file. We take
+the transitive closure of both relations, so tasks connected
+through either one always end up in the same scene. A
+scene typically contains one to four tasks.
+• Task kernel. The task kernel abstracts away the con-
+crete scene.
+It records how an instruction departs
+from the original task of its scene:
+which element
+changes (the object to pick, the destination, or both),
+the spatial predicate (on or in), and the destination cat-
+egory with instance identifiers removed. Examples are
+pick:on:plate (a different object goes to the same
+plate) and destination:on:flat stove (the same
+object goes to a different receptacle, the stove). Goals
+with several literals and articulated actions (drawers, stove
+knobs) get a separate other: kernel.
+Grounding supervision.
+LDS supervises a localization
+view: the first input frame of a supervised task, together
+with labels of the instructed target and alternative candidates.
+Pick views label objects; Place views label placement desti-
+nations. Pick views use official initial states 0, 1, and 2 of
+each supervised task. Place views use the initial states with
+valid destination-localization labels. The number of included
+initial states can therefore differ between task types.
+Within the LIBERO-CF supervision panel, Place views
+come from the two tasks whose counterfactual goals move
+the object to a different receptacle body (Long-4 and Long-6).
+The LangGap supervision panel contains twelve destination-
+change tasks. Both types use first-frame supervision, consis-
+tent with the main text. The hold-out affects only grounding
+supervision; demonstration trajectories used by the native
+action objective are unchanged.
+E.2. Hold-Out Construction
+We withhold entire physical scenes from grounding supervi-
+sion and stratify the hold-out by task kernel. Let Gk denote
+the set of physical scenes that contain at least one supervision
+task of kernel k. The hold-out quota of kernel k is
+mk = max
+ 1, round(|Gk|/3)
+
+,
+qk =
+(
+0,
+|Gk| = 1,
+min
+ |Gk| −1, mk
+
+,
+|Gk| ≥2.
+(E.1)
+We visit all scenes once, in a random order drawn with a
+fixed seed (2026102727). A scene is held out if every kernel
+it contains still has unused quota, and the quota of each such
+kernel is then decremented. The procedure enforces three
+properties.
+1. No scene contributes both supervised and held-out views.
+2. No task appears in both splits.
+3. Every kernel keeps at least one supervised scene.
+Together, these guarantee that an episode from a held-out
+scene tests a familiar kernel in an unfamiliar scene. Kernels
+with a single scene are never held out. The resulting split
+26
+
+
+holds out 7 of 24 scenes in LIBERO-CF and 6 of 18 in Lang-
+Gap. We draw the split once and share it across all model
+families: OpenWAM, LingBot-VA and InternW0-∆are fine-
+tuned on identical supervision. Each model’s training run is
+initialized independently, and no model continues from its
+all-train checkpoint. Table 17 summarizes the split.
+In LIBERO-CF, the split kernels are pick:in:basket
+(3 of 10 scenes held out) and pick:on:plate (4 of 11).
+Both destination kernels have a single scene and therefore
+remain fully supervised. In LangGap, the hold-out cov-
+ers
+pick:in:basket
+(3/10),
+pick:on:plate
+(2/6),
+destination:on:flat stove
+(2/5),
+destination:on:wooden cabinet
+(1/4),
+and
+destination:on:glazed rim porcelain ramekin
+(1/3).
+E.3. Coverage Groups
+We evaluate every model under the full official protocol: all
+50 LIBERO-CF tasks with 50 initial states each, and all 59
+LangGap tasks with 10 initial states each. Each episode
+is assigned to a group according to the supervision of the
+evaluated model.
+• Sup. The (task, initial state) pair was itself a localization
+view.
+• Unsup. init. The task was supervised, but not from this
+initial state.
+• Unsup. scene. The task was never supervised, but its
+kernel was supervised in another scene.
+• Unsup. kernel. The kernel was never supervised. We
+exclude this group from the standardized comparison
+and make no generalization claim for it. It contains 50
+LIBERO-CF and 70 LangGap episodes.
+The Unsup. scene group contains the held-out tasks. In
+LIBERO-CF it also contains three evaluation tasks that are
+absent from the supervision panel but share a supervised
+kernel (Long-1, Long-2, and Long-3). Table 18 lists the size
+of each group.
+E.4. Composition Imbalance Across Coverage
+Groups
+Pick and Place views sample initial states at very different
+rates. A supervised Pick task contributes exactly three of its
+initial states to Sup., which is 6% of a LIBERO-CF task and
+30% of a LangGap task. A supervised Place task contributes
+the initial states with valid destination labels, which is 83%
+of a LangGap Place task on average. Place episodes therefore
+make up a much larger share of Sup. than of Unsup. init
+(Table 18). In LangGap, Place episodes make up 40.7% of
+Sup. but only 5.9% of Unsup. init, although they make up
+23.1% of the benchmark’s tasks.
+This imbalance matters because the two task types differ
+sharply in difficulty. Place requires an acquisition, a trans-
+port, and a relational placement, and for most models it has
+a much lower success rate than Pick (Table 20). Write pg
+and rg for the Pick and Place success rates in group g, and
+πg for its Place share. The episode-pooled rate is then
+¯spool
+g
+= (1 −πg) pg + πg rg.
+(E.2)
+Because πg differs across groups, a difference between two
+pooled rates mixes a genuine difference in performance with
+a difference in task mix. The mix effect can even reverse the
+comparison, an instance of Simpson’s paradox. On LangGap,
+LingBot-VA has similar Pick rates in Sup. and Unsup. init
+(25.0% and 26.3%) and fails every Place episode in both
+groups. Yet its pooled Sup. rate (14.8%) is ten points below
+its pooled Unsup. init rate (24.8%), because Place makes up
+40.7% of the former and 5.9% of the latter. The same effect
+pulls down the pooled Sup. rate of InternW0-∆.
+E.5. Composition-Standardized Rates
+We remove the mix effect with direct standardization. Every
+group is evaluated under one common reference composition
+π⋆:
+¯sstd
+g = (1 −π⋆) pg + π⋆rg,
+π⋆=
+# Place tasks
+# tasks with supervised kernels.
+(E.3)
+The rates pg and rg are pooled over the episodes of each
+type within the group. As the reference we take the task
+composition of the benchmark itself, giving equal weight
+to each task outside Unsup. kernel: π⋆= 3/49 = 6.1%
+for LIBERO-CF and 12/52 = 23.1% for LangGap. This
+reference has three useful properties. It does not depend on
+how many initial states the supervision protocol happens to
+sample. It is the same for all groups and all models. It also
+matches the Pick/Place composition of uniformly sampled
+evaluation tasks. For a group whose composition matches the
+reference, the standardized and pooled rates coincide. When
+groups have the same per-type rates, their standardized rates
+are equal, whatever their composition. We apply the same
+weights to the biased-success metric of LIBERO-CF.
+Uncertainty.
+We compute 95% confidence intervals with
+a stratified, task-clustered bootstrap. Within each group
+and task type, we resample tasks with replacement and then
+resample episodes within each drawn task. The two resam-
+pled rates are combined with the fixed weights of Eq. (E.3).
+We use 2,000 replicates and report these intervals with the
+standardized point estimates in Table 19.
+E.6. Results
+Table 19 compares the pooled and standardized rates, and
+Table 20 reports the per-type rates from which both are
+derived. Three observations follow.
+27
+
+
+Table 17. Scene hold-out split of the grounding supervision. Contexts are localization views; each view is supervised with its two instructions
+(queries). A kernel is split if at least one of its scenes is held out.
+LIBERO-CF
+LangGap
+Supervision tasks / physical scenes
+46 / 24
+52 / 18
+Task kernels (split / total)
+2 / 7
+5 / 11
+Held-out scenes / tasks
+7 / 11
+6 / 12
+Contexts: supervised / held out
+117 / 33
+162 / 56
+Queries: supervised / held out
+234 / 66
+324 / 112
+Table 18. Composition of the coverage groups: episodes (tasks) by task type. The reference share is the fraction of Place tasks among all
+tasks outside Unsup. kernel.
+Benchmark
+Group
+Pick
+Place
+Total
+Place share
+LIBERO-CF
+Sup.
+99 (33)
+18 (2)
+117
+15.4%
+Unsup. init
+1551 (33)
+82 (2)
+1633
+5.0%
+Unsup. scene
+650 (13)
+50 (1)
+700
+7.1%
+Reference
+(46)
+(3)
+6.1%
+LangGap
+Sup.
+96 (32)
+66 (8)
+162
+40.7%
+Unsup. init
+224 (32)
+14 (6)
+238
+5.9%
+Unsup. scene
+80 (8)
+40 (4)
+120
+33.3%
+Reference
+(40)
+(12)
+23.1%
+Task composition explains much of the Sup./Unsup. init
+gap.
+After standardization, LangGap Sup. and Unsup. init
+are close for every model that showed an inversion: LingBot-
+VA 19.2 vs. 20.3 and InternW0-∆73.0 vs. 73.9, compared
+with 14.8 vs. 24.8 and 69.1 vs. 76.1 pooled. On LIBERO-CF,
+standardization raises faithful success in Sup. (OpenWAM
+61.5→67.1, InternW0-∆71.8→79.7) and lowers biased suc-
+cess (OpenWAM 13.7→7.3). This happens because the two
+LIBERO-CF Place tasks are over-represented in Sup., and
+most models still complete the original goal on them. Stan-
+dardization substantially reduces these apparent gaps. It
+does not make the groups identical: their tasks and initial
+states still differ, so the remaining rate differences are not a
+matched estimate of generalization loss.
+Held-out scene results remain qualitatively consistent.
+The Unsup. scene group has a Place share of 33.3% on
+LangGap and 7.1% on LIBERO-CF, compared with refer-
+ence shares of 23.1% and 6.1%. Its standardized rates move
+by at most 3.8 percentage points. The qualitative conclu-
+sion of Table 4 stands under both aggregations. Instruction
+following is observed in scenes withheld from grounding
+supervision, although success rates remain below those in
+supervised scenes for most model–benchmark combinations.
+For example, OpenWAM reaches 50.0% faithful success in
+LIBERO-CF held-out scenes against 66.1% for unsupervised
+initial states, and 41.0% against 59.4% on LangGap.
+The Place strata are small.
+In LIBERO-CF, Place is rep-
+resented by two tasks in Sup. and Unsup. init and by a single
+task (Long-1) in Unsup. scene. Its per-type rates are there-
+fore close to all-or-nothing and are highly uncertain. An
+example is InternW0-∆’s 100% on the one held-out Place
+task. Because π⋆= 6.1%, these rates affect the standard-
+ized LIBERO-CF numbers only marginally. We report the
+per-type rates so that readers can apply any other reference
+composition, including an equal Pick/Place weighting, di-
+rectly through Eq. (E.3).
+F. Mechanistic Evidence for LDS Design
+Choices
+This appendix examines two choices in LDS: applying the
+auxiliary loss at the first denoising step, and supervising
+instruction-conditioned visual representations. We trace how
+an instruction affects action generation in Motus, an inde-
+pendent mechanistic case study. Activation interventions
+show that most of its measurable instruction effect enters
+through the video stream during the first denoising update.
+These findings motivate our design; they do not establish
+that first-step supervision is optimal for every WAM. We
+describe the diagnostic setting (§F.1), the evidence for first-
+step supervision (§F.2), the visual pathway (§F.3), and the
+implications for spatial grounding (§F.4).
+F.1. Diagnostic Model and Intervention Protocol
+Independent model.
+We analyze a RoboTwin-finetuned
+Motus checkpoint, separately from OpenWAM, LingBot-
+28
+
+
+Table 19. Scene hold-out results (%) under pooled and composition-standardized aggregation. Pooled averages all episodes of a group and
+gives the values used in Table 4. Std. is a supplementary comparison, reweighting Pick and Place to the benchmark’s task composition
+(Eq. (E.3); Place weight 6.1% for LIBERO-CF and 23.1% for LangGap). F.: faithful success (↑); B.: biased success (↓). LangGap reports
+success.
+Model
+Agg.
+LIBERO-CF
+LangGap SR↑
+Sup.
+Unsup. init
+Unsup. scene
+Sup.
+Unsup. init
+Unsup. scene
+F.
+B.
+F.
+B.
+F.
+B.
+OpenWAM
+Pooled
+61.5
+13.7
+66.9
+4.8
+49.6
+32.0
+65.4
+64.7
+39.2
+Std.
+67.1
+7.3
+66.1
+5.7
+50.0
+31.4
+64.2
+59.4
+41.0
+LingBot-VA
+Pooled
+26.5
+31.6
+32.0
+23.1
+27.4
+24.1
+14.8
+24.8
+25.0
+Std.
+29.4
+24.1
+31.6
+23.9
+27.7
+23.4
+19.2
+20.3
+28.8
+InternW0-∆
+Pooled
+71.8
+14.5
+79.1
+8.1
+67.7
+9.4
+69.1
+76.1
+45.8
+Std.
+79.7
+7.0
+78.2
+8.9
+67.4
+9.5
+73.0
+73.9
+46.0
+95% CIs of standardized rates (task-clustered bootstrap), in the column order above.
+OpenWAM: [54.1, 78.9], [3.7, 13.0], [56.0, 75.5], [4.5, 7.2], [30.6, 67.9], [12.9, 53.1], [51.5, 75.4], [47.8, 71.9], [16.5, 66.9].
+LingBot-VA: [16.1, 43.6], [13.7, 36.5], [20.5, 43.3], [15.0, 34.5], [10.1, 46.4], [7.9, 42.5], [8.8, 31.2], [10.0, 31.6], [9.6, 57.7].
+InternW0-∆: [69.2, 89.1], [3.7, 11.8], [69.7, 85.3], [5.3, 13.6], [43.2, 88.3], [0.0, 25.4], [61.2, 84.1], [60.4, 86.1], [21.5, 71.2].
+Table 20. Per-type success rates (%) within each coverage group, the quantities pg (Pick) and rg (Place) of Eq. (E.3). Episode and task
+counts per cell are given in Table 18. LIBERO-CF Place cells contain one or two tasks.
+Model
+Type
+LIBERO-CF
+LangGap SR↑
+Sup.
+Unsup. init
+Unsup. scene
+Sup.
+Unsup. init
+Unsup. scene
+F.
+B.
+F.
+B.
+F.
+B.
+OpenWAM
+Pick
+70.7
+3.0
+70.3
+0.8
+52.6
+27.5
+62.5
+66.5
+45.0
+Place
+11.1
+72.2
+1.2
+80.5
+10.0
+90.0
+69.7
+35.7
+27.5
+LingBot-VA
+Pick
+31.3
+19.2
+33.7
+19.1
+29.5
+18.9
+25.0
+26.3
+37.5
+Place
+0.0
+100.0
+0.0
+97.6
+0.0
+92.0
+0.0
+0.0
+0.0
+InternW0-∆
+Pick
+84.8
+2.0
+83.3
+4.3
+65.2
+10.2
+78.1
+76.8
+46.2
+Place
+0.0
+83.3
+0.0
+79.3
+100.0
+0.0
+56.1
+64.3
+45.0
+VA, and InternW0-∆in the main evaluation. Motus jointly
+denoises eight future video frames and a chunk of 16 biman-
+ual actions, A ∈R16×14, using 20 flow-matching steps. Its
+30 transformer blocks contain three residual streams: video
+(360 tokens, width 3072), action (21 tokens, width 1024),
+and understanding (187 tokens, width 512). These streams
+exchange information through joint self-attention over 568
+tokens; feed-forward layers are stream-specific. UMT5 en-
+codes the instruction for video-stream cross-attention, while
+Qwen3-VL processes the observation and instruction to ini-
+tialize the understanding stream. The action stream has no
+direct language cross-attention. Between denoising steps, the
+video and action latents are carried forward and the residual
+streams are rebuilt.
+Step, frame, and layer indices.
+We index denoising calls
+from k = 0 to 19. Thus, step 0 means the first sampler
+call, not a diffusion-time value of zero or a clean sample. It
+is also distinct from the first input frame, which specifies
+the observation tokens carrying the grounding labels. Layer
+indices in this analysis are zero-based. The 20-step schedule
+belongs to this Motus study; it does not replace the native
+schedules used by the models elsewhere in the paper.
+Matched counterfactuals.
+We use a diagnostic panel of
+87 RoboTwin-IF contrast sets, distinct from the main bench-
+mark evaluation in Appendix A. Within a pair, the observa-
+tion is byte-identical and instructions LA, LB differ in one
+word. For each of eight seeds, both instructions and all inter-
+vention conditions share the same initial noise. We cluster
+the resulting action chunks into behavior modes and test for
+instruction-dependent mode distributions using an exact per-
+mutation test with Benjamini–Hochberg correction. Six of
+87 sets are responsive at q < 0.10, all involving spatial refer-
+ences or arm choice. The main patching analyses use these
+six pairs, two donor–receiver directions, and three seeds: 36
+29
+
+
+0
+5
+10
+15 19
+split step i
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+λ (0 = receiver, 1 = donor)
+a
+T5 cross-attn write
+steps < i
+steps ≥i
+0
+5
+10
+15 19
+latents into steps 0–k patched
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+k = 1: latent handed
+from step 0 to step 1
+b
+inter-step latent
+0
+20
+single layer (step 0)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+c
+T5 write, one layer at a time
+90th percentile
+over 36 units
+Figure 14. Instruction influence is concentrated early in denoising. (a) Donor cross-attention outputs patched at steps < i or ≥i: lines
+show the stride-1 sweep (4 units), and markers the stride-3 sweep (36 units). (b) Patching inter-step latents shows that the state passed from
+step 0 to step 1 already carries most of the donor effect. (c) Single-layer cross-attention patches within step 0 (36 units). Bars are means and
+ticks the 90th percentile; layers 1–10 are shaded. All panels use the action projection score in Eq. (F.1).
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+seed
+receiver (no patch)
+donor (native)
+step-0 state at L0
+step-0 state at L1
+step-0 state at L2
+step-0 state at L3
+L
+R
+L
+b
+L
+L
+L
+L
+L
+L
+L
+L
+L
+L
+L
+L
+L
+R
+b
+R
+R
+L
+R
+L
+R
+L
+b
+b
+R
+L
+L
+L
+L
+R
+L
+R
+R
+L
+R
+L
+R
+L
+L
+L
+R
+L
+L
+L
+L
+R
+L
+R
+R
+L
+R
+L
+R
+L
+L
+L
+R
+L
+L
+L
+L
+R
+L
+R
+R
+L
+R
+L
+R
+L
+L
+L
+R
+L
+L
+L
+L
+R
+L
+R
+R
+L
+R
+L
+R
+L
+L
+L
+R
+L
+L
+L
+1/16
+6/16
+6/16
+6/16
+6/16
+6/16
+# R
+Figure 15. Early-state replacement preserves a component of behavior. Arm modes over 16 seeds in the controlled two-cup experiment:
+L, left only; R, right only; b, both arms. The four patched conditions replace all three residual streams at a layer boundary within step 0, then
+resume receiver conditioning. They recover the donor’s six R seeds, but not its three b seeds. The right margin counts R outcomes, not task
+success.
+units in total. This selection studies how existing instruc-
+tion effects arise, rather than estimating their prevalence in
+arbitrary scenes.
+Intervention readout.
+For a flattened action chunk x, we
+measure displacement from the receiver xR toward the donor
+xD by
+λ(x) = ⟨x −xR, xD −xR⟩
+∥xD −xR∥2
+2
+.
+(F.1)
+Here λ is an intervention score, separate from the LDS loss
+weight. Zero and one match the receiver and donor projec-
+tions, respectively; orthogonal trajectory differences may re-
+main. We also report switches to the donor’s discrete behav-
+30
+
+
+ior mode. No-patch and full-patch controls give λ = 0.000
+and 1.000, respectively, on every unit.
+F.2. Why Apply LDS at the First Denoising Step?
+Most instruction influence enters in step 0.
+Cross-
+attention reads the instruction at every layer and denoising
+step, but these reads have very different behavioral effects.
+We replace the receiver’s cross-attention outputs with the
+donor’s either before a split step i or from i onward (Fig-
+ure 14a). In the fine, stride-1 sweep over four units, patching
+step 0 alone gives λ = 0.95, whereas patching steps 1–19
+gives 0.13 and steps 2–19 gives 0.00. A stride-3 sweep over
+all 36 units gives 1.00 for steps < 3 and 0.02 for steps ≥3.
+The wider sweep supports an early-step concentration, while
+the smaller, finer sweep localizes most of that effect to the
+first call.
+The latent carries the effect forward.
+Replacing the
+video and action latents passed from step 0 to step 1 with the
+donor’s gives λ = 0.96, even though the remaining steps use
+the receiver’s instruction (Figure 14b). Thus, an instruction
+effect established by the first update can persist through later
+updates with conflicting language conditioning. This sup-
+ports applying supervision where the initial state of action
+generation is formed.
+Observation-based state replacement.
+We also test early-
+state persistence using a controlled pair of two-cup scenes
+that differ in color saturation (0.08 versus 0.55), with the
+instruction “Pick up the red cup” and noise held fixed. This
+is an observation intervention, not an additional language
+minimal pair. The receiver’s VLM uses the donor image
+in this experiment, so the runs differ only in their video
+input. At a layer boundary within step 0, we replace all three
+receiver residual streams with the donor’s; the remaining
+computation uses receiver conditioning.
+At each tested boundary (layers 0–3), the step-0 video
+and action velocities become bitwise identical to the donor’s.
+The patched run enters the right-arm-only mode on the same
+6 of 16 seeds as the donor, compared with 1 of 16 for the
+unpatched receiver (Figure 15). However, three donor seeds
+that move both arms become left-arm-only after patching,
+and the mean relative trajectory L2 difference is 0.03. Early-
+state replacement therefore preserves the right-arm-only out-
+come in this test, without fixing every aspect of the motion.
+The left-target control succeeds on all 16 seeds under every
+condition.
+Relation to first-frame representations.
+In the probing
+configuration of §B.2, the clean first-frame tokens are re-
+computed identically across denoising calls under the first-
+frame-causal attention mask. Reading them once therefore
+avoids repeating the same readout in that configuration. This
+architecture-specific observation complements the Motus
+interventions, which concern when instruction information
+affects the generated action.
+Implication for LDS.
+These results motivate supervising
+first-frame visual representations at the first denoising call,
+before an instruction-dependent behavior has been carried
+into later latents. We compute the auxiliary loss at this call
+only, while retaining the native flow-matching objective and
+full inference sampler (Appendix D). This avoids evaluating
+the auxiliary loss at every denoising step. The interventions
+explain the timing choice, but do not compare training with
+first-step, later-step, or all-step LDS; such an ablation would
+be needed to establish their relative effectiveness.
+F.3. Why Supervise the Visual Representations?
+Language entry routes.
+Motus has two language entry
+points: UMT5-to-video cross-attention and the Qwen3-VL
+understanding stream (Figure 16). We separate them by giv-
+ing a receiver the donor’s text encoding while retaining its
+own VLM input, or vice versa. On the tested responsive
+pairs, the UMT5 swap gives λ = 0.998–1.003, whereas the
+VLM-input swap gives −0.003–0.053 (Figure 17a). The
+near-null VLM effect does not mean its features lack instruc-
+tion information: changing one word changes understanding
+tokens at image positions by 9–17%, and the action stream
+assigns 61% of its attention to understanding tokens, against
+a uniform share of 33%.
+Content replacement and video-to-action transfer.
+Re-
+placing the understanding stream with a fixed tensor from an
+unrelated scene preserves 98–101% of the original instruc-
+tion effect on the tested pairs (Figure 17b). Its instruction-
+dependent content is therefore largely dispensable for these
+responses. Across the 87 contrast sets, video and action
+instruction effects are coupled; in responsive sets, the seed-
+normalized action effect is 1.7–5.0 times the video effect
+(Figure 17c). More directly, patching the donor’s video
+residual while letting the action stream recompute yields
+λ = 0.998 (95% CI [0.98, 1.01], 36 units). Together, these
+interventions identify a behaviorally effective route from
+language, through video representations and joint attention,
+to action generation.
+Implication for LDS.
+The video representation is a plau-
+sible intervention site because it lies on the measured path
+from language to action. LDS supervises the instructed tar-
+get in visual tokens that the policy already uses, rather than
+relying on a separate readout to control actions at inference.
+This motivates the choice of representation; it does not show
+that action-side adaptation cannot help, or that every WAM
+has Motus’s routing structure.
+31
+
+
+video (360 tok)
+action (21 tok)
+und. (187 tok)
+joint
+self-attn
+×30 layers
+heavily attended, but
+content-invariant
+read at step 0, layers 1–10,
+through the attention keys
+instruction L
+observation O
+UMT5 (text)
+VAE encoder
+noise + state
+Qwen3-VL
+cross-attn
+video V
+action A
+step 0:
+reads L
+step 19
+denoising steps 1–19: the commitment is carried by the latent
+Figure 16. The instruction pathway identified in the Motus case study. Video, action, and understanding streams interact through joint
+self-attention. UMT5 supplies text to video cross-attention; Qwen3-VL initializes understanding tokens. Blue highlights the dominant
+pathway under the tested interventions: early video-stream writes affect action generation, and the resulting effect persists in later latents.
+The diagram summarizes this checkpoint and diagnostic panel, rather than a universal information-flow property of WAMs.
+F.4. Why Use Target-Aligned Spatial Supervision?
+Attention magnitude does not localize behavioral influ-
+ence.
+Single-layer patches within step 0 concentrate the
+measured effect in layers 1–10: no layer above 10 has mean
+λ ≥0.05 (Figure 14c). No single layer exceeds a mean
+of 0.24, although individual layers (10, 2, or 7) suffice on
+10 of 36 units. Layer 0 gives the instruction tokens more
+attention than layers 1–10, yet its maximum λ is only 0.027.
+Attention mass peaks at layers 24–28, which have negligible
+effects in this scan. Hence, increasing attention mass alone
+is not a direct measure of improved behavioral use. These
+are locations of causal language writes; they do not identify
+the optimal layers for an auxiliary readout. In particular, this
+experiment does not ablate the LDS layer choice {9, 19, 29}.
+Routing through keys rather than replacement values.
+Cross-attention writes WO softmax(QK⊤/
+√
+d)V into the
+video stream. At step 0, layers 1–10, donor keys with re-
+ceiver values recover much of the donor effect (λ = 0.875;
+28/36 mode switches), whereas donor values with receiver
+keys give approximately zero (0/36 switches; Figure 18a).
+Value-only swaps remain near zero when applied across all
+steps and layers. These swaps perturb the written vector
+by similar amounts (19.3% versus 18.6% of its norm), so
+perturbation size alone does not explain the difference. Re-
+stricting the key swap to the single differing text token gives
+λ = 0.844 and 27/36 switches; the 47 shared prefix tokens
+give 0.041 despite a larger write (Figure 18b).
+From global modes to spatial targets.
+For these pairs,
+language primarily changes the mixing of value vectors al-
+ready present in the receiver. Roughly three quarters of the
+resulting write is a vector shared across video-token posi-
+tions, and its leading singular direction carries 84% of its
+magnitude. This is consistent with the observed global arm-
+choice and spatial-reference effects, but does not establish
+object-instance grounding. LDS instead asks the representa-
+tion to distinguish target, alternative-object, and background
+regions under the instruction (§D.3). The spatial objective
+directly specifies the desired target information. The Motus
+experiments motivate this choice; they do not measure how
+its write geometry changes after LDS.
+F.5. Scope of the Design Rationale
+The case study supports intervening early in the visual path-
+way, where the tested instruction effects enter action gener-
+ation. Its evidence comes from one Motus checkpoint and
+short predictions (eight video frames and 16 actions), with
+most analyses conditioned on six responsive contrast sets.
+32
+
+
+0.0
+0.5
+1.0
+λ (0 = LA, 1 = LB)
+S1 D4.arm
+S2 D4.arm
+S3 D1b.spatial
+S4 D1b.spatial
+a
+swap T5 only
+swap VLM only
+S1
+S2
+S3
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+instruction effect
+(relative to full model)
+b
+other-scene tensor
+blank-image tensor
+10
+−1
+10
+0
+10
+1
+video effect / seed
+10
+−1
+10
+0
+10
+1
+action effect / seed
+c
+other sets
+responsive sets
+Figure 17. Route interventions in Motus. (a) Text-encoding versus VLM-input swaps on four responsive pairs. (b) Instruction effects with
+a constant understanding tensor from an unrelated scene or a blank image, shown for three pairs. (c) Video and action instruction effects for
+all 87 diagnostic contrast sets, normalized by their respective seed spread (log scale). Large attention to the understanding stream does not
+imply that its instruction-dependent content drives these action differences.
+step 0
+L1–5
+step 0
+L6–10
+step 0
+L1–10
+step 0
+all L
+all steps
+all L
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+λ (0 = receiver, 1 = donor)
+a
+donor keys (QK)
+donor values (OV)
+padding
+(449)
+scene
+prefix (47)
+instruction
+(16)
+differing
+word (1)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+λ (key swap, step 0, L1–10)
+0/36
+1/36
+27/36
+27/36
+b
+Figure 18. The measured instruction effect depends primarily on keys. (a) Donor text context routed to cross-attention keys (QK) or
+values (OV), at different layers and steps. (b) Step-0 key swaps in layers 1–10 restricted to groups of text positions. Numbers above bars
+count donor-mode switches among 36 units. These interventions separate the influence of instruction-sensitive routing from write magnitude.
+The finer temporal sweep uses four units, route and constant-
+stream tests cover small subsets, and state replacement uses
+one controlled scene pair and 16 seeds. Later-step effects are
+small in these tests, not identically absent in all settings. The
+results therefore provide a mechanistic rationale for first-step
+visual supervision, while its comparative optimality, transfer
+33
+
+
+across architectures, and behavior under longer prediction
+horizons remain separate empirical questions.
+G. How LDS Changes the Internal Representa-
+tion of OpenWAM
+This appendix supplements the main-text explanation of
+why LDS works. We measure the instruction-independent
+component U and the instruction-dependent component I
+before and after LDS, then test their behavioral relevance
+with representation interventions. At layer 8, the results
+support amplification of an existing instruction direction and
+a reduction of the magnitude of the competing U projection
+along an estimated action-read direction. We also report how
+this description varies across depth.
+G.1. Models, Scenes, and Feature Extraction
+Models.
+We compare the released OpenWAM LIBERO
+checkpoint (Base) with the same checkpoint after 1,024
+LDS updates (Base + LDS). This is the run used for the
+present mechanistic analysis. Training combines native flow
+matching on LIBERO trajectories with first-frame grounding
+supervision on LIBERO-CF, using heads at blocks 9, 19, and
+29 (Appendix D). Counterfactual grounding queries supply
+no action or future-video labels; the heads are discarded at in-
+ference. In the diagnostic panel below, Base completes 5/132
+counterfactual goals, while Base + LDS completes 77/132
+and retains 131/132 completions on the original instructions.
+Scenes.
+The panel contains 132 LIBERO-CF scenes with
+exactly two candidate objects. Following the main text, the
+original instruction names the prior-preferred object B, and
+the counterfactual instruction names A. Both use the same
+observation, verified by matching image hashes in all 132
+scenes. Of these, 96 scenes belong to layout groups that
+received grounding supervision (train); 36 belong to five
+layout groups that received none (held-out). The main-text
+representation comparison reports the held-out set. This
+panel is separate from the coverage-group evaluation in Ap-
+pendix E; its counts and success rates are not full-benchmark
+results.
+Features.
+First-frame tokens in OpenWAM attend only
+to the first frame, so instruction information reaches them
+through per-block cross-attention. At each block ℓ, we pool
+its output over the main-camera first-frame tokens for each
+candidate c ∈{A, B}, weighting tokens by ground-truth
+mask coverage. This yields xℓ
+c ∈R3072. All features come
+from the first denoiser call on the unmodified observation.
+Block indices are zero-based.
+G.2. Paired Decomposition and Reported Quanti-
+ties
+For counterfactual and original instructions LA, LB, respec-
+tively, define
+∆ℓ
+A = xℓ
+A(LA) −xℓ
+B(LA),
+∆ℓ
+B = xℓ
+A(LB) −xℓ
+B(LB).
+(G.1)
+Their symmetric and antisymmetric components are
+U ℓ= 1
+2(∆ℓ
+A + ∆ℓ
+B),
+Iℓ= 1
+2(∆ℓ
+A −∆ℓ
+B).
+(G.2)
+Thus ∆A = U + I and ∆B = U −I exactly for each paired
+observation, suppressing the layer index. Under the main
+text’s additive model, U = (vA −vB) −P combines vi-
+sual differences with the prior-associated term. The paired
+contrast isolates instruction-dependent changes but cannot
+identify P separately from the visual component. We an-
+alyze U as a combined quantity rather than a pure prior
+tag.
+Aggregation.
+Let ¯U and ¯I average the per-scene vectors
+within a split. The reported magnitudes ∥¯U∥and ∥¯I∥are
+the norms of these averages, measuring components shared
+across scenes. They differ from the mean per-scene norms,
+which also include scene-specific variation. Direction agree-
+ment is the cosine between the Base and trained scene-
+averaged vectors on the same split. The 95% percentile
+intervals use 10,000 paired bootstrap resamples of scenes,
+with the same sampled indices for both models. These inter-
+vals are not clustered by layout group.
+G.3. Results at Layer 8
+Table 21 reports the layer used in the main-text comparison
+and the interventions in §G.6.
+A stronger, substantially aligned instruction component.
+On held-out scenes, ∥¯I∥grows 4.2-fold, from 3.4 to 14.1,
+while ∥¯U∥decreases by 12%, from 26.1 to 22.9. The train-
+set increase in I is 6.4-fold. Mean per-scene norms show
+the same qualitative pattern. Base-to-LDS direction cosines
+on held-out scenes are 0.95 for ¯U and 0.90 for ¯I. These
+values support amplification along a substantially aligned
+instruction direction, while allowing changes orthogonal to
+it.
+A weak Base component that transfers across splits.
+In
+Base, ∥¯I∥/∥¯U∥is 0.13–0.19, yet its independently estimated
+train and held-out directions have cosine 0.85. It is also
+distinct from U: their Base cosine is -0.30 on train scenes and
+-0.21 on held-out scenes. After LDS, the train-versus-held-
+out ¯I cosine is 0.96, but the held-out magnitude is smaller
+34
+
+
+Table 21. U and I at layer 8 of OpenWAM before and after LDS. Magnitudes are norms of scene-averaged vectors. Brackets give 95%
+bootstrap intervals over scenes. Per-scene norms are averages of the per-scene vector norms.
+Scenes
+Quantity
+Base
+Base + LDS
+Ratio
+Held-out (36)
+∥¯U∥
+26.1 [24.0, 33.3]
+22.9 [21.9, 29.4]
+0.88
+∥¯I∥
+3.4 [2.7, 4.4]
+14.1 [12.3, 16.3]
+4.2
+per-scene ∥U∥
+68.6
+65.3
+0.95
+per-scene ∥I∥
+5.6
+17.9
+3.2
+cos( ¯UBase, ¯ULDS)
+0.95 [0.93, 0.97]
+cos(¯IBase, ¯ILDS)
+0.90 [0.83, 0.92]
+Train (96)
+∥¯U∥
+21.3 [20.9, 24.4]
+19.9 [19.2, 23.4]
+0.94
+∥¯I∥
+4.0 [3.5, 4.7]
+26.0 [24.6, 27.4]
+6.4
+per-scene ∥U∥
+76.0
+71.7
+0.94
+per-scene ∥I∥
+6.9
+31.0
+4.5
+cos( ¯UBase, ¯ULDS)
+0.86 [0.84, 0.90]
+cos(¯IBase, ¯ILDS)
+0.94 [0.92, 0.94]
+(14.1 versus 26.0). Direction transfer therefore accompanies
+partial transfer of the amplification.
+G.4. Layer-wise Results
+Figure 19 extends the comparison to all 30 blocks.
+• An increase at blocks 5–6. In blocks 0–4, ∥¯I∥< 0.8
+in both models. Its magnitude increases at blocks 5–6,
+locating an early increase in the measured instruction-
+dependent contrast.
+• Amplification along aligned directions in early and
+middle blocks. In blocks 5–11, Base-to-LDS ¯I cosines
+are 0.83–0.96 on held-out scenes. The Base magnitude
+peaks near 7 at block 11, then decays to 1.4–2.6 in blocks
+18–27. After LDS it remains large, exceeding ∥¯U∥at every
+held-out block from 16 onward.
+• U changes depend on depth and split. Held-out Base-
+to-LDS ¯U cosines remain at least 0.87 in blocks 0–25.
+Train-set cosines fall to 0.44–0.72 in blocks 10–13, near su-
+pervised block 9, while exceeding 0.83 elsewhere through
+block 27.
+• Deep instruction directions diverge. From block 14
+onward, held-out Base-to-LDS ¯I cosines range from 0.38
+to 0.70. The Base component is weak there and its own
+cross-split alignment decreases, so both representational
+change and estimation variability may contribute. The
+following tests assess how much behavioral change earlier
+features can recover.
+G.5. Layer-8 Transplants and Later-Layer Edits
+We evaluate three interventions using the first action chunk:
+the first 32 executed commands of the native policy, con-
+verted to end-effector displacement. An approach score
+measures movement toward the instructed candidate rela-
+tive to the other candidate; the reported AUC for predicting
+which candidate is grasped first is 0.97. We report the frac-
+tion of the Base-to-LDS approach-score gap recovered (train
+/ held-out): 0% denotes Base and 100% denotes Base+LDS.
+This is distinct from closed-loop success.
+Transplanting first-frame features.
+Replacing Base’s
+first-frame block output with the trained output at block
+8, then using Base weights for all subsequent blocks, recov-
+ers 98% / 88% of the gap. Block 6 recovers 94% / 65%;
+blocks 3–4 recover at most 31% / 1%. The layer-8 hybrid
+leaves 2% / 12% of this score gap unrecovered. This is a
+recovery result, not a bound on every possible contribution
+of the trained deeper layers.
+Adding edits at deeper blocks.
+Adding the same steering
+vector at blocks 14, 20, and 26 in addition to block 8 has
+small incremental effects. For the negative Base ¯U direction
+at amplitude a = 32, gap recovery is 71% / 83% with four
+blocks versus 71% / 82% with block 8 alone. For the trained
+layer-9 head direction, the respective results are 79% / 89%
+and 79% / 88%. Deeper edits increase action-token attention
+to the marked object at blocks 20–29, despite the small
+change in approach score. The corresponding closed-loop
+−ˆU target edit at a = 64 completes 68/132 goals with four
+blocks versus 67/132 with block 8 alone.
+Transferring first-frame content through the future video.
+Giving Base’s future-video tokens the trained first-frame
+keys and values at every block recovers 97% / 92% of the gap.
+Swapping only the read projections WK, WV at blocks 9–15
+recovers 0% in the reported test. This supports a substan-
+tial role for changed first-frame content without excluding
+adaptations elsewhere in the downstream network.
+These results complement the independent Motus study in
+Appendix F, where the tested instruction effects are concen-
+trated in early video-stream writes during the first denoising
+call. The models, panels, and intervention scores differ, so
+35
+
+
+0
+10
+20
+Layer
+0
+10
+20
+30
+40
+a
+‖̄U‖
+Base
++LDS
+held-out
+train
+0
+10
+20
+Layer
+0
+20
+40
+60
+b
+‖̄I‖
+0
+10
+20
+Layer
+0.00
+0.25
+0.50
+0.75
+1.00
+c
+Direction (held-out)
+cos(̄UB,̄ UL)
+cos(̄IB,̄ IL)
+cos(̄Itr
+B,̄ Iho
+B )
+Figure 19. U and I across the 30 blocks of OpenWAM. (a,b) Norms of scene-averaged U and I. Solid: held-out scenes (36); dotted:
+train scenes (96). Gray: Base; red: Base + LDS. (c) Base-to-LDS direction cosines for ¯U and ¯I on held-out scenes, and Base ¯I agreement
+between train and held-out scenes (dotted). Below block 5, ∥¯I∥< 0.8 in both models, so its direction estimates warrant caution. The vertical
+line marks block 8; shading marks later blocks, examined by intervention in §G.5.
+Table 22. Closed-loop LIBERO-CF results of editing the frozen Base at layer 8. Counterfactual instructions, one rollout per scene. I:
+per-scene Base instruction component, added only to the instructed target. ˆU: unit scene-averaged Base U direction; the prior-transfer edit
+subtracts β ˆU from the instructed target and adds it to the other candidate.
+Counterfactual goal completed
+Original instruction
+Model
+All (132)
+Train (96)
+Held-out (36)
+completed (132)
+Base
+5
+3
+2
+132
+Base, −ˆU on target, β = 64
+67
+56
+11
+131
+Base, +I, α = 32
+70
+53
+17
+132
+Base + LDS
+77
+64
+13
+131
+their numerical effects are not directly comparable. In Open-
+WAM, the layer-8 transplant recovers most of the first-chunk
+score improvement; it does not establish that later blocks are
+unnecessary or that layer 8 fixes full closed-loop behavior.
+G.6. Connecting the Measured Tags to Behavior
+The balance changes along an estimated read direction.
+We examine an estimated linear action-read direction r in the
+first-frame candidate difference. Within the plane spanned
+by the Base ¯U and ¯I directions, r has cosine 0.98 with Base
+¯I and -0.49 with Base ¯U. Projected onto r, the train-set U
+component changes from -10.4 to -2.3 and the I component
+rises from 3.9 to 24.1. On held-out scenes the corresponding
+changes are -9.5 to -5.5 and 2.8 to 12.8. Thus, a modest
+overall change in ∥¯U∥can accompany a substantial decrease
+in the magnitude of its projection along r. Both changes are
+consistent with the main-text separability condition w⊤I >
+|w⊤U|. The fitted direction r is an analysis tool and need
+not equal an auxiliary head’s weights w.
+Editing the frozen Base with its per-scene instruction
+component.
+Following the main-text intervention, we ex-
+tract I separately for each scene from Base’s paired features
+(Eq. (G.2)). At block 8, we add αI only to the instructed
+candidate’s tokens, with α = 32, leaving the other candi-
+date’s tokens unedited. The intervention uses ground-truth
+masks at every replanning step. This per-scene edit is dis-
+tinct from the scene-averaged vectors used in the descriptive
+statistics. Table 22 reports 70/132 completed counterfac-
+tual goals, compared with 5/132 for Base and 77/132 for
+Base + LDS. The held-out counts are 17/36 for this edit and
+13/36 for LDS.
+Editing with a shared prior-associated direction.
+For
+the prior-transfer intervention, we instead use the scene-
+averaged Base direction ˆU = ¯U/∥¯U∥. Under LA, we sub-
+tract β ˆU from candidate A and add it to candidate B, using
+ground-truth masks at each replanning step. The direction
+is shared across scenes, unlike the per-scene I edit, and the
+amplitude multiplies a unit vector rather than the raw U.
+This is the main-text Transit P condition: it reaches 67/132
+at β = 64. The edited component includes visual differences
+as well as prior-associated information. Original-instruction
+completions remain at 131–132/132 across these conditions.
+With one rollout per scene, the held-out count difference is
+36
+
+
+not a significance test.
+Together, these measurements and interventions support
+a behaviorally useful instruction component already present
+in Base. LDS strengthens it at the analyzed layer while
+reducing the magnitude of the competing U projection along
+the estimated read direction.
+Scope.
+The analysis covers one OpenWAM LIBERO
+checkpoint and one 1,024-update LDS run on 132 two-
+candidate scenes. Mask-based edits are diagnostic and use
+one rollout per scene. Transplants and the deeper-edit com-
+parisons use the first action chunk; the multi-layer steering
+edit is also checked in closed loop. The comparison with
+Motus is an analogy between independent case studies. The
+symmetric/antisymmetric decomposition is exact for each
+feature pair, while its mechanistic interpretation relies on the
+main text’s modeling assumptions. Identical observations
+support attributing the contrast to the instruction; they do not
+separate visual differences from prior-associated information
+within U. Scene-bootstrap intervals also do not account for
+shared layout groups.
+37
+
+
+References
+[1] Remi Cadene, Simon Alibert, Alexander Soare, Quentin
+Gallouedec, Adil Zouitine, Steven Palma, Pepijn Kooij-
+mans, Michel Aractingi, Mustafa Shukor, Dana Aubakirova,
+Martino Russi, Francesco Capuano, Caroline Pascal, Jade
+Choghari, Khalil Meftah, Maxime Ellerbach, Jess Moss, and
+Thomas Wolf. LeRobot: State-of-the-art machine learning for
+real-world robotics in PyTorch. https://github.com/
+huggingface/lerobot, 2024.
+[2] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, et al. Robotwin 2.0: A scalable data generator and bench-
+mark with strong domain randomization for robust bimanual
+robotic manipulation. CoRR, abs/2506.18088, 2025.
+[3] Yanai Elazar, Shauli Ravfogel, Alon Jacovi, and Yoav Gold-
+berg. Amnesic probing: Behavioral explanation with amnesic
+counterfactuals. Trans. Assoc. Comput. Linguistics, 9:160–
+175, 2021.
+[4] Yu Fang, Yuchun Feng, Dong Jing, Jiaqi Liu, Yue Yang,
+Zhenyu Wei, Daniel Szafir, and Mingyu Ding. When vision
+overrides language: Evaluating and mitigating counterfactual
+failures in vlas. CoRR, abs/2602.17659, 2026.
+[5] Catherine Glossop, William Chen, Arjun Bhorkar, Dhruv
+Shah, and Sergey Levine. CAST: counterfactual labels im-
+prove instruction following in vision-language-action models.
+IEEE Robotics Autom. Lett., 11(10):11785–11792, 2026.
+[6] Jonathan Ho and Tim Salimans. Classifier-free diffusion
+guidance. CoRR, abs/2207.12598, 2022.
+[7] Yuchen Hou and Lin Zhao. Langgap: Diagnosing and closing
+the language gap in vision-language-action models. CoRR,
+abs/2603.00592, 2026.
+[8] Shaohan Jiang, Jiahang Cao, Qiduo He, Fengting Deng, Kun
+Wu, Jingkai Sun, Jiaxu Wang, Qiang Zhang, Qihao Zheng,
+Chunfeng Song, Ping Luo, and Andrew F. Luo. Encoded
+but not in control: Revealing the grounding gap in vision-
+language robot policies, 2026.
+[9] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin, et al.
+Cosmos policy: Fine-tuning video models for visuomotor
+control and planning. In ICLR. proceedings.iclr.cc, 2026.
+[10] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin Wang,
+Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing Zhu, Yujun
+Shen, and Yinghao Xu. Causal world modeling for robot
+control. CoRR, abs/2601.21998, 2026.
+[11] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao
+Zhang, et al.
+Grounding DINO: marrying DINO with
+grounded pre-training for open-set object detection. In Com-
+puter Vision - ECCV 2024 - 18th European Conference, Mi-
+lan, Italy, September 29-October 4, 2024, Proceedings, Part
+XLVII, pages 38–55. Springer, 2024.
+[12] Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu,
+Chaitanya Ryali, et al. SAM 2: Segment anything in images
+and videos. In The Thirteenth International Conference on
+Learning Representations, ICLR 2025, Singapore, April 24-
+28, 2025. OpenReview.net, 2025.
+[13] Michael Tschannen, Alexey A. Gritsenko, Xiao Wang,
+Muhammad Ferjad Naeem, Ibrahim Alabdulmohsin, et al.
+Siglip 2: Multilingual vision-language encoders with im-
+proved semantic understanding, localization, and dense fea-
+tures. CoRR, abs/2502.14786, 2025.
+[14] Ang Wang, Baole Ai, Bin Wen, Chaojie Mao, et al. Wan:
+Open and advanced large-scale video generative models.
+CoRR, abs/2503.20314, 2025.
+[15] Yuran Wang, Siqiao Huang, Mingleyang Li, Chenhao Zhang,
+Jiaqi Liang, Weiyang Jin, Yue Chen, Xuemin Chi, Donghao
+Zhou, Qize Yu, Yu-Kai Wang, Yuhan Rui, Shenzhe Yao, Zhen
+Yuan, Zhenhao Shen, Kefei Zhu, Zijie Zhu, Ning Gao, Xi-
+aowei Chi, Guanqi He, Shanghang Zhang, Hao Dong, Lin
+Shao, and Hang Zhao. Openwam: An open, modular ex-
+ploration towards systematic world-action model pretraining.
+CoRR, abs/2609.07398, 2026.
+[16] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan Gao,
+Sihyun Yu, et al. World action models are zero-shot policies.
+CoRR, abs/2602.15922, 2026.
+[17] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+Fast-wam: Do world action models need test-time future
+imagination? CoRR, abs/2603.16666, 2026.
+[18] Haochen Zhang and Yonatan Bisk. Flatness preserves in-
+struction following in vision-language-action models. CoRR,
+abs/2606.23641, 2026.
+[19] Ninghao Zhang, Bin Zhu, Shijie Zhou, and Jingjing Chen.
+Restoring linguistic grounding in VLA models via train-free
+attention recalibration. CoRR, abs/2603.06001, 2026.
+[20] Yuyang Zhang, Wenyao Zhang, Zekun Qi, He Zhang, Haitao
+Lin, et al.
+Imagewam: Do world action models really
+need video generation, or just image editing?
+CoRR,
+abs/2606.19531, 2026.
+[21] Mengao Zhao, Ziang Li, Chaodong Huang, Mengchen Ma,
+Haoyi Jiang, et al.
+Instructmove: A text-indispensable
+benchmark for instruction-following manipulation. CoRR,
+abs/2608.22990, 2026.
+38

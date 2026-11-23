@@ -1,0 +1,2370 @@
+A CONTINUOUS RELAXATION OF QUANTIZATION-AWARE TRAINING
+Kartikeya Bhardwaj 1 Mohammed Almousa 1 Chaitanya Mullapudi 1 Ananth Balasubramanian 1
+Nithin Ramesan 1 Tuc Nguyen 1 Harris Teague 1
+ABSTRACT
+Quantization is a critical piece of the deployment pipeline in the era of large generative models. Low-bit
+quantization, particularly 2-bits or sub-2-bits, is a notoriously difficult problem, particularly when using a
+channelwise quantization scheme which has been shown as a leading candidate for hardware-efficiency. The key
+challenges with low-bit quantization range from limited quantization levels to saddle points or flat regions in the
+loss surface. In this paper, we look at the problem of flat quantization loss surfaces through a lens of dynamically
+changing bitwidth. Unlike existing techniques which either change the bit-precision abruptly or keep it fixed,
+we propose to gradually alter the bitwidth as the model trains. To this end, we propose RelaxQAT, a continuous
+relaxation of the QAT process. We also provide simple theoretical and empirical insights behind why RelaxQAT
+helps the QAT performance. Our extensive experiments demonstrate up to 6.3% average accuracy gains on vision
+and up to 7.7% better average accuracy on natural language tasks, compared to the leading QAT methods.
+1
+INTRODUCTION
+Quantization has become the de facto strategy for deploy-
+ing Large Language Models (LLMs) and Vision-Language
+models (VLMs) on resource-constrained systems such as
+phones and laptops (Nagel et al., 2021; Gong et al., 2025).
+To address the substantial memory footprint, power con-
+sumption, and cycle cost of inference of generative models,
+quantization reduces the precision of weights and activa-
+tions from a higher bitwidth to a significantly lower bitwidth.
+This reduction in precision introduces quantization errors
+which result in noisy model outputs and an associated accu-
+racy degradation in the real-world applications (Song et al.,
+2026). The prevailing paradigm that current hardware sup-
+ports is quantization bitwidths in the range of 2 to 4 bits.
+The lower the bits, the worse the quantization error, albeit
+with a significantly better energy-efficiency. Although many
+advanced techniques exist that address 4-bit precision (Lin
+et al., 2024; Liu et al., 2025a; Sun et al., 2020; Frantar et al.,
+2022; Ashkboos et al., 2024), even lower bitwidth, such as
+2-bit quantization, remains a critical challenge (Liu et al.,
+2025b; Li et al., 2026; Lee et al., 2025). Hence, investigat-
+ing newer quantization techniques to address 2-bit precision
+for weights is of paramount importance.
+For such low precisions, training-free methods known as
+Post-Training Quantization (PTQ) have not been effective
+at recovering the quantization error (Liu et al., 2025b; Yi
+1Qualcomm AI Research. Qualcomm AI Research is an ini-
+tiative of Qualcomm Technologies, Inc. Correspondence to: Kar-
+tikeya Bhardwaj <kbhardwa@qti.qualcomm.com>.
+Preprint. Copyright 2026 by the author(s).
+et al., 2026). Consequently, Quantization-Aware Training
+(QAT) techniques have emerged as the standard methods to
+convert a pretrained floating point model to a 2-bit weight
+model (Song et al., 2026). Various QAT methods target
+different challenges: LSQ (Esser et al., 2019) proposes a
+learned scale as well as improvements to the gradient com-
+putation to improve the QAT convergence. ParetoQ (Liu
+et al., 2025b) proposes a new symmetric integer grid for
+1.58- and 2-bit models. WinQ (Li et al., 2026) addresses
+the presence of saddle points or flat regions in the quan-
+tized loss surface. Progressive quantization methods such
+as UPQ (Lee et al., 2025) focus on converting a model from
+a floating point precision to 2-bits in multiple stages, e.g.,
+going from floating point model to 4-bits first, and then
+eventually quantizing the model to 2-bits.
+Most QAT techniques in the literature result in an abrupt
+change in bitwidth, either from floating point directly to 2-
+bits (Liu et al., 2024b; Chen et al., 2025; Liu et al., 2025b; Li
+et al., 2026; Yi et al., 2026), or as in the case of UPQ (Lee
+et al., 2025), from floating point to 4-bits first and then
+suddenly to 2-bits. Once the desired bitwidth is reached,
+the model is trained with no further changes in precision.
+It is known that low-bit quantization loss surfaces usually
+consist of highly flat surfaces (Li et al., 2026) due to the
+nature of quantization itself. Hence, when we optimize on
+a fixed bitwidth, the optimization may get stuck in those
+flat portions of the loss surface. Indeed, increasing the bit-
+precision of the weights can make the loss surface less flat
+and can make it easier for the optimization to escape saddle
+points. To this end, we hypothesize whether a dynamic
+bitwidth during the QAT can be a solution to this problem.
+arXiv:2611.27056v1  [cs.AI]  20 Nov 2026
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Importantly, since abrupt changes in bitwidth can destabilize
+the training, we need a solution that makes gradual changes
+to the bitwidth as the training progresses.
+Therefore, we ask the following key questions in this pa-
+per: During QAT, can we dynamically relax the bitwidth of
+a model in a continuous fashion? That is, instead of dis-
+crete (abrupt) integer changes in the number of bits, can we
+change the bitwidth in a continuous (floating point) domain?
+If yes, how do we implement a floating point bitwidth and
+what does it even mean?
+To answer the above questions, we propose RelaxQAT, a
+continuous relaxation of the QAT problem. The key idea be-
+hind RelaxQAT is to create a schedule for the bitwidth and
+change the underlying QAT equations, so that the extreme
+values in the model weight distributions become floating
+points which slowly turn into integers during the training.
+Importantly, the dynamically changing bitwidth also dynam-
+ically changes the number of quantization bins, which helps
+the model escape saddle points and reach a better training
+loss. With extensive experiments, we demonstrate that our
+method achieves significantly better benchmark accuracies
+on a variety of vision-language and natural language tasks.
+Of note, our work focuses only on channelwise quantization
+since it remains one of the most hardware-efficient quanti-
+zation schemes, and is highly relevant to deploying large
+generative models on constrained hardware such as Neural
+Processing Units (NPUs).
+Overall, we make the following key contributions:
+1. We propose RelaxQAT, a continuous relaxation of the
+QAT. To our knowledge, we are the first to dynamically
+vary the bitwidth in a floating point domain and the
+resulting number of quantization bins during the QAT.
+2. We provide simple theoretical and empirical insights
+behind why RelaxQAT helps the QAT performance.
+3. For the challenging case of 2-bit weight only quantiza-
+tion, we demonstrate that RelaxQAT achieves the state-
+of-the-art accuracies on a variety of vision-language
+and natural language benchmarks. We show an im-
+provement in average accuracy of up to 6.3% on vision
+benchmarks compared to the leading QAT baselines.
+On natural language tasks, we show up to 7.7% better
+average accuracy. In total, we conduct experiments
+on five models of various sizes (0.6B to 4B), spanning
+two VLMs, three LLMs, and multiple model (Gemma
+and Qwen) families. We consider five leading QAT
+baselines and each model is trained on 10B tokens.
+4. Finally, we also show a proof-of-concept that Re-
+laxQAT can be used for other bitwidths such as ternary
+(1.58-bit) quantization. We show up to 4.2% accuracy
+gains for this quantization scheme.
+2
+RELATED WORK
+We review briefly important quantization methods from the
+literature to set the stage for our proposed RelaxQAT al-
+gorithm. One of the early work in low-bit quantization
+was the Learned Step Quantization, introduced by (Esser
+et al., 2019). LSQ’s key innovation was to treat the quanti-
+zation step size itself as a learnable parameter .(Choi et al.,
+2018), proposed learning activation clipping thresholds dur-
+ing training while (Bhalgat et al., 2020) proposed learning
+both scale and offset.
+Building on LSQ, (Liu et al., 2025b) proposed ParetoQ
+which introduced Stretched Elastic Quantizer (SEQ) for
+ternary and 2-bit quantization. It is shown that although
+LSQ performed well in higher-precision (e.g., 4-bit quantiza-
+tion), its effectiveness degrades significantly in the extreme
+low-bit regimes. To address this, SEQ employs a more sym-
+metric quantization grid, leading to improved performance.
+Inference scaling laws for models w.r.t quantization have
+been extensively studied in (Dettmers & Zettlemoyer, 2023),
+(ˇSubi´c & Cozzini, 2026), and (Liu et al., 2025b).
+BitNet was proposed in (Hugging Face, 2024), which in-
+troduced the idea of gradually transitioning model weights
+towards the target low-bit representation through a prede-
+fined schedule (e.g., linear schedule). This is accomplished
+by linearly combining the latent weights with appropriately
+scaled version (based on a schedule) of difference of FP
+latent weight and the desired quantized weight. However, in
+our proposed RelaxQAT, the bitwidth itself changes based
+on a schedule. Other follow up works in Bitnet w.r.t activa-
+tion quantization, 1-bit optimzation and efficient inference
+are detailed in (Wang et al., 2024), (Wang et al., 2025c),
+(Wang et al., 2025d).
+(Li et al., 2026) investigates the root cause of slow conver-
+gence observed in quantization-aware training (QAT) for
+extreme low bit quantization. It is shown that low-bit train-
+ing tends to become trapped in flat regions around saddle
+points of the loss landscape, resulting in slower optimization.
+To mitigate this issue, an optimization strategy is proposed
+that periodically interpolates the quantized weights with the
+latent weights to escape the saddle point. Further, (Xu et al.,
+2025), (Xu et al., 2026),(Wei et al., 2022), (Lv et al., 2026),
+(Shao et al., 2024), (Lee et al., 2024), (Wang et al., 2025b),
+(Wang et al., 2025a) analyse several low-bit training meth-
+ods and how outlier-aware quantization schedules improve
+convergence and accuracy at extreme bit widths.
+A direction closely related to our proposal is the progressive
+quantization framework introduced in Unifying Block-wise
+PTQ and Distillation-based QAT for Progressive Quantiza-
+tion (UPQ) (Lee et al., 2025). UPQ proposes a two-stage
+quantization pipeline in which a full-precision model is con-
+verted to an intermediate representation (e.g., INT4) using
+
+
+A Continuous Relaxation of Quantization-Aware Training
+block-wise post-training quantization (PTQ), followed by
+INT2 QAT initialized from the intermediate checkpoint. In
+contrast, the proposed RelaxQAT generalizes the notion
+of progressive quantization by replacing the fixed transi-
+tion (FP to INT4 to INT2) with a continuously evolving bit
+schedule. We hypothesize that this continuous transition
+enables a smoother optimization trajectory as shown next.
+3
+PROPOSED RELAXQAT
+RelaxQAT consists of two parts: (i) set bitwidth using a
+smooth schedule during training, and (ii) modify existing
+quantization equations such as Stretched Elastic Quantizer
+(SEQ) (Liu et al., 2025b) to make sure the extreme values of
+the weight distribution become floating points so they can
+smoothly vary as the bitwidth changes. We describe these
+components below.
+3.1
+Bitwidth Schedule
+The bitwidth (bt) at training step t is given by:
+bt = bs −(bs −be)sin
+π
+2 ω
+
+,
+ω ∈[0, 1]
+(1)
+Here, bs and be are the starting and ending bitwidths, respec-
+tively, and ω ∈[0, 1] dynamically changes during training.
+Eq. (1) states that when ω = 0, we get the starting bitwidth
+(bs), and when ω = 1, we get the desired final bitwidth (be).
+Typically, the ω starts at 0 and ends at 1 and then follows
+a cyclical pattern. Before the end of the training, we keep
+ω = 1 to ensure that the model finetunes in the desired be
+bitwidth for a prolonged time.
+An example of our proposed bitwidth schedule is shown
+in Fig. 1(a). We typically start with a half cycle going
+from bitwidth bs to be over maximum schedule steps (ms
+training steps). For instance, in Fig. 1(a), bs = 4, be = 2,
+ms = 1200). This corresponds to ω changing from 0 to
+1. After this half cycle, we can have n full cycles (n ∈
+{1, 2, 3, ..., . . . , N}) where the ω cycles from 1 to 0 and
+then back to 1. This results in bitwidth changing from be to
+bs and then back to be. As shown in Fig. 1(a), at step 3000,
+the quantization bitwidth starts to relax from 2 bits to 4 bits
+(by step 4200, since ms = 1200 and n = 1) and then goes
+back to 2 bits by step 5400. The intuition behind adding one
+or more full cycles after the initial half cycle is to help the
+optimization escape any flat regions that it might be stuck
+in. We empirically validate that the additional full cycles
+indeed help improve the RelaxQAT performance.
+It is important to note that Eq. (1) leads to a slowly changing
+bit precision which can be a floating point value. Moreover,
+the gradient of the proposed schedule is 0 whenever it ap-
+proaches 2-bits. This helps us to ease into 2-bit precision
+instead of a sudden change in bitwidth. In contrast, existing
+methods either (i) perform progressive quantization to train
+2
+3
+4
+Bitwidth
+a.
+RelaxQAT
+2
+3
+4
+Bitwidth
+b.
+UPQ
+0
+2000
+4000
+6000
+8000
+10000
+Training Steps
+2
+Bitwidth
+c.
+ParetoQ
+Figure 1. (a) An example of our proposed RelaxQAT bitwidth
+schedule which gradually and smoothly reduces the bitwidth. The
+gradient of the schedule 0 whenever it is approaches 2-bits; this
+helps to ease into the 2-bit precision instead of an abrupt change.
+(b) Prior progressive quantization methods reduce the bitwidth sud-
+denly during training like UPQ, or (c) keep it the same throughout.
+the model in stages and abruptly change the bitwidth (e.g.,
+UPQ (Lee et al., 2025), see Fig. 1(b) blue line around step
+2000), or (ii) keep it the same throughout the QAT after
+directly reducing it from the floating point precision (e.g.,
+ParetoQ (Liu et al., 2025b), see Fig 1(c) red line).
+Our hypothesis is that the relaxation in bitwidth can help the
+optimization escape the flat regions in the quantization loss
+surface. Further, a sudden change in bitwidth in methods
+such as UPQ can cause the loss to increase suddenly, and
+may need some training steps to recover it. Since RelaxQAT
+has a slowly changing floating point bitwidth, this reduces
+sudden spikes in the loss function. Next, we explain the
+changes to the quantization equations needed to realize the
+proposed floating point bitwidth.
+3.2
+RelaxSEQ
+QAT first replaces each model weight with its corresponding
+quantized-dequantized (QDQ) weight which is computed
+as a function of a latent floating point weight θ and its
+channelwise scale α. Specifically, given a θ ∈Rn×m, the
+latent floating point weight with n output channels and m
+input channels and a channelwise scale α ∈Rn, various
+quantization schemes compute the QDQ weights in different
+ways (Esser et al., 2019; Liu et al., 2025b). Then, the model
+is trained with the latent weight θ and the scale α as the
+trainable parameters, where the QDQ weight is computed in
+every forward pass and passed on to the model layers. The
+associated backward pass is also modified using Straight-
+Through Estimators (STE), etc. (Esser et al., 2019).
+Recently, a popular 2-bit and sub-2-bit (e.g., ternary, 1.58-
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Extreme integers suddenly drop 
+from {-13,13} to {-11,11} to {-9,9} 
+and so on for Existing SEQ
+Extreme values are 
+floating point and change 
+very slowly for RelaxSEQ
+Figure 2. ParetoQ SEQ with a bitwidth schedule loses extreme
+integers as k = 2bt−1 decreases with a shrinking bitwidth. Re-
+laxSEQ shows a smooth change in extreme values which results in
+a smoothly changing loss.
+bits) scheme called Stretched Elastic Quantizer (SEQ) was
+proposed in ParetoQ (Liu et al., 2025b). The main advantage
+of SEQ compared to LSQ (Esser et al., 2019) for 2-bit QAT
+is that it results in a symmetric {−3, −1, 1, 3} integer grid.
+In contrast, LSQ results in an aysmmetric {−2, −1, 0, 1}
+integer grid which does not perform as well for 2-bit QAT.
+The QDQ weight wp using the existing SEQ (Liu et al.,
+2025b) is computed as:
+wp = α
+k
+
+round
+
+clip
+ θ
+α, −1, 1
+
+× k −0.5
+
++ 0.5
+
+.
+(2)
+Here, k = 2b−1, b is the number of bits. In principle, we
+can use Eq. 1 to assign a dynamically changing, floating
+point bitwidth to the existing SEQ Eq. (2) because k is a
+function of the number of bits. That is, the range of the QDQ
+weight distribution simply expands or shrinks as b changes.
+Note that, wp first performs a clipping and then rounds the
+resulting expression. Thus, excluding the α/k scaling and
+the +0.5 shift in Eq. (2), this Clip-then-Round operation
+obviously results in integer values for all the quantization
+bins, including the extremes. We next analyze how these
+extreme quantization bins vary when the bitwidth changes.
+Suppose that we are given a latent weight θ ∼N(0, 0.02)
+and its corresponding channelwise scale α = max{θ}. For
+the purpose of this simulation, the latent weight and the scale
+are fixed, and only the bitwidth is reduced from 4 bits to 2
+bits in Eq. (2). In Fig. 2, we plot how the extreme values of
+the distribution change as the schedule continues to reduce
+the bitwidth. Clearly, the existing SEQ (Clip-then-Round,
+red) shows a sudden, staircase drop in extreme integers.
+Why does this sudden change in integer ranges pose a prob-
+lem? During QAT, the training continues between the stair-
+case drops assuming that those extreme integers are avail-
+able. However, when bt (and thus k = 2bt−1) is reduced due
+to a schedule, those extreme integers suddenly disappear. In
+other words, during training, if the bitwidth is dynamically
+reduced, the model weights get finetuned assuming that we
+have these extreme integers. However, these extreme in-
+tegers are abruptly lost as the training goes on. This loss
+of extreme integers can result in unstable training behavior
+and sudden loss spikes (similar to UPQ (Lee et al., 2025)).
+Indeed, additional training steps are needed to recover from
+each loss spike. Consequently, we need to modify the ex-
+isting SEQ to gradually change the extreme values in the
+QDQ distribution. To this end, we propose RelaxSEQ as:
+wr = α
+k
+
+clip
+
+round
+ θ
+α × k −0.5
+
+, −k, k −1
+
++ 0.5
+
+.
+(3)
+Essentially, RelaxSEQ flips the order of operations from
+Clip-then-Round to Round-then-Clip and makes the clip-
+ping ranges a function of k. Therefore, when the bitwidth is
+floating point, the extreme values (resulting from the clip-
+ping operation) are also floating point. Meanwhile, similar
+to the existing SEQ, the distribution can still shrink and
+expand with the changing bitwidth. As a result, when the
+precision changes, there is a smooth change in the extreme
+values of the distribution, which leads to a smoothly chang-
+ing loss with no sudden spikes. As ω becomes 1 towards the
+end of the training, the model converges to the desired low-
+bitwidth. Fig. 2 (green) demonstrates that as the bit schedule
+progresses, the extreme values smoothly change instead of
+a sudden staircase drop as in the existing SEQ. More details
+on existing SEQ vs. RelaxSEQ including some early train-
+ing and benchmarking results are shown in Appendix A,
+Figs. 5, 6, and Table 10.
+3.3
+RelaxQAT
+We now combine the bit schedule and the RelaxSEQ to
+get the proposed RelaxQAT method. We implement the
+bit schedule as a transformers.TrainerCallback.
+Algorithm 1 shows a psuedo-code to initialize the bitwidth
+schedule. It requires start bits (bs), end bits (be), cycle
+start step (css), cycle end step (ces), cycle length (cl), and
+maximum schedule steps (ms) as arguments. Then, an array
+ω is initialized to evenly spaced ms numbers between 0
+and 1 (all inclusive). Eq. (1) is then used to obtain a list of
+floating point bitwidths B. The number of full cycles n and
+cycle intervals C are obtained using css, ces, and cl. Finally,
+for each SEQ module, various states are initialized (e.g.,
+cycle indices, bit schedule list, bit schedule index).
+After initialization, we compute the dynamic bitwidth at
+each training step as shown in Algorithm 2. As mentioned
+in Section 3.1, we start with a half cycle going from bs to be
+bits. Then we conduct n full cycles going from be to bs and
+then back to be bitwidth. Once all n cycles have ended, we
+set the bitwidth to be for the final finetuning in the desired
+bit precision. Hence, at each global step t during training,
+the dynamic bitwidth bt is set using Algorithm 2. Finally,
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Algorithm 1 RelaxQATCallback: At initialization
+1: function INITIALIZERELAXQATCALLBACK(model,
+start bits
+(bs),
+end bits
+(be),
+cycle start step
+(css),
+cycle end step
+(ces),
+cycle length
+(cl),
+max schedule steps (ms))
+2:
+Assert css > ms
+3:
+Assert cl > 2 · ms
+4:
+Assert bs > be
+5:
+Assert (ces −css)%cl = 0
+6:
+ω ←linspace(0, 1, num = ms)
+7:
+B ←(bs −(bs −be) sin((π/2)ω))
+8:
+n ←((ces −css)/cl)+1
+# number of cycles
+9:
+C ←linspace(css, ces, num = n)
+10:
+modules ←all SEQ modules in model
+11:
+for all m ∈modules do
+12:
+m.enable relax qat ←true
+13:
+m.i ←0
+# current bit schedule index
+14:
+m.B ←B
+# bit schedule list: [bs, be]
+15:
+m.cci ←0
+# current cycle idx
+16:
+m.pci ←−1
+# previous cycle idx
+17:
+end for
+18:
+return initialized callback state
+19: end function
+we assign the dynamic bitwidth bt to the RelaxSEQ function.
+The forward function shown in Algorithm 3 computes the
+QDQ weight wr and sends it to the nn.Linear layers
+in the transformer modules. The backward function for
+RelaxSEQ is similar to the backward function of existing
+SEQ (Liu et al., 2025b), except the clipping ranges are
+changed based on Eq. (3). This completes the description
+of our proposed RelaxQAT technique.
+3.4
+Systems Considerations
+Any new QAT paradigm must not come at the expense
+of training speed, particularly because low-bit (2-bit or
+sub-2-bit) QAT requires billions of tokens in training in
+order to recover sufficient accuracy. To this end, we im-
+plemented triton kernels (Tillet et al., 2019) for both Re-
+Method
+GPU Hours
+ParetoQ
+370
+RelaxQAT (ours)
+361 (-2.4%)
+Table 1. Training Speeds for Qwen3-
+0.6B model on 10B tokens.
+laxSEQ
+and
+the
+existing
+ParetoQ
+SEQ functions.
+We
+train
+Qwen3-0.6B
+model (Yang et al.,
+2025) on 10B tokens
+on
+eight
+NVIDIA
+H100 GPUs. Table 1
+shows the end-to-end training time for ParetoQ and
+RelaxQAT in GPU hours. As evident, both ParetoQ and
+RelaxQAT achieve very similar GPU hours with RelaxQAT
+being slightly faster (but within margin of error). Note
+that, Algorithms 1 and 2 precompute the bit schedule at
+Algorithm 2 RelaxQATCallback: At each training step
+1: function
+RELAXQATONSTEPBEGIN(modules,
+global step (t), cycle intervals (C), max schedule steps
+(ms))
+2:
+for all m ∈modules do
+3:
+if t < C[0] then
+# first half cycle from bs to be
+4:
+m.i ←min(t, ms −1)
+5:
+else if t < C[−1] then
+# n full cycles
+6:
+if t = C[m.cci] then
+7:
+# Update current and previous cycle idx
+8:
+m.i ←ms −1
+9:
+m.cci ←m.cci + 1
+10:
+m.pci ←m.pci + 1
+11:
+else if t ≤C[m.pci] + ms −1 then
+12:
+# first: relax bits from be to bs
+13:
+m.i ←C[m.pci] + ms −1 −t
+14:
+else
+15:
+# second: reduce bits from bs to be
+16:
+m.i ←min(t −(C[m.pci] + ms −
+1), ms −1)
+17:
+end if
+18:
+else
+# all n cycles ended: set bits to be
+19:
+m.i ←ms −1
+20:
+end if
+21:
+m.bt ←m.B[m.i] # set dynamic bitwidth bt
+22:
+end for
+23:
+return dynamic bitwidth bt for all SEQ modules
+24: end function
+initialization. Hence, the bitwdith is simply assigned to
+RelaxSEQ without any computation of Eq. (1) during the
+forward pass. This further removes any additional overhead
+resulting from the bit schedule in RelaxQAT.
+4
+THEORETICAL INSIGHTS
+Let us now derive some simple theoretical insights for Re-
+laxQAT. Although RelaxQAT is proposed for SEQ, the same
+principles apply to other quantizers such as Learned Step-
+size Quantizer (LSQ) (Esser et al., 2019). The LSQ QDQ
+weight is computed as:
+wl = α
+k
+
+clip
+
+round
+ θ
+α × k
+
+, −k, k −1
+
+.
+(4)
+Once again, k = 2b−1. It is easy to see why the same
+RelaxQAT ideas apply to LSQ. The main difference be-
+tween Eq. (3) and (4) is the shift factor of 0.5 which
+changes the integer grid from {−3, −1, 1, 3} for RelaxQAT
+to {−2, −1, 0, 1} for LSQ for a 2-bit QAT. Since the LSQ
+grid is simpler to analyze, without loss of generality, we
+will use it in this section to derive our theoretical insights.
+We will show two key results: (i) How is bitwidth related
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Algorithm 3 RelaxSEQ for 2-bit QAT
+1: function RELAXSEQ(θ, α, b)
+2:
+nlevels ←2b−1
+3:
+shift←0.5
+4:
+δ ←α/nlevels
+5:
+qbins ←round(θ/δ−shift)
+6:
+qbins ←clip(qbins, −nlevels, nlevels −1)
+7:
+q ←qbins+shift
+8:
+wr ←q · δ
+9:
+return wr
+10: end function
+to the flatness of the quantization loss surface and how we
+may need integer changes in QDQ weights to make progress
+when we are stuck on a flat surface? (ii) Why does the opti-
+mization stall when the QAT does not result in a substantial
+change in integer values? We will also demonstrate how
+RelaxQAT can help with the above problems.
+Proposition 1. The higher the bit precision, the smaller the
+width of the quantization hyperplanes. Specifically, given
+two bitwidths b1 and b2, with b1 < b2, the width of the
+quantization hyperplanes can be reduced by a factor of
+2b2−b1 if we relax the bitwidth from b1 to b2.
+Therefore, relaxing the bitwidth during QAT can help the
+optimization escape the flat regions in the loss surface.
+Proof. See Appendix B for the proof.
+We next simulate a real quantization loss surface for a toy
+problem to illustrate how flatness increases with larger scale
+values. Fig. 3(a) plots a simple 1-d function: x4 −3x3 −2x.
+The problem is to minimize this function. Now, if we choose
+x as the optimization variable, a 1-d function in the float-
+ing point domain will result in a 2-d optimization problem
+in the quantized realm. This is because the scalar x splits
+into a scalar latent weight θ and a scalar δ scale. Thus,
+the minimization problem is wl4 −3wl3 −2wl, where wl
+comes from the LSQ Eq. (4) and {θ, δ} are the two opti-
+mization variables. Fig. 3(b) shows the highly complex 2-d,
+2-bit quantization loss surface arising from a simple 1-d
+minimization problem. As evident, we see clear quantiza-
+tion hyperplanes marking the integer value changes in the
+QDQ weight. More importantly, we see that as the scale
+becomes larger, the width of the hyperplanes increases, just
+as predicted in Proposition 1. Hence, relaxing the bitwidth
+(which reduces the scale δ) can help a stuck optimization by
+reducing the width of such hyperplanes.
+Fig. 3(b) also shows a red line tracing the optimization path
+on the quantized loss surface. It moves across multiple hy-
+perplanes, which show changes in the integer value in the
+QDQ weight, to reach near the minimum point. An inter-
+Figure 3. (a) A simple 1-d function to minimize. (b) The 1-d func-
+tion above results in a highly complex 2-d, 2-bit quantization loss
+surface (generated using LSQ) where the width of the hyperplanes
+(defined as the flat regions between integer changes) increases with
+larger scales. Red line shows the QAT trajectory.
+esting problem then would be to understand how important
+these integer changes are for a QAT. Moreover, can we math-
+ematically capture the QAT optimization trajectory (e.g., red
+line in Fig. 3(b))? This leads us to our next theoretical result.
+Proposition 2. The direction of the QAT trajectory is pri-
+marily decided by the scale gradients only and not by the
+latent weight gradients if there are no integer changes in
+the QDQ weight tensor. This can slow down the training
+convergence since there are a lot more latent weights than
+(channelwise) scale parameters in the model.
+Since RelaxQAT relaxes the bitwidth which reduces the
+width of quantization hyperplanes defined by the integer-
+change boundaries, it makes it easier to change integers.
+This directly contributes to the directions the QAT trajectory
+can take by better utilizing the latent weight gradients, and
+thus results in faster convergence.
+Proof. Let us first rewrite Eq. (4) in the following form:
+w(t) = δ(t)
+θ(t)
+δ(t)
+
+= δ(t)z(t),
+(5)
+where, w(t) is the QDQ weight at training step t, δ(t) =
+
+
+A Continuous Relaxation of Quantization-Aware Training
+α(t)
+2b−1 is the scale at step t, and b is an integer bitwidth, e.g.,
+2-bits. The ⌊⌉operator should be understood as the Round-
+then-Clip from Eq. (4). Since b is an integer here, z(t) is the
+integer value of the QDQ weight at step t.
+Now, let us mathematically describe the QAT trajectory (red
+line in Fig. 3(b)). The QDQ weight at step t + 1 is given by:
+w(t+1) = δ(t+1)
+θ(t+1)
+δ(t+1)
+
+= (δ(t) −ηd(t)
+δ )
+$
+(θ(t) −ηd(t)
+θ )
+(δ(t) −ηd(t)
+δ )
+'
+= (δ(t) −ηd(t)
+δ )z(t+1)
+= δ(t)z(t+1) −ηz(t+1)d(t)
+δ ,
+(6)
+where, η is the learning rate, d(t)
+δ
+(d(t)
+θ ) is the optimizer (e.g.,
+Adam or SGD) update as a function of the gradient of δ (θ),
+and z(t+1) is the integer value at step t + 1. Note that, the
+gradient information of θ is contained only within z(t+1)
+and does not appear anywhere else in Eq. (6). When there
+is no integer change at a given training step, we have:
+w(t+1) = δ(t)z(t+1) −ηz(t+1)d(t)
+δ
+= δ(t)z(t) −ηz(t)d(t)
+δ
+(since z(t+1) = z(t))
+= w(t) −ηz(t)d(t)
+δ
+(Eq. (5))
+= w(t) −ηd(t)
+w ,
+(7)
+where, d(t)
+w = z(t)d(t)
+δ . Hence, when the integer values z do
+not change, there are no gradient directions (d(t)
+θ ) coming
+from the latent weights, and the optimization direction is
+primarily driven by the scales. Further, because the number
+of latent weights far exceed the (channelwise) scales, a lack
+of integer changes during QAT can slow down the training
+convergence. This highlights how gradual changes to the
+loss surface induced by RelaxQAT can lead to more integer
+changes, and thus meaningfully contribute to the QAT con-
+vergence by better utilizing the latent weight gradients.
+Finally, similar to Fig. 3(b) which was produced using LSQ,
+we repeat the analysis for the ParetoQ SEQ and RelaxSEQ
+(Eqs. (2) and (3), respectively). The loss visualization is
+shown in Fig. 7 in Appendix C.
+5
+EXPERIMENTS
+5.1
+Experimental Setup
+We perform experiments on Qwen3 (0.6B/4B), Qwen3.5
+(2B/4B) and Gemma3-1B models in the language domain
+and Qwen3.5 (2B/4B) models in the vision-language do-
+main. We compare our method against five state-of-the-
+art QAT baselines, including ParetoQ (Liu et al., 2025b),
+LLM-QAT (Liu et al., 2024b), UPQ (Lee et al., 2025), Bit-
+Net (Hugging Face, 2024), and WinQ (Li et al., 2026). Ad-
+ditionally, we evaluate AdaScale (AIMET, 2026), a PTQ
+method for comparison. For BitNet, since (Hugging Face,
+2024) is only for 1.58 bits and has no learnable scale, we
+adopt ParetoQ’s SEQ function to get the 2-bit QDQ weight
+and use it inside the BitNet algorithm.
+The training data consists of a mixture of DCLM-Edu (Allal
+et al., 2025), tulu-3-sft-olmo-2-mixture (Allen Institute for
+AI) and xlam-function-calling-60k (Liu et al., 2024a). For
+vision-language model training, we additionally include
+Llama-Nemotron-VLM-Dataset-v1 (NVIDIA). We train all
+models on 10B tokens. We use the same initial learning rate
+of 0.0001 for all models and baselines with a cosine learning
+rate schedule that decays to nearly zero. The smaller models
+are trained on a single node of eight H100 GPUs whereas
+the bigger models are trained on two A100 nodes. Note that,
+we only do weight only quantization in all experiments.
+We select n = 1 full cycle (after an initial half cycle) for all
+experiments. For maximum schedule steps ms, we perform
+a grid search between {400, 800, 1200}. We also conduct
+a detailed ablation study to show that RelaxQAT is robust
+across hyperparameter choices for n and ms. Also, we set
+bs = 4 and be = 2 bits, signifying a 4-bit to 2-bit schedule.
+In the language domain, we evaluate RelaxQAT on five
+zero-shot common sense reasoning tasks. These include
+Arc-easy, Arc-challenge (Clark et al., 2018), HellaSwag
+(Zellers et al., 2019), Winogrande (Sakaguchi et al., 2021),
+and PIQA (Bisk et al., 2020). We also report five-shot
+MMLU (Hendrycks et al., 2020) (loglikelihood task) and
+IFEval (Zhou et al., 2023) (generative task) benchmarks,
+each focusing on evaluating the knowledge and instruction
+following capabilities of the model. In vision domain, we
+evaluate on MMMU (Yue et al., 2024), DocVQA (Mathew
+et al., 2021), and ScienceQA (Lu et al., 2022) benchmarks.
+5.2
+Language Modeling Results
+We first look at the loss convergence of RelaxQAT. Fig. 4
+demonstrates the training convergence of RelaxQAT vs.
+ParetoQ for the Qwen3-0.6B model class. As evident, the
+initial half cycle from 4-bits to 2-bits significantly boosts
+the accuracy. However, by step 3000 or so, ParetoQ starts to
+catch up. The final (n = 1) full cycle further accelerates the
+RelaxQAT towards the end. Hence, RelaxQAT converges
+faster and achieves a significantly better training loss.
+We now analyze the performance of RelaxQAT against sev-
+eral quantization baselines. Table 2 presents the accuracy
+of various quantized 2-bit Qwen3-4B-Instruct-2507
+models on (i) five common sense reasoning datasets,
+(ii) their average (CSR), (iii) MMLU, (iv) IFEval, and
+(iv) the global average of CSR, MMLU, and IFEval. As
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Method
+Type
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+-
+81.22
+58.44
+69.08
+67.48
+75.73
+70.39
+72.63
+86.55
+76.52
+AdaScale (AIMET, 2026)
+PTQ
+25.54
+26.36
+26.94
+50.19
+50.76
+35.95
+26.89
+20.27
+27.70
+ParetoQ (Liu et al., 2025b)
+QAT
+74.92
+48.38
+62.08
+63.77
+73.78
+64.58
+62.30
+80.22
+69.03(+0.00%)
+UPQ (Lee et al., 2025)
+75.97
+49.66
+61.79
+62.67
+73.23
+64.66
+61.21
+79.18
+68.35 (-0.68%)
+LLM-QAT (Liu et al., 2024b)
+76.94
+48.29
+61.29
+63.93
+73.45
+64.78
+59.66
+79.73
+68.05 (-0.98%)
+BitNet (Hugging Face, 2024)
+69.86
+43.51
+60.67
+61.95
+71.27
+61.45
+60.15
+79.21
+66.93 (-2.10%)
+WinQ (Li et al., 2026)
+75.42
+48.55
+62.23
+65.51
+73.99
+65.14
+62.80
+80.26
+69.40 (+0.37%)
+RelaxQAT (ours)
+76.47
+50.26
+63.05
+64.48
+74.43
+65.73
+62.84
+81.54
+70.03 (+1.00%)
+Table 2. Evaluation of Qwen3-4B on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote WinoGrande and
+HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ, respectively. Bold
+is best and underline is second-best.
+Method
+Type
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+-
+56.01
+34.55
+47.29
+55.48
+67.73
+52.21
+47.25
+64.78
+54.74
+AdaScale (AIMET, 2026)
+PTQ
+40.45
+25.51
+32.78
+52.49
+59.41
+42.12
+25.96
+21
+29.69
+ParetoQ (Liu et al., 2025b)
+QAT
+50.79
+27.64
+40.19
+52.40
+64.03
+47.01
+37.18
+33.85
+39.34 (+0.00%)
+UPQ (Lee et al., 2025)
+50.42
+27.56
+39.58
+52.09
+63.82
+46.69
+36.54
+43.89
+42.37 (+3.03%)
+LLM-QAT (Liu et al., 2024b)
+49.91
+28.41
+39.76
+52.72
+64.09
+46.97
+37.35
+44.61
+42.97 (+3.63%)
+BitNet (Hugging Face, 2024)
+52.44
+28.49
+40.34
+55.64
+64.20
+48.22
+37.62
+49.29
+45.04 (+5.70%)
+WinQ (Li et al., 2026)
+50.16
+27.30
+40.12
+55.01
+63.76
+47.27
+37.02
+49.56
+44.61 (+5.27%)
+RelaxQAT (ours)
+52.95
+30.03
+40.90
+53.28
+64.09
+48.25
+40.14
+52.73
+47.04 (+7.70%)
+Table 3. Evaluation of Qwen3-0.6B on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote WinoGrande
+and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ, respectively.
+Bold is best and underline is second-best among QAT methods.
+0
+2000
+4000
+6000
+8000
+10000
+Global step
+100
+6 × 10−1
+2 × 100
+3 × 100
+4 × 100
+6 × 100
+train/loss
+train/loss vs. step
+ParetoQ
+RelaxQAT
+Figure 4. RelaxQAT converges significantly faster than ParetoQ.
+shown, AdaScale (AIMET, 2026), a PTQ technique that
+combines leading methods like OmniQuant (Shao et al.,
+2024) and FlexRound (Lee et al., 2023), performs poorly in
+a 2-bit setting. In terms of QAT methods, ParetoQ achieves
+a global average accuracy of 69.03%. Compared to this,
+RelaxQAT achieves 70.03% global average accuracy (+1%
+over ParetoQ) and also achieves the best overall accuracy
+on 7/9 columns reported in Table 2 (with the second-best
+accuracy on the remaining two). The runner-up for the
+Qwen3-4B-Instruct-2507 model class in global av-
+erage is WinQ at 69.40%. We beat WinQ by 0.63%.
+Next, we consider the Qwen3-0.6B to see if RelaxQAT is
+still effective on a smaller model. All benchmark evaluation
+results are shown in Table 3. Compared to ParetoQ’s 39.34%
+global average accuracy, we achieve a substantially higher
+47.04% (+7.7%) on this model class. The second-best
+method in Table 3 is BitNet at 45.04%. We outperform Bit-
+Net by 2%. Thus, RelaxQAT outperforms even the second-
+best baseline by a significant margin for Qwen3-0.6B.
+Let us now move on to a more recent model class:
+Qwen3.5-4B. Once again, Table 4 shows a significant
+improvement of 1.38% accuracy over ParetoQ. The second
+best is WinQ and we outperform it by 0.41% on average.
+RelaxQAT also achieves the highest or second highest scores
+on 8 of the 9 columns reported in Table 4. Next, we also
+consider the Qwen3.5-2B model and show its results in
+Table 5. As evident, RelaxQAT outperform ParetoQ by
+0.36% and achieves the best or second-best scores on 6
+out of 9 columns reported. The second-best method for
+Qwen3.5-2B is UPQ with only 0.24% lower accuracy
+than RelaxQAT. UPQ achieves highest or second highest
+scores on 5 out of 9 columns in Table 5.
+5.3
+Vision-Language Modeling Results
+We now present the results on vision-language problems
+such as MMMU, DocVQA, and ScienceQA. Table 6 shows
+the results for Qwen3.5-4B. Clearly, we achieve the high-
+est or second-highest accuracy on 3 of the 4 columns. Over-
+all, RelaxQAT achieves the second highest average accuracy
+which is 0.82% above ParetoQ, but only 0.16% below UPQ,
+the best performing method for this model.
+For Qwen3.5-2B, the results are shown in Table 7. As
+evident, RelaxQAT demonstrates strong VLM performance
+with a massive 6.26% accuracy gain over ParetoQ. We also
+see a nearly 9% gain in the ScienceQA score for RelaxQAT
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Method
+Type
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+-
+75.63
+54.35
+73.01
+69.69
+77.97
+70.13
+69.70
+85.31
+75.04
+AdaScale (AIMET, 2026)
+PTQ
+24.32
+25
+26.44
+51.22
+51.79
+35.75
+24.16
+16.12
+25.34
+ParetoQ (Liu et al., 2025b)
+QAT
+73.94
+49.57
+67.48
+67.48
+75.40
+66.77
+63.95
+74.32
+68.34 (+0.00%)
+UPQ (Lee et al., 2025)
+71.84
+46.67
+67.10
+67.64
+76.33
+65.91
+63.83
+75.15
+68.29 (-0.05%)
+LLM-QAT (Liu et al., 2024b)
+73.95
+47.78
+67.25
+65.90
+75.68
+66.11
+64.03
+73.95
+68.03 (-0.31%)
+BitNet (Hugging Face, 2024)
+72.90
+48.21
+66.65
+67.32
+75.24
+66.06
+63.93
+76.29
+68.76 (+0.42%)
+WinQ (Li et al., 2026)
+76.73
+51.96
+67.30
+66.69
+75.46
+67.62
+64.44
+75.88
+69.31 (+0.97%)
+RelaxQAT (ours)
+74.41
+48.89
+67.47
+68.03
+75.79
+66.91
+65.21
+77.05
+69.72 (+1.38%)
+Table 4. Evaluation of Qwen3.5-4B on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote WinoGrande
+and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ, respectively.
+Bold is best and underline is second-best among QAT methods.
+Method
+Type
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+-
+66.03
+41.46
+62.06
+62.58
+72.52
+60.93
+57.19
+72.84
+63.65
+AdaScale (AIMET, 2026)
+PTQ
+24.32
+25.00
+26.44
+51.22
+51.79
+35.75
+24.16
+16.12
+25.34
+ParetoQ (Liu et al., 2025b)
+QAT
+60.81
+37.28
+57.38
+62.50
+71.81
+57.95
+54.42
+62.12
+58.16 (+0.00%)
+UPQ (Lee et al., 2025)
+60.77
+36.60
+56.92
+62.66
+71.27
+57.64
+54.63
+62.59
+58.28 (+0.12%)
+LLM-QAT (Liu et al., 2024b)
+58.54
+36.77
+56.62
+62.11
+71.16
+57.04
+53.40
+62.15
+57.53 (-0.63%)
+BitNet (Hugging Face, 2024)
+51.64
+33.95
+54.76
+60.77
+70.02
+54.22
+50.91
+59.91
+55.01 (-3.15%)
+WinQ (Li et al., 2026)
+61.36
+36.94
+56.70
+62.03
+71.32
+57.67
+53.43
+59.07
+56.72 (-1.44%)
+RelaxQAT (ours)
+62.58
+37.45
+56.72
+60.85
+71.59
+57.83
+54.34
+63.39
+58.52 (+0.36%)
+Table 5. Evaluation of Qwen3.5-2B on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote WinoGrande
+and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ, respectively.
+Bold is best and underline is second-best among QAT methods.
+Method
+Type
+MMMU(↑)
+DocVQA(↑)
+ScienceQA(↑)
+Avg.(↑)
+FP
+-
+41.22
+94.51
+85.52
+73.75
+AdaScale
+PTQ
+26.00
+0
+0
+8.66
+ParetoQ
+QAT
+40.78
+90.42
+81.85
+71.02 (+0.00%)
+UPQ
+42.44
+90.80
+82.75
+72.00 (+0.98%)
+LLM-QAT
+39.22
+90.76
+79.67
+69.88 (-1.14%)
+BitNet
+40.33
+90.60
+81.71
+70.88 (-0.14%)
+WinQ
+34.00
+7.76∗
+65.94
+35.90 (-35.12%)
+RelaxQAT
+40.33
+91.25
+83.94
+71.84 (+0.82%)
+Table 6. Evaluation of Qwen3.5-4B on MMMU, DocVQA, and
+ScienceQA. (↑): higher is better. Green and red denote improve-
+ment and degradation relative to ParetoQ, respectively. Bold is
+best and underline is second-best among QAT methods. ∗WinQ
+showed some training instability which caused loss of accuracy.
+compared to the second-best method (UPQ). On average,
+RelaxQAT outperforms UPQ by a large (3.75%) margin.
+Our results demonstrate how RelaxQAT outperforms base-
+lines across the board for both LLM and VLM tasks. Impor-
+tantly, no other single method consistently scores the highest
+or second-highest for all these different tasks; the second
+highest position is shared by WinQ, UPQ, and BitNet. This
+further highlights the effectiveness of RelaxQAT.
+5.4
+Ablations
+In this section, we evaluate the impact of RelaxQAT hy-
+perparameters such as maximum schedule steps ms and
+number of full cycles n. To this end, we conduct two abla-
+tion studies using the Qwen3-0.6B model. We also show
+whether RelaxQAT works on model classes other than the
+Qwen family.
+Method
+Type
+MMMU(↑)
+DocVQA(↑)
+ScienceQA(↑)
+Avg.(↑)
+FP
+-
+39.77
+92.05
+82.89
+71.57
+AdaScale
+PTQ
+25.55
+0
+0
+8.52
+ParetoQ
+QAT
+31.77
+87.73
+52.30
+57.26 (+0.00%)
+UPQ
+30.55
+88.09
+60.68
+59.77 (+2.51%)
+LLM-QAT
+30.66
+87.34
+56.66
+58.22 (+0.96%)
+BitNet
+29.11
+87.90
+59.29
+58.76 (+1.50%)
+WinQ
+29.11
+72.16
+57.01
+52.76 (-4.50%)
+RelaxQAT
+33.11
+87.71
+69.75
+63.52 (+6.26%)
+Table 7. Evaluation of Qwen3.5-2B on MMMU, DocVQA, and
+ScienceQA. (↑): higher is better. Green and red denote improve-
+ment and degradation relative to ParetoQ, respectively. Bold is
+best and underline is second-best among QAT methods.
+Varying ms.
+While fixing n = 1 full cycle after the ini-
+tial half cycle of the bit schedule, we vary ms between
+{400, 800, 1200, 1600, 2000}. The results are shown in Ta-
+ble 8. We make two key observations: (a) RelaxQAT is
+fairly robust across different choices of maximum schedule
+steps. Specifically, all ms values significantly outperform
+ParetoQ (by 6.45% to 7.7%) and also beat the second high-
+est BitNet method shown in Table 3. (b) The values of
+ms ∈{400, 800, 1200} typically perform the best, which is
+what we have used throughout this work.
+Varying n.
+Next, we change the number of full cycles
+n ∈{0, 1, 2, 3, 4} after the initial half cycle for ms = 400.
+Table 9 shows that RelaxQAT is once again quite robust to
+the choice of n since all values provide a substantial accu-
+racy boost compared to ParetoQ (4.5% to 7%). Moreover,
+n = 1 performs the best among all other n values consid-
+ered. Of note, RelaxQAT with n = 0, i.e., just the initial
+
+
+A Continuous Relaxation of Quantization-Aware Training
+ms
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+56.01
+34.55
+47.29
+55.48
+67.73
+52.21
+47.25
+64.78
+54.74
+ParetoQ
+50.79
+27.64
+40.19
+52.40
+64.03
+47.01
+37.18
+33.85
+39.34 (+0.00%)
+400
+53.11
+29.01
+40.82
+53.91
+63.82
+48.13
+40.01
+51.28
+46.47 (+7.13%)
+800
+52.95
+30.03
+40.90
+53.28
+64.09
+48.25
+40.14
+52.73
+47.04 (+7.70%)
+1200
+53.24
+29.10
+40.88
+55.49
+63.98
+48.54
+40.09
+49.78
+46.14 (+6.80%)
+1600
+50.88
+28.92
+41.19
+54.14
+63.71
+47.77
+40.57
+49.26
+45.87 (+6.53%)
+2000
+51.14
+28.75
+41.22
+56.27
+63.98
+48.27
+40.12
+48.99
+45.79 (+6.45%)
+Table 8. Ablation study of Qwen3-0.6B with varying maximum schedule steps (ms) and number of full cycles (n) fixed to 1 (after the
+initial half cycle of bit schedule). Evaluation is performed on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS
+denote WinoGrande and HellaSwag, respectively. (↑): higher is better. Bold is best and underline is second-best among QAT methods.
+n
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+56.01
+34.55
+47.29
+55.48
+67.73
+52.21
+47.25
+64.78
+54.74
+ParetoQ
+50.79
+27.64
+40.19
+52.40
+64.03
+47.01
+37.18
+33.85
+39.34 (+0.00%)
+0
+51.68
+29.10
+41.01
+54.14
+63.22
+47.83
+39.84
+43.81
+43.83 (+4.49%)
+1
+49.66
+28.75
+40.78
+53.43
+63.98
+47.32
+39.45
+52.02
+46.26 (+6.92%)
+2
+52.95
+29.01
+40.68
+53.91
+63.38
+47.99
+40.67
+49.61
+46.09 (+6.75%)
+3
+51.18
+28.41
+41.22
+55.01
+64.42
+48.05
+39.39
+49.71
+45.72 (+6.38%)
+4
+50.80
+28.84
+41.09
+54.78
+63.33
+47.77
+40.45
+48.44
+45.55 (+6.21%)
+Table 9. Ablation study of Qwen3-0.6B with varying number of full cycles, n (after the initial half cycle of bit schedule), with maximum
+schedule steps (ms) fixed to 400. Evaluation is performed on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS
+denote WinoGrande and HellaSwag, respectively. (↑): higher is better. Bold is best and underline is second-best among QAT methods.
+half cycle of bit schedule and no full cycles, outperforms
+ParetoQ by about 4.5%. Most interestingly, all non-zero
+full cycle cases (n ≥1) outperform RelaxQAT with n = 0
+by a large margin of up to nearly 2.5%. This demonstrates
+that while the initial half cycle dramatically speeds up the
+early convergence, further bit schedule relaxation cycles
+result in significant additional accuracy gains.
+What about model classes outside the Qwen family?
+To address this, we present results for Gemma-3-1B-it
+model in Table 11 in Appendix E. Once again, RelaxQAT
+significantly outperforms ParetoQ by 3.35% with highest
+or second highest scores in 6 out of 9 columns. Overall,
+RelaxQAT outperforms the second best method WinQ by
+2.63%, a significant margin. Most notably, RelaxQAT
+achieves a nearly 6% higher IFEval score than the second
+best method.
+5.5
+Does RelaxQAT work for Ternary Quantization?
+Finally, we investigate whether RelaxQAT works for other
+quantization schemes such as ternary (1.58) bits: {−1, 0, 1}
+integer grid. Table 12 in Appendix F shows the accuracy
+of ternary Qwen3-4B-Instruct-2507 models. As ev-
+ident, RelaxQAT performs the best with 4.2% higher accu-
+racy than ParetoQ. Similar results are observed for Table 13
+in Appendix F for the ternary Qwen3.5-2B model. Re-
+laxQAT outperforms ParetoQ by 1.38%. Hence, RelaxQAT
+is a versatile technique that strongly outperforms leading
+methods for both ternary (1.58-bit) and 2-bit quantization.
+6
+CONCLUSION AND FUTURE WORK
+In this paper, we have explored a new paradigm which aims
+to create a continuous relaxation of the QAT process. To this
+end, we have proposed RelaxQAT which dynamically varies
+the bitwidth during training in a continuous floating point do-
+main. RelaxQAT gradually alters the bit precision of model
+weights in order to accelerate the early training convergence,
+as well as to escape any flat regions in the low-bit quantiza-
+tion loss surfaces. We have also presented simple theoretical
+and empirical insights into why RelaxQAT helps QAT. Our
+extensive experiments demonstrate accuracy gains of up to
+6.3% on vision and up to 7.7% on natural language tasks,
+compared to the leading QAT methods.
+Finally, although we have considered weight only quantiza-
+tion in this work, RelaxQAT can also be applied to activation
+or KV-cache quantization. We leave this for future work.
+REFERENCES
+AIMET.
+Adascale ptq, 2026.
+URL https://
+quic.github.io/aimet-pages/releases/
+latest/ptq_techniques/adascale.html.
+Allal, L. B., Lozhkov, A., Bakouch, E., Bl´azquez, G. M.,
+Penedo, G., Tunstall, L., Marafioti, A., Kydl´ıˇcek, H.,
+Lajar´ın, A. P., Srivastav, V., Lochner, J., Fahlgren, C.,
+Nguyen, X.-S., Fourrier, C., Burtenshaw, B., Larcher, H.,
+Zhao, H., Zakka, C., Morlon, M., Raffel, C., von Werra,
+L., and Wolf, T. Smollm2: When smol goes big – data-
+centric training of a small language model, 2025. URL
+
+
+A Continuous Relaxation of Quantization-Aware Training
+https://arxiv.org/abs/2502.02737.
+Allen Institute for AI.
+Tulu-3-sft-olmo-2-mixture.
+URL
+https://huggingface.co/datasets/
+allenai/tulu-3-sft-olmo-2-mixture.
+Ashkboos, S., Mohtashami, A., Croci, M. L., Li, B.,
+Cameron, P., Jaggi, M., Alistarh, D., Hoefler, T., and
+Hensman, J. Quarot: Outlier-free 4-bit inference in ro-
+tated llms. Advances in Neural Information Processing
+Systems, 37:100213–100240, 2024.
+Bhalgat, Y., Lee, J., Nagel, M., Blankevoort, T., and Kwak,
+N. Lsq+: Improving low-bit quantization through learn-
+able offsets and better initialization. In 2020 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+Workshops (CVPRW), pp. 2978–2985. IEEE, 2020.
+Bisk, Y., Zellers, R., Gao, J., Choi, Y., et al. Piqa: Reasoning
+about physical commonsense in natural language. In Pro-
+ceedings of the AAAI conference on artificial intelligence,
+volume 34, pp. 7432–7439, 2020.
+Chen, M., Shao, W., Xu, P., Wang, J., Gao, P., Zhang, K.,
+and Luo, P. Efficientqat: Efficient quantization-aware
+training for large language models. In Proceedings of
+the 63rd Annual Meeting of the Association for Computa-
+tional Linguistics (Volume 1: Long Papers), pp. 10081–
+10100, 2025.
+Choi, J., Wang, Z., Venkataramani, S., Chuang, P. I.-J., Srini-
+vasan, V., and Gopalakrishnan, K. Pact: Parameterized
+clipping activation for quantized neural networks. arXiv
+preprint arXiv:1805.06085, 2018.
+Clark, P., Cowhey, I., Etzioni, O., Khot, T., Sabharwal, A.,
+Schoenick, C., and Tafjord, O. Think you have solved
+question answering? try arc, the ai2 reasoning challenge.
+arXiv preprint arXiv:1803.05457, 2018.
+Dettmers, T. and Zettlemoyer, L. The case for 4-bit preci-
+sion: k-bit inference scaling laws. In International Con-
+ference on Machine Learning, pp. 7750–7774. PMLR,
+2023.
+Esser, S. K., McKinstry, J. L., Bablani, D., Appuswamy, R.,
+and Modha, D. S. Learned step size quantization. arXiv
+preprint arXiv:1902.08153, 2019.
+Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D. Gptq:
+Accurate post-training quantization for generative pre-
+trained transformers. arXiv preprint arXiv:2210.17323,
+2022.
+Gong, R., Ding, Y., Wang, Z., Lv, C., Zheng, X., Du, J.,
+Yong, Y., Gu, S., Qin, H., Guo, J., et al. A survey of
+low-bit large language models: Basics, systems, and al-
+gorithms. Neural networks, 192:107856, 2025.
+Hendrycks, D., Burns, C., Basart, S., Zou, A., Mazeika,
+M., Song, D., and Steinhardt, J.
+Measuring mas-
+sive multitask language understanding. arXiv preprint
+arXiv:2009.03300, 2020.
+Hugging Face.
+Fine-tuning llms to 1.58bit:
+Ex-
+treme
+quantization
+made
+easy,
+2024.
+URL
+https://huggingface.co/blog/1_58_
+llm_extreme_quantization.
+Lee, C., Jin, J., Kim, T., Kim, H., and Park, E. Owq: Outlier-
+aware weight quantization for efficient fine-tuning and
+inference of large language models. In Proceedings of the
+AAAI Conference on Artificial Intelligence, volume 38,
+pp. 13355–13364, 2024.
+Lee, J. H., Kim, J., Kwon, S. J., and Lee, D. Flexround:
+Learnable rounding based on element-wise division for
+post-training quantization. In International Conference
+on Machine Learning, pp. 18913–18939. PMLR, 2023.
+Lee, J. H., Shin, S., Kim, V., You, J., and Chen, A. Unifying
+Block-wise PTQ and Distillation-based QAT for Progres-
+sive Quantization toward 2-bit Instruction-Tuned LLMs.
+arXiv preprint arXiv:2506.09104, 2025.
+Li, D., Liu, Z., Yi, K., Zhang, Z., Zhao, C., Krishnamoor-
+thi, R., Khaitan, H., Zhang, H. R., and Li, S. WinQ:
+Accelerating quantization-aware training of language
+models around saddle points. In Zhang, T., Dudik, M.,
+Jaggi, M., Agarwal, A., Li, S., Schuurmans, D., Zhu,
+J., Berkenkamp, F., Dong, H., and Bietti, A. (eds.), Pro-
+ceedings of the 43rd International Conference on Ma-
+chine Learning, volume 306 of Proceedings of Machine
+Learning Research, pp. 68772–68794. PMLR, 06–11 Jul
+2026. URL https://proceedings.mlr.press/
+v306/li26dr.html.
+Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M., Wang,
+W.-C., Xiao, G., Dang, X., Gan, C., and Han, S. Awq:
+Activation-aware weight quantization for on-device llm
+compression and acceleration. Proceedings of machine
+learning and systems, 6:87–100, 2024.
+Liu, Z., Hoang, T., Zhang, J., Zhu, M., Lan, T., Kokane,
+S., Tan, J., Yao, W., Liu, Z., Feng, Y., et al.
+Api-
+gen:
+Automated pipeline for generating verifiable
+and diverse function-calling datasets.
+arXiv preprint
+arXiv:2406.18518, 2024a.
+Liu, Z., Oguz, B., Zhao, C., Chang, E., Stock, P., Mehdad,
+Y., Shi, Y., Krishnamoorthi, R., and Chandra, V. Llm-qat:
+Data-free quantization aware training for large language
+models. In Findings of the association for computational
+linguistics: ACL 2024, pp. 467–484, 2024b.
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Liu, Z., Zhao, C., Fedorov, I., Soran, B., Choudhary, D., Kr-
+ishnamoorthi, R., Chandra, V., Tian, Y., and Blankevoort,
+T. Spinquant: Llm quantization with learned rotations. In
+International Conference on Learning Representations,
+volume 2025, pp. 92009–92032, 2025a.
+Liu, Z., Zhao, C., Huang, H., Chen, S., Zhang, J., Zhao, J.,
+Roy, S., Jin, L., Xiong, Y., Shi, Y., et al. Paretoq: Improv-
+ing scaling laws in extremely low-bit llm quantization.
+Advances in Neural Information Processing Systems, 38:
+91311–91336, 2025b.
+Lu, P., Mishra, S., Xia, T., Qiu, L., Chang, K.-W., Zhu,
+S.-C., Tafjord, O., Clark, P., and Kalyan, A. Learn to
+explain: Multimodal reasoning via thought chains for sci-
+ence question answering. Advances in neural information
+processing systems, 35:2507–2521, 2022.
+Lv, K., Zhang, M., Xia, X., Ni, J., Yan, S., Yu, X., Hou, L.,
+Yuan, C., and Bai, H. What makes low-bit quantization-
+aware training work for reasoning llms? a systematic
+study. arXiv preprint arXiv:2601.14888, 2026.
+Mathew, M., Karatzas, D., and Jawahar, C. Docvqa: A
+dataset for vqa on document images. In 2021 IEEE Winter
+Conference on Applications of Computer Vision (WACV),
+pp. 2199–2208. IEEE, 2021.
+Nagel, M., Fournarakis, M., Amjad, R. A., Bondarenko,
+Y., Van Baalen, M., and Blankevoort, T. A white pa-
+per on neural network quantization.
+arXiv preprint
+arXiv:2106.08295, 2021.
+NVIDIA.
+Llama-nemotron-vlm-dataset-v1.
+URL
+https://huggingface.co/datasets/
+nvidia/Llama-Nemotron-VLM-Dataset-v1.
+Sakaguchi, K., Bras, R. L., Bhagavatula, C., and Choi, Y.
+Winogrande: An adversarial winograd schema challenge
+at scale. Communications of the ACM, 64(9):99–106,
+2021.
+Shao, W., Chen, M., Zhang, Z., Xu, P., Zhao, L., Li, Z.,
+Zhang, K., Peng, G., Qiao, Y., and Luo, P. Omniquant:
+Omnidirectionally calibrated quantization for large lan-
+guage models. In International Conference on Learning
+Representations, volume 2024, pp. 45472–45496, 2024.
+Song, J., Zhao, M., Wang, Z., Liu, Y., Li, Q., Feng, S.,
+Ren, F., Wang, D., and Sch¨utze, H. A target-centric
+survey of quantization-aware training. arXiv preprint
+arXiv:2608.29667, 2026.
+ˇSubi´c, T. and Cozzini, S. Balancing compute in llm infer-
+ence: Model selection, quantization, and test-time scaling.
+In Proceedings of the Sixth European Workshop on Ma-
+chine Learning and Systems, pp. 433–438, 2026.
+Sun, X., Wang, N., Chen, C.-Y., Ni, J., Agrawal, A., Cui, X.,
+Venkataramani, S., El Maghraoui, K., Srinivasan, V. V.,
+and Gopalakrishnan, K. Ultra-low precision 4-bit training
+of deep neural networks. Advances in Neural Information
+Processing Systems, 33:1796–1807, 2020.
+Tillet, P., Kung, H.-T., and Cox, D. Triton: an intermediate
+language and compiler for tiled neural network computa-
+tions. In Proceedings of the 3rd ACM SIGPLAN Interna-
+tional Workshop on Machine Learning and Programming
+Languages, pp. 10–19, 2019.
+Wang, G., Cai, S., Li, W., Lyu, D., and He, G. Ofq-llm:
+Outlier-flexing quantization for efficient low-bit large lan-
+guage model acceleration. IEEE Transactions on Circuits
+and Systems I: Regular Papers, 72(8):4077–4090, 2025a.
+Wang, H., Ma, S., and Wei, F. Bitnet a4. 8: 4-bit activations
+for 1-bit llms. arXiv preprint arXiv:2411.04965, 2024.
+Wang, H., Lu, J., Zhang, Y., and Fu, Y. Outlier-aware post-
+training quantization for image super-resolution. In 2025
+IEEE/CVF International Conference on Computer Vision
+(ICCV), pp. 16175–16184. IEEE, 2025b.
+Wang, H., Ma, S., Ma, L., Wang, L., Wang, W., Dong, L.,
+Huang, S., Wang, H., Xue, J., Wang, R., et al. Bitnet:
+1-bit pre-training for large language models. Journal of
+Machine Learning Research, 26(125):1–29, 2025c.
+Wang, J., Zhou, H., Song, T., Cao, S., Xia, Y., Cao, T.,
+Wei, J., Ma, S., Wang, H., and Wei, F.
+Bitnet. cpp:
+Efficient edge inference for ternary llms. In Proceed-
+ings of the 63rd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers), pp.
+9305–9322, 2025d.
+Wei, X., Gong, R., Li, Y., Liu, X., and Yu, F. Qdrop: Ran-
+domly dropping quantization for extremely low-bit post-
+training quantization. arXiv preprint arXiv:2203.05740,
+2022.
+Xu, B., Dong, Z., Elachqar, O., and Shang, Y.
+Butter-
+flyquant: Ultra-low-bit llm quantization through learn-
+able orthogonal butterfly transforms.
+arXiv preprint
+arXiv:2509.09679, 2025.
+Xu, B., Gu, H., Li, L., Wang, H., Liu, B., Liu, J., Zhu, Q.,
+Yang, X., Li, C., Han, S., et al. Bit-by-bit: Progressive
+qat strategy with outlier channel splitting for stable low-
+bit llms. In Proceedings of the 64th Annual Meeting of
+the Association for Computational Linguistics (Volume 1:
+Long Papers), pp. 22284–22299, 2026.
+Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B.,
+Yu, B., Gao, C., Huang, C., Lv, C., et al. Qwen3 technical
+report. arXiv preprint arXiv:2505.09388, 2025.
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Yi, K., Vivekraja, V., Khaitan, H., and Li, S. Jacquant:
+Ste-free quantization-aware training via learned jacobian
+surrogates. arXiv preprint arXiv:2605.25469, 2026.
+Yue, X., Ni, Y., Zhang, K., Zheng, T., Liu, R., Zhang, G.,
+Stevens, S., Jiang, D., Ren, W., Sun, Y., et al. Mmmu: A
+massive multi-discipline multimodal understanding and
+reasoning benchmark for expert agi. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pp. 9556–9567, 2024.
+Zellers, R., Holtzman, A., Bisk, Y., Farhadi, A., and Choi, Y.
+Hellaswag: Can a machine really finish your sentence? In
+Proceedings of the 57th annual meeting of the association
+for computational linguistics, pp. 4791–4800, 2019.
+Zhou, J., Lu, T., Mishra, S., Brahma, S., Basu, S.,
+Luan, Y., Zhou, D., and Hou, L. Instruction-following
+evaluation for large language models. arXiv preprint
+arXiv:2311.07911, 2023.
+7
+AI USAGE DISCLOSURE
+No AI was used in ideation, literature search, experiment de-
+sign, code implementation, and writing of this paper. Claude
+code was only used to write a python code to process the
+Tensorboard logs of a few trained models and to plot these
+training loss values in matplotlib (which are shown in Fig 4).
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Supplementary Information: A Continuous Relaxation of Quantization-Aware Training
+A
+EXISTING SEQ VS. RELAXSEQ
+Let us now look at some concrete loss and test accuracy
+behavior for the existing ParetoQ SEQ (Liu et al., 2025b)
+(Clip-then-Round) vs. the proposed RelaxSEQ (Round-then-
+Clip) when trained under a specific bitwidth schedule. As
+mentioned before, existing SEQ (due to Clip-then-Round)
+loses extreme integers as the schedule reduces bitwidth from
+bs to be bits. In contrast, RelaxSEQ results in a smoothly
+changing extreme values. Our hypothesis is that the sudden
+change in extreme integers can cause the loss to spike.
+We noticed this issue early on during the development of
+RelaxQAT. Specifically, we show the unstable behavior of
+existing SEQ (Clip-then-Round) in Fig. 5 for an early train-
+Method
+MMLU
+ParetoQ SEQ + bit schedule
+62.47
+RelaxSEQ + bit schedule
+62.96 (+0.5%)
+Table 10. Clip-then-Round (Existing SEQ)
+vs.
+Round-then-Clip (RelaxSEQ): Early
+Benchmarking on MMLU.
+ing run for the
+Qwen3-4B-
+Instruct-2507
+model.
+In
+contrast,
+Re-
+laxSEQ
+has
+a
+smoothly
+changing loss.
+Interestingly,
+we noticed that although Clip-then-Round shows loss
+spikes and unstable training, the final loss did recover and
+perform similarly to RelaxSEQ. However, we found that
+Clip-then-Round resulted in poor benchmark scores as
+shown in Table 10. Consequently, we chose RelaxSEQ
+(Eq. (3)) as our main QDQ equation in this work.
+Figure 5. Existing SEQ (Clip-then-Round) with a bitwidth sched-
+ule shows an unstable training behavior with sudden loss spikes as
+predicted by Fig. 2. The new RelaxSEQ with Round-the-Clip has
+a smooth transition in loss with changing bitwidth. Although, the
+final loss after the end of schedule was similar for both Clip-then-
+Round vs. Round-then-Clip, we found that RelaxSEQ resulted in
+better benchmark scores (see Table 10).
+Figs. 6(a-d) continue the analysis from Section 3.2. Using
+the same simulation environment from Fig. 2, we show how
+the weight distribution changes with bitwidth for the exist-
+ing SEQ equation. As k = 2b−1 shrinks with decreasing
+bitwidth, the weight distribution also narrows. However,
+the extreme values do not change until the argument to the
+round operation becomes sufficiently small. When k be-
+comes sufficiently small, the extreme integers are suddenly
+lost. For instance, in Figs. 6(a-d), the extreme integer values
+go from {−15, 15} to {−13, −13} and so on (see dotted
+red lines). This happens because in the existing SEQ equa-
+tion, even if the bitwidth can be varied and is floating point,
+the extremes are still integers due to the Clip-then-Round
+operation.
+Figs. 6(e-h) illustrate the intermediate floating point extreme
+values for RelaxSEQ. The extreme values for floating point
+bitwidths are floating points, yet all other intermediate quan-
+tization bins are integers.
+B
+PROOF OF PROPOSITION 1
+Proposition 1. The higher the bit precision, the smaller the
+width of the quantization hyperplanes. Specifically, given
+two bitwidths b1 and b2, with b1 < b2, the width of the
+quantization hyperplanes can be reduced by a factor of
+2b2−b1 if we relax the bitwidth from b1 to b2.
+Therefore, relaxing the bitwidth during QAT can help the
+optimization escape the flat regions in the loss surface.
+Proof. Consider the LSQ Eq. (4) and let δ = α
+k =
+α
+2b−1 .
+Then, the argument to the round operation becomes θ
+δ . Note
+that, the round operation decides the boundaries of the quan-
+tization bins. Given a current integer value zi, let us assume
+that the adjacent quantization bins lead to integers zi−1 and
+zi+1. Suppose that θ
+δ is at the center of the quantization
+bin for the integer zi. Then, the minimum movement in
+θ
+δ to reach the neighboring quantization bins zi−1 or zi+1
+would be 0.5. For example, if zi−1 = −1, zi = 0, and
+zi+1 = +1, and θ
+δ = 0, we need to move it by 0.5 to reach
+the neighboring quantization boundaries. This is because
+θ
+δ ∈(−0.5, 0.5) still results in zi = 0, θ
+δ = −0.5 leads to
+zi−1 = −1, and θ
+δ = 0.5 leads to zi+1 = +1.
+Therefore, the latent weight θ must move by 0.5δ from
+the center of the quantization bin to change the integer
+value in the resulting QDQ weight. Hence, the width of the
+quantization hyperplane (defined by the flat region where the
+integer value does not change) is given by = 2 × 0.5δ = δ.
+Now, since δ =
+α
+2b−1 , the higher the bit precision, the
+
+
+A Continuous Relaxation of Quantization-Aware Training
+a.
+b.
+c.
+d.
+e.
+f.
+g.
+h.
+Figure 6. (a-d) Clip-then-Round operation in the existing SEQ (Eq. (2)) creates integers at the extremes (see vertical red dotted lines) since
+the round operation follows the clip. As the bitwidth reduces, the extreme integers are suddenly lost (e.g., from {−15, 15} to {−13, 13}
+and so on). This means that a training assumes that the previous range of integers (say {−15, 15}) was available until k = 2b−1 reduces
+sufficiently; once k is sufficiently small, the round abruptly moves on to the new range of integers (i.e., {−13, 13}). The sudden change
+in integer ranges can cause loss spikes (similar to UPQ (Lee et al., 2025)) and unstable training behavior. (e-h) RelaxSEQ employs the
+Round-then-Clip operation (Eq. (3)) which keeps the extremes in floating point as the k reduces. The range of the distribution changes
+slowly and the extremes stay floating point until the end of the schedule. This causes the loss to change smoothly as the bitwidth shrinks.
+smaller the delta, which in turn results in a smaller width of
+the quantization hyperplanes. Specifically, if we relax the
+bitwidth from b1 to b2 bits (b1 < b2), we get:
+δ1
+δ2
+=
+α
+2b1−1
+α
+2b2−1
+= 2b2−b1 =⇒δ2 =
+δ1
+2b2−b1
+(8)
+That is, the width of the quantization hyperplanes reduces
+by a factor of 2b2−b1. As a result, if the QAT optimization
+is stuck in a flat region, dynamically and gradually relaxing
+the bitwidth can reduce the width of the quantization hyper-
+planes and enable the QAT to escape those flat regions.
+C
+SEQ SIMULATION
+We start again with a 1-d optimization problem which be-
+comes 2-d for the quantized domain. For RelaxQAT, we
+also implement a bit schedule to see how a changing loss
+surface alters the optimization trajectory. For ParetoQ, the
+number of bits are fixed to 2-bits. Figs. 7(a-d) show that
+ParetoQ gets stuck near the true minimum and does not
+reach it even with many more (10000) training steps. In con-
+trast, Fig. 7(e-h) converges within the 2000 steps because
+the initial changing loss surface sets the optimization on a
+different path.
+We notice similar convergence patterns on real LLM/VLM
+trainings (see Fig. 4 in the main paper) where (i) the ini-
+tial convergence accelerates significantly due to changing
+integers during the first half cycle of the bit schedule, and
+(ii) Further n cycles help the optimization escape the flatter
+regions in the loss surface.
+D
+MORE DETAILS ON EXPERIMENTS
+We use a total batch size of 256 for Qwen3-0.6B, Qwen3-
+4B and Gemma3-1B and a batch size of 320 for Qwen3.5-
+2B and Qwen3.5-4B models. We implement the AdamW
+optimizer with zero weight decay.
+For evaluation, we select a variety of tasks.
+For in-
+stance, common sense reasoning (CSR) benchmarks in-
+clude five tasks: Arc-easy, Arc-Challenge, HellaSwag,
+PIQA and WinoGrande which focus on everyday knowl-
+edge tasks, grade-school science questions and plausibility.
+We also evaluate on benchmarks such as MMLU and IFEval.
+MMLU evaluates the model on factual recall and basic rea-
+soning across 57 subjects whereas IFEval evaluates whether
+the model is following natural language instructions. While
+the CSR and MMLU tasks are multiple-choice questions,
+comparing the log-likelihood of each answer, IFEval is a
+generation task. We report accuracy norm metric for Arc-
+Easy, Arc-Challenge, Hellaswag, PIQA and accuracy for
+WingoGrande. IFEval reports four metrics namely prompt-
+level-strict-acc, inst-level-strict-acc, prompt-level-loose-acc,
+inst-level-loose-acc. For our experiments, we take an aver-
+age of all four metrics.
+E
+ABLATION RESULTS
+Gemma3-1B results are shown in Table 11.
+
+
+A Continuous Relaxation of Quantization-Aware Training
+ParetoQ
+RelaxQAT
+Loss surface changes until step 1000 (end of bit schedule)
+ParetoQ gets stuck near the optimal point and does not reach it even until the end (+)
+RelaxQAT explores an alternative optimization path due to a changing loss 
+surface. It converges and reaches the optimal point by step 2000
+a.
+b.
+c.
+d.
+e.
+f.
+g.
+h.
+Figure 7. (a) ParetoQ SEQ simulation for a 1-d optimization problem. QAT gets stuck near the minimum point around step 2000 and stays
+there until the end of training (10000 steps). (b) RelaxQAT (with just a half cycle bit schedule) converges within the first 2000 steps.
+F
+TERNARY QUANTIZATION RESULTS
+The ternary (1.58-bit) RelaxSEQ equation is given as:
+wr = α
+k
+
+clip
+
+round
+ θ
+α × k
+
+, −k + 0.5, k −0.5
+
+.
+(9)
+Here, at the end of the schedule, k = 2be−1 = 21.58−1 ≈
+1.5.
+Hence, the QDQ weight wr achieves the ternary
+{−1, 0, 1} integer grid. Of note, during training, we vary
+the bit schedule from bs = 3 bits to be = 1.58 bits.
+
+
+A Continuous Relaxation of Quantization-Aware Training
+Method
+Type
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+-
+63.43
+38.31
+57.79
+58.48
+72.42
+58.09
+41.37
+73.38
+57.61
+AdaScale (AIMET, 2026)
+PTQ
+28.49
+23.89
+27.72
+49.56
+53.48
+36.63
+23.75
+9.80
+23.39
+ParetoQ (Liu et al., 2025b)
+QAT
+52.48
+30.12
+46.13
+58.41
+67.90
+51.01
+25.28
+53.12
+43.14 (+0.00%)
+UPQ (Lee et al., 2025)
+53.03
+29.01
+45.64
+56.83
+68.17
+50.54
+25.34
+42.01
+39.30 (-3.84%)
+LLM-QAT (Liu et al., 2024b)
+25.97
+25.68
+26.14
+50.43
+51.63
+35.97
+22.95
+-∗
+-∗
+BitNet (Hugging Face, 2024)
+52.82
+28.92
+45.24
+56.99
+67.63
+50.32
+26.23
+46.61
+41.05 (-2.09%)
+WinQ (Li et al., 2026)
+53.62
+28.75
+46.33
+58.17
+68.88
+51.15
+25.64
+54.80
+43.86 (+0.72%)
+RelaxQAT (ours)
+53.45
+29.10
+46.14
+58.09
+67.85
+50.93
+28.24
+60.31
+46.49 (+3.35%)
+Table 11. Evaluation of Gemma3-1B on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote WinoGrande
+and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ, respectively.
+Bold is best and underline is second-best among QAT methods. ∗LLM-QAT produced repeating tokens for IFEval, hence, its accuracy
+cannot be reported.
+Method
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+81.22
+58.44
+69.08
+67.48
+75.73
+70.39
+72.63
+86.55
+76.52
+ParetoQ (Liu et al., 2025b)
+75.08
+47.44
+58.28
+61.56
+71.87
+62.85
+54.27
+68.18
+61.77 (+0.00%)
+UPQ (Lee et al., 2025)
+72.81
+45.14
+58.48
+62.90
+72.52
+62.37
+55.88
+74.88
+64.38 (+2.61%)
+BitNet (Hugging Face, 2024)
+70.96
+44.88
+57.16
+60.93
+71.49
+61.08
+54.46
+74.87
+63.47(+1.70%)
+WinQ (Li et al., 2026)
+74.49
+45.48
+56.48
+61.01
+72.25
+61.94
+53.15
+72.41
+62.50 (+0.73%)
+RelaxQAT (ours)
+73.23
+47.35
+60.89
+65.35
+73.50
+64.06
+58.96
+74.90
+65.97(+4.20%)
+Table 12. Evaluation of Qwen3-4B Ternary model on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote
+WinoGrande and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ,
+respectively. Bold is best and underline is second-best among QAT methods.
+Method
+ArcE(↑)
+ArcC(↑)
+HS(↑)
+WG(↑)
+PIQA(↑)
+CSR(↑)
+MMLU(↑)
+IFEval(↑)
+Global Avg.(↑)
+FP
+66.03
+41.46
+62.06
+62.58
+72.52
+60.93
+57.19
+72.84
+63.65
+ParetoQ (Liu et al., 2025b)
+62.54
+37.63
+54.82
+61.40
+70.24
+57.33
+50.31
+57.35
+55.00 (+0.00%)
+UPQ (Lee et al., 2025)
+28.66
+22.35
+24.65
+51.38
+50.38
+35.49∗
+24.08∗
+18.34∗
+25.97∗(-29.03%)
+BitNet (Hugging Face, 2024)
+56.73
+35.24
+54.09
+60.06
+69.48
+55.12
+47.31
+60.49
+54.31 (-0.69%)
+WinQ (Li et al., 2026)
+61.99
+36.86
+54.92
+61.56
+71.00
+57.27
+50.28
+56.60
+54.72 (-0.28%)
+RelaxQAT (ours)
+59.93
+36.69
+55.33
+61.25
+70.29
+56.70
+51.64
+60.80
+56.38 (+1.38%)
+Table 13. Evaluation of Qwen3.5-2B Ternary model on Commonsense Reasoning, MMLU, and IF-Eval benchmarks. WG and HS denote
+WinoGrande and HellaSwag, respectively. (↑): higher is better. Green and red denote improvement and degradation relative to ParetoQ,
+respectively. Bold is best and underline is second-best among QAT methods. ∗UPQ did not converge well for the ternary training for
+Qwen3.5-2B, which explains its loss of accuracy.

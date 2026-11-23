@@ -1,0 +1,450 @@
+Analysis of Multi-Client Inference Techniques for
+Vision-Language-Action Models
+Stefan de Lasa
+University of Toronto
+Mohammadreza Mofayezi
+University of Toronto
+Gennady Pekhimenko
+University of Toronto
+Nandita Vijaykumar
+University of Toronto
+Abstract—Vision-Language-Action models (VLAs) are a new
+class of machine learning model for generalizable robot control.
+While they enable robots to perform complex tasks in unseen
+environments, serving VLAs leaves hardware idle between infer-
+ence passes and under-utilized during inference. Serving multiple
+clients at once can improve utilization, but fundamental multi-
+client techniques such as batching and co-execution have not been
+characterized for VLAs. We therefore characterize the trade-
+offs these known techniques impose across latency, throughput,
+power, and hardware utilization. Our findings inform trade-offs
+and challenges for future multi-VLA serving systems.
+I. INTRODUCTION
+Vision-Language-Action (VLA) models [1]–[3] are an
+emerging paradigm in robotics that aim to learn generalizable
+robotics behavior. They leverage internet-scale vision encoders
+(ViT) and vision-language models (VLM) as backbones to un-
+derstand image observations and user text-prompt instructions.
+A subsequent “action expert” (AE) stage generates a series of
+actions to achieve the text-prompted goal (see Figure 1).
+Fig. 1: Overview of VLA
+models.
+Fig. 2: Illustration of VLA in-
+ference and action execution.
+Unlike stand-alone VLMs, VLAs typically follow the
+ViT encoding and VLM prefill stages with a constant-step
+diffusion-based action policy [1], [2], rather than a variable-
+length auto-regressive decode [4], [5]. The VLA “action
+chunking” paradigm entails that multiple action tokens are
+generated per inference pass, instead of a single decoded
+language token like with large-language models (LLMs) or
+VLMs. As a result, VLA workloads alternate between GPU
+inference and on-robot action execution (see Figure 2).
+While VLAs have improved robotic generalizability [1],
+[6], we find they severely under-utilize GPU compute. Action
+chunking leaves the GPU idle between inference passes for
+>80% of total task completion time while the robot executes
+generated actions. We also observe under-utilization during
+inference passes: streaming multiprocessor (SM) throughput
+averages 21-27% across models, with the AE’s utilization
+being the lowest of all three stages (5-19%). Given the high
+cost of GPUs, VLA operators are economically motivated to
+maximize hardware utilization [7]. Since single-robot scenar-
+ios leave hardware idle, multi-client VLA serving – scheduling
+inference for multiple robotic clients on one device – is
+a natural setting to study. This setting is most applicable
+to warehouse and factory deployments where robot fleets
+communicate with an on-premises server [8].
+Multi-client serving enables techniques such as batching [4],
+[5] and stage co-execution [9], [10] to improve inference-time
+utilization, but these have not been characterized for VLAs.
+Prior LLM/VLM serving work [4], [5], [9], [10] does not
+account for the VLA’s AE or action chunking, and prior multi-
+client VLA work [8], [11] details neither the heterogeneous
+behavior of VLA stages nor stage co-execution.
+We profile popular VLA models [1]–[3], spanning key VLA
+architectural axes, to highlight fundamental challenges with
+these serving techniques applied to VLAs. Our analysis of
+batching shows that it alone cannot improve utilization across
+all stages due to the VLM’s and ViT’s compute-bound matrix-
+multiplication (GEMM) kernels. Furthermore, intuitions from
+LLM serving do not transfer directly to VLAs, since the
+latter cannot easily amortize the increased latency incurred
+from a batched VLM and ViT. Stage co-execution yields
+modest speedups as VLM GEMM kernels block AE kernel
+dispatching or slow substantially on partitioned SMs.
+Therefore, in this characterization study, we make the fol-
+lowing contributions:
+• We explain VLA GPU compute under-utilization, both be-
+tween and during inference passes, motivating the multi-
+client setting we characterize.
+• We analyze VLA per-stage hardware utilization, power us-
+age, and latency under batching, quantifying trade-offs and
+fundamental challenges for multi-client VLA serving.
+• We explain the behavior of VLAs under stage co-execution,
+highlighting the limitations of co-execution techniques.
+II. METHODOLOGY
+A. VLA Models
+We profile three popular open-source VLA models: π0.5 [1],
+GR00T N1.7 [2], and VLA-Adapter [3] using the compilation
+methods from their respective implementations. The models
+span key VLA architectural axes: parameter scale (0.5-3B),
+action-generation mechanism (flow-matching, L1-regression),
+and VLM-AE interface (full KV cache, single embedding, per-
+layer cross-attention), as summarized in Table I.
+arXiv:2611.26944v1  [cs.DC]  20 Nov 2026
+
+
+TABLE I: Profiled VLA models. All are fine-tuned for the
+DROID [12] platform and run with two camera views.
+π0.5
+GR00T N1.7
+VLA-Adapter
+VLM
+PaliGemma
+Cosmos-Reason2
+Prismatic
+(Gemma)
+(Qwen3-VL)
+(Qwen2.5)
+VLM/ViT params
+3B
+2B
+0.5B
+AE
+flow-match.
+flow-match.
+L1-reg.
+AE params
+300M
+1B
+100M
+VLM-AE interf.
+full KV
+single
+per-layer
+cache
+embedding
+cross-attn.
+B. Evaluation Methodology
+To reduce variability, our experiments report averages over
+100 runs (fewer for NCU utilization measurements) after five
+warm-up runs. We input random images and use a short
+text prompt (40 tokens). Our measurements use CUDA syn-
+chronization. Utilization metrics come from NVIDIA Nsight
+Compute [13].
+C. Hardware
+We profile each model on an NVIDIA RTX4090 and H100.
+The latter is a representative data-center GPU standard for
+LLM serving [4]. Although some VLAs have been adapted
+for deployment on embedded/onboard devices [14], we target
+larger GPUs for two reasons. First, server-side network and
+inference latencies are lower than onboard inference latency
+in most scenarios [15]. Second, server-side GPUs enable larger
+models with further improved robot generalization [6], [16].
+III. INTER-REQUEST IDLENESS
+Generating and executing action chunks creates alternating
+idle-busy periods for the GPU (see Figure 2), which allows
+for multi-client scheduling [11]. In Figure 3, we measure the
+effect that this action chunking has on GPU idleness.
+Fig. 3: Percentage of time the GPU is idle, over different chunk
+sizes and control frequencies. Control frequency (in Hz) is the
+rate at which the robot executes actions.
+Figure 3 shows that the GPU is typically idle >80% of
+the time. This idleness arises because generating an additional
+action token adds minimal inference latency: increasing the
+chunk size from 10 to 75 raises latency by <10%. However,
+this same increase in chunk size corresponds to a 750%
+increase in action execution time on the robot.
+Therefore, action chunking leaves the GPU idle during the
+majority of each request cycle, even at high control frequen-
+cies and on consumer-grade GPUs. Because a single client
+occupies the GPU ∼15% of the time, temporal interleaving
+alone can support ∼5-10 clients before the GPU’s idle budget
+is consumed. Beyond that, additional clients’ compute periods
+must overlap, so utilization gains require techniques that share
+the GPU under contention, such as batching and co-execution.
+IV. MULTI-REQUEST BATCHING
+A. Utilization and Power Analysis
+GPUs are costly and consume substantial power. Conse-
+quently, VLA model operators have a strong economic incen-
+tive to maximize their utilization [7]. However, experiments
+reveal that VLA inference fails to saturate GPU compute,
+thereby raising the opportunity cost to serve these models.
+Batching, a fundamental technique in machine learning serving
+[5], [17], combines input tensors so as to better exploit the
+GPU’s parallel compute units and achieve higher utilization
+[5]. Figure 4 and Figure 5 measure the per-stage hardware
+utilization and power (respectively) of three VLA models as
+batch size increases. We make the following observations.
+First, at a batch size of 1, the AE’s compute utilization
+is low, with “SM Throughput %” ranging from 4.6 to 18.7%.
+Profiling π0.5 on an RTX4090 (representative case) shows that
+the AE’s most time-consuming kernels are GEMM kernels,
+yet the average “Tensor Active %” remains below 2%. Two
+factors account for this. First, a weight-loading bottleneck:
+these kernels have high memory throughput (70-80%) but low
+SM throughput (10%). Second, the stage’s key kernels are too
+small to saturate the GPU, as the AE computes attention over
+a short context, denoising a chunk of only 15 to 50 action
+tokens at once [1] while cross-attending to the VLM output.
+NCU profiling confirms this: the longest kernels run with low
+grid and block sizes. Because they issue too few instructions to
+overlap with outstanding memory requests, the weight-loading
+latency is exposed on the critical path.
+Second, TCU utilization increases with batch size. All
+model stages exhibit some gain, but the effect is largest for the
+AE. The greatest TCU throughput gains originate from feed-
+forward network (FFN) kernels. These kernels grow linearly
+with batch size [18], allowing more warps to be scheduled and
+producing near-linear increases in TCU throughput.
+Third, Figure 5 shows that the power usage of the AE is
+characterized by the power required during the weight-loading
+bottleneck, which stays constant as batch size increases. For
+GR00T’s AE, which has higher TCU utilization at a batch size
+of 1, batching the AE incurs a power overhead (∼1.5× at a
+batch size of 4).
+Fourth, the VLM and ViT stages exhibit higher compute
+utilization than the AE. Attending to vision and text tokens
+yields a context length of 700 to 1000 tokens, which results
+in larger GEMM kernels with higher arithmetic intensity. VLM
+GEMMs are also larger than the AE’s since their parameter
+count is typically one order of magnitude larger. Our profile
+traces show that the VLM’s execution time is dominated
+by FFN GEMM kernels (65% of time). Batching therefore
+has little effect on VLM compute utilization, as these time-
+dominating kernels already have high compute utilization at a
+batch size of one.
+
+
+Fig. 4: Utilization metrics over different batch sizes for π0.5, GR00T and VLA-Adapter. Profiled on RTX4090 and H100.
+Fig. 5: Mean power per batch size of π0.5 , GR00T and VLA-
+Adapter on an RTX4090. To isolate the switching activity
+factor, we hold the GPU’s clock frequency constant.
+Fifth, L2 throughput increases with batch size for nearly all
+models and stages, since the larger GEMM kernels produced
+by batching exhibit greater data reuse through tiling [19].
+Together, these results demonstrate that batching improves
+utilization primarily for the AE, while the backbone’s utiliza-
+tion remains largely unchanged. Therefore, increasing overall
+utilization cannot be achieved through batching alone.
+B. Latency Analysis
+Batching can increase latency when the unbatched workload
+already saturates the GPU’s compute units [17]. Because VLA
+response time is critical for safety and task completion [15],
+serving providers must balance utilization and throughput
+against latency. Yet, this trade-off has not been quantified for
+each VLA stage. In Figure 6 we measure the per-stage latency
+overhead of batching and make the following observations.
+First, the AE batches with minimal latency overhead (1.15-
+1.33× at batch size 4, H100). The action-stage kernels perform
+relatively little computation and are memory-bound. Thus,
+once model weights are loaded, generating an additional batch
+of tokens adds little latency. The AE’s low TCU utilization
+(Figure 4) means that large batches cause minimal extra
+stalling on the math pipeline.
+Second, the VLM and ViT stages benefit less from batching,
+with much smaller throughput gains than the AE. In π0.5’s
+VLM, >65% of time is spent on dense FNN GEMM kernels
+(batch size 1), and >50% of cycles stall on the math pipeline.
+Larger batches only deepen this compute bottleneck, raising
+latency.
+Batching therefore affects VLA stages unevenly. The ViT
+and VLM process larger token counts, producing GEMM ker-
+nels that grow with batch size and dominate end-to-end latency
+(44-71% at batch size 4). In LLM serving, comparable prefill
+costs are amortized over a long, variable-length decode stage
+[17]. However, VLAs cannot do this since action generation
+comes from a fixed-length AE. Furthermore, VLA input image
+tokens change on every pass, preventing prefill computation
+reuse via KV-cache optimizations. The VLM backbone is thus
+recomputed often and cannot be hidden by typical techniques
+used by LLM serving.
+V. CO-EXECUTION
+GPU co-execution exploits the fact that a single application
+rarely saturates all of a GPU’s heterogeneous resources (e.g.,
+SMs, memory bandwidth, caches [9], [10]). Co-executing
+memory-bound and compute-bound applications has proven to
+be effective in other domains [20], since their bottlenecks fall
+on different hardware, thus minimizing interference. Given the
+AE’s under-utilized compute and the VLM stage’s higher com-
+pute utilization (Section IV-A), we examine their co-execution
+as a candidate for stage-wise pipeline-parallel serving [9].
+Our experiments use standard co-execution methods: CUDA
+streams and CUDA green contexts (GC). The latter is an
+inter-SM partitioning method, which we tune for the highest
+throughput. Table II reports the throughput gains from these
+two methods.
+TABLE II: Throughput gains from co-executing VLM and AE
+relative to serial execution. For π0.5, we use a PyTorch model
+with torch.compile. The green context split shows SMs
+partitioned for the VLM and AE respectively.
+Model- Hardware
+CUDA Streams
+GC (Split)
+π0.5 - RTX4090
+1.08×
+1.20× (88,40)
+π0.5 - H100
+1.13×
+1.23× (88,44)
+GR00T - RTX4090
+1.11×
+1.10× (32,96)
+GR00T - H100
+1.02×
+1.04× (32,100)
+From Table II we observe that the throughput of co-executed
+stages only marginally improves over serial execution (1.02-
+1.23×). Below, we detail VLA stage co-execution challenges.
+First, profile traces show that the VLM’s large FFN and
+Query-Key-Value (QKV) GEMM kernels are a common
+source of action-stage stalls. These are the longest-running
+VLM kernels, with grid sizes large enough to launch a thread
+block per SM. Under multiple CUDA streams, a second kernel
+
+
+Fig. 6: Per-batch latency for all models on RTX and H100 GPUs. Standard deviation bars are shown but are usually < ±1ms.
+can only co-execute once the earlier kernel has dispatched all
+its thread blocks [20], so AE kernel dispatching is blocked.
+Second, while inter-SM partitioning improves throughput
+over CUDA streams, reduced compute units increase the
+latency of certain key kernels. The VLM’s FFN and QKV
+projection GEMM kernels increase significantly in latency (50-
+100% for π0.5, 285-295% for GR00T) given that these kernels
+are compute-intensive. Similarly, we observe that π0.5’s AE
+sinusoidal time embedding kernels increase by over 225%
+compared to their serial execution time, since these kernels
+use FP64 arithmetic. Additionally, the AE’s GEMM kernels
+increase in latency (16-108%) due to DRAM contention be-
+tween the two stages (DRAM utilization increases by 33%).
+Third, action kernels are short-lived (∼6µs), producing
+unpredictable overlap with long VLM kernels. Other co-
+execution methods therefore have relatively high overhead
+(40µs for preemption-based methods [21]) or require re-
+implementing proprietary kernels. Finer-grained temporal SM
+repartitioning incurs high synchronization cost [9].
+Thus, despite their contrasting resource needs, standard
+methods fail to co-execute VLA stages efficiently. Under
+CUDA streams, the VLM’s FFN and QKV kernels occupy
+most SMs and block AE kernel scheduling. Under SM parti-
+tioning, reduced SMs increase the latency of these compute-
+bound GEMM kernels in the VLM, and cause DRAM con-
+tention. Improving co-execution warrants more investigation.
+VI. CONCLUSION
+We detail how fundamental serving techniques, batching
+and co-execution, affect key multi-client serving trade-offs for
+VLAs: latency, throughput, hardware utilization, and power.
+We find that batching alone cannot increase hardware utiliza-
+tion across all stages, as the VLM backbone is dominated by
+compute-bound GEMM kernels. We find that VLAs, unlike
+LLMs, cannot amortize the latency that batching the VLM and
+ViT stages introduces. Stage co-execution offers only modest
+gains since VLM GEMM kernels either block AE kernels or
+slow under SM partitioning. Short-lived AE kernels impede
+optimal co-execution. Our takeaways inform the trade-offs and
+challenges that multi-VLA serving systems must address.
+REFERENCES
+[1] K. Black et al., “pi0.5: a vision-language-action model with open-world
+generalization,” in Proc. Conf. Robot Learn., 2025.
+[2] J. Bjorck et al., “Gr00t n1: An open foundation model for generalist
+humanoid robots,” arXiv preprint arXiv:2503.14734, 2025.
+[3] Y. Wang et al., “Vla-adapter: An effective paradigm for tiny-scale vision-
+language-action model,” in Proc. AAAI Conf. Artif. Intell., vol. 40,
+no. 22, 2026, pp. 18 638–18 646.
+[4] A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, and
+R. Ramjee, “Sarathi: Efficient llm inference by piggybacking decodes
+with chunked prefills,” arXiv preprint arXiv:2308.16369, 2023.
+[5] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, “Orca: A
+distributed serving system for {Transformer-Based} generative models,”
+in Proc. USENIX Symp. Oper. Syst. Des. Implement. (OSDI), 2022, pp.
+521–538.
+[6] P. Intelligence et al., “pi0.7: a steerable generalist robotic foundation
+model with emergent capabilities,” arXiv preprint arXiv:2604.15483,
+2026.
+[7] Z. Ye et al., “Deep learning workload scheduling in gpu datacenters: A
+survey,” ACM Comput. Surv, vol. 56, no. 6, pp. 1–38, 2024.
+[8] Y. Wen et al., “Rosa: Harnessing robot states for vision-language and
+action alignment,” arXiv preprint arXiv:2506.13679, 2025.
+[9] Y. Xu, S. Liu, D. Zhang, B. Yan, F. Wu, and G. Chen, “Nova: Real-
+time agentic vision-language model serving with adaptive cross-stage
+parallelization,” in Proc. IEEE Real-Time Syst. Symp. (RTSS).
+IEEE,
+2025, pp. 378–391.
+[10] K. Zhu et al., “{NanoFlow}: Towards optimal large language model
+serving throughput,” in Proc. USENIX Symp. Oper. Syst. Des. Implement.
+(OSDI), 2025, pp. 749–765.
+[11] S. Pohland et al., “Offload or overload: A platform measurement study
+of mobile robotic manipulation workloads,” arXiv:2603.18284, 2026.
+[12] A. Khazatsky et al., “DROID: A large-scale in-the-wild robot manipu-
+lation dataset,” in Proc. Robot. Sci. Syst. (RSS), Delft, The Netherlands,
+Jul. 2024.
+[13] Nvidia, “Nvidia Nsight Compute CLI,” https://docs.nvidia.com/nsight-
+compute/NsightComputeCli/index.html, 2026, accessed: 2026-05-21.
+[14] Y. Takagi, M. Kambara, D. Yashima, K. Seno, K. Tokura, and
+K. Sugiura, “Anolevla: Lightweight vision-language-action model with
+deep state space models for mobile manipulation,” arXiv preprint
+arXiv:2603.15046, 2026.
+[15] W. Jiang, J. Clemons, K. Sankaralingam, and C. Kozyrakis, “How fast
+can i run my vla? demystifying vla inference performance with vla-perf,”
+arXiv:2602.18397, 2026.
+[16] Y.
+Hu
+et
+al.,
+“Bagelvla:
+Enhancing
+long-horizon
+manipulation
+via
+interleaved
+vision-language-action
+generation,”
+arXiv
+preprint
+arXiv:2602.09849, 2026.
+[17] A. Agrawal et al., “Taming {Throughput-Latency} tradeoff in {LLM}
+inference with {Sarathi-Serve},” in Proc. USENIX Symp. Oper. Syst.
+Des. Implement. (OSDI), 2024, pp. 117–134.
+[18] J. Kaplan et al., “Scaling laws for neural language models,” arXiv
+preprint arXiv:2001.08361, 2020.
+[19] NVIDIA
+Corporation,
+“Matrix
+multiplication
+background
+user’s
+guide,”
+NVIDIA
+Deep
+Learning
+Performance
+Documenta-
+tion,
+Feb.
+2023,
+accessed:
+2026-07-13.
+[Online].
+Avail-
+able: https://docs.nvidia.com/deeplearning/performance/dl-performance-
+matrix-multiplication/index.html
+[20] X. S. Tan, P. Golikov, N. Vijaykumar, and G. Pekhimenko, “Gpupool: A
+holistic approach to fine-grained gpu sharing in the cloud,” in Proc. Int.
+Conf. Parallel Archit. Compilation Tech. (PACT), 2022, pp. 317–332.
+[21] R.
+Fan,
+T.
+Ren,
+M.
+Xie,
+S.
+Gao,
+J.
+Shu,
+and
+Y.
+Lu,
+“{GPREEMPT}:{GPU} preemptive scheduling made general and
+efficient,” in 2025 USENIX Annual Technical Conference (USENIX
+ATC 25), 2025, pp. 263–272.

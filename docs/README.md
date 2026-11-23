@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-11-22</span>
+      <span class="dpr-home-dashboard-kicker">2026-11-23</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 0 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 21 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>12</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-11-22 19:26:01 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-11-23 19:21:44 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,7 +69,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日无新推荐，系统未产出可展示论文。</p>
+<p>今日筛选21篇论文、精读9篇，重点聚焦移动端NPU上的LLM低比特推理与机器人操作。最值得看的是《MixFold》提出的输出通道分组子4比特混合精度推理（10.0分），以及《FORTH》用仅前向代理控制配对来落地触觉VLA执行（9.0分）。普通读者可先读这两篇精读，再从速读中的MomentMem与VLA多客户端推理延伸。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -78,12 +78,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs">MixFold: Sub-4-Bit Mixed-Precision LLM Inference via Output-Channel Grouping on Mobile NPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="FORTH: Grounding Tactile VLA Execution via Forward-Only Proxy-Control Pairing">FORTH: Grounding Tactile VLA Execution via Forward-Only Proxy-Control Pairing</span></li><li><span class="dpr-home-dashboard-paper-title" title="PonderPounce-WM: When Does Predicting the Future Help Context-Dependent Robot Control?">PonderPounce-WM: When Does Predicting the Future Help Context-Dependent Robot Control?</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>6</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -91,12 +91,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">12 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MomentMem: Memorizing Key Moments for Robot Manipulation">MomentMem: Memorizing Key Moments for Robot Manipulation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Analysis of Multi-Client Inference Techniques for Vision-Language-Action Models">Analysis of Multi-Client Inference Techniques for Vision-Language-Action Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Continuous Relaxation of Quantization-Aware Training">A Continuous Relaxation of Quantization-Aware Training</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>9</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>3</strong></span></div>
 </section>
 </div>
 

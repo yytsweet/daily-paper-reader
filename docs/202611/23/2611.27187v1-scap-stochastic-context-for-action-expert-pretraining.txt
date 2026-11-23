@@ -1,0 +1,2303 @@
+SCAP: Stochastic Context for Action Expert Pretraining
+Xiao Lin1,∗
+Yaoxu Lyu2,4,∗
+Ronghao Dang4,∗,†
+Zhili Liu4
+Kaijing Ma3,4
+Yang Zhou3,4
+Dingning Liu3,4
+Runzhe Teng3,4
+Jun Cen4
+Shanghang Zhang2
+Chengju Liu1
+Qijun Chen1
+1Tongji University, 2Peking University, 3Fudan University, 4JD Future Academy
+Abstract
+Single-modality action-expert pretraining controls compe-
+tition from visual shortcuts before vision–language–action
+(VLA) adaptation. Yet single-modality pretraining can im-
+pair the vision–language interactions needed for subse-
+quent joint prediction.
+We construct a diagnostic model
+in which VA or LA pretraining can disable an initially ac-
+tive pathway for joint vision–language modeling. In this
+model, subsequent training with complete visual and lan-
+guage inputs cannot restore the pathway, even with unlim-
+ited adaptation. We therefore introduce Stochastic Context
+for Action Expert Pretraining (SCAP), a new action-expert
+pretraining stage that precedes full-input training. During
+this stage, visual and text tokens are randomly masked be-
+fore entering the VLM. In this unified diagnostic model,
+SCAP can preserve the joint vision–language modeling
+pathway during pretraining and subsequent full-input train-
+ing. Compared with direct full-input training, it can also re-
+duce reliance on visual shortcuts and increase reliance on
+language instructions. SCAP consistently improves perfor-
+mance across four different VLA architectures. In real-robot
+experiments, it achieves 76.67% average success across
+three instruction-conditioned manipulation tasks, outper-
+forming full-input pretraining by 25 percentage points.
+1. Introduction
+Vision–language–action (VLA) models build robot poli-
+cies on pretrained vision–language models (VLMs), us-
+ing an action expert to turn the observed scene and the
+instruction into continuous actions [3]. However, scene–
+instruction correlations in demonstrations can encourage vi-
+sual shortcuts, allowing policies to ignore language [17, 38].
+Because the action expert is randomly initialized, it can
+readily inherit these biases and may, in turn, degrade the
+pretrained VLM’s representations through backpropagation
+during joint fine-tuning. Action expert pretraining is thus
+*Equal contribution.
+†Corresponding author: Ronghao Dang.
+Figure 1. Pretraining shapes multimodal modeling pathways.
+worth exploring to foster language dependence.
+Existing recipes counter visual shortcuts by control-
+ling which modality the expert sees.
+APT [35] and
+BayesVLA [34] adopt vision–action (VA) pretraining, first
+learning a visuomotor prior and then introducing language.
+Conversely, LA4VLA [18] uses language–action (LA) pre-
+training without vision to learn instruction–action associa-
+tions, exploring both sequential and mixed LA–VLA train-
+ing.
+Despite their differences, these methods follow the
+same paradigm of incorporating a unimodal pretraining
+stage preceding full pretraining.
+However, single-modality staging can damage the path-
+way needed to combine vision and language. For an in-
+struction such as “pick up the cup that is the same color
+as the plate,” VA pretraining provides the scene without the
+instruction specifying color matching, while LA pretraining
+provides the instruction without the visual evidence needed
+to identify the matching cup. Neither stage directly super-
+vises this joint computation, yet the parameters supporting
+it continue to change. The risk is therefore not merely that
+joint modeling is left untrained, but that its pathway can be
+shut down. Under the specified population gradient flow,
+subsequent full-input training cannot reopen it, even with
+unlimited adaptation. This raises a question: can action ex-
+1
+arXiv:2611.27187v1  [cs.CV]  20 Nov 2026
+
+
+pert pretraining mitigate visual shortcuts while preserving
+joint vision–language modeling?
+We answer with Stochastic Context for Action Expert
+Pretraining (SCAP). SCAP follows a two-stage training
+scheme: we first pretrain the action expert by randomly
+masking both visual and text tokens, then continue training
+with full visual and language inputs. By varying the visi-
+bility of both modalities, this pretraining exposes the expert
+to diverse combinations of visual and linguistic cues, dis-
+couraging visual shortcuts while retaining joint supervision
+whenever complementary cues remain visible (Fig. 1). VA,
+LA, and full-input pretraining are special cases of SCAP
+obtained with different mask distributions.
+In the same construction, SCAP meets both require-
+ments. First, if masks retain both joint cues sufficiently of-
+ten, the joint modeling path never closes (Sec. 3.3). Second,
+random masking gives cues from either modality a chance
+of being hidden, reducing overreliance on a single modal-
+ity. This advantage persists through subsequent full-input
+adaptation (Sec. 3.4).
+Experiments demonstrate that SCAP outperforms alter-
+native pretraining methods, with consistent gains across
+four VLA architectures and multiple model scales.
+By
+intervening on test-set instructions, we further show that
+SCAP improves robustness to paraphrasing and sensitivity
+to changes in task intent. On three real-robot manipulation
+tasks, SCAP achieves an average success rate of 76.67%,
+exceeding full-input pretraining by 25 percentage points.
+In summary, our contributions are:
+• We identify a key limitation of unimodal action expert
+pretraining: it can shut down certain pathways for joint
+vision–language modeling.
+• We propose SCAP, which randomly masks visual and text
+tokens during action expert pretraining to address visual
+shortcuts while preserving vision–language modeling.
+• We establish a controlled evaluation protocol spanning
+multi-task simulation, paired language interventions, and
+real-robot joint grounding to test instruction reliance and
+the preservation of joint conditioning.
+2. Related Work
+Action generation and expert pretraining.
+Recent VLA
+models, including π0.5 [25] and GR00T N1.7 [22], cou-
+ple pretrained VLMs with action experts for continuous
+robot control. Action expert pretraining seeks to establish
+useful priors before full VLA adaptation. APT [35] and
+BayesVLA [34] derive staged training from a Bayesian fac-
+torization of the VLA policy into a vision–action prior and
+an instruction likelihood. LA4VLA [18] learns instruction–
+action associations from atomic language–action episodes
+without visual input. Jing et al. [13] pretrain an action-
+only encoder–decoder and transfer its motion prior through
+decoder reuse and latent distillation.
+SCAP generalizes
+modality-restricted conditioning through simple stochastic
+masking to mitigate visual shortcuts while preserving joint
+vision–language learning.
+Dropout and multimodal masking.
+Dropout regularizes
+neural networks by randomly removing units [28], with es-
+tablished connections to adaptive regularization [30]. Mod-
+Drop [20] applies multimodal dropout to gesture recogni-
+tion, while masked autoencoders [10] reconstruct missing
+image content. SCAP uses masking to address a different
+training problem: it randomly masks visual and language
+tokens at the VLM input to mitigate visual shortcuts arising
+from modality imbalance in VLA pretraining data.
+3. Stochastic Context Pretraining
+Our question is how pretraining affects the joint action con-
+ditional p(A | V, L, S), where V, L, S, A denote vision, lan-
+guage, robot state, and actions. Let Y denote the supervised
+target. With robot state S always available, SCAP samples
+a content-independent mask M ∼Q before the VLM Fϕ,
+freezes ϕ during expert pretraining, and optimizes the ex-
+pert and its projections θ:
+HM = Fϕ(V, L; M),
+(1)
+Lmask(θ) = EM∼Q ℓ(hθ(S, HM), Y ).
+(2)
+The expectation also averages over data. For theoretical
+analysis, we consider a simplified conditional-regression
+model with squared-error loss ℓ(h, Y ) = 1
+2∥h −Y ∥2 (Ap-
+pendix A). Appendix B shows that our simplified model and
+a corresponding flow-matching realization have equivalent
+gradient-flow dynamics up to time rescaling, so the same
+qualitative conclusions apply.
+3.1. Single-Modality Pretraining
+When visual cues alone are predictive of the target actions,
+the expert may rely on vision while neglecting language in-
+structions. Single-modality staging separates the competing
+inputs. The vision-only (VA) and language-only (LA) pre-
+training objectives are:
+LVA = Eℓ(hθ(S; V, ∅), Y ),
+LLA = Eℓ(hθ(S; ∅, L), Y ).
+(3)
+Here ∅means semantic absence:
+LA blocks vision,
+whereas VA learns visuomotor behavior before language
+alignment. Although staged training reduces competition
+between modalities, it can impair the joint vision–language
+modeling pathway. The next subsection proves this.
+3.2. Damage to Joint Vision–Language Modeling
+We write the visual and language inputs as V = (Z, C)
+and L = (D, H). Here, C denotes a scene cue, D a direct
+2
+
+
+Figure 2. SCAP training and model architecture. (a) The action expert is pretrained with randomly masked visual and language
+tokens and a frozen backbone, then jointly adapted with the backbone on complete inputs. (b) The expert reads keys and values from the
+corresponding full-attention layers of the backbone and predicts the flow velocity.
+instruction cue, and H a relational instruction cue; these
+three variables are independent and uniformly distributed
+over {−1, +1}. The visual cue Z equals D on the training
+distribution, providing a visual substitute for the direct in-
+struction cue. For this diagnostic, we take robot state S to
+be constant and define the action target as
+Y = (Ad, Aj) = (D, CH).
+(4)
+Vision can substitute for language in Ad through Z, but Aj
+requires both modalities. Let mZ, mC, mD, mH indicate
+cue presence and jM = mCmH. We define a simplified
+action predictor in which the parameter u appears in both
+the joint-output offset and the gate controlling the vision–
+language interaction:
+h(M)
+θ,d = κwvmZZ + wlmDD,
+h(M)
+θ,j
+=
+√
+λ(b + u + c) + jM[u]+CH,
+(5)
+with trainable (wv, wl, b, u), constants κ ≥1, λ > 0, c > 1,
+and [u]+ = max(u, 0).
+Initialize (wv, wl, b, u) = (0, 0, 0, 1) and write R =
+b + u + c. Let Lsingle,j denote the expected squared-error
+loss for predicting the joint action Aj = CH under single-
+modality pretraining. For either VA or LA, jM = 0, giving
+Lsingle,j = (λR2 + 1)/2. With the same learning rate for b
+and u, their continuous-time gradient updates are:
+˙b = −∂bL = −λR,
+˙u = −∂uL = −λR,
+˙R = ˙b + ˙u = −2λR.
+(6)
+Here dots denote derivatives with respect to optimization
+time T. Solving ˙R = −2λR gives R(T) = (1 + c)e−2λT .
+Since ˙u = ˙b and u(0) −b(0) = 1, their difference remains
+u −b = 1. Combining this with R = b + u + c yields
+u(T) = R(T )+1−c
+2
+= 1−c
+2
++ 1+c
+2 e−2λT .
+(7)
+Thus u < 0 after Tclose = log((1+c)/(c−1))/(2λ): train-
+ing closes an initially active gate. Even if the complete vi-
+sual and language inputs are restored at Tp > Tclose, the in-
+teraction gate remains inactive. Since R > 0, ˙u = −λR <
+0, preventing the gate from reopening. Let Ta ≥0 denote
+the elapsed training time after restoring complete visual and
+language inputs. Then,
+u(Tp + Ta) < 0,
+Lfull,j = 1
+2(1 + λR2) ≥1
+2,
+lim
+Ta→∞Lfull,j = 1
+2 > 0.
+(8)
+Thus, in this model, single-modality pretraining can close
+the joint vision–language pathway, and subsequent train-
+ing with complete visual and language inputs cannot re-
+open it under the same gradient-flow dynamics. The de-
+tailed derivation is provided in Appendix C.
+3.3. Preserving Joint Modeling with SCAP
+The diagnostic assumes independent retention of visual and
+language cues with probability q ∈(0, 1). The probability
+of retaining both cues required for joint prediction is there-
+fore α = Pr(jM = 1) = q2. Averaging over all masks
+gives
+Lmask,j = 1−α
+2
++ Fα(b, u),
+Fα(b, u) = 1
+2
+
+λ(b + u + c)2 + α(1 −[u]+)2
+.
+(9)
+3
+
+
+Appendix D derives this expectation. Missing-cue masks
+still contribute offset loss. For u > 0, ˙u = −λR+α(1−u):
+joint evidence opposes closure. If λ(1 + c)2 < α, then
+Fα(0, 1) < α
+2 ≤Fα(b, 0),
+∀b ∈R,
+dFα
+dT = −∥∇b,uFα∥2 ≤0.
+(10)
+Since gradient flow cannot increase Fα, the trajectory can-
+not reach u = 0, and the joint pathway remains active.
+However, this guarantee requires a sufficiently high reten-
+tion probability q.
+In the second stage, we remove the masks and continue
+training with complete visual and language inputs. At the
+switch, F1 ≤Fα/α < 1/2, so the full-input joint loss is
+below the minimum loss at the gate-closing boundary u =
+0. Gradient flow therefore keeps the joint pathway active
+and converges to zero joint prediction error in our simplified
+model. The detailed derivation is provided in Appendix D.
+Beyond preserving the joint pathway, we next show that
+SCAP reduces reliance on visual shortcuts compared with
+direct full-input training.
+3.4. Reducing Visual Shortcuts with SCAP
+We use the subscripts F and MF to denote direct full-input
+training and SCAP pretraining followed by full-input train-
+ing, respectively. Both routes start from the same initializa-
+tion: F uses complete inputs for Tp + Ta, whereas MF uses
+masked inputs for Tp > 0 and then complete inputs for Ta.
+We use the same masking scheme with retention probabil-
+ity q and assume κ > 1; λ(1 + c)2 < q2 simultaneously
+protects the joint path.
+Write a = κwv, d = wl, g = κ2 > 1, and β = g + 1.
+Visual Dominance under Full-Input Training.
+For the
+direct action component, the full-input loss is
+Lfull,d = 1
+2E
+
+h(full)
+θ,d
+−Ad
+2
+= 1
+2(a + d −1)2.
+(11)
+Here h(full)
+θ,d
+= aZ +dD denotes the direct action prediction
+with complete inputs, and Z = D = Ad on the training
+distribution. Its gradient-flow dynamics are:
+˙a = g(1 −a −d),
+˙d = 1 −a −d,
+d
+dT (a −gd) = 0,
+a(0) = d(0) = 0.
+(12)
+The invariant a = gd yields
+aF(T) = g
+β (1 −exp(−βT)),
+dF(T) = 1
+β (1 −exp(−βT)).
+(13)
+The limiting coefficients are a∞
+F = g/(g + 1) and d∞
+F =
+1/(g + 1). As T →∞, the training error vanishes, but vi-
+sion dominates when g > 1. Thus, direct full-input training
+can favor visual cues over language instructions. We next
+show that SCAP pretraining mitigates this visual shortcut.
+Language-Dominant
+Solutions
+with
+SCAP.
+Let
+(ap, dp) be the coefficients actually reached after a finite
+SCAP pretraining duration Tp > 0, without assuming
+convergence of that stage. Continuing with complete visual
+and language inputs and taking Ta →∞gives
+a∞
+MF = g+ap−gdp
+β
+,
+d∞
+MF = 1+gdp−ap
+β
+.
+(14)
+These limits follow because a+d →1 while gd−a remains
+constant during full-input training. Relative to F,
+d∞
+MF −d∞
+F = gdp−ap
+β
+,
+a∞
+MF −a∞
+F = −gdp−ap
+β
+.
+(15)
+The sign of gdp −ap determines whether MF increases lan-
+guage reliance and reduces visual reliance relative to F. We
+therefore define
+δ(T) := gd(T) −a(T),
+δp := δ(Tp) = gdp −ap.
+(16)
+Thus δp > 0 would establish increased language reliance
+and reduced visual reliance. To prove its sign along the
+actual pretraining trajectory, average the masked direct-
+coordinate error:
+Lmask,d = 1
+2[qa2 + qd2 + 2q2ad
+−2q(a + d) + 1].
+(17)
+The corresponding dynamics are
+˙a = gq(1 −a −qd),
+˙d = q(1 −d −qa),
+a(0) = d(0) = 0.
+(18)
+Along mask training, ˙δ = gq(1 −q)(a −d) and δ(0) = 0.
+The exact solution for a−d is a positive multiple of the dif-
+ference between a slower and a faster decaying exponential,
+so a(T) > d(T) for every T > 0 (Appendix E). Integrating
+gives δp > 0 for every finite Tp > 0. Thus, MF retains
+greater language dependence than F.
+Language dominance, d∞
+MF > a∞
+MF, further requires
+δp > (g −1)/2. As Tp →∞, the masked coefficients
+satisfy ap, dp →1/(1+q), giving δp →(g −1)/(1 +q) >
+(g −1)/2. Thus sufficiently long but finite SCAP pretrain-
+ing yields language dominance after full-input training.
+4
+
+
+Lower Loss under Visual-Cue Flips.
+To assess reliance
+on the visual shortcut, we make the shortcut cue conflict
+with the language instruction. Specifically, we flip Z = D
+to Z = −D, keeping the instruction, target, and other cues
+unchanged. The direct-coordinate loss becomes
+Eflip(a, d) = 1
+2E[((d −a)D −D)2]
+= 1
+2(1 + a −d)2.
+(19)
+At full-input convergence, the prediction aZ + dD = (a +
+d)D on the training distribution matches the target D, giv-
+ing a + d = 1. Substituting d = 1 −a into the flip loss
+yields Eflip = 2a2. Since 0 < a∞
+MF < a∞
+F , the flip losses
+satisfy
+E∞
+flip,MF = 2(a∞
+MF)2
+< 2(a∞
+F )2 = E∞
+flip,F.
+(20)
+This loss advantage holds after full-input convergence for
+every finite Tp > 0. Thus, compared with direct full-input
+training, SCAP enables more robust instruction following
+under this visual-cue perturbation. Appendix E provides
+the detailed trajectories, finite-time comparisons, and an
+asymmetric-retention extension.
+3.5. Architecture and Two-Stage Training
+Model configuration.
+Our configuration uses a mixture-
+of-transformers (MoT) architecture with a Qwen3.5-9B
+vision–language backbone [26] and an approximately
+900M-parameter action expert. Figure 2 illustrates the two-
+stage training process and the overall model architecture.
+Stage 1: masked context, expert-only updates.
+We ini-
+tialize and freeze the pretrained VLM. After visual encod-
+ing and before the language backbone, SCAP uniformly se-
+lects a fixed-size subset (30%) of pooled image-content and
+instruction tokens and zeros their complete embeddings in
+place. Token positions are preserved, with no mask-token
+replacement or rescaling. Only the expert and action-side
+projections are optimized using Eq. (2); Appendix F gives
+implementation details.
+Stage 2: complete context, joint model updates.
+We
+carry the Stage-1 weights into full-context VLA training.
+SCAP input masking is disabled, and the VLM is unfrozen;
+both ϕ and θ are updated on complete visual observations
+and instructions using the same action-target convention.
+Inference uses complete, unmasked inputs.
+4. Experiments
+We evaluate SCAP through multi-task performance, lan-
+guage robustness and intent sensitivity, and language-
+conditioned real-robot manipulation.
+4.1. Experimental Setup
+Benchmarks.
+We
+use
+two
+simulation
+benchmarks.
+RoboTwin 2.0 [7] comprises 50 bimanual manipulation
+tasks with Clean (Easy) and Randomized (Hard) evaluation
+settings. RoboCasa-GR1 [23, 27] contains 24 humanoid
+tabletop tasks, including 6 PnPClose and 18 PosttrainPnP
+tasks. We report success rates for each setting or group and
+the within-benchmark average.
+Implementation Details.
+Both pretraining stages are
+trained for 100k optimization steps with a global batch size
+of 512, while benchmark-specific SFT uses a global batch
+size of 256. We adopt AdamW with a weight decay of 0.01
+and an initial action-expert learning rate of 10−4. A 1000-
+step warmup is followed by cosine learning-rate decay, with
+a minimum VLM learning rate of 10−6 in Stage 2. Visual
+observations comprise up to three camera views at 224×224
+resolution, and the policy predicts 16-step action chunks.
+4.2. Training Data
+We use approximately 1.2 million action-labeled trajec-
+tories from real-robot and synthetic datasets, processed
+with a shared pipeline.
+State/action fields share a 46-
+dimensional layout with quaternion end-effector poses and
+calibrated gripper commands, while retaining native coor-
+dinate frames and reference points. Quality checks assess
+pose availability, kinematic consistency, temporal smooth-
+ness, state–action alignment, and numerical validity. Con-
+trolled routes share data within each stage; instruction in-
+terventions are evaluation-only. Appendix G details source
+composition, conversion rules, filtering statistics, and re-
+porting limitations.
+4.3. Main Results
+RoboTwin 2.0.
+Table 1 shows that SCAP achieves the
+highest success rates in both Clean and Randomized set-
+tings, reaching 56.48% overall success. It outperforms Full,
+VA→Full, and VL-Mask→Full by 14.42, 6.32, and 10.18
+percentage points, respectively. These comparisons support
+stochastic joint-context pretraining over vision-only condi-
+tioning or complete-modality dropout. Joint Stage-2 fine-
+tuning further improves overall success from 52.96% with
+a frozen VLM to 56.48%, highlighting the benefit of back-
+bone adaptation after action-expert pretraining.
+RoboCasa-GR1.
+SCAP also achieves the best results
+in both Articulated and Pick-and-Place categories, with
+58.60% overall success.
+It surpasses Full, VA→Full,
+and VL-Mask→Full by 11.60, 11.18, and 9.68 percentage
+points, respectively, in overall success rate. Joint Stage-
+2 fine-tuning improves overall success from 53.60% to
+58.60%, extending the benefit of backbone adaptation to hu-
+manoid tabletop manipulation. The consistent gains across
+5
+
+
+Method
+RoboTwin 2.0
+RoboCasa-GR1
+Avg.
+Gain
+Clean
+Randomized
+Overall
+Articulated
+Pick-and-Place
+Overall
+GO-1 [4]
+37.80
+36.20
+37.00
+35.73∗
+43.13∗
+41.28∗
+39.14∗
+-
+π0.5 [25]
+42.98
+43.84
+43.41
+44.24∗
+48.67∗
+47.54∗
+45.48∗
+-
+GR00T N1.6 [21]
+47.34∗
+44.98∗
+46.16∗
+24.17
+55.43
+47.60
+46.88∗
+-
+RDT-1B [19]
+45.15∗
+43.43∗
+44.29∗
+40.05∗
+46.61∗
+44.97∗
+44.63∗
+-
+OpenVLA-OFT [15, 16]
+53.63∗
+50.85∗
+52.24∗
+46.51∗
+51.27∗
+50.08∗
+51.16∗
+-
+FLARE [39]
+52.50∗
+51.04∗
+51.77∗
+51.30
+58.20
+55.00
+53.39∗
+-
+Qwen3.5-9B [26]
+34.40
+33.40
+33.90
+40.42
+48.03
+46.13
+40.02
++0.00
+Full
+42.08
+42.04
+42.06
+42.46
+48.51
+47.00
+44.53
++4.51
+LA→Full (LA4VLA [18])
+43.40
+42.12
+42.76
+46.49
+46.61
+46.58
+44.67
++4.65
+VA→Full (APT [35])
+50.44
+49.88
+50.16
+47.18
+47.50
+47.42
+48.79
++8.77
+VL-Mask (50%)→Full
+46.12
+46.48
+46.30
+44.93
+50.25
+48.92
+47.61
++7.59
+SCAP→Full (freeze VLM)
+53.50
+52.42
+52.96
+54.08
+53.44
+53.60
+53.28
++13.26
+SCAP→Full
+56.66
+56.30
+56.48
+59.53
+58.29
+58.60
+57.54
++17.52
+Table 1. Results on RoboTwin 2.0 and RoboCasa-GR1 (success rate %). FLARE’s RoboCasa-GR1 scores are quoted directly from
+Table 1 of the original paper; its reported Overall score is not recomputed from the subgroup scores. Indented routes are trained indepen-
+dently from the same backbone initialization; →denotes stage order within each route. ∗marks scores from reproductions aligned with
+our training configuration. Best and second-best scores are bold and underlined, respectively.
+Method
+OS ↑
+PS ↑
+OG ↓
+NG ↑
+PC ↑
+Qwen3.5-9B [26]
+53.37 48.91
+34.40 25.49
+19.58
+Full
+54.03 50.63
+32.09 27.26
+21.45
+LA→Full
+54.90 52.14
+22.84 35.31
+28.97
+VA→Full
+57.19 52.92
+35.17 31.07
+25.36
+VL-Mask (50%)→Full 59.26 56.05
+23.13 38.90
+32.78
+SCAP→Full
+67.23 65.83
+12.24 56.46
+47.93
+Table 2. Text perturbations on RoboCasa-GR1 sub-tasks (%).
+OS: Original SR; PS: Paraphrase SR; OG: Old-Goal rate; NG:
+New-Goal SR; PC: Pair-Correct rate. Best and second-best scores
+are bold and underlined, respectively.
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Mask ratio (%)
+35
+40
+45
+50
+55
+60
+65
+Success rate (%)
+56.48
+58.60
+RoboTwin 2.0
+RoboCasa-GR1
+Figure 3. Token Mask-ratio ablation. Overall success rates on
+RoboTwin 2.0 and RoboCasa-GR1.
+both benchmarks show the effectiveness of SCAP pretrain-
+ing followed by full-context adaptation.
+4.4. Ablation Studies
+Text Perturbations.
+Guided by the visual-shortcut anal-
+ysis in Sec. 3.4, we compare Qwen3.5-9B and five training
+routes on four RoboCasa-GR1 pick-and-place tasks [27].
+Paraphrases preserve intent; minimal object or destina-
+tion edits change the goal in the same scene, probing
+cue–instruction conflict rather than directly flipping visual
+cues.
+Each task uses 100 shared scenes and two para-
+phrases per scene, with independently reset rollouts, com-
+plete inputs, and matched inference settings. Table 2 re-
+ports equal-weight task means. SCAP’s high paraphrase
+success and small drop from original instructions indicate
+wording robustness while retaining semantic sensitivity.
+Lower old-goal execution and higher new-goal success in-
+dicate redirection to the requested goal rather than inac-
+tion. Paired correctness requires both original- and edited-
+instruction rollouts to succeed and cannot exceed either
+single-instruction success rate. It combines goal selection
+and physical execution, whose residual failures cannot be
+separated by aggregate scores. Together, these results sup-
+port reduced visual shortcuts and preserved joint vision–
+language grounding after full-context adaptation.
+Token Masking Ratio.
+We vary Stage-1 masking over
+r ∈{0, 0.1, . . . , 1} with fixed data, stage budgets, and
+evaluation settings. Stage 2 and inference use complete in-
+puts; r = 0 gives two full-context stages on the same data
+(Full→Full). In Figure 3, RoboTwin 2.0 peaks at 20% and
+RoboCasa-GR1 at 30%; we adopt 30% for its highest cross-
+benchmark average. The 20–40% range remains competi-
+tive, while stronger masking shows an overall decline with
+local rebounds. SCAP’s advantage over the budget-matched
+zero-mask control cannot be explained solely by an extra
+round of training on the same data. This agrees with the
+qualitative trade-off in Eq. (10): λ(1+c)2 < q2 is sufficient
+to preserve the joint pathway. Moderate masking weakens
+shortcuts while retaining task-critical joint evidence. Here q
+6
+
+
+Clean
+RoboTwin 2.0
+Randomized
+RoboTwin 2.0
+Articulated
+RoboCasa-GR1
+Pick-and-Place
+RoboCasa-GR1
+0
+20
+40
+60
+80
+Success rate (%)
++8.4
++13.2
++3.5
++12.3
++6.0
++10.9
++7.5
++7.6
++6.1
++9.3
++2.3
++11.0
++14.6
++14.3
++17.1
++9.8
+GR00T-style
+Qwen-VLA-style
+π-style
+SCAP
+Full
+SCAP→Full
+Figure 4. Action expert pretraining across VLA architectures.
+denotes semantic-cue retention, not token retention, so the
+diagnostic does not predict an optimal token ratio.
+Action Pretraining on More Architectures.
+We test
+final-feature cross-attention (GR00T-style), concatenated-
+feature DiT (Qwen-VLA-style [31]),
+layer-wise full-
+attention MoT (π-style [3, 9]), and hybrid-attention MoT
+(SCAP). The π-style uses Qwen3-VL-8B, the nearest dense
+scale; the others use Qwen3.5-9B. Figure 4 compares Full
+with SCAP→Full under matched downstream SFT and in-
+ference settings within each architecture. Gains across all
+four benchmark settings, despite varying magnitudes, sup-
+port transfer across representative VLA conditioning inter-
+faces rather than dependence on one fusion design.
+Model Scale.
+We test Qwen3.5 at 2B, 4B, and 9B with
+approximately 100M, 300M, and 900M action experts, re-
+spectively. Within each scale, Full and SCAP→Full share
+the backbone, expert, pretraining corpus, and downstream
+SFT settings. Consistent gains on both benchmarks in Ta-
+ble 3 indicate that SCAP benefits compact and larger mod-
+els as backbone and expert capacity vary. Same-scale re-
+productions provide context rather than matched controls
+because their expert capacities and prior pretraining differ.
+4.5. Real-Robot Evaluation
+Tasks.
+Three wooden-block tasks require different goals
+under two language instructions for the same initial scene
+(Figure 5). Base selection places an orange triangular roof
+on the red or natural-wood base, specified by color. Roof
+selection installs an orange triangular or red rounded roof;
+the candidates differ in both shape and color. Color-relation
+matching assembles two houses from blue and green bodies
+and roofs using same-color or cross-color pairings.
+Data and adaptation.
+We collect 50 demonstrations per
+instruction (300 total) and adapt the seven simulation initial-
+Model Size
+Method
+RoboTwin GR1
+VLM
+Expert
+2B
+∼100M Full
+34.86
+36.73
+∼100M APT [35]
+39.15∗
+41.95∗
+∼100M SCAP→Full
+44.45
+47.54
+4B
+∼300M Full
+40.12
+42.97
+∼160M ABot-M0 [36]
+46.39∗
+49.06∗
+∼1.15B Qwen-VLA-style [31]
+50.67∗
+55.72∗
+∼300M SCAP→Full
+51.48
+54.58
+9B
+∼900M Full
+42.06
+47.00
+SCAP→Full
+56.48
+58.60
+Table 3. Model-scale ablation.
+∗marks scores from reproduc-
+tions aligned with our training configuration. Best and second-best
+scores within each scale are bold and underlined, respectively.
+ization routes independently to each task. All routes share
+task-specific data, preprocessing, normalization, and adap-
+tation budgets. All real-robot SFT freezes the VLM and
+updates the action expert and state/action projections. In-
+puts comprise three RGB views, joint angles, and gripper
+opening; targets are the next retained joint and gripper state
+after idle removal. We use chunk length 32, batch size 64,
+AdamW learning rate 5×10−5, and the final 10,000-update
+checkpoint. Appendix H provides implementation details.
+Evaluation protocol.
+Each task-specific policy is tested
+on the same 10 held-out layouts under both instructions (20
+episodes per task, 420 total). The scene, policy history, and
+action cache are reset before each instruction, with random-
+ized instruction order. Success requires fulfilling the in-
+struction and keeping the blocks from falling after the grip-
+per releases them. Table 4 reports instruction-wise SR and
+their mean to expose target preferences.
+Results.
+SCAP→Full achieves mean success rates of
+80%, 85%, and 65% on base selection, roof selection,
+7
+
+
+(a)
+Initial scene
+Instruction 1: Use the red base
+Instruction 2: Use the wooden base
+(b)
+Initial scene
+Instruction 1: Use the triangular roof
+Instruction 2: Use the rounded roof
+(c)
+Initial scene
+Instruction 1: Build same-color houses
+Instruction 2: Build cross-color houses
+Figure 5. Real-robot roof-assembly sequences under different language instructions. Each row shows a shared initial scene followed by
+two instruction-conditioned execution sequences, read left to right within each group. (a) Place the orange roof on the red or natural-wood
+base. (b) Install the triangular or rounded roof. (c) Assemble both houses with same-color or cross-color roof–body pairings. Instruction
+keywords are highlighted. Photographs illustrate task execution rather than aggregate policy performance.
+Method
+Base selection
+Roof selection
+Color matching
+Overall
+Red
+Wood
+Average
+Triangular
+Rounded
+Average
+Same
+Cross
+Average
+Qwen3.5-9B [26]
+50
+40
+45
+40
+60
+50
+40
+20
+30
+41.67
+Full
+40
+60
+50
+50
+70
+60
+40
+50
+45
+51.67
+LA→Full (LA4VLA [18])
+70
+30
+50
+60
+40
+50
+40
+30
+35
+45.00
+VA→Full (APT [35])
+70
+70
+70
+70
+60
+65
+70
+40
+55
+63.33
+VL-Mask (50%)→Full
+50
+80
+65
+60
+80
+70
+50
+30
+40
+58.33
+SCAP→Full (freeze VLM)
+80
+70
+75
+80
+90
+85
+50
+60
+55
+71.67
+SCAP→Full
+80
+80
+80
+90
+80
+85
+60
+70
+65
+76.67
+Table 4. Real-robot success rates (%). Indented routes are trained independently from the same backbone initialization; →denotes
+stage order within each route. Each instruction has 10 trials; Average is the mean of the two instruction scores; Overall averages the three
+task scores. Best and second-best scores in each column are bold and underlined, respectively; ties receive the same formatting. See
+Appendix H for protocol and initialization details.
+and color matching, respectively, outperforming VA→Full
+(70%, 65%, and 55%) and LA→Full (50%, 50%, and 35%).
+Beyond identifying a single target, color matching requires
+applying a language-specified relation to multiple visual ob-
+jects across two assembly operations. Because the same
+scene supports either pairing, visual layout alone cannot de-
+termine the requested configuration. On same-/cross-color
+assembly, SCAP→Full achieves 60%/70%, compared with
+70%/40% for VA→Full and 40%/30% for LA→Full. Its
+advantage over both unimodal routes is largest in cross-
+color assembly, which requires pairing objects according to
+the instruction rather than color similarity. Under shared
+adaptation data and budgets, these results provide behav-
+ioral support for SCAP better preserving the capacity for
+subsequent joint vision–language learning.
+5. Conclusion
+We show that single-modality action-expert pretraining can
+compromise joint vision–language modeling. To address
+this, we introduce SCAP, a pretraining stage that randomly
+masks visual and text tokens before full-input training. Our
+diagnostic analysis shows that SCAP can preserve joint
+modeling pathways while reducing visual shortcuts and
+strengthening reliance on language instructions.
+Exper-
+iments across different VLA architectures and real-robot
+manipulation tasks demonstrate consistent performance im-
+provements. More broadly, SCAP provides a unified frame-
+work for action-expert pretraining based on mask distribu-
+tions, with vision-only, language-only, and full-input pre-
+training recovered as special cases.
+8
+
+
+LLM Usage Statement
+Large language models were used to assist with writing and
+revising code, including figure-preparation scripts, and with
+language editing and grammar polishing of the manuscript.
+The authors take full responsibility for the code, experimen-
+tal results, and final manuscript.
+References
+[1] AgiBot World Team.
+AgiBot World 2026.
+https:
+//huggingface.co/datasets/agibot-world/
+AgiBotWorld2026, 2026. 15, 16
+[2] Arthur Allshire, Himanshu Gaurav Singh, Ritvik Singh,
+Adam Rashid, Hongsuk Choi, David McAllister, et al. Scal-
+able behavior cloning with open data, training, and evalua-
+tion. arXiv preprint arXiv:2606.27375, 2026. 15, 16
+[3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 1, 7
+[4] Qingwen Bu, Jisong Cai, Li Chen, Xiuqi Cui, Yan Ding,
+Siyuan Feng, Xindong He, Xu Huang, et al. Agibot world
+colosseo: A large-scale manipulation platform for scalable
+and intelligent embodied systems.
+In 2025 IEEE/RSJ In-
+ternational Conference on Intelligent Robots and Systems
+(IROS). IEEE, 2025. 6
+[5] Qingwen Bu, Jisong Cai, Li Chen, et al.
+AgiBot World
+Colosseo:
+A large-scale manipulation platform for scal-
+able and intelligent embodied systems.
+arXiv preprint
+arXiv:2503.06669, 2025. 15, 16
+[6] Remi Cadene, Simon Alibert, Alexander Soare, Quentin
+Gallouedec, Adil Zouitine, Steven Palma, et al. LeRobot:
+State-of-the-art machine learning for real-world robotics in
+PyTorch.
+https://github.com/huggingface/
+lerobot, 2024. 16
+[7] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge,
+Zhenyu Gu, et al.
+RoboTwin 2.0: A scalable data gen-
+erator and benchmark with strong domain randomization
+for robust bimanual robotic manipulation.
+arXiv preprint
+arXiv:2506.18088, 2025. 5, 16
+[8] GEAR-Dreams.
+DreamZero-DROID-Data:
+Dataset re-
+lease.
+https://huggingface.co/datasets/
+GEAR-Dreams/DreamZero-DROID-Data, 2026. 15,
+16
+[9] Asher James Hancock, Boyi Li, Yuxiao Chen, Shuhan Tan,
+Wenhao Ding, Thomas Tian, Yan Wang, Boris Ivanovic, and
+Marco Pavone.
+Should the action expert train the VLM?
+action-token supervision and gradient routing in Mixture-of-
+Transformer VLAs. arXiv preprint arXiv:2611.05249, 2026.
+7
+[10] Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr
+Doll´ar, and Ross Girshick. Masked autoencoders are scal-
+able vision learners. In IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2022. 2
+[11] Chengkai Hou, Kun Wu, Jiaming Liu, Zhengping Che, et al.
+RoboMIND 2.0: A multimodal, bimanual mobile manipula-
+tion dataset for generalizable embodied intelligence. arXiv
+preprint arXiv:2512.24653, 2025. 15, 16
+[12] Tao Jiang, Tianyuan Yuan, Yicheng Liu, Chenhao Lu,
+et al. Galaxea open-world dataset and G0 dual-system VLA
+model. arXiv preprint arXiv:2509.00576, 2025. 15, 16
+[13] Dong Jing, Tianqi Zhang, Jiaqi Liu, Jinman Zhao, Zelong
+Sun, Li Erran Li, Zhiwu Lu, and Mingyu Ding. Learning ac-
+tion priors for cross-embodiment robot manipulation. arXiv
+preprint arXiv:2606.26095, 2026. 2
+[14] Alexander Khazatsky,
+Karl Pertsch,
+Suraj Nair,
+Ash-
+win Balakrishna, Sudeep Dasari, Siddharth Karamcheti,
+et al. DROID: A large-scale in-the-wild robot manipulation
+dataset. arXiv preprint arXiv:2403.12945, 2024. 15
+[15] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-
+ter, Grace Lam, Pannag Sanketi, et al.
+OpenVLA: An
+open-source vision-language-action model. arXiv preprint
+arXiv:2406.09246, 2024. 6
+[16] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. arXiv preprint arXiv:2502.19645, 2025. 6
+[17] Shijie Lian, Bin Yu, Xiaopeng Lin, Laurence T. Yang, Zhao-
+long Shen, Changti Wu, Yuzhuo Miao, Cong Huang, and Kai
+Chen. LangForce: Bayesian decomposition of vision lan-
+guage action models via latent action queries. arXiv preprint
+arXiv:2601.15197, 2026. 1
+[18] Tao Lin, Yuxin Du, Yiran Mao, Zewei Ye, Yilei Zhong,
+Bing Cheng, Yiming Wang, Jiting Liu, Yang Tian, Junchi
+Yan, Feiran Wu, Zenan Meng, Hu Wei, Yuqian Fu, Gen
+Li, and Bo Zhao.
+LA4VLA: Learning to act without
+seeing via language-action pretraining.
+arXiv preprint
+arXiv:2606.27295, 2026. 1, 2, 6, 8
+[19] Songming Liu, Lingxuan Wu, Bangguo Li, Hengkai Tan,
+Huayu Chen, Zhengyi Wang, Ke Xu, Hang Su, and Jun Zhu.
+RDT-1B: a diffusion foundation model for bimanual manip-
+ulation. arXiv preprint arXiv:2410.07864, 2024. 6
+[20] Natalia Neverova, Christian Wolf, Graham Taylor, and Flo-
+rian Nebout.
+ModDrop:
+Adaptive multi-modal gesture
+recognition. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 38(8):1692–1706, 2016. 2
+[21] NVIDIA.
+Isaac GR00T N1.6:
+Official RoboCasa GR1
+evaluation results. https://github.com/NVIDIA/
+Isaac-GR00T/tree/n1d6/examples/robocasa-
+gr1-tabletop-tasks, 2026. N1.6 evaluation branch;
+accessed 2026-11-11. 6
+[22] NVIDIA. NVIDIA Isaac GR00T N1.7: Official model card.
+https://huggingface.co/nvidia/GR00T-N1.
+7-3B, 2026. Accessed 2026-11-08. 2
+[23] NVIDIA, Johan Bjorck, Fernando Casta˜neda, Nikita Cherni-
+adev, Xingye Da, Runyu Ding, et al. GR00T N1: An open
+foundation model for generalist humanoid robots.
+arXiv
+preprint arXiv:2503.14734, 2025. 5
+[24] Open X-Embodiment Collaboration. Open X-Embodiment:
+Robotic learning datasets and RT-X models. arXiv preprint
+arXiv:2310.08864, 2023. 16
+9
+
+
+[25] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: A
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 2, 6
+[26] Qwen Team. Qwen3.5-9B: Official model card. https:
+//huggingface.co/Qwen/Qwen3.5-9B, 2026. 5, 6,
+8
+[27] RoboCasa-GR1.
+RoboCasa GR-1 Tabletop Tasks: Offi-
+cial simulation benchmark.
+https://github.com/
+robocasa / robocasa - gr1 - tabletop - tasks,
+2025. 5, 6, 16
+[28] Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya
+Sutskever, and Ruslan Salakhutdinov. Dropout: A simple
+way to prevent neural networks from overfitting. Journal of
+Machine Learning Research, 15(56):1929–1958, 2014. 2
+[29] Yang Tian, Yuyin Yang, Yiman Xie, Zetao Cai, Xu Shi, Ning
+Gao, Hangxu Liu, Xuekun Jiang, et al. InternData-A1: Pio-
+neering high-fidelity synthetic data for pre-training general-
+ist policy. arXiv preprint arXiv:2511.16651, 2025. 15, 16
+[30] Stefan Wager, Sida Wang, and Percy Liang. Dropout training
+as adaptive regularization. In Advances in Neural Informa-
+tion Processing Systems, 2013. 2
+[31] Qiuyue Wang, Mingsheng Li, Jian Guan, Jinhui Ye, Sicheng
+Xie, Yitao Liu, Junhao Chen, Zhixuan Liang, Jie Zhang,
+Xintong Hu, et al. Qwen-VLA: Unifying vision-language-
+action modeling across tasks, environments, and robot em-
+bodiments. arXiv preprint arXiv:2605.30280, 2026. 7
+[32] Kun Wu, Chengkai Hou, Jiaming Liu, Zhengping Che, Xi-
+aozhu Ju, Zhuqin Yang, et al. RoboMIND: Benchmark on
+multi-embodiment intelligence normative data for robot ma-
+nipulation. arXiv preprint arXiv:2412.13877, 2024. 15, 16
+[33] Shihan Wu, Xuecheng Liu, Shaoxuan Xie, Pengwei Wang,
+Xinghang Li, Bowen Yang, et al.
+RoboCOIN: An open-
+sourced bimanual robotic data collection for integrated ma-
+nipulation. arXiv preprint arXiv:2511.17441, 2025. 15, 16
+[34] Kechun Xu, Zhenjie Zhu, Anzhe Chen, Shuqi Zhao, Qing
+Huang, Yifei Yang, Haojian Lu, Rong Xiong, Masayoshi
+Tomizuka, and Yue Wang. Seeing to act, prompting to spec-
+ify: A Bayesian factorization of vision language action pol-
+icy. arXiv preprint arXiv:2512.11218, 2025. 1, 2
+[35] Kechun Xu, Zhenjie Zhu, Anzhe Chen, Rong Xiong, and
+Yue Wang. APT: Action expert pretraining improves instruc-
+tion generalization of vision-language-action policies. arXiv
+preprint arXiv:2606.12366, 2026. 1, 2, 6, 7, 8
+[36] Yandan Yang, Shuang Zeng, Tong Lin, Xinyuan Chang,
+Dekang Qi, Junjin Xiao, Haoyun Liu, Ronghan Chen, Yuzhi
+Chen, Dongjie Huo, et al.
+ABot-M0:
+Vla foundation
+model for robotic manipulation with action manifold learn-
+ing. arXiv preprint arXiv:2602.11236, 2026. 7
+[37] Chenghao Yin, Da Huang, Di Yang, Jichao Wang, Nan-
+shu Zhao, Chen Xu, Wenjun Sun, et al.
+Genie Sim 3.0:
+A high-fidelity comprehensive simulation platform for hu-
+manoid robot. arXiv preprint arXiv:2601.02078, 2026. 15,
+16
+[38] Haochen Zhang and Yonatan Bisk. Flatness preserves in-
+struction following in vision-language-action models, 2026.
+1
+[39] Ruijie Zheng, Jing Wang, Scott Reed, Johan Bjorck, Yu
+Fang, Fengyuan Hu, Joel Jang, Kaushil Kundalia, Zongyu
+Lin, Loic Magne, Avnish Narayan, You Liang Tan, Guanzhi
+Wang, Qi Wang, Jiannan Xiang, Yinzhen Xu, Seonghyeon
+Ye, Jan Kautz, Furong Huang, Yuke Zhu, and Linxi Fan.
+FLARE: Robot learning with implicit world modeling. In
+Proceedings of the 9th Conference on Robot Learning, pages
+3952–3971, 2025. 6
+10
+
+
+Organization. Appendices A–E provide the methodolog-
+ical derivations, followed by the token-masking protocol
+(Appendix F), in the order of Sec. 3.
+The experimental
+appendices follow Sec. 4: training data and preprocessing
+(Appendix G) and real-robot evaluation (Appendix H).
+A. Construction of the Diagnostic Model
+To analyze how pretraining input visibility affects joint
+vision–language modeling and reliance on visual shortcuts,
+we construct a simplified conditional-regression diagnos-
+tic model. The independent fair signs C, D, H represent
+scene, direct instruction, and relational instruction cues. Set
+Z = D, V = (Z, C), L = (D, H), and Y = (D, CH). For
+this diagnostic, robot state S is constant. The head in Eq. (5)
+has trainable parameters (wv, wl, b, u) and fixed constants
+κ ≥1, λ > 0, c > 1.
+A.1. A General Loss Formulation
+The goal of this step is to obtain one objective for all vis-
+ibility routes and verify that the direct and joint parameter
+blocks can be analyzed separately. Let R = b + u + c and
+a = κwv. Because Z = D, the two residuals are
+h(M)
+θ,d −Yd = (amZ + wlmD −1)D,
+h(M)
+θ,j
+−Yj =
+√
+λR + (jM[u]+ −1)CH.
+(21)
+The squared vector norm adds the two squared coordi-
+nates; no cross-coordinate product appears. Inside the joint
+square, the cross term averages to zero because E[CH] = 0
+and masks are independent of the cues.
+Also, D2 =
+(CH)2 = 1.
+Write α = EjM; since jM is binary,
+E(jM[u]+−1)2 = (1−α)+α([u]+−1)2. Write L(θ; Q) for
+the general diagnostic objective under the specified input-
+visibility law, allowing degenerate laws for single-modality
+and full inputs. Its exact expression is
+2L(θ; Q) = EM(amZ + wlmD −1)2 + λR2
++ (1 −α) + α([u]+ −1)2.
+(22)
+Under the diagnostic data distribution defined above, sub-
+stituting the predictor in Eq. (5) into the training objective
+in Eq. (2), with squared-error loss ℓ(h, Y ) = 1
+2∥h −Y ∥2
+and content-independent masks, gives Eq. (22).
+For the
+main-text SCAP setting, visual and language cues are re-
+tained independently with probability q, so that α = q2.
+The joint component of Eq. (22) then becomes Lmask,j =
+(1 −α)/2 + Fα(b, u), recovering Eq. (9). The VA and
+LA objectives in Eq. (3) follow by fixing the correspond-
+ing single-modality masks, which gives α = 0; complete
+inputs give α = 1.
+B. Flow-Matching Realization of the Diagnos-
+tic Model
+This section constructs a flow-matching counterpart of the
+diagnostic model in Appendix A. We show that its expected
+velocity loss is a positive constant multiple of Eq. (22),
+yielding equivalent gradient-flow dynamics up to a rescal-
+ing of optimization time.
+B.1. Flow-Matching Setup and Target Decomposi-
+tion
+Use A = (D, CH), standard normal noise ϵ ∼N(0, I2),
+and time t ∼ρ on [0, 1), with Xt = (1 −t)ϵ + tA and
+velocity target U = A −ϵ. Noise, time, semantic cues,
+and masks are independent. The action-side inputs S, Xt, t
+remain unmasked, with S constant as in the diagnostic.
+For either coordinate r ∈{d, j}, the Gaussian likeli-
+hoods with equal action priors give
+µ(x, t) := E[Ar | Xt,r = x, t] = tanh
+
+tx
+(1 −t)2
+
+. (23)
+Since Ur = (Ar−Xt,r)/(1−t), define the baseline velocity
+and residual by
+v0(x, t) = µ(x, t) −x
+1 −t
+,
+g(a; x, t) = a −µ(x, t)
+1 −t
+,
+Ur = v0(Xt,r, t) + g(Ar; Xt,r, t).
+(24)
+Thus v0(Xt,r, t) = E[Ur | Xt,r, t] and E[g(Ar; Xt,r, t) |
+Xt,r, t]
+=
+0.
+Write v0,r
+=
+v0(Xt,r, t), gr(a)
+=
+g(a; Xt,r, t), and σ2 = E[gr(Ar)2], common to both co-
+ordinates. Then
+E[gr(Ar)2 | t] = E Var(Ar | Xt,r, t)
+(1 −t)2
+.
+(25)
+For t ≤1/2, the numerator is at most one; for t > 1/2,
+the estimator Xt,r/t bounds it by (1 −t)2/t2. Both yield
+E[gr(Ar)2 | t] ≤4. The posterior variance is positive for
+every t < 1, hence 0 < σ2 ≤4.
+B.2. Velocity Model Construction and Loss Equiv-
+alence
+Use the diagnostic parameters, initialization, constants, and
+masks, with R = b + u + c. Using the fixed distribution-
+dependent features v0,r, gr and constant σ, define
+v(M)
+θ,d = v0,d + κwvmZgd(Z) + wlmDgd(D),
+v(M)
+θ,j
+= v0,j + σ
+√
+λR + jM[u]+gj(CH).
+(26)
+Features are evaluated only from retained cues and the un-
+masked action-side inputs; gj(CH) requires both C and H.
+Subtracting Eq. (24) yields
+v(M)
+θ,d −Ud = (κwvmZ + wlmD −1)gd(D),
+v(M)
+θ,j
+−Uj = σ
+√
+λR + (jM[u]+ −1)gj(CH).
+(27)
+11
+
+
+Using
+mask
+independence,
+E[gr(Ar)]
+=
+0,
+and
+E[gr(Ar)2] = σ2, the squared residuals give
+LFM(θ; Q) := 1
+2E∥v(M)
+θ
+−U∥2 = σ2L(θ; Q).
+(28)
+Consequently, ∇θLFM = σ2∇θL, and gradient-flow tra-
+jectories agree under T = σ2TFM. The closing time is di-
+vided by σ2, the persistent joint-loss floor becomes σ2/2,
+and the protection condition λ(1 + c)2 < α is unchanged,
+with α = q2 for SCAP and α = 1 for full inputs.
+After closure, the joint velocity is v0(xj, t) + σ
+√
+λR,
+independent of C, H.
+A coordinate-wise sampler with
+context-independent noise and solver randomness therefore
+produces the same joint-coordinate distribution for every
+(C, H). It cannot match both required point masses δ+1 and
+δ−1; context-independent thresholding gives average sign
+error 1/2.
+C. Damage to Joint Vision–Language Model-
+ing
+This appendix provides the detailed derivations for Sec. 3.2,
+covering joint-pathway closure during single-modality pre-
+training and its persistence under subsequent full-input
+training.
+C.1. Joint-Pathway Closure under Single-Modality
+Pretraining
+We now solve the single-modality dynamics from (b, u) =
+(0, 1). Either VA or LA has jM = 0. With R = b + u +
+c, independence of the fair signs gives E[CH] = 0 and
+(CH)2 = 1, hence
+Lsingle,j = 1
+2E[(
+√
+λR −CH)2]
+= λ
+2 R2 −
+√
+λR E[CH]
++ 1
+2E[(CH)2]
+= 1
+2(λR2 + 1).
+(29)
+The direct-coordinate block does not involve b, u. Differen-
+tiate with respect to these two independent parameters be-
+fore using any relation along the trajectory:
+∂bL = λR ∂bR = λR,
+∂uL = λR ∂uR = λR.
+(30)
+Equation (6) follows from negative-gradient updates.
+Adding and subtracting them gives
+˙R = ˙b + ˙u = −2λR,
+R(0) = 1 + c,
+d
+dT (u −b) = 0,
+u(0) −b(0) = 1.
+(31)
+The first equation can be integrated explicitly:
+d
+dT
+ e2λT R(T)
+
+= 0,
+e2λT R(T) = R(0) = 1 + c,
+R(T) = (1 + c)e−2λT .
+(32)
+The second supplies the parameter invariant:
+d
+dT (u −b) = ˙u −˙b = 0,
+u(T) −b(T) = u(0) −b(0) = 1.
+(33)
+Thus b = u−1 and R = 2u+c−1, yielding the gate trajec-
+tory in Eq. (7). These identities hold along the solution and
+are not constraints imposed during differentiation. Setting
+u(T) = 0 gives Tclose = log((1 + c)/(c −1))/(2λ). Since
+c > 1, closure occurs in finite time and u(T) < 0 for every
+T > Tclose. The missing joint signal does not oppose the
+offset-fitting updates that close the initially active gate.
+C.2. Persistent Closure under Full-Input Training
+The purpose of this step is to rule out recovery for the en-
+tire full-input continuation, not merely to observe a nega-
+tive gate at the switch. Restore full inputs at Tp > Tclose.
+In the region u < 0, the gate and its derivative vanish, but
+the offset derivatives remain. Therefore ˙R = −2λR and
+˙u = −λR. Their candidate continuation is
+R(Tp + Ta) = R(Tp)e−2λTa > 0,
+u(Tp + Ta) = u(Tp) −R(Tp)
+2
+(1 −e−2λTa) < 0.
+(34)
+The second line verifies the assumed region for every Ta ≥
+0, so the solution never reaches the ReLU boundary. Its lim-
+its are R →0 and u →(1 −c)/2 < 0. Substituting into
+Eq. (22) with full inputs gives Lfull,j = (1+λR2)/2 →1/2.
+The gradients already use the complete population distribu-
+tion, not a finite data-coverage approximation.
+At u = 1, b = −c −1, and κwv + wl = 1, both
+residuals in Eq. (21) are identically zero under full inputs.
+Thus the failure is not a capacity lower bound. The data
+require p(Aj | C, H) = δCH, where δa is a point mass at
+a. After closure, the prediction is the constant
+√
+λR, in-
+dependent of C, H. It cannot realize both conditional out-
+puts +1 and −1; its limiting conditional prediction is zero.
+The FM realization in Appendix B establishes the analo-
+gous context-blindness statement for a generative sampler,
+separately from this deterministic regression example.
+Paired data still reveal the joint relation. The obstruction
+is the inherited parameter state under the unchanged opti-
+mizer, not irreversible destruction of dataset information. A
+reset, a different shared architecture, or a nonzero negative-
+side activation derivative can alter the result. An indepen-
+dent gate that starts dead would not show damage caused
+by pretraining; here u(0) = 1 and first-stage updates cause
+closure explicitly.
+D. Preserving Joint Modeling with SCAP
+D.1. Joint Loss under SCAP Masking
+For completeness, expand the joint-coordinate expectation
+before separating the parameter-independent constant. We
+12
+
+
+allow the more general independent probabilities qv, ql ∈
+(0, 1) here; the main-text setting is recovered by setting both
+to q. Keep the target CH unchanged. The residual is
+h(M)
+θ,j
+−CH =
+√
+λR + (jM[u]+ −1)CH.
+(35)
+At a fixed mask, independence gives E[CH | M] = 0 and
+E[(CH)2 | M] = 1, so
+E[(h(M)
+θ,j
+−CH)2 | M]
+= λR2 + 2
+√
+λR(jM[u]+ −1)E[CH | M]
++ (jM[u]+ −1)2E[(CH)2 | M]
+= λR2 + (jM[u]+ −1)2.
+(36)
+Since jM is binary with α = Pr(jM = 1) = qvql,
+EM[(jM[u]+ −1)2] = (1 −α) · 1 + α([u]+ −1)2,
+Lmask,j = 1
+2[λR2 + 1 −α + α([u]+ −1)2].
+(37)
+Separating the constant yields Eq. (9). Substituting α for
+jM inside the square would lose the mask-variance contri-
+bution. In particular, masks missing joint cues still con-
+tribute the offset loss as well as the constant (1 −α)/2.
+D.2. Joint-Pathway Preservation under SCAP Pre-
+training
+We seek a sufficient condition preventing the first bound-
+ary hit u = 0. Use the main-text independent retention
+with α = q2; the proof also applies to the generalization
+α = qvql. Equation (22) gives Lmask,j = (1 −α)/2 + Fα.
+Removing the constant does not discard unfavorable masks:
+every mask still contributes the offset term λR2/2. While
+u > 0,
+˙b = −λR,
+˙u = −λR + α(1 −u).
+(38)
+The second term supplies a restoring signal when offset fit-
+ting lowers u below one. A positive restoring signal by itself
+need not dominate the downward term; the barrier condition
+below provides a sufficient quantitative guarantee.
+Assume λ(1 + c)2 < α ≤1. At (b, u) = (0, 1), Fα =
+λ(1 + c)2/2 < α/2. At the closing boundary,
+Fα(b, 0) = 1
+2[λ(b + 0 + c)2 + α(1 −0)2]
+= λ
+2 (b + c)2 + α
+2
+≥α
+2 ,
+∀b ∈R.
+(39)
+The lower bound uses λ > 0 and (b+c)2 ≥0, with equality
+at b = −c; the strict protection condition instead places
+the initialization below this bound. Before any hypothetical
+first boundary hit, ˙Fα = −∥∇Fα∥2 ≤0. Continuity would
+make the loss at that hit both smaller than and at least α/2,
+a contradiction. Thus u(T) > 0 for all finite T.
+Avoiding closure does not by itself prove successful fit-
+ting. To establish convergence to an exact joint predictor,
+compute the Hessian in the active region:
+Gα =
+λ
+λ
+λ
+λ + α
+
+,
+det Gα = λα > 0.
+(40)
+Its leading diagonal entry is positive, so the matrix is pos-
+itive definite. Setting both gradients to zero gives R = 0
+and u = 1, hence b = −c −1.
+This strictly convex
+quadratic has bounded sublevel sets and exponentially con-
+vergent gradient flow. The trajectory therefore converges to
+the unique exact joint-relation solution rather than merely
+avoiding closure.
+D.3. Joint-Pathway Preservation under Full-Input
+Training
+We must transfer the boundary argument to the new full-
+input objective; decreasing the old objective alone would
+not justify protection after the switch. At any finite switch
+time Tp, Fα(Tp) ≤Fα(0, 1) < α/2. For 0 < α ≤1,
+F1(b, u) = 1
+2[λR2 + (1 −[u]+)2]
+≤
+1
+2α[λR2 + α(1 −[u]+)2] = Fα(b, u)/α. (41)
+Hence F1(Tp) < 1/2, below every point on the boundary
+u = 0 for the new objective. The full-input trajectory stays
+active and converges to (b, u) = (−c −1, 1), with zero
+joint loss. The same argument with α = 1 protects full-
+input training from the original initialization. Masking is
+not uniquely necessary for avoiding the trap.
+The following numerical example only demonstrates that
+the sufficient condition is feasible; it is not an experiment or
+an additional proof assumption. For c = 2, λ = 1/64, and
+q = 1/2,
+λ(1 + c)2 =
+1
+64(1 + 2)2 =
+9
+64
+< 1
+4 = q2 = α.
+(42)
+A common first-stage budget Tp = 60 > 32 log 3 = Tclose
+closes the gate under either single-modality route while the
+masked route remains protected. Alternating only VA and
+LA also has jM = 0 and the same closing dynamics. Once
+u < 0, adding masks does not restore the missing joint
+derivative; the continuation in Eq. (34) still applies. The
+result concerns prevention, not post-closure repair.
+E. Reducing Visual Shortcuts with SCAP
+Both routes start at wv = wl = 0. Define a = κwv, d = wl,
+g = κ2, and β = g + 1. Only input visibility changes; a
+finite comparison uses total duration Tp+Ta for both routes.
+In this appendix L(θ; Q) denotes the general objective for
+a specified mask law, whereas route-specific losses retain
+13
+
+
+the subscripts full and mask. The three core parts assume
+g > 1 and independent common retention q ∈(0, 1).
+E.1. Visual Dominance under Full-Input Training
+We first recover the time-dependent full-input baseline used
+in the route comparison. Because Z = D and D2 = 1, the
+loss and its original-parameter derivatives are
+Lfull,d = 1
+2E[(κwvZ + wlD −D)2]
+= 1
+2(a + d −1)2,
+∂wvLfull,d = κ(a + d −1),
+∂wlLfull,d = a + d −1.
+(43)
+Since ˙a = κ ˙wv, the dynamics are Eq. (12); dropping this
+extra factor would change the optimizer.
+The invariant
+a −gd = 0 and the scalar equation ˙s = β(1 −s) for
+s = a + d, with s(0) = 0, give s = 1 −exp(−βT). Solv-
+ing for both coefficients yields Eq. (13). This baseline uses
+neither a visual-only reference point nor a preceding single-
+modality phase. Thus a∞
+F
+= g/β > d∞
+F
+= 1/β when
+g > 1: the visual cue dominates even though the full-input
+training error vanishes.
+E.2. Language-Dominant Solutions with SCAP
+Let (ap, dp) be the actual endpoint after a finite masked pre-
+training duration Tp > 0, without assuming convergence.
+Continuing with complete visual and language inputs gives
+the full-stage limits
+a∞
+MF = g+ap−gdp
+β
+,
+d∞
+MF = 1+gdp−ap
+β
+.
+These are Eq. (14). Comparing them with the full-input
+baseline gives
+d∞
+MF −d∞
+F = gdp−ap
+β
+,
+a∞
+MF −a∞
+F = −gdp−ap
+β
+.
+The sign of this common numerator determines whether MF
+increases language reliance and reduces visual reliance. We
+therefore define δ(T) = gd(T) −a(T) and δp = gdp −ap,
+as in Eq. (16).
+To justify the full-stage limits, write r = 1−a−d. Full-
+input updates give ˙r = −βr, hence a + d →1, while the
+inherited difference remains constant:
+˙δ
+
+full = g ˙d −˙a = gr −gr = 0.
+(44)
+Solving a + d = 1 and gd −a = δp yields the limits
+above. It remains to prove δp > 0 along the actual masked
+trajectory. Expand the masked direct-coordinate error be-
+fore taking expectations:
+(amZ + dmD −1)2
+= a2m2
+Z + d2m2
+D + 2admZmD
+−2amZ −2dmD + 1.
+(45)
+Using m2
+Z = mZ, m2
+D = mD, EmZ = EmD = q, and
+EmZmD = q2 gives Eqs. (17) and (18). With x = (a, d)⊤
+and f = (gq, q)⊤, the matrix and equilibrium are
+K =
+gq
+gq2
+q2
+q
+
+,
+x∗=
+1
+1+q
+1
+1
+
+.
+(46)
+Since
+Kx∗
+=
+f,
+the
+integrating-factor
+identity
+d
+dT [exp(KT)(x −x∗)] = 0, with x(0) = 0, yields
+xmask(T) = (I −exp(−KT))x∗,
+(47)
+ap
+dp
+
+= xmask(Tp) = (I −exp(−KTp))x∗.
+(48)
+Here T is optimization time, not an action-sequence index.
+In particular, the endpoint passed to full-input training is the
+actual value at finite Tp rather than x∗.
+Under symmetric retention,
+˙δ
+
+mask = gq[(1 −d −qa) −(1 −a −qd)]
+= gq(1 −q)(a −d),
+δ(0) = 0.
+(49)
+Therefore it suffices to show that z = a −d is positive.
+Subtracting the two mask updates and differentiating gives
+˙z = q(g −1) −q(g −q)a −q(gq −1)d,
+¨z = −q(g −q)˙a −q(gq −1) ˙d
+= −q(g + 1) ˙z −gq2(1 −q2)z.
+(50)
+Substitution and collection of terms yields the scalar initial-
+value problem
+¨z + q(g + 1) ˙z + gq2(1 −q2)z = 0,
+z(0) = 0,
+˙z(0) = q(g −1).
+(51)
+Its two positive decay rates are
+ρ± = q
+2
+h
+g + 1 ±
+p
+(g −1)2 + 4gq2
+i
+,
+0 < ρ−< ρ+.
+(52)
+The
+general
+solution
+z
+=
+A−exp(−ρ−T)
++
+A+ exp(−ρ+T) satisfies A+ = −A−and (ρ+ −ρ−)A−=
+q(g −1). Hence
+a(T) −d(T) = q(g −1)
+ρ+ −ρ−
+[exp(−ρ−T) −exp(−ρ+T)] > 0,
+δp = gq(1 −q)
+Z Tp
+0
+(a(T) −d(T)) dT > 0.
+(53)
+14
+
+
+Both the coefficient and exponential difference are positive
+for T > 0. Integrating with δ(0) = 0 gives the following
+closed expression for every finite Tp > 0:
+δp = gq2(1 −q)(g −1)
+ρ+ −ρ−
+×
+1 −exp(−ρ−Tp)
+ρ−
+−1 −exp(−ρ+Tp)
+ρ+
+
+> 0.
+(54)
+Since a, d →1/(1 + q), the strictly increasing δ(T) tends
+to (g −1)/(1 + q). Hence 0 < δp < (g −1)/(1 + q) < g
+for every finite positive mask duration. At g = 1, symmetry
+instead gives a = d and δ = 0: there is no strict limiting
+advantage from this symmetric schedule.
+The positive sign established above therefore gives, for
+every fixed finite Tp > 0,
+a∞
+MF = g−δp
+β
+< g
+β = a∞
+F ,
+d∞
+MF = 1+δp
+β
+> 1
+β = d∞
+F .
+(55)
+We next determine when relative language improvement
+becomes language dominance. Taking the separate limit
+Tp →∞of the already derived full-stage outcome gives,
+under symmetric retention,
+a∞,∞
+MF
+=
+gq + 1
+(g + 1)(1 + q),
+d∞,∞
+MF
+=
+g + q
+(g + 1)(1 + q).
+(56)
+For a finite mask stage, language dominates vision at the
+full-stage limit exactly when δp > (g −1)/2. Such stages
+exist because (g −1)/(1 + q) > (g −1)/2. Nevertheless
+the visual coefficient in Eq. (56) is positive, so neither this
+limit nor the finite-stage result eliminates the shortcut com-
+pletely.
+E.3. Lower Loss under Visual-Cue Flips
+To assess reliance on the visual shortcut, we flip Z = D
+to Z = −D while keeping the language instruction, target,
+and other cues unchanged. The shortcut cue now conflicts
+with the instruction. The bound 0 < δp < (g−1)/(1+q) <
+g proved above and a∞
+MF = (g −δp)/β imply 0 < a∞
+MF <
+a∞
+F .
+Under this intervention, the direct-coordinate loss is
+Eflip(a, d) =
+1
+2(1 + a −d)2 by Eq. (19). Both full-stage
+limits satisfy a + d = 1 on the training distribution, so sub-
+stituting d = 1 −a gives Eflip = 2a2. Therefore
+E∞
+flip,MF = 2(a∞
+MF)2
+< 2(a∞
+F )2 = E∞
+flip,F.
+This proves Eq. (20) for every finite Tp > 0: after full-input
+convergence, MF follows the unchanged instruction more
+robustly under this visual-cue perturbation.
+F. Token-Masking Implementation
+Sampling.
+For each sample, we pool the expanded image-
+content positions and instruction tokens into N eligible po-
+sitions and uniformly select K = ⌊Nr + 0.5⌋for embed-
+ding zeroing without replacement, with r = 0.3 by de-
+fault. This is fixed-count sampling over both modalities,
+not independent Bernoulli sampling or a separate quota per
+modality. System-prompt tokens, role and vision delimiters,
+and padding are excluded. All instruction-content embed-
+dings may be zeroed; no minimum-content constraint is im-
+posed. At r = 1, all eligible content embeddings are ze-
+roed, while protected-token embeddings and the separately
+supplied state remain available.
+Encoding and conditioning.
+All valid images first pass
+through the vision encoder.
+Selected multimodal token
+embeddings are then zeroed in place before the language
+backbone, retaining sequence positions and original multi-
+dimensional RoPE coordinates. This is content-embedding
+masking, not token deletion, sequence compaction, or re-
+placement with a learned mask embedding.
+Sequence-
+validity masks accompany the inputs through the back-
+bone and action decoder to identify padding. The expert
+reads the full-attention-layer K/V from this masked-input
+forward pass. Zero input embeddings need not yield zero
+hidden states or K/V, since subsequent contextual process-
+ing can propagate retained information to masked positions.
+No retention-dependent rescaling or additional embedding-
+dimension dropout is applied.
+Masking does not reduce
+vision-encoder computation, and unmasked visual features
+may encode information from other image regions.
+Validation and theoretical scope.
+Stage-1 validation re-
+tains masking with a separate fixed-seed random stream;
+evaluation mode alone does not disable this preprocessing.
+Stage-2 training, downstream benchmark evaluation, and
+inference use complete inputs. With R = N −K eligi-
+ble tokens left unmasked, two distinct eligible tokens are
+jointly unmasked with probability R(R −1)/[N(N −1)]
+for N > 1, rather than (R/N)2. These token-level proba-
+bilities are not the diagnostic’s semantic-cue probabilities:
+the independent-cue analysis characterizes the mechanism,
+not an exact guarantee for the implemented VLA.
+G. Training Data and Preprocessing
+G.1. Source Composition and Accounting
+The audited collection combines ABC-130k [2], AgiBot-
+World [1, 5], DreamZero-DROID [8] (a DROID-derived
+collection [14]), Galaxea Open-World [12], GenieSim [37],
+RoboCOIN [33], RoboMIND [11, 32], and InternData-
+A1 [29], a public synthetic dataset.
+It also includes the
+15
+
+
+Source
+Original (h)
+Retained (h)
+ABC-130k [2]
+4,126.29
+1,642.30
+AgiBotWorld-Beta [5]
+2,344.34
+2,286.54
+AgiBotWorld 2026 [1]
+440.70
+390.66
+DreamZero-DROID [8]
+271.41
+263.80
+Galaxea Open-World [12]
+454.61
+423.37
+GenieSim [37]
+230.51
+211.38
+RoboCOIN [33]
+677.17
+653.23
+RoboMIND 1.0 [32]
+192.53
+36.91
+RoboMIND 2.0 [11]
+1,166.89
+262.37
+InternData-A1 [29]
+3,721.71
+3,559.02
+RoboCasa-GR1 [27]
+80.84
+80.84
+RoboTwin Clean [7]
+2.98
+2.98
+RoboTwin Randomized [7]
+29.77
+29.77
+LeRobot OXE [6, 24]
+935.86
+0.00
+Audit total
+14,675.59
+9,843.16
+Table 5. Dataset composition before and after preprocessing.
+Durations are audit statistics, not stage-wise sampling weights.
+Benchmark collections are shown separately and their inclusion
+here does not establish pretraining use. Independently rounded
+source rows differ from the audit totals by at most 0.02 h.
+RoboTwin and RoboCasa benchmark collections. The audit
+reports 9,843.16 retained hours across 3,579 data reposito-
+ries; repositories are storage units, not distinct tasks or em-
+bodiments. Table 5 separates source-level duration from the
+approximately 1.2M trajectory budget in Sec. 4.2. Hours do
+not determine an episode count or the number of sampled
+action chunks.
+G.2. State and Action Conversion
+The shared storage layout contains 14 arm-joint channels,
+14 end-effector (EE) pose channels, two gripper channels,
+12 dexterous-hand channels, and four torso channels, to-
+taling 46 dimensions. Arm and hand blocks are ordered
+left before right. Each arm has at most seven joint chan-
+nels; six-joint arms and the absent arm of a single-arm
+embodiment are padded. Each absolute EE pose is repre-
+sented as [x, y, z, qx, qy, qz, qw]. Euler-angle and rotation-
+6D sources require source-specific quaternion conversion,
+normalization, and temporal sign-continuity checks. Where
+supported, forward kinematics (FK) supplies EE poses from
+joint targets; native poses are otherwise retained. Padding
+is not an observed control target, and a shared layout does
+not imply complete annotations for every channel.
+Gripper values are calibrated to [0, 1], with zero fully
+closed and one fully open; source ranges and opening di-
+rections are handled separately. Each hand uses little-, ring-,
+middle-, and index-finger flexion, followed by thumb bend-
+ing and rotation. Supported mappings retain explicit finger
+semantics; unresolved mappings are zero-filled rather than
+assigned guessed meanings. Torso slots follow yaw, pitch,
+roll, and lift. Source torso fields that cannot be mapped un-
+EE frame category
+Hours
+Share (%)
+Base/torso local
+6,902.46
+70.12
+Head camera
+2,286.54
+23.23
+World/simulation scene
+290.94
+2.96
+Unresolved frame/reference
+282.39
+2.87
+Unified EE unavailable
+80.84
+0.82
+Total
+9,843.16
+100.00
+Table 6. EE coordinate conventions in the data collection. Cate-
+gories describe stored annotations, not globally aligned geometry.
+Values are rounded independently.
+ambiguously are not represented as verified torso controls.
+The 46-dimensional layout does not include additional head
+or mobile-base fields. Conversion to a common layout is
+distinct from action normalization or the loss treatment of
+unavailable channels, whose exact settings require the train-
+ing configuration.
+G.3. Quality Checks and Retention Exceptions
+The quality audit assesses six failure types: absent EE states
+throughout a trajectory; missing one side of a dual-arm
+EE annotation; excessive disagreement between FK and
+recorded EE poses; abrupt state/action changes; inconsis-
+tent state–action motion trends even after allowing tempo-
+ral lag; and extreme or non-finite values. A single-arm tra-
+jectory only requires its active side. The largest reported
+exclusions are 2,421.36 h lacking EE data and 2,000.94 h
+that could not be validated; FK, abrupt-change, trend, and
+numerical checks account for additional removals. LeRobot
+OXE contributes no retained data, so its appearance in the
+earlier conversion inventory is not evidence of use in SCAP
+pretraining.
+These checks do not certify every retained field. The
+benchmark collections have no reported rejection break-
+down, and the RoboCasa collection retains 80.84 h without
+unified EE annotations. Some RoboMIND checks validate
+position but not the complete orientation convention.
+G.4. Coordinate Conventions and Reporting Scope
+The preprocessing pipeline preserves native pose frames
+and tool reference points. Table 6 quantifies this hetero-
+geneity. For example, AgiBotWorld-Beta uses head-camera
+poses at the wrist/flange, whereas AgiBotWorld 2026 uses
+an arm-base frame and an end-link reference with a tool off-
+set. DROID-derived poses use the Franka base and link-8
+reference; Galaxea uses a torso frame and arm-link-6 refer-
+ence. Different RoboMIND and RoboCOIN sources retain
+distinct base/world frames and tool offsets. Consequently,
+a common quaternion format does not establish a common
+wrist or tool-center-point convention. Additional camera-
+frame and wrist-reference transformations are not part of
+the collection described here.
+16
+
+
+(a) Hardware setup
+External RGB camera
+External RGB camera
+Franka FR3
+Parallel gripper
+Wrist RGB camera
+(b) Task materials
+Base selection
+Roof selection
+Color matching
+Figure 6. Real-robot hardware and task materials. (a) Franka
+Research 3, parallel gripper, two fixed external RGB cameras, and
+wrist RGB camera. (b) Objects used for base selection, roof se-
+lection, and color matching. The photographs document the setup
+and materials.
+H. Real-Robot Evaluation Details
+Each of the seven initialization routes is adapted indepen-
+dently to three task families, yielding three task-specific
+checkpoints per route. The dataset contains 300 demon-
+strations, and evaluation comprises 20 episodes per task-
+specific policy, 60 per route, and 420 across all seven routes.
+Results for all three tasks are reported in Table 4.
+H.1. Hardware, Observations, and Control
+Figure 6 shows the hardware and task materials.
+The
+platform uses a Franka Research 3 (FR3; controller iden-
+tifier fr3v2.1) and a two-finger parallel gripper.
+The
+three RGB views are head (Intel RealSense D435, fixed
+external main view), exterior 1 (D435i, fixed exter-
+nal side view), and wrist (D405, wrist-mounted close
+view). Original images are 640 × 480 and are resized di-
+rectly to 224 × 224 using float32 bilinear interpolation with
+align corners=False, without cropping or padding.
+State contains seven joint angles in radians and total grip-
+per opening in meters. State is supplied to the action expert.
+Recording and upper-level joint-target dispatch are con-
+figured at 30 Hz. Policy inference is queue-driven: a new
+chunk is predicted after the current action queue is ex-
+hausted.
+The upper layer limits each joint-target incre-
+ment to ±0.005 rad without explicit linear interpolation; the
+underlying franky controller uses Ruckig trajectory gen-
+eration. The current implementation has no fixed overall
+episode time limit. Safety watchdog timeouts are not treated
+as episode-duration limits.
+H.2. Demonstrations and Idle-Frame Removal
+Each task contains two instruction conditions with 50
+demonstrations each. Base selection refers to the red or
+natural-wood base; roof selection refers to the orange trian-
+gular or red rounded roof. Color matching counts both roof
+placements as one episode. All three task datasets use the
+same idle-frame removal rule. A transition is idle only when
+the maximum absolute change across the seven joint angles
+is below 10−4 rad and the gripper-width change is below
+10−4 m. Leading, trailing, and internal near-stationary tran-
+sitions are removed; adjacent retained frames are rechecked
+iteratively.
+There is no minimum stationary-duration re-
+quirement or fixed waiting-frame window around gripper
+events.
+The procedure retains the starting frames of active tran-
+sitions and the final active target frame, while selecting all
+three images and state synchronously. If original retained
+indices are r0, r1, . . ., the reconstructed state is x[rk] and
+the action target is x[rk+1]. Labels therefore point to the
+next retained measured state, not necessarily the original
+next frame. The last observation has no successor and is not
+assigned a cross-episode action target. Original frame map-
+pings, timestamps, and inter-frame intervals are retained,
+even though exported video is rearranged at 30 fps. A 32-
+target chunk consequently has no fixed original-time dura-
+tion.
+Conversion checks preserve the number of gripper open-
+ing/closing events and inspect jumps across removed inter-
+vals. Additional joint, gripper, and end-effector translation
+changes relative to the original interval’s largest single-step
+change are bounded by 0.0005 rad, 0.0001 m, and 0.0005 m,
+respectively. These are splice checks, not a justification for
+removing contact waits during deployment. Episode lists
+and held-out test layouts are fixed separately from check-
+point selection.
+H.3. Joint Targets and Task-Specific Normalization
+Action labels are absolute next-retained-observation joint
+positions and gripper opening, not Cartesian velocities
+or controller setpoints.
+The 46D projector interface
+stores seven joint angles at zero-based coordinates 0–6
+and normalized gripper opening at coordinate 28. Other
+coordinates are zero-filled and invalid; masks exclude
+them from supervision.
+Gripper opening is mapped by
+clip((w −wclosed)/(wopen −wclosed), 0, 1).
+State uses
+sign(x) log(1 + |x|) inside the projector, with mean-
+17
+
+
+zero/unit-scale state statistics. Valid action coordinates use
+(a −µ)/ max(σ, 10−6); a horizon mask excludes padding
+at episode boundaries.
+Gripper endpoints and action statistics are task-specific,
+rather than pooled across all three tasks. Within each task,
+all seven model routes share the same endpoints and statis-
+tics, computed from that task’s training data. Each check-
+point retains the corresponding mapping and normalization
+for inference. This matches separate task-specific adapta-
+tion and does not require cross-task normalization. Shared
+state/action projection modules can be transferred together
+with the pretrained expert.
+H.4. Initialization and Frozen-VLM Adaptation
+In Table 4, each indented row denotes an independent pre-
+training route built on the same Qwen backbone. Method
+names follow the simulation comparison.
+Real-robot runs use seven initialization routes aligned
+with the simulation comparison:
+the base Qwen3.5-
+9B without action-expert pretraining, Full, LA→Full,
+VA→Full, VL-Mask→Full, and the frozen-VLM and Ft-
+VLM SCAP→Full variants.
+The Qwen baseline initial-
+izes the action expert and state/action projections randomly.
+All other routes transfer their corresponding pretrained ex-
+pert and projection weights. Frozen-VLM and Ft-VLM la-
+bel the pretraining stage; all seven routes freeze the VLM
+during real-robot SFT. Since the two SCAP initializations
+may differ in pretraining data or budget, their comparison
+alone does not isolate the effect of updating the VLM. Each
+route’s initialization is copied independently for the three
+task-specific adaptations, retaining its VLM weights while
+optimizing the expert and state/action projections.
+The expert is a 32-layer hybrid-attention MoT with hid-
+den width 1024 and MLP width 4096. Adaptation predicts
+32 actions, with no action-position embedding. Each task-
+specific policy is trained for 10,000 updates on eight GPUs
+with per-GPU batch size 8 and no gradient accumulation
+(global batch 64). AdamW uses learning rate 5 × 10−5,
+weight decay 0.01, gradient clipping 1.0, and a 500-update
+warmup followed by cosine decay. VLM weights use BF16;
+training uses DeepSpeed ZeRO-1 with expert and VLM gra-
+dient checkpointing disabled. Evaluation always uses the
+final 10,000-update checkpoint.
+H.5. Paired Layouts and Counterbalancing
+Each route uses the same 10 held-out layouts per task,
+with two instructions evaluated separately after resetting the
+scene, policy history, and action cache. Instruction order is
+randomized.
+For base selection, the red and natural-wood bases ex-
+change positions across layouts; the instruction names the
+base color, not a spatial location. For roof selection, the
+triangular and rounded roofs exchange candidate positions
+across layouts. For color matching, roof positions and body
+positions vary independently, so that a fixed same-color or
+different-color instruction requires different spatial pairings
+across layouts.
+H.6. Instruction-Wise Success Rates
+The instruction columns in Table 4 specify the red or
+natural-wood base (Red/Wood), triangular or rounded roof
+(Triangular/Rounded), and same-color or cross-color pair-
+ing (Same/Cross). All routes share task-specific demonstra-
+tions, preprocessing, normalization, and adaptation budgets
+as described above.
+For each task and route, let si,A, si,B ∈{0, 1} be the
+episode success indicators for the two instructions on layout
+i. We report
+SRc = 100
+10
+10
+X
+i=1
+si,c,
+c ∈{A, B},
+Avg. SR = SRA + SRB
+2
+.
+(57)
+Each condition is evaluated on 10 layouts, so Avg. SR is
+also the percentage of successful episodes among all 20 tri-
+als for that task and route. The two condition scores re-
+veal whether performance is concentrated on one instruc-
+tion.
+Comparing instructions after independently reset-
+ting the same layout tests whether behavior follows the re-
+quested target rather than a fixed object or position prefer-
+ence. These success rates jointly reflect instruction follow-
+ing and execution ability. Across three task-specific check-
+points, each route has 60 evaluation episodes.
+An episode succeeds when the instruction is fulfilled and
+the released roof remains supported without falling. For
+matching, both houses must be complete and both roof–
+body relations correct, with either order allowed. One com-
+pleted house earns no episode-success credit; completion
+count (0, 1, or 2) is recorded separately.
+Ordinary task
+failures remain in the denominator of the corresponding in-
+struction condition.
+18

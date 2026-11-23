@@ -1,0 +1,1271 @@
+FORTH: Grounding Tactile VLA Execution via Forward-Only
+Proxy-Control Pairing
+Junde Li1, Wei-Han Yu1, Xiangyi Chu1, Yaoxin Li1, Jiawei Xu1, Ka-Fai Un1, Pui-In Mak1
+1University of Macau
+Abstract
+Vision-Language-Action (VLA) policies are widely cred-
+ited with force control, operating on the unverified as-
+sumption that proxy loss minimization implies physical
+force grounding. In this work, we demonstrate that this
+assumption breaks down at three core deployment levels:
+frozen visual backbones discard contact geometry, down-
+stream losses mask token-level gradient alignment, and
+discrete indicators trigger optimization collapse. To ad-
+dress these disconnections, we present FORTH, a forward-
+only measurement harness and execution framework that
+explicitly pairs the optimization objective at each level
+with its physical control observable. FORTH incorporates
+three grounded pillars: a layer-local, forward-only tactile
+encoder that preserves spatial contact geometry without
+backpropagation, a token-parallel zeroth-order adapter en-
+abling activation-space updates, and SlipGuard, a contin-
+uous tactile verification gate that fires on incipient slip.
+On an elasto-plastic structural shell, the SlipGuard con-
+troller peaks at 29× lower grip force than the reflex ramp
+of the same shell, preventing structural crush where the
+baseline leaves permanent deformation.
+Furthermore,
+FORTH matches state-of-the-art execution performance
+with a 97.6% average success rate across three evaluated
+LIBERO suites, while reducing peak activation memory
+by 7.12× compared to a backpropagated step on the same
+backbone. Enhanced perception enables deeper physical
+intelligence. The code and models are open-sourced at
+https://github.com/Jordanlllll/FORTH.
+1
+Introduction
+Vision-Language-Action (VLA) policies are rapidly ad-
+vancing from tabletop picking to contact-rich manipula-
+tion. To operate effectively under contact, state-of-the-art
+systems increasingly augment pretrained visual backbones
+with tactile or force sensing modalities [16, 40, 41, 87].
+Concurrently, tactile sensing hardware and representa-
+tions have matured: optical tactile sensors, high-fidelity
+contact simulators, and learned representations provide
+policies with spatially resolved contact maps rather than
+scalar load readings [20, 37, 71, 77, 80]. While an emerg-
+ing family of tactile VLAs reports force-aware execu-
+tion across tasks like insertion, wiping, and grasping
+[2, 8, 10, 11, 35, 49, 51, 52, 84, 86, 88, 90], performance
+across these systems is predominantly evaluated using a
+single proxy metric per task level. Such scalar metrics ob-
+scure the underlying physical reality: the critical quantities
+governing whether an object survives an episode are rarely
+measured or reported together. This discrepancy stems
+from a missing evaluation and reporting convention.
+Existing research programs address isolated compute
+and memory bottlenecks without closing this measure-
+ment gap. Layer-local learning objectives replace global
+backpropagation with forward-only computations [1, 17,
+23, 29, 36, 38, 44, 55, 61, 63, 65], yet report perfor-
+mance strictly via local loss values. Zeroth-order (ZO)
+and gradient-free optimizers trade memory-intensive back-
+ward passes for forward queries [9, 19, 32, 46, 48, 66,
+67, 81, 85], evaluating only estimated gradient directional
+alignment. Parameter-efficient fine-tuning (PEFT) and
+quantization constrain these updates within frozen back-
+bones [13, 25, 26], while low-level controllers treat phys-
+ical slip as a binary classification target scored by de-
+tection accuracy.
+Crucially, an improvement in these
+algorithmic proxies can decouple from physical interac-
+tion quality—a lower local loss does not inherently pre-
+vent object damage—and no current benchmark protocol
+[12, 22, 30, 34, 42, 45, 47, 50, 57, 58, 74, 79, 91] system-
+atically measures and reports these paired dynamics.
+To resolve this decoupling, we introduce FORTH, a uni-
+fied harness governed by a paired metric convention across
+all three execution levels: report the optimized algorithmic
+quantity alongside the physical quantity it aims to con-
+trol, accepting a policy level only when both metrics move
+in lockstep. Operating entirely forward-only and layer-
+locally on frozen 4-bit backbones without global backward
+passes, FORTH integrates three key components: (1) a tac-
+tile feature trunk composed of two Forward-Forward (FF)
+blocks; (2) a token-parallel zeroth-order adapter of rank
+8 attached to the action head; and (3) SlipGuard, a one-
+class shear-ratio gate with a bounded real-time corrector.
+Rather than introducing a massive new backbone, FORTH
+1
+arXiv:2611.26744v1  [cs.RO]  19 Nov 2026
+
+
+Figure 1: FORTH architecture and experimental testbed. Top: Slip detection and recovery across three material regimes (rubber,
+plastic, and metal) driven past their friction limits. While uncorrected execution leads to object dropping or crushing at the slip
+limit, SlipGuard dynamically restores stable grasp force. Bottom: The three execution levels of FORTH: (1) Representation: a local
+Forward-Forward (FF) tactile trunk; (2) Update Rule: a token-parallel zeroth-order low-rank adapter on the action head operating
+without backpropagation; and (3) Controller: SlipGuard, a shear-ratio gate triggering two-frame debounced corrective adjustments.
+makes tactile policy execution measurable and correctable
+directly on edge deployment hardware, requiring only 16
+forward passes per update (T=8 tokens) instead of full
+backpropagation.
+This design yields a deployment-ready harness that acts
+dynamically before manipulation failure occurs. Empir-
+ically, the forward-only tactile trunk matches backprop-
+agated representation accuracy; the zeroth-order updater
+fine-tunes the rank-8 adapter at a fraction of backward
+memory requirements; and SlipGuard converts incipient
+slip into a recoverable interaction across three slip severity
+regimes, where standard hand-tuned force ramps result in
+permanent object crush. Figure 1 illustrates our testbed for
+recording physical contact dynamics across three material
+bodies driven past their friction limits.
+2
+Related Work
+2.1
+Vision-Language-Action Policies
+Vision-language-action models predict an action sequence
+from an image and an instruction [3, 5, 33]. Their scale
+comes from a pretrained multimodal backbone rather than
+from robot data, and the head that turns features into com-
+mands is small enough to adapt on one GPU. Alongside
+them sit action-chunking transformers for low-cost biman-
+2
+
+
+ual teleoperation [89], tokenizers that compress a chunk
+to a short sequence [62] and open-world variants of the
+recipe [27, 28, 82].
+Touch enters that stack in three ways: as semantic-
+aligned tokens projected into the same space as text [11],
+as a residual representation added to a frozen visual pol-
+icy [86], or as a predictive model that forecasts contact
+before it occurs [31, 84, 90]. Neighboring designs fuse
+heterogeneous tactile sensors behind one policy [35, 40],
+learn the touch representation from future visual super-
+vision [10], or name material and object properties from
+touch without closing a control loop [83].
+A separate line learns force implicitly rather than condi-
+tioning on it [21, 41]: grip strength emerges from the task
+reward [8, 59, 60], and the force in the logs is whatever the
+policy found sufficient.
+2.2
+Forward-Only Update Rules
+Forward-only learning replaces the backward pass with a
+local objective. Forward-Forward trains each layer on its
+own contrastive goodness [23], and the similarity kernel
+of layer representations contracts toward rank one with
+depth [78]. Local error signals and forward gradients are
+the neighboring non-contrastive route [55, 63]; contrastive,
+predictive-coding and scalable variants extend it [1, 17,
+36, 61]. On hardware, INT8, sparse, binary-stochastic
+and closed-box trainers report lower energy, memory or
+compute than backpropagation at the edge [29, 38, 44, 65,
+72].
+Zeroth-order optimization estimates a descent direction
+from function evaluations alone, from the black-box attack
+estimator [7] and random search [48, 66] through adap-
+tive moments [9] to MeZO [46], with variance-reduced
+variants [19] and convergence analyses [85]. Applications
+reach VLA adaptation [32], quantized fine-tuning [67] and
+prompt tuning [81].
+These methods are judged by downstream loss or recall.
+A population argument, in which independent per-token
+perturbations average out, predicts that estimator quality
+improves with token count; that prediction has not been
+measured against the true gradient on a physical signal.
+Adaptation and evaluation practice supply the rest: low-
+rank and quantized adapters [13, 25, 26], one-bit back-
+bones [76], benchmarks and simulators [30, 42, 45, 50, 53,
+57, 79], and replication practice [43, 56, 75].
+2.3
+Slip Detection and Tactile Sensing
+Slip detection has a reflex-control literature that pre-
+dates learned policies. Visuo-tactile classifiers run on
+multi-scale temporal convolutions [18], and incipient-slip
+measurement tracks the transition during in-hand pivot-
+ing [4, 39, 64, 73]. Geometric reconstruction recovers ex-
+trinsic contact from touch and proprioception [52], and the
+same contact signal drives sub-millimeter insertion [51].
+A second class puts that signal in a fast loop under a
+slow planner: a reactive dexterous controller [2, 54], or a
+vibration signal routed straight to action [49].
+On the representation side the split is between an online-
+refined tactile prediction that absorbs contact drift [87]
+and a decomposition that separates force from surface
+texture [88]. Both matter for the representation level: an
+aggregate can be predictive of contact and still carry no
+usable force.
+Evaluation in this line is detection rate, latency and false
+positives on a held-out session, which scores the detector
+while the force it commands can stay wrong.
+The substrate matured alongside the policies: gel-sensor
+hardware [37], simulators [71, 77], visuo-tactile pretrain-
+ing [20], sim-to-real transfer [74] and a recent survey [80].
+2.4
+Proxy-Based Evaluation
+Reporting conventions here are inherited from benchmark
+suites that score task success alone, or at most one scalar
+force reading beside it [12, 14, 15, 22, 30, 34, 42, 47,
+50, 58, 79, 91]. Adapter and parameter-efficient prac-
+tice keeps the same convention: the reported columns are
+loss and success, and the controlled physical quantity is
+not among them [13, 25, 26]. Contact-aware instrumenta-
+tion measures the sensor rather than the policy’s outcome
+[20, 37, 71, 74, 77]. The pairing defined next therefore
+keeps each line’s objective as given and adds the column
+none of them reports.
+3
+Proxy-Control Framework
+3.1
+Deployment Stack Taxonomy
+The FORTH framework organizes the tactile Vision-
+Language-Action (VLA) pipeline into a three-level hierar-
+chy, where each level is governed by a specific proxy signal
+that approximates a critical physical control quantity.
+3.2
+Paired Evaluation Protocol
+The validity of these proxies is established through a paired
+evaluation protocol that runs four checks in cost order—
+floor, readout, validity, then mechanism, whose protocol
+labels are 1, 3, 4, 2.
+Low-overhead checks run before expensive simulations
+or hardware trials, so evaluation cost accumulates in non-
+decreasing order:
+Ctotal =
+4
+X
+i=1
+ci,
+ci ≤ci+1,
+(1)
+3
+
+
+where Ctotal is the total cost, ci the cost of the i-th check
+and ci+1 the cost of the next one. This structure allows
+FORTH to maintain high execution fidelity while reducing
+the need for exhaustive real-world testing.
+Figure 2 draws the three levels and names the stage each
+acts on (backbone, adapter, 30 Hz loop), The four checks
+run in cost order, so a task that fails a cheap check never
+reaches an expensive one.
+M(θ1, θ2) = I
+
+|J(θ1) −J(θ2)| < ϵ
+
+· ∥q(θ1) −q(θ2)∥2,
+(2)
+where M is the mismatch metric, θ1 and θ2 are two distinct
+sets of policy parameters, I is the indicator function, J is
+the scored objective function, ϵ is a small scalar threshold,
+q is the controlled physical quantity, and ∥·∥2 denotes the
+Euclidean norm.
+sgn(∆J(θ, δ)) = sgn(∆Q(θ, δ)),
+(3)
+where sgn is the signum function, ∆J is the change in the
+scored signal, θ represents the policy parameters, δ is a
+perturbation applied to those parameters, and ∆Q is the
+resulting change in the controlled physical quantity.
+The protocol operationalizes the mismatch in Eq. (2) as
+the sign-agreement test of Eq. (3) and reports whether each
+level clears its rank-agreement threshold τrank. Because
+this test is level-agnostic, the next three sections apply it in
+stack order, starting with the policy’s input representation.
+4
+Representation
+4.1
+Layer-Local Trunk Architecture
+The tactile representation processes local spatial interac-
+tions through a frozen layer-local trunk constructed from
+two Forward-Forward blocks, Eq. (5) [23]. Let x ∈R48×d
+denote the stacked sequence of projected patch embed-
+dings:
+x = LinearProjection (Patchify(I)) ,
+(4)
+where
+x
+is
+the
+sequence
+of
+patch
+tokens,
+LinearProjection maps raw visual-tactile interface
+patches into the latent vector space of dimension d = 128,
+Patchify decomposes the continuous sensory surface
+tensor into discrete non-overlapping regions, and I
+represents the spatial surface sensory tensor extracted
+from the sensor interface.
+Each block in the layer-local trunk updates its represen-
+tations using a local goodness objective operating on scalar
+activations rather than propagating gradients back through
+the global backbone architecture. A given layer processes
+the incoming vector state to generate a zero-centered fea-
+ture field, evaluated via a sum-of-squares goodness metric:
+h = tanh(xW),
+f = h −µ,
+g =
+d
+X
+i=1
+(fi)2,
+(5)
+where h is the activated hidden state, x the patch-token
+input, W the layer weight matrix, µ the per-sample mean
+of h over the hidden dimension, f the centered feature, d
+the feature dimension and g the summed goodness of the
+sample.
+Training proceeds locally within each block by con-
+trasting positive sensory executions against negative coun-
+terfactual sensor states. A layer-specific scalar threshold
+θ ∈R, a free parameter trained with the local objective and
+fixed at 2.0 in the reported protocol, dictates the decision
+boundary separating valid tactile contacts from noise.
+The optimization objective maximizes the scalar good-
+ness for real physical interactions while suppressing good-
+ness for synthetic or ungrounded states, using a localized
+logistic loss:
+Llocal = −log σ(g −θ) −log σ(θ −gneg),
+(6)
+where Llocal is the layer-local forward-forward objective
+loss, log is the natural logarithm function, σ is the stan-
+dard logistic sigmoid function, g is the scalar goodness
+computed on positive real tactile data, θ is the local layer
+threshold, and gneg is the scalar goodness evaluated on
+negative counterfactual state samples.
+Because only scalar goodness values cross block bound-
+aries, the layer-local trunk maintains functional parity with
+a standard backpropagated network while avoiding end-
+to-end backpropagation. On a random validation split,
+this local trunk architecture achieves a tight trunk par-
+ity of 0.0004 on the contact-phase task and 0.012 on the
+temporal-order task.
+4.2
+Force Grounding in Representation Fea-
+tures
+Unmodified frozen Vision-Language-Action backbones ex-
+hibit a fundamental failure mode termed force misground-
+ing. However, the ungrounded visual feature space is in-
+variant to mechanical load, so the prompt changes the atten-
+tion state but not the contact geometry, and the measured
+force does not move across command variations while the
+logit variance stays high.
+To detect and evaluate this misgrounding diagnostic, a
+linear probe reads out contact presence directly from the
+layer-local trunk goodness metric:
+ˆc = w⊤
+probef + bprobe,
+(7)
+where ˆc is the predicted scalar contact variable, f the cen-
+tered feature vector, wprobe the probe weights and bprobe
+the probe bias.
+The parity gap measures the functional discrepancy be-
+tween representations learned by the forward-only local
+trunk and a globally backpropagated control trunk evalu-
+ated on the probing task:
+∆parity = |acclocal −accbackprop| ,
+(8)
+4
+
+
+Figure 2: The FORTH evaluation harness and physical grounding protocol. FORTH pairs each level’s proxy loss (L1–L3, one
+per level) with its physical control observable. Top: grounded iff the observable q moves monotonically with objective minimization.
+Middle: observation to 500 Hz contact-load modulation at the tactile servo, with a 1 Hz rank-8 adapter and a 30 Hz policy on the
+4-bit VLA. Bottom: the four-step diagnostic protocol enforcing task validity before feature auditing.
+where ∆parity is the absolute accuracy gap, acclocal the
+probe accuracy of the layer-local trunk and accbackprop
+that of a backpropagated trunk on the same split.
+Across all evaluated samples, the minimal parity gap
+confirms that the layer-local trunk preserves critical con-
+tact representations without modifying the frozen vision-
+language backbone weights.
+4.3
+Force Channels in Policy Input
+Physical force signals cannot be introduced into the VLA
+execution policy as instantaneous scalar readings. To make
+the tactile signal usable for robust proxy control, force
+must enter the network as a temporally aggregated feature
+channel structured alongside spatial patch representations.
+We test this interface with matched arms and controls.
+The channel integrates force across a sliding temporal win-
+dow before policy decoding, which decouples language-
+level force intent from real-time load.
+5
+Update Rule
+5.1
+Token-Noise Low-Rank Adaptation
+The fundamental mechanism of the FORTH framework
+relies on perturbing the internal latent representations of
+the tactile VLA to estimate parameter updates without
+a formal backward pass. We define the perturbed token
+representation as:
+θ± = θ ± σϵ,
+ϵ ∼N(0, I),
+(9)
+where θ are the adapter parameters, ϵ a standard normal
+direction, σ the perturbation scale and N(0, I) the standard
+multivariate normal distribution.
+By evaluating the loss at these perturbed states, the sys-
+tem approximates a finite-difference directional derivative
+for each token. To ensure stability during the grounding of
+tactile execution, we utilize a symmetric difference formu-
+lation:
+dt = L(+σϵ) −L(−σϵ)
+2σ
+,
+(10)
+where dt is the finite-difference directional derivative for
+token t, L(+σϵ) is the loss at the positive perturbation,
+L(−σϵ) is the loss at the negative perturbation, and σ is
+the perturbation scale constant.
+The resulting updates are restricted to a rank-8 adapter
+situated on the action head, ensuring that the high-
+dimensional backbone remains frozen while the proxy-
+control pairing is refined. The update for the low-rank
+adapter weights is computed by aggregating the product
+of the directional derivatives and the corresponding noise
+vectors across a population of T tokens:
+∆A = −η ˆgT ,
+ˆgT =
+T
+X
+t=1
+dt ϵth⊤
+t ,
+(11)
+where ∆A is the adapter update, η the adaptation rate, ˆgT
+the token-parallel gradient estimate, dt the finite-difference
+derivative of token t, ϵt its noise scalar and ht its hidden
+state.
+5.2
+Memory-Compute Trade-off
+The forward-only pairing cuts the hardware requirement
+of tactile adaptation. We quantify this efficiency by the
+memory ratio Rmem = Mbp/Mlocal, where Mlocal is the
+peak activation memory of the local forward-only update
+rule and Mbp is the peak activation memory of standard
+backpropagation.
+Table 1 prices one 7B adaptation pass. The 16 passes
+behind one update can be pipelined across tokens, because
+forward passes parallelize more readily than the synchro-
+nized dependency chain of a backward pass.
+5
+
+
+Table 1: Per-pass cost of a forward-only estimate against one
+backpropagated step, same model and GPU. The 2T multiplier
+enters once per step.
+forward-only
+backprop
+ratio(↑)
+latency/pass(↓)
+58.8 ms
+117.5 ms
+2.00×
+energy/pass(↓)
+28.9 J
+57.2 J
+1.98×
+peak act. memory(↓)
+334 MB
+2381 MB
+7.12×
+5.3
+Gradient Alignment in Forward-Only
+Updates
+A critical property of the FORTH update rule is its align-
+ment with the true analytical gradient. We measure this
+consistency using an alignment metric defined as the co-
+sine similarity between the estimated update and the true
+gradient:
+α =
+∆θfwd · ∆θbp
+∥∆θfwd∥∥∆θbp∥,
+(12)
+where α is the alignment metric, ∆θfwd is the parameter
+step vector generated by the forward-only update, · denotes
+the dot product, ∆θbp is the parameter step vector gener-
+ated by backpropagation, and ∥· ∥denotes the Euclidean
+norm of the respective vectors.
+On a controlled two-layer transformer sweep (5 seeds,
+rank 8), alignment rises to a peak at T = 512 and does not
+improve beyond, while the shared-noise arm falls and the
+weight-space arm stays near zero (Figure 3). Fitted across
+the whole sweep, Eq. (13), the per-doubling increment is
+A(Tk+1) −A(Tk) ≈0.033,
+Tk+1 = 2Tk,
+(13)
+where A(T) is the alignment at token population T,
+0.033 ± 0.008 is the ordinary-least-squares slope of align-
+ment against log2 T over the full sweep (T = 32 to 2048,
+five seeds), and Tk indexes doublings; the slope summa-
+rizes the trend, which peaks at T = 512.
+Figure 3 shows both sides of that pairing: the left panel
+traces cosine alignment against true gradients over token
+populations T ∈[32, 2048], and the right panel places the
+probe accuracy of the layer-local trunk beside a backprop-
+agated and a random frozen trunk on contact phase and
+temporal order. Conversely, shared-noise alignment drops
+by 0.025 per doubling of T, while weight-space perturba-
+tions remain near zero with mean cosine alignment below
+0.02.
+6
+Controller
+6.1
+One-Class Shear-Ratio Gate
+We name this closed loop SlipGuard: the detector fires on
+incipient slip and a bounded correction raises the normal
+force until the contact recovers. SlipGuard admits two in-
+Figure 3: Left: the zeroth-order estimate aligns with the true gra-
+dient as T grows. Right: the layer-local trunk matches backprop
+probe accuracy, while a random frozen trunk stays at the floor.
+stantiations. On the taxel plant the statistic is the one-class
+shear-to-normal ratio defined below. On the deformable-
+shell plant, which exposes no taxel ratio, the statistic is
+the tangential slip speed of the pad over the shell com-
+pared against a fixed 1.5 mm/s threshold. The shear ratio
+ρt = F s
+t /F n
+t at step t is the tangential shear force magni-
+tude F s
+t divided by the normal force magnitude F n
+t at the
+same step.
+Calibration of the decision boundary occurs entirely on
+nominal trajectories without requiring simulated or phys-
+ical fault data. The one-class threshold is τ = ¯ρ + k σρ,
+where τ is the scalar decision threshold, ¯ρ is the nominal
+mean shear ratio, σρ is its standard deviation, and k = 3 is
+the fixed dispersion multiplier.
+To eliminate spurious activations from transient tactile
+noise while maintaining rapid reaction times, the system
+enforces a strict temporal persistence filter. The gate trig-
+gers an active correction signal according to a two-step
+debounce condition:
+gt = I(ρt > τ) · I(ρt−1 > τ),
+(14)
+where gt is the binary gate activation indicator at step t,
+I(·) is the indicator function evaluating to one when its
+logical condition holds and zero otherwise, ρt is the shear
+ratio at step t, τ is the scalar threshold, and ρt−1 is the
+shear ratio at step t −1.
+Across the 1,920-episode fault-injection sweep (eight
+arms, four crush settings, three severities, 20 seeds per
+cell), SlipGuard records zero pre-fault false trips. Upon
+fault detection, the controller recovers 1.00, 0.95 and 0.75
+of episodes across three severities.
+6.2
+Slip-Triggered Force Correction
+When the debounce filter fires (gt = 1), the controller
+applies an immediate proportional adjustment to the nor-
+mal force command to mitigate slipping before structural
+failure occurs. The dynamic correction ramp is governed
+by
+F cmd
+t
+= F nom
+t
++ min (γ · gt · (ρt −τ), ∆Fmax) ,
+(15)
+6
+
+
+Algorithm 1 SlipGuard: one-class calibration, debounced
+firing, bounded correction.
+1: input: nominal episodes E0, debounce d, refractory
+R, increment δ
+2: ¯ρ ←meant∈E0st,
+σρ ←stdt∈E0st
+3: τ ←¯ρ + 3σρ,
+tlast ←−∞
+4: for t = 1, 2, . . . do
+5:
+st ←f τ
+t /f n
+t
+▷one ratio, no labels
+6:
+if t −tlast ≥R and st−j > τ for all j < d then
+7:
+raise grip by δ
+▷direction fixed by the plant
+8:
+tlast ←t
+9:
+end if
+10: end for
+where F cmd
+t
+is the total commanded normal force at step
+t, F nom
+t
+is the baseline policy force command at step t,
+min(·, ∆Fmax) clamps the additive correction to ∆Fmax, γ
+is the proportional correction gain, gt is the binary gate
+activation indicator at step t, ρt is the shear ratio at step t,
+τ is the scalar decision threshold, and ∆Fmax is the maxi-
+mum allowable additive force correction limit. We write
+the correction in this proportional form for exposition; the
+implementation applies a bounded slew toward a searched
+force target rather than evaluating the term directly.
+Object damage during intervention is evaluated relative
+to the structural force limit of the target payload: under
+the standard evaluation convention the crushing force limit
+Ncrush, the structural threshold of the object, is set to the
+required force Freq, the nominal force for secure manipula-
+tion at post-drop friction µ, and any applied force exceed-
+ing this threshold constitutes irreversible deformation.
+The reflex baseline is an open-loop monotone integral
+ramp [16, 70] that rises at 3 N/s up to a 22 N cap and
+never decreases. We express the relative safety of Slip-
+Guard against such ramps as the damage-reduction fac-
+tor Rdamage = Dreflex/Dgate, where Dgate is the mean in-
+tegrated over-force damage under SlipGuard across fault
+episodes and Dreflex is the corresponding mean damage in-
+curred by the static hand-tuned reflex ramp; a value above
+one means SlipGuard damages the object less.
+Under the Ncrush = Freq baseline, SlipGuard reduces
+object damage by a factor of 1.59–3.42 relative to hand-
+tuned reflex ramps. On the rigid eight-seam crush the same
+ramp reaches 15.64 N, severs all eight seams and drops
+the box to 29.6 mm, whereas SlipGuard peaks at 2.27 N,
+leaves 0/8 seams severed and holds the shell at a 40.4 mm
+center height.
+Algorithm 1 states SlipGuard as a procedure; Table 2 re-
+ports the damage under that convention, Table 3 the recov-
+ery under three friction drops, and Figure 4 the mechanical
+instance of the same fault.
+Figure 4 and Table 5 report a Physical Integrity Audit
+on a Deformable Structural Shell. The reflex ramp drives
+Table 2: Object damage D (mean over-force above Ncrush=Freq,
+integrated per episode; N s, lower is better): four drops, ten seeds
+each.
+µ after drop
+reflex D(↓)
+SlipGuard D(↓)
+ratio(↑)
+0.22
+3.110
+1.223
+2.54×
+0.30
+3.330
+0.973
+3.42×
+0.45
+3.532
+2.219
+1.59×
+0.60
+3.633
+1.722
+2.11×
+Table 3: Self-correction under three friction drops (20 episodes
+per cell). Recovery means the object stopped slipping and stayed
+stuck for 25 steps.
+µ after
+arm
+recovery(↑)
+peak grip(↓)
+0.45
+no gate
+0.00
+0.300
+0.45
+forward-only, speed
+1.00
+0.490
+0.30
+no gate
+0.00
+0.300
+0.30
+forward-only, speed
+0.95
+0.684
+0.22
+no gate
+0.00
+0.300
+0.22
+forward-only, speed
+0.75
+0.855
+the hollow shell past its first plastic sample at 2.8 N into
+permanent crush, peaking at 22.43 N, while SlipGuard
+keeps the same box elastic with a 0.77 N peak: a 29×
+force separation, and the 10.62 mm residual of the ramp
+arm does not appear in the SlipGuard arm. These are peak
+forces; Table 2 accrues over-force across episodes and
+measures a different quantity.
+Having closed the loop where force is observable, we
+next bound what survives on a real sensor.
+Table 4: LIBERO [42] success rate (%); Goal excluded. Pub-
+lished rows as reported; OpenVLA-OFT uses one image and
+language only; averages over the three suites shown.
+method
+Spatial
+Object
+Long
+Avg.(↑)
+Octo [58]
+78.9
+85.7
+51.1
+71.9
+Diffusion Pol. [12]
+78.3
+92.5
+50.5
+73.8
+OpenVLA [33]
+84.7
+88.4
+53.7
+75.6
+Dita [24]
+84.2
+96.3
+63.8
+81.4
+SmolVLA [69]
+90.0
+96.0
+71.0
+85.7
+π0 [3]
+96.8
+98.8
+85.2
+93.6
+UniVLA [6]
+96.5
+96.8
+92.0
+95.1
+MemoryVLA [68]
+98.4
+98.4
+93.4
+96.7
+OpenVLA-OFT [34]
+97.6
+98.4
+94.5
+96.8
+FORTH (ours)
+99.3
+98.6
+94.8
+97.6
+7
+
+
+Figure 4: Physical Integrity Audit on a Deformable Structural
+Shell. Two views of a hollow box under the same press: the reflex
+ramp buckles it permanently (22.43 N), SlipGuard keeps it elastic
+(0.77 N); traces are measured grip force, release marked.
+Figure 5: Three frames of one LIBERO episode. Top: a paired
+execution reaches the target. Bottom: an ungrounded baseline
+leaves the object outside the receptacle although its action objec-
+tive reports a low error.
+6.3
+Operating Envelope of the Controller
+Across a 4 × 4 grid crossing disturbance duration (5–
+150 ms) with the crush-to-slip force margin (1.1–2.5),
+SlipGuard recovers 160/160 episodes, against 68/160
+Table 5: Paired force and deformation. Panel A: rigid grasp, 60
+seeds per arm, 0/60 drops each. Panel B: Physical Integrity Audit,
+one paired episode per arm on a deterministic substrate, zero
+plastic state.
+arm
+A: steady(N)(↓) B: peak/resid(N/mm)(↓)
+constant grip
+4.412
+—
+reflex ramp
+—
+22.43 / 10.62
+SlipGuard (ours)
+1.518
+0.77 / 0.01
+(42.5%) for a constant-force policy and 145/160 (90.6%)
+for an oracle given true mass and friction. It damages no
+episode where the constant arm damages 22 and the ora-
+cle 12; paired across episodes, it beats the constant 92–0
+(p < 10−15) and the oracle 15–0 (p = 6.1 × 10−5). The
+crush bound, not the clock, drives the gain: the same law
+at 500, 25 and 15 Hz ties, while the bound cuts a 50–66%
+damage rate to zero.
+This advantage survives sensor replacement: on a paired
+twin substituting a measured statistic for the simulated
+one, SlipGuard recovers 12/12 episodes against 1/12 for
+the discrete gate and 0/12 for the passive arm (Holm p =
+0.0024, 0.0039). On the carton it holds 0.250 N where the
+reflex ramp holds 22.00 N, an 88× force separation.
+With all parameters frozen, three audits hold: 100.0%
+success across 1,200 out-of-distribution episodes at 2.34×
+the required force, 87.3% fault localization against 47.6%
+for the scalar statistic, and single-step detection latency.
+7
+Discussion
+7.1
+Real-Sensor Degradation
+Empirically calibrated rather than physically derived, the
+threshold shifts under per-sensor offsets. On real-sensor
+recordings, this yields a pre-onset false-positive rate of
+0.024 on the force-level statistic and 0.031 on the ratio
+statistic. Figure 5 illustrates the failure mode captured
+at this boundary: the policy’s action objective continues
+to report a low error even as the object misses the target
+receptacle.
+7.2
+Sensitivity
+Three empirical findings bound how much of the per-
+formance gain depends on the gating mechanism. First,
+SlipGuard transfers without retuning: across 1,200 cross-
+domain episodes spanning five geometries, six masses up
+to 1 kg and two mid-lift friction steps it succeeds 100.0%
+of the time at a median peak force of 2.34× the require-
+ment. Second, the command responds 6 ms after initial slip
+and then relaxes (+2.26 N), whereas pure reflex continues
+tightening until it crushes the body (33.17 mm, 63× yield).
+Third, adaptivity proves decisive once disturbances ex-
+ceed the static margin: under a mild step, a tuned constant
+matches the adaptive arms (1.51× on one object, ties on
+two), but when required force exceeds the delivered con-
+stant, the constant arm recovers 0/2 episodes versus 2/2 for
+every adaptive arm.
+7.3
+Tactile Hardware Requirements
+Deployment requires three elements: a shear/normal sensor
+pair sampled at the control rate, one fault-free calibration
+8
+
+
+set of nominal episodes, and a closed-loop force cap the
+policy cannot raise. Because SlipGuard is one-class, it
+needs neither fault data nor a force/torque sensor beyond
+the pad pair. The plant’s native 500 Hz loop serves as the
+servo layer, the adapter updates at 1 Hz, and a 48 × 64
+tactile frame is the only added input, on top of a 4.6 GB
+4-bit backbone.
+8
+Conclusion
+Previous methods were scored by a proxy never paired with
+the quantity each level must control; FORTH reports the pair.
+At the representation level, a layer-local Forward-Forward
+trunk matches backpropagated accuracy while remaining
+forward-only. At the update-rule level, a token-parallel
+zeroth-order adapter trains a rank-8 adapter on the action
+head and cuts peak activation memory 7.12× against a
+backpropagated step. At the controller level, SlipGuard
+fires on incipient slip and peaks 29× lower in grip force
+than a reflex ramp, leaving the object intact where the
+baseline crushes it. Across three evaluated LIBERO suites
+the harness reaches a 97.6% average success rate with
+the pairing intact (Table 4). Enhanced perception enables
+deeper physical intelligence.
+References
+[1] Md. Atik Ahamed, Jin Chen, and Abdullah-Al-Zubaer Im-
+ran.
+Forward-Forward Contrastive Learning.
+arXiv preprint
+arXiv:2305.02927, 2023.
+[2] Th´eo Ayral, Saifeddine Aloui, and Mathieu Grossard. Reactive
+Slip Control in Multifingered Grasping: Hybrid Tactile Sensing
+and Internal-Force Optimization. arXiv preprint arXiv:2602.16127,
+2026.
+[3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael
+Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman,
+Brian Ichter, et al. π0: A Vision-Language-Action Flow Model for
+General Robot Control. arXiv preprint arXiv:2410.24164, 2024.
+[4] Dirk-Jan Boonstra, Laurence Willemet, Jelle Luijkx, and Micha¨el
+Wiertlewski. Learning to Estimate Incipient Slip With Tactile Sens-
+ing to Gently Grasp Objects. In IEEE International Conference on
+Robotics and Automation (ICRA), pages 16118–16124, 2024.
+[5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebo-
+tar, Xi Chen, Krzysztof Choromanski, Tianli Ding, Danny Driess,
+Avinava Dubey, Chelsea Finn, et al.
+RT-2: Vision-Language-
+Action Models Transfer Web Knowledge to Robotic Control. arXiv
+preprint arXiv:2307.15818, 2023.
+[6] Qingwen Bu, Yanting Yang, Jisong Cai, Shenyuan Gao, Guanghui
+Ren, Maoqing Yao, Ping Luo, and Hongyang Li.
+UniVLA:
+Learning to Act Anywhere with Task-centric Latent Actions.
+In Proceedings of Robotics: Science and Systems (RSS), 2025.
+arXiv:2505.06111.
+[7] Pin-Yu Chen, Huan Zhang, Yash Sharma, Jinfeng Yi, and Cho-Jui
+Hsieh.
+ZOO: Zeroth Order Optimization based Black-box At-
+tacks to Deep Neural Networks without Training Substitute Models.
+arXiv preprint arXiv:1708.03999, 2017.
+[8] Rosy Chen, Mustafa Mukadam, Michael Kaess, Tingfan Wu, Fran-
+cois R Hogan, Jitendra Malik, and Akash Sharma. PTLD: Sim-to-
+real Privileged Tactile Latent Distillation for Dexterous Manipula-
+tion. arXiv preprint arXiv:2603.04531, 2026.
+[9] Xiang-Yi Chen, Si-Jia Liu, Kaidi Xu, Xingguo Li, Xue Lin, Ming-
+Yi Hong, and David Cox. ZO-AdaMM: Zeroth-order adaptive
+momentum method for black-box optimization. In NeurIPS, 2019.
+[10] Ning Cheng, Jinan Xu, Wanlin Li, Yangzhi Chen, Jing Gao,
+Yiqun Wang, Kelan Peng, and Wenjuan Han. τ: Learning Touch-
+Augmented Vision-Language-Action Models from Future Visual
+Supervision. arXiv preprint arXiv:2607.24485, 2026.
+[11] Zhengxue Cheng, Yiqian Zhang, Anni Tang, Keyu Wang, Wenkang
+Zhang, Haoyu Li, Hengdi Zhang, and Li Song. OmniVTLA: Vision-
+Tactile-Language-Action Models with Semantic-Aligned Tactile
+Sensing. arXiv preprint arXiv:2508.08706, 2025.
+[12] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau,
+Benjamin Burchfiel, and Shuran Song.
+Diffusion Policy: Vi-
+suomotor Policy Learning via Action Diffusion. arXiv preprint
+arXiv:2303.04137, 2023.
+[13] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettle-
+moyer. QLoRA: Efficient Finetuning of Quantized LLMs. arXiv
+preprint arXiv:2305.14314, 2023.
+[14] Tim Engelbracht, Ren´e Zurbr¨ugg, Matteo Wohlrapp, Martin
+B¨uchner, Abhinav Valada, Marc Pollefeys, Hermann Blum, and
+Zuria Bauer. Hoi!: A multimodal dataset for force-grounded cross-
+view articulated manipulation. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 8880–8890, 2026.
+[15] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Peng-
+fang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye Fei, Jinlan
+Fu, Jingjing Gong, and Xipeng Qiu. LIBERO-Plus: A progressive
+robustness benchmark for visual-language-action models. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 38574–38583, 2026.
+[16] Ziyan Feng, Yulong Fu, Zheng Li, Yuxin He, Jieji Ren, Yudong
+Zhong, Lujia Wang, Jinni Zhou, and Qiang Nie. TactileReflex:
+Noise-Statistics-Driven Vision-Tactile Reflex Control for Force-
+Sensitive Manipulation. In IEEE/RSJ International Conference on
+Intelligent Robots and Systems (IROS), 2026. arXiv:2605.23568.
+[17] Saumya Gandhi, Ritu Gala, Jonah Kornberg, and Advaith Srid-
+har. Extending the Forward Forward Algorithm. arXiv preprint
+arXiv:2307.04205, 2023.
+[18] Junli Gao, Zhaoji Huang, Zhaonian Tang, Haitao Song, and Wenyu
+Liang. Visuo-Tactile-Based Slip Detection Using A Multi-Scale
+Temporal Convolution Network. arXiv preprint arXiv:2302.13564,
+2023.
+[19] Tanmay Gautam, Youngsuk Park, Hao Zhou, Parameswaran Raman,
+and Wooseok Ha. Variance-reduced Zeroth-Order Methods for Fine-
+Tuning Language Models. arXiv preprint arXiv:2404.08080, 2024.
+[20] Abraham George,
+Selam Gano,
+Pranav Katragadda,
+and
+Amir Barati Farimani. VITaL Pretraining: Visuo-Tactile Pretraining
+for Tactile and Non-Tactile Manipulation Policies. arXiv preprint
+arXiv:2403.11898, 2024.
+[21] Nate Gillman, Yinghua Zhou, Zitian Tang, Evan Luo, Arjan
+Chakravarthy, Daksh Aggarwal, Michael Freeman, and Chen
+Sun. Goal Force: Teaching video models to accomplish physics-
+conditioned goals. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 20077–
+20087, 2026. arXiv:2601.05848.
+[22] Carolina Higuera, Akash Sharma, Chaithanya Krishna Bodduluri,
+Taosha Wu, Mike Lambeta Li, et al. Sparsh: Self-supervised touch
+representations for vision-based tactile sensing. In Conference on
+Robot Learning (CoRL), 2024.
+[23] Geoffrey Hinton. The forward-forward algorithm: Some prelimi-
+nary investigations. arXiv preprint arXiv:2212.13345, 2022.
+[24] Zhi Hou, Tianyi Zhang, Yuwen Xiong, Haonan Duan, Hengjun
+Pu, Ronglei Tong, Chengyang Zhao, Xizhou Zhu, Yu Qiao, Jifeng
+Dai, and Yuntao Chen. Dita: Scaling Diffusion Transformer for
+Generalist Vision-Language-Action Policy. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV),
+2025. arXiv:2503.19757.
+9
+
+
+[25] Neil Houlsby, Andrei Giurgiu, Stanislaw Jastrzebski, Bruna Mor-
+rone, Quentin de Laroussilhe, Andrea Gesmundo, Mona Attariyan,
+and Sylvain Gelly. Parameter-Efficient Transfer Learning for NLP.
+arXiv preprint arXiv:1902.00751, 2019.
+[26] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu,
+Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. LoRA:
+Low-Rank Adaptation of Large Language Models. arXiv preprint
+arXiv:2106.09685, 2021.
+[27] Chi-Pin Huang, Yunze Man, Zhiding Yu, Min-Hung Chen, Jan
+Kautz, Yu-Chiang Frank Wang, and Fu-En Yang. Fast-ThinkAct:
+Efficient vision-language-action reasoning via verbalizable latent
+planning. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition (CVPR), pages 5070–5081,
+2026. arXiv:2601.09708.
+[28] Physical Intelligence, Kevin Black, Noah Brown, James Darpinian,
+Karan Dhabalia, Danny Driess, Adnan Esmail, Michael Equi,
+Chelsea Finn, Niccolo Fusai, et al.
+π0.5: a Vision-Language-
+Action Model with Open-World Generalization. arXiv preprint
+arXiv:2504.16054, 2025.
+[29] Risi Jaiswal, Supriyo Datta, and Joseph G. Makin. Energy-efficient
+supervised learning with a binary stochastic forward-forward al-
+gorithm. IEEE Transactions on Artificial Intelligence, 7(7):3798–
+3807, 2026.
+[30] Stephen James, Zicong Ma, David Rovick Arrojo, and Andrew J.
+Davison. RLBench: The Robot Learning Benchmark & Learning
+Environment. arXiv preprint arXiv:1909.12271, 2019.
+[31] Changwei Jing, Jai Krishna Bandi, Jianglong Ye, Yan Duan, Pieter
+Abbeel, Xiaolong Wang, and Sha Yi. Contact-Aware Neural Dy-
+namics. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 13442–13452, 2026.
+arXiv:2601.12796.
+[32] Jaemin Kim, Jiahn Kim, and Taesik Gong. VLA-ZO: Fast Zeroth-
+Order Adaptation for Vision-Language-Action Models.
+arXiv
+preprint arXiv:2610.06271, 2026.
+[33] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ash-
+win Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Foster, Grace
+Lam, Pannag Sanketi, et al. OpenVLA: An Open-Source Vision-
+Language-Action Model. arXiv preprint arXiv:2406.09246, 2024.
+[34] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-Tuning Vision-
+Language-Action Models: Optimizing Speed and Success. arXiv
+preprint arXiv:2502.19645, 2025.
+[35] Rickmer Krohn, Erik Helmut, Niklas Funk, Jan Peters, Vignesh
+Prasad, and Georgia Chalvatzaki. Multi-resolution tactile imitation
+learning for contact-rich robotic manipulation. In Conference on
+Robot Learning (CoRL), 2026. arXiv:2606.06281.
+[36] Andrii Krutsylo. Scalable Forward-Forward Algorithm. arXiv
+preprint arXiv:2501.03176, 2025.
+[37] Mike Lambeta, Po-Wei Chou, Stephen Tian, Brian Yang, Benjamin
+Maloon, Victoria Rose Most, Dave Stroud, Raymond Santos, Ah-
+mad Byagowi, Gregg Kammerer, et al. DIGIT: A Novel Design for
+a Low-Cost Compact High-Resolution Tactile Sensor with Applica-
+tion to In-Hand Manipulation. arXiv preprint arXiv:2005.14679,
+2020.
+[38] Junde Li, Guoqiang Xin, Wei-Han Yu, Ka-Fai Un, Rui P. Martins,
+and Pui-In Mak. A 512-nW 0.003-mm2 Forward-Forward Closed
+Box Trainer for an Analog Voice Activity Detector in 28-nm CMOS.
+IEEE Transactions on Circuits and Systems II: Express Briefs, 71
+(11):4703–4707, 2024.
+[39] Mingxuan Li, Yen Hang Zhou, Tiemin Li, and Yao Jiang. Incipient
+Slip-Based Rotation Measurement via Visuotactile Sensing During
+In-Hand Object Pivoting. arXiv preprint arXiv:2309.05366, 2023.
+[40] Xiaoqi Li, Muhe Cai, Jiadong Xu, Juan Zhu, Hongwei Fan, Yan
+Shen, Guangrui Ren, and Hao Dong. AT-VLA: Adaptive tactile
+injection for enhanced feedback reaction in vision-language-action
+models. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 28764–28774, 2026.
+arXiv:2605.07308.
+[41] Yang Li, Zhaxizhuoma Zhaxizhuoma, Hongru Jiang, Junjie Xia,
+Hongquan Zhang, Jinda Du, Yunsong Zhou, Jia Zeng, Ce Hao,
+Jieji Ren, Qiaojun Yu, Cewu Lu, Yu Qiao, and Jiangmiao Pang.
+ForceVLA2: Unleashing Hybrid Force-Position Control with Force
+Awareness for Contact-Rich Manipulation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 8911–8920, 2026. arXiv:2603.15169.
+[42] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke
+Zhu, and Peter Stone. LIBERO: Benchmarking Knowledge Transfer
+for Lifelong Robot Learning. arXiv preprint arXiv:2306.03310,
+2023.
+[43] Meng Luo, Zechen Bai, Shanqing Xu, Yanlin Li, Kaixin Li,
+Mengchen Qian, Weifeng Lu, Ran Zhang, Yingtian Zou, Ziyang
+Luo, et al. Toward Recursive Self-Improvement in Physical AI.
+arXiv preprint arXiv:2610.29677, 2026.
+[44] Jingxiao Ma, Priyadarshini Panda, and Sherief Reda. FF-INT8:
+Efficient forward-forward DNN training on edge devices with INT8
+precision. In ACM/IEEE Design Automation Conference (DAC),
+2025.
+[45] Viktor Makoviychuk, Lukasz Wawrzyniak, Yunrong Guo, Michelle
+Lu, Kier Storey, Miles Macklin, David Hoeller, Nikita Rudin,
+Arthur Allshire, Ankur Handa, et al. Isaac Gym: High Perfor-
+mance GPU-Based Physics Simulation For Robot Learning. arXiv
+preprint arXiv:2108.10470, 2021.
+[46] Sadhika Malladi, Tianyu Gao, Eshaan Nichani, Alexandru Damian,
+Jason D. Lee, Danqi Chen, and Sanjeev Arora. Fine-tuning language
+models with just forward passes. In NeurIPS, 2023.
+[47] Ajay Mandlekar, Danfei Xu, Josiah Wong, Soroush Nasiriany, Chen
+Wang, Rohan Kulkarni, Li Fei-Fei, Silvio Savarese, Yuke Zhu, and
+Roberto Mart´ın-Mart´ın. What matters in learning from offline
+human demonstrations for robot manipulation. In Conference on
+Robot Learning (CoRL), 2021.
+[48] Horia Mania, Aurelia Guy, and Benjamin Recht. Simple random
+search provides a competitive approach to reinforcement learning.
+arXiv preprint arXiv:1803.07055, 2018.
+[49] Yuemin Mao, Uksang Yoo, Jean Oh, Jonathan Francis, and Jef-
+frey Ichnowski. VibeAct: Vibration to Actions for Contact-Rich
+Reactive Robot Dexterity. arXiv preprint arXiv:2606.27344, 2026.
+[50] Oier Mees, Lukas Hermann, Erick Rosete-Beas, and Wolfram Bur-
+gard.
+CALVIN: A Benchmark for Language-Conditioned Pol-
+icy Learning for Long-Horizon Robot Manipulation Tasks. arXiv
+preprint arXiv:2112.03227, 2021.
+[51] Xinpan Meng, Siyao Huang, JingPu Yang, Muyuan Ma, Zhenghua
+Ma, Lijun Han, Gao Yuan, Houcheng Li, and Long Cheng. From
+reach to insert: Tactile-augmented precision assembly under sub-
+millimeter tolerances. In IEEE/RSJ International Conference on
+Intelligent Robots and Systems (IROS), 2026. arXiv:2605.04649.
+[52] Seojung Min, Yoonjin Kim, Jeong-Jung Kim, and Jung Kim. Geo-
+metric reconstruction of extrinsic contact trajectories using tactile
+sensing and proprioception for tool manipulation. In IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS),
+2026. arXiv:2606.22251.
+[53] Yao Mu, Tianxing Chen, Zanxin Chen, Shijia Peng, Zhiqian Lan,
+Zeyu Gao, Zhixuan Liang, Qiaojun Yu, Yude Zou, Mingkun
+Xu, Lunkai Lin, Zhiqiang Xie, Mingyu Ding, and Ping Luo.
+RoboTwin: Dual-arm robot benchmark with generative digital
+twins. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 27649–27660, 2025.
+arXiv:2504.13059.
+[54] Dantong Niu, Zhuoyang Liu, Zekai Wang, Boning Shao, Zhao-
+Heng Yin, Anirudh Pai, Yuvan Sharma, Stefano Saravalle, Ruijie
+Zheng, Jing Wang, et al. T-Rex: Tactile-Reactive Dexterous Manip-
+ulation. arXiv preprint arXiv:2606.17055, 2026.
+[55] Arild Nøkland and Lars Hiller Eidnes. Training Neural Networks
+with Local Error Signals. arXiv preprint arXiv:1901.06656, 2019.
+[56] Adam Norton and Brian Flynn.
+Towards Using Multiple It-
+erated, Reproduced, and Replicated Experiments with Robots
+10
+
+
+(MIRRER) for Evaluation and Benchmarking.
+arXiv preprint
+arXiv:2408.04736, 2024.
+[57] NVIDIA, Mayank Mittal, Pascal Roth, James Tigue, Antoine
+Richard, Octi Zhang, Peter Du, Antonio Serrano-Munoz, Xinjie
+Yao, Rene Zurbrugg, et al. Isaac Lab: A GPU-Accelerated Simula-
+tion Framework for Multi-Modal Robot Learning. arXiv preprint
+arXiv:2511.04831, 2025.
+[58] Octo Model Team, Dibya Ghosh, Homer Walke, Karl Pertsch,
+Kevin Black, Oier Mees, Sudeep Dasari, Joey Hejna, Tobias
+Kreiman, Charles Xu, Jianlan Luo, You Liang Tan, Pannag Sanketi,
+Quan Vuong, Ted Xiao, Dorsa Sadigh, Chelsea Finn, and Sergey
+Levine. Octo: An Open-Source Generalist Robot Policy. arXiv
+preprint arXiv:2405.12213, 2024.
+[59] OpenAI, Marcin Andrychowicz, Bowen Baker, Maciek Chociej,
+Rafal Jozefowicz, Bob McGrew, Jakub Pachocki, Arthur Petron,
+Matthias Plappert, Glenn Powell, et al. Learning Dexterous In-Hand
+Manipulation. arXiv preprint arXiv:1808.00177, 2018.
+[60] OpenAI, Ilge Akkaya, Marcin Andrychowicz, Maciek Chociej,
+Mateusz Litwin, Bob McGrew, Arthur Petron, Alex Paino, Matthias
+Plappert, Glenn Powell, et al. Solving Rubik’s Cube with a Robot
+Hand. arXiv preprint arXiv:1910.07113, 2019.
+[61] Alexander Ororbia and Ankur Mali.
+The Predictive Forward-
+Forward Algorithm. arXiv preprint arXiv:2301.01452, 2023.
+[62] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj
+Nair, Quan Vuong, Oier Mees, Chelsea Finn, and Sergey Levine.
+FAST: Efficient Action Tokenization for Vision-Language-Action
+Models. arXiv preprint arXiv:2501.09747, 2025.
+[63] Mengye Ren, Simon Kornblith, Renjie Liao, and Geoffrey Hin-
+ton. Scaling Forward Gradient With Local Losses. arXiv preprint
+arXiv:2210.03310, 2022.
+[64] Joseph M. Romano, Kaijen Hsiao, G¨unter Niemeyer, Sachin Chitta,
+and Katherine J. Kuchenbecker. Human-Inspired Robotic Grasp
+Control With Tactile Sensing. IEEE Transactions on Robotics, 27
+(6):1067–1079, 2011.
+[65] Marcus R¨ub, Michael R¨ub, and Axel Sikora.
+Sparse forward-
+forward algorithm:
+Efficient machine learning for resource-
+constrained edge devices. In IEEE International Conference on
+Industrial Cyber-Physical Systems (ICPS), 2025.
+[66] Bidipta Sarkar, Mattie Fellows, Juan Agustin Duque, Alistair
+Letcher, Antonio Le´on Villares, Anya Sims, Clarisse Wibault,
+Dmitry Samsonov, Dylan Cope, Jarek Liesen, et al. Evolution
+Strategies at the Hyperscale. arXiv preprint arXiv:2511.16652,
+2025.
+[67] Sifeng Shang, Jiayi Zhou, Chenyu Lin, Minxian Li, and Kaiyang
+Zhou. Fine-tuning Quantized Neural Networks with Zeroth-order
+Optimization. arXiv preprint arXiv:2505.13430, 2025.
+[68] Hao Shi, Bin Xie, Yingfei Liu, Lin Sun, Fengrong Liu, Tiancai
+Wang, Erjin Zhou, Haoqiang Fan, Xiangyu Zhang, and Gao Huang.
+MemoryVLA: Perceptual-Cognitive Memory in Vision-Language-
+Action Models for Robotic Manipulation. In International Confer-
+ence on Learning Representations (ICLR), 2026. arXiv:2508.19236.
+[69] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn
+Kooijmans, Steven Palma, Adil Zouitine, Michel Aractingi, Car-
+oline Pascal, Martino Russi, Andres Marafioti, Simon Alibert,
+Matthieu Cord, Thomas Wolf, and Remi Cadene.
+SmolVLA:
+A Vision-Language-Action Model for Affordable and Efficient
+Robotics. arXiv preprint arXiv:2506.01844, 2025.
+[70] Yusei Shuto and Danilo Vasconcellos Vargas. Sensorless Damage-
+Safe Grasping. arXiv preprint arXiv:2608.23983, 2026.
+[71] Zilin Si and Wenzhen Yuan.
+Taxim: An Example-based Sim-
+ulation Model for GelSight Tactile Sensors.
+arXiv preprint
+arXiv:2109.04027, 2021.
+[72] Przemysław Spyra and Witold Dzwinel. Energy-Efficient Deep
+Learning Without Backpropagation:
+A Rigorous Hardware-
+Validated Benchmarking Study of Forward-Only Algorithms. arXiv
+preprint arXiv:2511.01061, 2025.
+[73] Ruomin Sui, Lunwei Zhang, Qiyin Huang, Tiemin Li, and Yao
+Jiang.
+A Novel Incipient Slip Degree Evaluation Method and
+Its Application in Adaptive Control of Grasping Force.
+IEEE
+Transactions on Automation Science and Engineering, 21(3):2454–
+2468, 2024.
+[74] Ya-Yen Tsai, Bidan Huang, Yu Zheng, Lei Han, Wang Wei Lee, and
+Edward Johns. Crossing the Reality Gap in Tactile-Based Learning.
+arXiv preprint arXiv:2305.09870, 2023.
+[75] Richard Vaughan and Jens Wawerla. Publishing Identifiable Exper-
+iment Code And Configuration Is Important, Good and Easy. arXiv
+preprint arXiv:1204.2235, 2012.
+[76] Hongyu Wang, Chuyan Xiong, Ruiping Wang, and Xilin Chen.
+BitVLA: 1-bit Vision-Language-Action Models for Robotics Ma-
+nipulation. arXiv preprint arXiv:2506.07530, 2025.
+[77] Shaoxiong Wang, Mike Lambeta, Po-Wei Chou, and Roberto Ca-
+landra. TACTO: A Fast, Flexible, and Open-source Simulator
+for High-Resolution Vision-based Tactile Sensors. arXiv preprint
+arXiv:2012.08456, 2020.
+[78] Zhaoxian Wu, Haichuan Liu, and Tianyi Chen. The price of lo-
+cality: Why forward-forward underperforms backpropagation? In
+Advances in Neural Information Processing Systems (NeurIPS),
+2026. arXiv:2609.33240.
+[79] Jingyi Xiang, Yixuan Wang, Jeannette Bohg, and Wenzhen Yuan.
+ContactBench 1.0: A Benchmark for Everyday Contact-Rich
+Robotic Manipulation. arXiv preprint arXiv:2610.24512, 2026.
+[80] Jingyi Xiang, Yixuan Wang, and Wenzhen Yuan. Tactile-Based
+Robotic Manipulation: From Mechanics-Driven to Data-Driven
+Perspectives. arXiv preprint arXiv:2610.30438, 2026.
+[81] Yifan Yang, Zhen Zhang, Rupak Vignesh Swaminathan, Jing Liu,
+Nathan Susanj, and Zheng Zhang. SharpZO: Hybrid Sharpness-
+Aware Vision Language Model Prompt Tuning via Forward-Only
+Passes. arXiv preprint arXiv:2506.20990, 2025.
+[82] Yi Yang, Xueqi Li, Yiyang Chen, Jin Song, Yihan Wang, Zipeng
+Xiao, Jiadi Su, You Qiaoben, Pengfei Liu, and Zhijie Deng. Mantis:
+A versatile vision-language-action model with disentangled visual
+foresight. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition (CVPR), pages 42505–42515,
+2026. arXiv:2511.16175.
+[83] Samson Yu, Kelvin Lin, and Harold Soh.
+Demonstrating
+the Octopi-1.5 Visual-Tactile-Language Model. arXiv preprint
+arXiv:2507.09985, 2025.
+[84] Haoran Yuan, Zekai Wang, Boning Shao, Haoran Lu, Trevor Darrell,
+Ismini Lourentzou, and Wei Zhan. DexTacWAM: A Visuo-Tactile
+World-Action Model for Dexterous Manipulation. arXiv preprint
+arXiv:2609.24976, 2026.
+[85] Liang Zhang, Bingcong Li, Kiran Koshy Thekumparampil, Se-
+woong Oh, Michael Muehlebach, and Niao He.
+Zeroth-Order
+Optimization Finds Flat Minima. arXiv preprint arXiv:2506.05454,
+2025.
+[86] Pengwei Zhang, Bin Xie, Xinpan Meng, Xinyu Guo, Ce Hao, Fang
+Deng, Long Cheng, and Tiancai Wang. Feeling the unexpected:
+ResTacVLA for contact-rich manipulation via residual tactile rep-
+resentation. In IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), 2026. arXiv:2607.03387.
+[87] Shiqi Zhang, Xin Zhang, Yedong Shen, Yao Li, Yuxuan Gao,
+Sha Zhang, Yuan Zhang, Kaixue Long, Jiajia Wu, Jia Pan,
+et al.
+ReTouch: Empowering Contact-Rich Dexterous Manip-
+ulation with Online-Refined Tactile Prediction. arXiv preprint
+arXiv:2608.01824, 2026.
+[88] Zhirui Zhang, Yunkai Tang, Jiahang Li, Fan Fei, Jinnuo Zhang,
+Kairan Ding, Jieji Ren, Yandong Guo, and Boxin Shi. DeTac:
+Dual-branch decoupling of texture and force signals in vision-based
+tactile sensors. In Conference on Robot Learning (CoRL), 2026.
+arXiv:2610.16463.
+[89] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn.
+Learning Fine-Grained Bimanual Manipulation with Low-Cost
+Hardware. arXiv preprint arXiv:2304.13705, 2023.
+11
+
+
+[90] Jianyi Zhou, Feiyang Hong, Yunhao Li, Yicheng Zhao, Yongjue
+Cen, Zirui Liu, Jiakang Huang, Zirui Chen, Ruiyang Zhang,
+Weizhuo Zhu, et al. TouchWorld: A Predictive and Reactive Tactile
+Foundation Model for Dexterous Manipulation. arXiv preprint
+arXiv:2607.07287, 2026.
+[91] Yuke Zhu, Josiah Wong, Ajay Mandlekar, and Roberto Mart´ın-
+Mart´ın. robosuite: A modular simulation framework and benchmark
+for robot learning. arXiv preprint arXiv:2009.12293, 2020.
+12

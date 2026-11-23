@@ -1,0 +1,2546 @@
+FlowScope: 3D Scene Flow Pretraining Improves Surgical Robot Policies
+John J. Han1
+Adam Schmidt2
+Jingpei Lu2
+Zooey He2
+Muhammad Abdullah Jamal2
+Jie Ying Wu1
+Omid Mohareri2
+1Department of Computer Science, Vanderbilt University
+2Intuitive Surgical Inc.
+Abstract
+Imitation learning for surgical robots is limited by the
+cost of collecting demonstrations. Meanwhile, many robot-
+assisted procedures are recorded as stereo video, yet poli-
+cies cannot learn from them directly; clinical video carries
+no action labels. We present FlowScope, which pretrains a
+surgical policy network on unlabeled clinical video by fore-
+casting scene flow, the metric 3D motion of scene points,
+with labels computed by off-the-shelf stereo depth and opti-
+cal flow models. We pretrain the trunk of an Action Chunk-
+ing Transformer (ACT) on a dataset of 1,149 clinical pro-
+cedures (1.35M clips) and discard the flow head afterward,
+so the deployed policy is a standard ACT with no added in-
+ference cost. On a real surgical robotic system, FlowScope
+raises needle pickup success from 54% to 90% and first-
+handover success on needle regrasp from 4% to 52% (full
+task: 2% to 14%) over training from scratch (n = 50 trials
+each), and retains its gains with a generative flow-matching
+action head. Ablations indicate that metric 3D motion is the
+strongest pretraining signal among those tested; kinemat-
+ics, 2D tracks, depth alone, and scale-free 3D flow, each
+paired with kinematics, yield smaller or no gains. Repre-
+sentation analyses suggest that scene-flow pretraining en-
+codes metric needle depth more accurately, that kinematics
+pretraining increases reliance on the robot state, and that
+needle-depth probes follow the ordering of real-robot suc-
+cess where offline validation error does not.
+1. Introduction
+Robot-assisted surgery is a promising but underexplored
+frontier for robot learning. Automating even routine su-
+turing subtasks, such as needle pickup or needle handover,
+could reduce surgeon fatigue and ultimately improve patient
+outcomes. Imitation learning has recently made dexterous
+behaviors like these tractable in general-purpose manipu-
+lation [3, 11, 48], following a simple recipe: collect more
+demonstrations, train better policies. In surgical robotics,
+the first half of this recipe is the bottleneck.
+Surgical demonstrations are scarce and expensive. Each
+one requires an expert operator, often an experienced
+robotic surgeon, a carefully prepared physical setup, and
+time on a costly system. Simulation offers a potential al-
+ternative, but accurately modeling deformable tissues and
+realistic endoscopic scenes remains challenging, limiting
+reliable transfer of learned policies to physical surgical
+robots [17, 28, 39].
+Pretraining offers another way to reduce the demonstra-
+tion burden. It has transformed language [14, 36, 37] and
+vision [20, 31, 41]. Robotics has followed, from the RT
+series [4, 5, 32] to vision-language-action models built on
+web-scale data [3, 35]. The natural next step is to fine-tune
+these generalist models on surgical tasks. Yet vision mod-
+els pretrained on general-domain images transfer poorly to
+surgical scenes [13, 19, 34], and the robot data behind gen-
+eralist policies looks nothing like the inside of a patient.
+Indeed, in our experiments, a fine-tuned π0.5 trails FlowS-
+cope on both surgical tasks (Sec. 4). Surgical policies need
+surgical pretraining data.
+Such data already exists at scale. Many robot-assisted
+procedures are recorded through an endoscope, producing a
+large and growing corpus of video from the domain a policy
+will be deployed in. This video, however, cannot serve as
+demonstrations directly. Imitation learning needs action la-
+bels, but clinical video carries none; the kinematics of clin-
+ical systems are rarely available outside the manufacturer.
+Even when they are available, they are offset from where
+the instruments appear in the image, due to errors in the for-
+ward kinematics and calibration [26, 47]. Actions recovered
+from them do not match what the policy sees.
+What, then, should a surgical policy learn from unlabeled
+stereo video? Our answer is motion. What a surgeon does
+is visible in how the scene moves: the instruments sweep
+toward the needle, the needle lifts from the tissue, and the
+tissue deforms under traction. Because the endoscope is
+stereo, this motion can be estimated in metric 3D with off-
+the-shelf stereo depth and optical flow models. The result-
+1
+arXiv:2611.26865v1  [cs.CV]  19 Nov 2026
+
+
+ing scene flow is an action-like signal that is read directly
+from the pixels, needs no robot labels, and does not inherit
+the errors of the kinematics.
+We present FlowScope, a pretraining recipe for surgi-
+cal policies built on scene flow. Using off-the-shelf stereo
+depth [43] and optical flow [42] models, we convert raw
+surgical video into metric 3D trajectories of points on tis-
+sue, needles, and instruments. We then pretrain the trunk of
+an Action Chunking Transformer (ACT) model to take the
+endoscope image as input and predict the 3D positions and
+future trajectories of queried points. Pretraining adds only
+a set of point queries and a lightweight flow head, both dis-
+carded afterward, so the fine-tuned model is a standard ACT
+policy and FlowScope requires no changes at deployment.
+We pretrain FlowScope with 1,149 clinical procedures,
+about 1.35M training clips, and fine-tune it on two sub-
+tasks on a minimally invasive surgical robotic system: nee-
+dle pickup and needle regrasp. On both tasks, FlowScope
+substantially improves real-robot success over training from
+scratch: from 54% to 90% on pickup, and from 4% to 52%
+on the first handover of regrasp. It also outperforms Dif-
+fusion Policy [11] and the finetuned vision-language-action
+model π0.5 [35]. The gains are not tied to ACT’s regression
+head; they persist when we replace it with a generative flow-
+matching head. Pretraining also improves data efficiency:
+with half of the demonstrations, FlowScope matches a pol-
+icy trained from scratch on all of them on needle pickup
+(52% vs. 54%) and surpasses it on needle regrasp (32% vs.
+4% first-handover success).
+Two findings stand out. First, scene flow alone is a better
+pretraining signal than robot kinematics for surgical robot
+learning. We expected the kinematics recorded alongside
+the video to be useful supervision, since they describe ex-
+actly what a policy must output. Yet pretraining on kine-
+matics gives little to no gain over training from scratch, and
+sometimes hurts; adding kinematics to scene-flow pretrain-
+ing lowers success. Second, metric 3D scene flow outper-
+forms its alternatives based on 2D point tracks, depth-only
+supervision, and scale-free 3D flow. Metric scale, which the
+stereo endoscope provides, is what makes FlowScope work.
+To understand why,
+we look inside the policies.
+Kinematics-pretrained policies devote nearly three times as
+much visual attention to the robot-state input as other poli-
+cies, and keep doing so after fine-tuning. Flow-pretrained
+policies instead encode the needle’s metric depth more ac-
+curately than any other initialization. FlowScope teaches
+the policy to locate what matters in 3D from visual input
+only.
+In summary, our contributions are:
+• FlowScope, a recipe that pretrains surgical policy net-
+works to forecast metric 3D scene flow from unlabeled
+clinical stereo video, requiring no robot labels and no
+changes to the deployed policy.
+• A real-robot evaluation on two surgical tasks, showing
+that FlowScope improves success and data efficiency over
+training from scratch, kinematics pretraining, and strong
+baselines, with both regression and generative heads.
+• Controlled ablations showing that the benefit comes from
+metric 3D motion: 2D tracks, depth alone, and scale-free
+3D flow give smaller or no gains when added to kinemat-
+ics, and kinematics alone are a weaker signal than scene
+flow.
+• Representation analyses showing that flow pretraining
+improves the policy’s encoding of metric needle depth,
+that kinematics pretraining shifts attention toward the
+robot state, and that such probes, unlike offline validation
+error, track real-robot success.
+2. Related Work
+Visuomotor imitation learning.
+Action chunking with
+transformers (ACT) [48] and Diffusion Policy [11] made
+imitation learning practical for dexterous manipulation.
+Vision-language-action models [3, 35] go further: they pre-
+train on large robot and web datasets and adapt to a new
+task with a few hours of demonstrations. Most of these
+policies build on a pretrained visual backbone, and frozen
+self-supervised encoders such as DINOv2 [31] are a com-
+mon choice [1]. FlowScope keeps this design and changes
+only what the policy is pretrained on.
+Learning policies from video motion.
+Point tracks and
+flow are a popular interface between action-free video
+and control.
+ATM [45] predicts 2D tracks of arbitrary
+points and conditions a policy on them; TraceGen [27],
+3PoinTr [24], and PointZero [15] predict object or scene
+trajectories; and ARM4R [30] and SPA [49] pretrain 3D-
+and 4D-aware representations for embodied learning. In
+surgery, SurgFlow [8] learns from stereo video of teleop-
+erated dVRK demonstrations of each task.
+It segments
+the target object, predicts the object’s future 3D flow and
+where the tool should make contact, and converts these into
+actions with an optimization-based controller and contact-
+gated grasping. FlowScope differs from these methods in
+three ways. It pretrains on clinical video from many pro-
+cedures, rather than on video of the target task. It predicts
+metric 3D flow over the whole scene, rather than 2D tracks,
+unscaled flow from monocular video, or segmented objects,
+so it needs no object masks. And flow is only a pretrain-
+ing target: the deployed policy is a standard learned policy
+that maps images to actions, with no flow prediction or con-
+troller at test time.
+What makes visual representations useful for control?
+Burns et al. [6] found that how well a ViT’s attention seg-
+ments objects predicts out-of-distribution manipulation suc-
+cess better than generic downstream accuracy.
+Wen et
+al. [46] trace the strengths and failures of pretrained vi-
+sion models for robot learning to whether they form object-
+2
+
+
+Figure 1. FlowScope. Each image is encoded by a frozen DINOv2 pretrained on surgical images. Pretraining (top): point queries read
+the image features at their pixels, and the flow head predicts each point’s metric 3D position and future trajectory, supervised with an L1
+loss on scene flow pseudo-labeled by off-the-shelf stereo and optical-flow models. The robot state is set to zero. Fine-tuning (bottom): the
+point queries and flow head are discarded, and the pretrained trunk is trained on robot demonstrations to predict action chunks with either
+the ACT or a flow-matching (FM) action head, giving a standard ACT policy. The CVAE (encoder not shown) is used only during training;
+z = 0 at test, similar to standard ACT rollout.
+centric representations. We follow this line of analysis but
+apply it to the policy itself. Instead of probing the vision en-
+coder, we probe the pretrained and fine-tuned policy trunks
+for the needle, the instruments, and their metric depth, and
+relate the probes to closed-loop success.
+Surgical robot learning.
+Research platforms such as
+the dVRK [25] enabled imitation learning for surgical sub-
+tasks. The Surgical Robot Transformer [26] showed that
+relative action parameterizations mitigate the kinematic er-
+ror of cable-driven arms. Clinical recordings, in turn, have
+been used widely for surgical perception, including phase
+recognition, segmentation, and depth estimation [19]. Re-
+cent work has begun to bring this video into policy learning,
+by turning it into actions. SurgVIL [10] estimates tool kine-
+matics from monocular clinical video and co-trains poli-
+cies on these pseudo-actions together with robot demonstra-
+tions, evaluating needle pickup on a real robot. Cosmos-H-
+Surgical [21] fine-tunes a video world model on annotated
+surgical clips, labels its generated videos with an inverse
+dynamics model, and uses them as extra training data, but
+reports offline trajectory error rather than real-robot roll-
+outs.
+Surgical WAM [2] pretrains a world-action model
+on action-free video and evaluates it only in simulation.
+FlowScope differs in what the policy learns from video.
+Instead of actions, estimated or generated, it predicts the
+metric 3D motion of the whole scene, which stereo video
+measures directly and which needs neither action labels nor
+video generation. Furthermore, our experiments show that
+pretraining on the recorded kinematics, which are at least
+as accurate as kinematics estimated from video, gives no
+consistent gain in our real-robot evaluations, while leading
+the policy to rely on the robot state rather than the visual
+observations (Sec. 5).
+3. Method
+FlowScope learns a visuomotor policy in two stages, shown
+in Fig. 1. First, we pretrain the policy’s transformer trunk on
+clinical surgical video, using only a pretext task that needs
+no robot actions: predicting where points in the scene are
+in 3D and how they will move. Second, we fine-tune the
+pretrained trunk on a small set of robot demonstrations, ei-
+ther with the standard ACT recipe or with a generative flow-
+matching action head.
+3.1. Problem Setup
+A policy πθ(at:t+H | ot, st) maps the left endoscope im-
+age ot and the robot state st to a chunk of H future actions.
+Unlike tabletop setups, which often add wrist cameras, min-
+imally invasive surgery offers a single viewpoint: the endo-
+scope. We use only its left image, so stereo is needed only
+to construct pretraining targets and the deployed policy re-
+mains single-view; feeding both views to the policy did not
+improve success and doubles the cost (Sec. H.2). The stan-
+dard approach trains πθ from scratch on a dataset D of tele-
+3
+
+
+Figure 2. Scene-flow pseudo-labels on clinical video. Each track
+shows where a point on the anchor frame moves over the next 10
+keyframes (1.7 s), computed from stereo depth and optical flow
+and kept only where both pass consistency checks. More visual-
+izations can be seen in Figure S2.
+operated demonstrations of the target task, such as needle
+pickup, which are expensive to collect. We additionally as-
+sume a much larger corpus V of clinical stereo videos. Un-
+like D, these videos carry no action labels, but they show the
+same kind of scene and often the same skills, such as grasp-
+ing and passing needles. Our goal is to use V to pretrain the
+trunk of πθ so that imitation learning on D becomes more
+effective. As the pretraining target we use metric 3D scene
+flow: for a queried point in the current frame, predict its 3D
+position and its 3D displacement over time. This target is
+computed from video alone, so pretraining uses neither the
+robot state nor any actions.
+3.2. 3D Motion Targets from Clinical Video
+Pretraining corpus.
+We use stereo endoscope recordings
+of clinical procedures performed with a minimally invasive
+surgical robotic system: 1,175 procedures, split by video
+into 1,149 training and 26 validation videos (Fig. 2). All
+videos were thoroughly de-identified to ensure patient pri-
+vacy, and data was collected with consent from anonymized
+surgical procedures, under our IRB-equivalent institutional
+review process. From each video we take candidate anchor
+frames every 10 frames, each paired with the scene’s motion
+over the following 100 frames (1.7 s). We keep an anchor
+only if the endoscope stays still over this window (within
+0.5 mm and 0.5◦), so that all labeled motion comes from
+tissue and instruments rather than the camera, and if the sur-
+geon drives at least one instrument for the whole window.
+We read both conditions from the logged kinematics, which
+serve only this selection step: they are never an input or a
+target during pretraining. After filtering, the corpus yields
+1.35M anchors.
+Metric depth and optical flow.
+We estimate dense
+depth from disparity for every stereo pair with Fast-
+FoundationStereo [43] and dense optical flow between con-
+secutive keyframes with SEA-RAFT [42]; both generalize
+well to surgical images [18, 40]. Pseudo-labels from both
+models can be wrong at occlusion boundaries, on specular
+highlights, and on textureless tissue, so we use a predic-
+tion only if it is self-consistent: disparity estimated from
+the left and from the right image must agree within 1 px,
+and flow followed forward and then backward must return
+within 1 px (plus 5% of its magnitude). These checks re-
+move regions seen by only one eye and points that become
+occluded, for example when an instrument passes over tis-
+sue. Sec. A.3 lists all filters with their thresholds.
+3D point trajectories.
+At each anchor frame we track a
+grid of pixels through the next K=10 keyframes by chain-
+ing the keyframe-to-keyframe flow, and lift every tracked
+pixel to a 3D point in the camera frame using the depth
+at that keyframe.
+This gives each point a start position
+P0 ∈R3 and displacements ∆Pk = Pk−P0, k = 1, . . . , K,
+in millimeters.
+A point stops being tracked at the first
+keyframe where it fails a check, so each (point, keyframe)
+pair carries its own validity flag. Since most of a surgical
+scene is static in any given second, uniform sampling would
+mostly teach the model that nothing moves. We therefore
+store 512 points per anchor, 256 sampled uniformly and 256
+with probability proportional to how far they move, and at
+training time use 256 of them as queries, up to half drawn
+from points that move more than 5 mm.
+3.3. Model and Pretraining
+Overview.
+We build on ACT [48], a DETR-style [7]
+encoder-decoder transformer widely used for imitation
+learning. We keep ACT’s architecture unchanged so that
+the pretrained weights transfer directly, and change only
+what it is trained to predict. During pretraining, the net-
+work receives a single image and a set of point queries, and
+predicts the metric 3D position and future 3D trajectory of
+each queried point. Everything that depends on robot data
+is inactive: the robot-state token and the CVAE latent token
+are set to zero, and ACT’s action queries and action head
+receive no loss. We keep these parts only so that the archi-
+tecture matches ACT exactly at fine-tuning time.
+Image tokenizer.
+Surgical vision foundation models out-
+perform general-purpose ones on surgical tasks [19]. We
+therefore train a DINOv2 ViT-L/14 [31] on surgical video
+(details and comparison studies in Sec. C). It stays frozen in
+every stage of FlowScope and acts as a tokenizer, mapping
+the left image at 518×518 to 37×37 = 1,369 patch tokens,
+which the transformer encoder processes together with the
+inactive state and latent tokens.
+Point queries. The decoder receives one query per tracked
+point. For a point at image position u, the query is
+q(u) = Wu γ(u) + Wf ϕ(u) + ept,
+(1)
+where γ(u) is a Fourier encoding of the position, ϕ(u) is the
+4
+
+
+encoder output bilinearly sampled at u, and ept is a learned
+embedding marking the query as a point rather than action.
+Each query thus starts from what the ACT encoder sees at
+that pixel, and the decoder refines it by cross-attending to
+the whole image.
+Flow head and loss.
+A shallow MLP maps the decoder
+output of each point query to the predicted 3D start posi-
+tion ˆP0 and displacements ∆ˆP1, . . . , ∆ˆPK. Let Q be the
+number of point queries in a sample and Ωthe set of valid
+(point, keyframe) pairs. We train with an L1 loss on the
+displacements and on the start positions:
+Ldisp = 1
+|Ω|
+X
+(i,k)∈Ω
+∆ˆPi,k −∆Pi,k
+
+1,
+(2)
+Lpos = 1
+Q
+Q
+X
+i=1
+ ˆPi,0 −Pi,0
+
+1,
+(3)
+Lflow = Ldisp + Lpos.
+(4)
+All targets are normalized with statistics computed on the
+training videos. Lpos asks the model where each point is
+in metric 3D, and Ldisp asks where it will go. Since future
+motion is often ambiguous from a single frame, we also test
+a generative flow-matching [29] flow head in place of the
+L1 head (Sec. 4.4).
+3.4. Fine-tuning and Deployment
+From pretraining to a policy.
+We initialize the policy
+from the pretrained checkpoint with the lowest validation
+flow error. For fine-tuning, we remove the point queries
+and the flow head, and switch the robot-specific parts of
+ACT back on: the robot state enters through the state token,
+and the CVAE encoder produces the latent from the action
+chunk. These parts and the action head are randomly initial-
+ized, exactly as in an ACT trained from scratch; the encoder,
+the decoder, and the input projections start from pretraining.
+We then train the whole policy on D with ACT’s standard
+L1 and KL objective, keeping the image tokenizer frozen.
+Action representation.
+Following prior work [26], we
+express all kinematics in the camera frame and act in end-
+effector Cartesian space. For each arm, an action is a trans-
+lation relative to the previous step, an absolute rotation (a
+3×3 rotation matrix), and an absolute gripper angle: 13 di-
+mensions per arm, 26 for both. The policy predicts a chunk
+of H=30 actions covering 2 s.
+Generative action head.
+To test whether the pretrained
+trunk also helps a generative policy, we replace ACT’s
+CVAE and action head with a flow-matching action head
+on the same trunk, in the spirit of Diffusion Policy [11] and
+the action expert of π0 [3]. The head is a 4-block trans-
+former with adaptive layer normalization [33] that denoises
+the whole 30-step chunk, conditioned on the decoder’s out-
+put for each step, and samples a chunk with 10 Euler steps.
+It is trained from scratch during fine-tuning on top of any
+pretrained trunk (Sec. E.1).
+Deployment.
+At test time the policy is a standard ACT (or
+ACT with the flow-matching head): it receives only the left
+endoscope image and the robot state, and needs no depth,
+flow, or other pseudo-labels.
+4. Experiments
+We evaluate FlowScope on a real surgical robotic sys-
+tem and ask three questions. Does pretraining on clinical
+video improve real-robot success, with either action head
+(Sec. 4.2)? Does it reduce the number of demonstrations
+needed (Sec. 4.3)? And which part of the pretraining target
+is responsible for the gain (Sec. 4.4)?
+4.1. Experimental setup
+Tasks.
+We evaluate two suturing subtasks of increasing
+difficulty. In needle pickup, the dominant (right) instrument
+grasps a suture needle lying on the pad and lifts it. Needle
+regrasp starts the same way, but the needle is then handed
+to the non-dominant instrument and back to the dominant
+one. Surgeons perform this regrasp to bring the needle into
+a good pose for driving it through tissue, which is the next
+step of suturing. Regrasp therefore requires precise coordi-
+nation of both arms over a long sequence, and we score it
+in three stages: pickup, the first handover, and the second
+handover, which completes the task.
+Robot and data.
+All experiments run on a minimally in-
+vasive surgical robotic system, with a suture pad placed in-
+side a mock abdominal cavity (Fig. S3). We collected 898
+teleoperated demonstrations of needle pickup and 2,255 of
+needle regrasp, including DAgger [38] data. Additional de-
+tails are in the supplementary material (Sec. A). Every pol-
+icy, baselines included, is fine-tuned on the same demon-
+strations and evaluated on the same physical setup.
+Evaluation protocol.
+Real-robot success varies across
+checkpoints and validation loss does not predict rollout per-
+formance, so we evaluate each policy at five fine-tuning
+checkpoints (every 20k steps up to 100k) on the same 10
+predefined needle configurations (Fig. S4), with 50 trials
+per policy. For pickup, the policy may make up to three at-
+tempts per trial, and we report success on the first attempt
+and within three attempts. For regrasp, the policy gets a
+single attempt, and we report the fraction of trials that com-
+plete each stage, together with the mean number of stages
+completed (from 0 to 3). Additional details are in Sec. B.
+Implementation.
+Pretraining runs for 100k steps on 4
+H200 GPUs with 128 samples per GPU. Fine-tuning runs
+for 100k steps on a single 40 GB A100 with a batch size
+of 128, photometric augmentation, and noise added to the
+robot state (1.5 mm and 3◦) to improve robustness against
+noisy measurements. Both stages use a base learning rate
+of 10−5, scaled with the square root of the batch size, and
+5
+
+
+Pickup (%)
+Regrasp
+Pretraining
+Policy
+1st
+≤3
+S1
+S2
+S3
+Stages
+External baselines
+—
+Diffusion Policy
+28
+62
+42
+18
+2
+0.62
+VLA
+π0.5 (full FT)
+42
+42
+24
+8
+0
+0.32
+VLA
+π0.5 (LoRA)
+38
+38
+20
+10
+0
+0.30
+ACT trunk: pretraining × action head
+None
+ACT
+22
+54
+28
+4
+2
+0.34
+None
+FM
+14
+58
+36
+20
+0
+0.56
+Kinematics
+ACT
+30
+60
+46
+12
+2
+0.60
+Kinematics
+FM
+6
+56
+14
+4
+0
+0.18
+Flow (ours)
+ACT
+54
+90
+76
+52
+14
+1.42
+Flow (ours)
+FM
+54
+90
+68
+40
+12
+1.20
+Table 1. Real-robot success (%). Pickup: success on the first
+attempt and within three attempts. Regrasp: subtasks completed
+(S1 pickup, S2 first handover, S3 second handover/full task) and
+the mean number of stages completed (max 3). n = 50 trials per
+policy (10 needle configurations × 5 checkpoints). ACT: the stan-
+dard action-chunking transformer with its CVAE and L1 action
+loss. FM: the flow-matching action head (Sec. 3.4). 95% Wilson
+intervals for pickup (≤3): scratch [40, 67], kinematics [46, 72],
+FlowScope [79, 96] with the ACT head.
+the frozen surgical DINOv2 tokenizer at 518 px. Policies
+with the flow-matching action head additionally use a co-
+sine learning-rate schedule, an exponential moving average
+of the weights, and full precision in the head, which we
+found necessary for stable training (see Sec. E.2).
+Baselines.
+We compare against the following baselines.
+• No pretraining.
+The same policy (ACT or the flow-
+matching action head) trained from scratch on the demon-
+strations.
+• External policies. Diffusion Policy [11] and the vision-
+language-action model π0.5 [35].
+For a fair compari-
+son, Diffusion Policy uses the same frozen surgical DI-
+NOv2 as FlowScope; everything else follows its standard
+real-robot recipe. We fine-tune π0.5 both fully and with
+LoRA [23]. See Sec. E.3 for more details.
+• Kinematics pretraining. The natural alternative way to
+use the same clinical videos: train a vanilla ACT to pre-
+dict the surgeon’s recorded kinematics, exactly as in be-
+havior cloning, with the recorded robot state as input and
+the same action format as the demonstrations. It uses the
+same data and training budget as FlowScope. Sec. 4.4
+also tests predicting kinematics and scene flow together.
+4.2. Does pretraining on clinical video help?
+Table 1 summarizes the main results.
+Baselines leave a large gap.
+Trained from scratch, ACT
+picks up the needle within three attempts in only 54% of tri-
+als, and Diffusion Policy in 62%. π0.5 behaves differently:
+it has the highest first-attempt success among the baselines
+(42% with full fine-tuning), but it never recovers once its
+first attempt fails, so its success stays at 42% after three at-
+tempts. LoRA and full fine-tuning perform about the same,
+even though full fine-tuning uses twice the GPUs. On re-
+grasp, every baseline struggles to get past the pickup stage:
+at most 20% of trials reach the first handover, and none
+completes more than 2% of trials.
+Scene-flow pretraining helps; kinematics pretraining
+does not.
+With the ACT head, FlowScope raises pickup
+success from 54% to 90% and first-attempt success from
+22% to 54%. The gain grows with the difficulty of the task.
+On regrasp, FlowScope reaches the first handover in 52%
+of trials, compared with 4% for ACT from scratch and 12%
+for kinematics pretraining, and it is the best policy at ev-
+ery stage, including full-task completion (14%). In paired
+comparisons on regrasp, FlowScope outperforms ACT from
+scratch in 31 trials and underperforms in 4 (p < 10−5).
+Kinematics pretraining, in contrast, barely helps (60%
+pickup success, against 54% from scratch), even though its
+pretraining labels are actions in exactly the format of the
+demonstrations. In our setting, pretraining therefore helps
+when the target is the scene’s 3D motion, but not when it
+is standard behavior cloning on the surgeon’s recorded mo-
+tion.
+The gain holds for a generative action head.
+Replac-
+ing ACT’s head with the flow-matching action head leaves
+the conclusion unchanged. With this head, FlowScope suc-
+ceeds at pickup in 90% of trials, against 58% from scratch
+and 56% with kinematics pretraining. On regrasp, it reaches
+the first handover in 40% of trials, against 20% from scratch
+and 4% with kinematics pretraining. Here kinematics pre-
+training is worse than no pretraining, which suggests that
+predicting recorded kinematics can teach the trunk habits
+that hurt downstream performance; we return to this in
+Sec. 5. Full-task completion remains low for every policy
+(at most 14%); even with 2,255 demonstrations, regrasp is
+challenging for all the methods we evaluate.
+4.3. Does pretraining reduce the number of demon-
+strations needed?
+A main benefit of pretraining is that it reduces how much
+labeled data a downstream task needs [9, 22].
+We fine-
+tune each policy on 50% of the demonstrations for each
+task. All policies use the same subset, and its validation
+demonstrations are unchanged. We compare training from
+scratch, kinematics pretraining, and FlowScope, and keep
+every other setting identical, including the 100k fine-tuning
+steps. The three policies are fit with the ACT head, on the
+same configurations and checkpoints as in Tab. 1.
+Figure 3 shows the results. With half the demonstrations,
+FlowScope reaches 52% pickup success, compared with
+28% from scratch and 26% with kinematics pretraining, and
+matches a policy trained from scratch on all of the demon-
+6
+
+
+50%
+100%
+0
+25
+50
+75
+100
+52
+90
+Pickup success (%)
+50%
+100%
+0.0
+0.5
+1.0
+1.5
+0.98
+1.42
+Regrasp mean stages
+Scratch
+Kinematics
+Flow (ours)
+Scratch, all demos
+Fraction of demonstrations
+Figure 3. Data efficiency. Real-robot performance with 50% and
+100% of the demonstrations (ACT head, 50 trials per point). With
+half the demonstrations, FlowScope matches the pickup success
+of a policy trained from scratch on all of them and far exceeds it
+on regrasp, while kinematics pretraining is no better than training
+from scratch.
+strations (54%). The gap is larger on regrasp, the longer
+task. With 50% of the demonstrations, FlowScope reaches
+the first handover in 32% of trials, compared with 4% for
+training from scratch on all of them (0.98 vs. 0.34 mean
+stages). Kinematics pretraining, in contrast, loses most of
+its benefit with fewer demonstrations (0.60 to 0.16 mean
+stages on regrasp) and is no better than training from scratch
+on either task. Scene-flow pretraining can thus replace half
+of the expert demonstrations without loss on pickup and
+with a large gain on regrasp.
+4.4. What in the video helps?
+The previous sections show that scene-flow pretraining
+helps. We now ask which part of the target matters. Table 2
+compares eight pretraining targets, all computed from the
+same video anchors and tracked points, so that only the tar-
+get changes. Each pretrained trunk is fine-tuned on needle
+pickup with the ACT head. To evaluate this many models on
+the robot, we roll out two checkpoints (40k and 60k steps)
+per model, for 20 trials each; Tab. 1 indicates that pickup
+success is a good proxy, since the policies that do well on
+pickup also do well on regrasp.
+The targets vary along three axes, each changing one fac-
+tor at a time. The first is whether the model also predicts
+kinematics: kinematics only, kinematics plus metric 3D
+flow, and metric 3D flow only (FlowScope). The second is
+how the motion is represented, with kinematics held fixed:
+alongside kinematics, we predict metric 3D flow, 2D pixel
+tracks (no depth), 3D flow divided by the median scene
+depth (scale-free, as from a monocular depth estimate), or
+depth only (3D positions, no motion). The third is the type
+of pretraining flow head: L1 regression or flow matching,
+applied to both kinematics plus flow and flow only.
+Metric 3D motion is the most useful target we tested.
+With kinematics held fixed, metric 3D flow gives the high-
+Pretraining target
+Success 1st attempt
+None (from scratch)
+70%
+45%
+Kinematics
+70%
+50%
+Kinematics + 2D tracks
+70%
+45%
+Kinematics + depth only
+60%
+30%
+Kinematics + scale-free 3D flow
+35%
+20%
+Kinematics + metric 3D flow
+80%
+45%
+with flow-matching flow head
+65%
+20%
+Metric 3D flow only (FlowScope)
+100%
+55%
+with flow-matching flow head
+55%
+10%
+Table 2. Pretraining targets. Needle pickup success within three
+attempts and on the first attempt, after fine-tuning each pretrained
+trunk with the ACT head. n = 20 trials per target (10 needle
+configurations × the 40k and 60k checkpoints). All targets are
+computed from the same anchors and points.
+“Flow-matching
+flow head”: the pretraining flow head is generative instead of L1
+(Sec. 3.3); the fine-tuned policy is unchanged. Different session
+from Tab. 1.
+est success (80%), ahead of 2D pixel tracks (70%) and depth
+alone (60%), neither of which improves on no pretraining;
+we note that at n = 20, these gaps are suggestive rather than
+conclusive. Removing metric scale is clearly harmful: with
+scale-free flow, success drops to 35%. On held-out video,
+the scale-free flow head barely improved on predicting no
+motion, so without metric scale the target carries little us-
+able signal. We did not test these alternatives without kine-
+matics, so we cannot rule out that they would help on their
+own.
+Kinematics do not help, and may hurt.
+Predicting
+kinematics alone gives the same success as no pretraining
+(70%). Adding kinematics to metric 3D flow lowers suc-
+cess from 100% to 80% compared with flow alone. The best
+target uses no robot data at all, which is also what makes it
+applicable to calibrated clinical stereo video; we use logged
+kinematics only to select static-camera clips, which a visual
+camera-motion check could replace.
+A generative flow head does not help during pretrain-
+ing.
+Replacing the L1 head with a flow-matching head
+to predict 3D scene flow reduces success in both settings,
+and first-attempt success in particular (55% to 10% for flow
+only). For pretraining the trunk, a simple regression tar-
+get is preferable. This concerns only the pretraining flow
+head; the flow-matching action head used for fine-tuning in
+Sec. 4.2 works well on top of a trunk pretrained with L1.
+5. Why does scene flow pretraining help?
+Section 4 shows that scene-flow pretraining helps and that
+kinematics pretraining does not. In this section we ask why,
+by looking inside the policies.
+Prior work links rollout success in manipulation to vi-
+sual understanding: how well a model captures the task-
+7
+
+
+Depth abs rel ↓
+IoU ↑
+Features
+needle instr. image needle instr.
+DINOv2-IH (1024-d)
+0.10
+0.08
+0.04
+0.49
+0.95
+Pretrained trunk (512-d)
+Kinematics
+0.13
+0.15
+0.06
+0.44
+0.93
+Kin. + flow
+0.10
+0.11
+0.04
+0.44
+0.94
+Flow only (ours)
+0.08
+0.09
+0.04
+0.46
+0.95
+Fine-tuned policy (512-d)
+None (from scratch)
+0.14
+0.14
+0.07
+0.43
+0.93
+Kinematics
+0.15
+0.15
+0.06
+0.43
+0.92
+Kin. + flow
+0.13
+0.11
+0.05
+0.43
+0.93
+Flow only (ours)
+0.11
+0.12
+0.06
+0.44
+0.94
+Table 3. What the policy trunk encodes. Linear probes on 80
+held-out demonstrations. Bold: best trunk in each block. Over
+2,000 bootstrap resamples of the validation demonstrations, flow-
+only pretraining gives the lowest needle and instrument depth error
+among pretrained trunks.
+relevant objects in a scene [6, 46]. In FlowScope, however,
+the visual tokenizer (DINOv2) is shared by every policy and
+frozen, so it cannot explain the differences between them.
+We therefore analyze what the policy trunk encodes: the
+output of the ACT encoder at the image tokens, which is
+what the action queries (and, during pretraining, the point
+queries) read from.
+We compare the trunks right after
+pretraining and after fine-tuning, on frames from held-out
+demonstrations.
+Dense linear probes.
+To measure how much scene geom-
+etry a trunk encodes, we train a linear probe on its frozen
+features to predict needle masks, instrument masks, and
+stereo disparity (details in Sec. G.3). We report the relative
+depth error (abs rel) on needle pixels, instrument pixels, and
+the whole image, and the segmentation IoU for needle and
+instruments, on 80 held-out demonstrations (4.5k frames).
+Depth labels come from Fast-FoundationStereo [43], the
+same model used to build the scene-flow pretraining tar-
+gets, so flow pretraining could in principle favor these la-
+bels. However, the probe frames are robot demonstrations,
+for which the trunks never saw stereo labels during pretrain-
+ing. For reference, we also probe the frozen DINOv2 tokens
+that every trunk takes as input; these are wider (1024-d in-
+stead of 512-d), limiting direct comparison.
+Flow pretraining builds metric needle geometry, fine-
+tuning maintains it.
+Among the pretrained trunks, the
+flow-only trunk of FlowScope encodes the scene best on
+every probe (Tab. 3). It is also the only trunk that encodes
+the needle’s depth better than the DINOv2 features it takes
+as input (0.08 vs. 0.10 abs rel), even though it has half as
+many channels.
+Pretraining with kinematics has the op-
+posite effect: kinematics-only pretraining encodes needle
+depth worse than its own input (0.13 vs. 0.10), while adding
+flow restores it to the input’s level.
+Fine-tuning on the pickup demonstrations removes some
+of this information from every trunk, but the ranking re-
+mains consistent. After fine-tuning, the FlowScope policy
+still encodes the needle’s depth best (0.11), ahead of kin. +
+flow (0.13) and of scratch and kinematics, which are tied
+(0.14 and 0.15). The ranking on needle depth (flow only >
+kin. + flow > scratch and kinematics) is also the ranking
+of real-robot success in Tabs. 1 and 2, whereas offline ac-
+tion error on held-out demonstrations is nearly identical for
+all four policies (Sec. G.2). Consistent with prior work [6],
+how well a representation captures the task-relevant object
+is associated with how well the policy performs across the
+four initializations we compare.
+Kinematics pretraining teaches the trunk to rely on the
+robot state rather than the scene.
+Besides the image to-
+kens, ACT’s encoder receives a token for the robot state,
+the current end-effector pose of both instruments. Imitation
+policies that predict actions from such proprioceptive input
+are known to rely on it. Although the detriment is indis-
+tinguishable offline, these models fail at rollout and closed
+loop [12, 44]. We therefore measure how much of the image
+tokens’ attention goes to the state token (Sec. G.1). After
+kinematics pretraining, the image tokens give about a quar-
+ter of their attention to it (24.5%), and the habit survives
+fine-tuning (21.3%, compared with about 8% for scratch
+and FlowScope). Flow pretraining cannot learn this short-
+cut, since its state input is zero. We therefore attribute the
+weakness of kinematics pretraining to this shortcut rather
+than to the kinematic target itself; pretraining on kinematics
+with the state masked is a control we leave to future work.
+6. Conclusion
+We present FlowScope, a method that pretrains surgical pol-
+icy networks on clinical video by forecasting how points
+in the scene move in metric 3D. Fine-tuned and evalu-
+ated on a minimally invasive surgical robot, FlowScope im-
+proves needle pickup and needle regrasp over training from
+scratch, with both a deterministic and a generative action
+head.
+The pretraining target matters: metric 3D motion
+helps, while the recorded kinematics do not. Flow pretrain-
+ing builds a trunk that encodes the needle’s 3D geometry,
+whereas kinematics pretraining teaches it to read the robot
+state instead of the scene.
+Limitations.
+We evaluate on a single platform and on su-
+ture pads; transfer to other robots and to ex vivo or in vivo
+tissue remain as future work. Our labels are pseudo-labels
+that inherit the errors of the stereo and optical-flow mod-
+els, and absolute success on the full regrasp task is still low.
+We compare pretraining targets within one architecture, not
+against other video-pretraining systems such as SurgVIL or
+Surgical WAM, whose data and platforms differ from ours.
+We see FlowScope as a first step toward policies that learn
+from the vast record of surgeries already performed.
+8
+
+
+LLM Usage Statement.
+The authors used Claude Opus 5
+to assist with the writing of this manuscript; authors wrote
+the initial draft and iteratively improved with the help of AI
+throughout the manuscript. The authors also employed the
+same AI model for code writing and figure generation.
+References
+[1] Arthur Allshire, Himanshu Gaurav Singh, Ritvik Singh,
+Adam Rashid, Hongsuk Choi, David McAllister, Justin Yu,
+Yiyuan Chen, Huang Huang, Pieter Abbeel, Xi Chen, Rocky
+Duan, Phillip Isola, Jitendra Malik, Fred Shentu, Guanya
+Shi, Philipp Wu, and Angjoo Kanazawa. Scalable behav-
+ior cloning with open data, training, and evaluation, 2026.
+2
+[2] Wenrui Bao, Tianyun Jiang, Zhiben Chen, Ser-Nam Lim, Pe-
+ter D Peng, and Yuzhang Shang. Surgical wam: A world-
+action model for data-efficient surgical robot learning. arXiv
+preprint arXiv:2608.11204, 2026. 3
+[3] Kevin Black et al. π0: A vision-language-action flow model
+for general robot control. arXiv preprint arXiv:2410.24164,
+2024. 1, 2, 5
+[4] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Joseph Dabis, Chelsea Finn, Keerthana Gopalakr-
+ishnan, Karol Hausman, Alex Herzog, Jasmine Hsu, et al.
+Rt-1: Robotics transformer for real-world control at scale.
+arXiv preprint arXiv:2212.06817, 2022. 1
+[5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding,
+Danny Driess, Avinava Dubey, Chelsea Finn, et al. Rt-2:
+Vision-language-action models transfer web knowledge to
+robotic control. arXiv preprint arXiv:2307.15818, 2023. 1
+[6] Kaylee Burns, Zach Witzel, Jubayer Ibn Hamid, Tianhe Yu,
+Chelsea Finn, and Karol Hausman. What makes pre-trained
+visual representations successful for robust manipulation?
+arXiv preprint arXiv:2312.12444, 2023. 2, 8, 17
+[7] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas
+Usunier, Alexander Kirillov, and Sergey Zagoruyko. End-to-
+end object detection with transformers. In European confer-
+ence on computer vision, pages 213–229. Springer, 2020. 4
+[8] Changwei Chen, Xiao Liang, Yinuo Yang, Nicole Shen,
+Peihan Zhang, Sara Wickenhiser, Zekai Liang, Soofiyan
+Atar, and Michael Yip. SurgFlow: 3D object-centric con-
+tact flow for surgical robot manipulation.
+arXiv preprint
+arXiv:2609.33237, 2026. 2
+[9] Ting Chen, Simon Kornblith, Kevin Swersky, Mohammad
+Norouzi, and Geoffrey E Hinton. Big self-supervised mod-
+els are strong semi-supervised learners. Advances in neural
+information processing systems, 33:22243–22255, 2020. 6
+[10] Xinhao Chen, JuoTung Chen, Nigel Nelson, Antony Gold-
+enberg, Jesse Haworth, Sean D Huver, and Axel Krieger.
+Surgvil: Scaling surgical robot imitation learning with open-
+source surgical videos.
+arXiv preprint arXiv:2608.16058,
+2026. 3
+[11] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric
+Cousineau, Benjamin Burchfiel, and Shuran Song. Diffu-
+sion policy: Visuomotor policy learning via action diffusion.
+In Robotics: Science and Systems (RSS), 2023. 1, 2, 5, 6, 15
+[12] Pim De Haan, Dinesh Jayaraman, and Sergey Levine. Causal
+confusion in imitation learning. Advances in neural informa-
+tion processing systems, 32, 2019. 8
+[13] Ronald de Jong, HJ Carolus, HA Franciscus, Romy C van
+Jaarsveld, Richard van Hillegersberg, PW Josien, Peter HN
+de With, Yasmina al Khalil, Fons van Der Sommen, et al.
+Scaling up self-supervised learning for improved surgical
+foundation models. Medical Image Analysis, page 103873,
+2025. 1
+[14] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina
+Toutanova. Bert: Pre-training of deep bidirectional trans-
+formers for language understanding. In Proceedings of the
+2019 conference of the North American chapter of the asso-
+ciation for computational linguistics: human language tech-
+nologies, volume 1 (long and short papers), pages 4171–
+4186, 2019. 1
+[15] Bardienus P Duisterhof, Kaifeng Zhang, Adam Hung,
+Bowen Wen, Stan Birchfield, Yunzhu Li, Deva Ramanan,
+and Jeffrey Ichnowski. Pointzero: 3d point track comple-
+tion for learning transferable 3d dynamics. arXiv preprint
+arXiv:2609.19142, 2026. 2
+[16] Evans Han, Yunfan Jiang, Yingke Wang, Haoyue Xiao,
+Huang Huang, Jianwen Xie, Jiajun Wu, Li Fei-Fei, and
+Ruohan Zhang.
+Stereopolicy:
+Improving robotic ma-
+nipulation policies via stereo perception.
+arXiv preprint
+arXiv:2605.09989, 2026. 18, 19
+[17] John J Han and Jie Ying Wu. Endopbr: Photorealistic syn-
+thetic data for surgical 3d vision via physically-based render-
+ing. In 2026 IEEE/CVF Winter Conference on Applications
+of Computer Vision (WACV), pages 5601–5611. IEEE, 2026.
+1
+[18] John J Han, Adam Schmidt, Max Allan, Jie Ying Wu, and
+Omid Mohareri. Scared-c: Corrected camera poses for endo-
+scopic depth estimation. arXiv preprint arXiv:2605.16628,
+2026. 4
+[19] John J Han, Adam Schmidt, Muhammad Abdullah Jamal,
+Jie Ying Wu, and Omid Mohareri.
+Dart: Depth-as-target
+pretraining for surgical vision foundation models.
+arXiv
+preprint arXiv:2609.04555, 2026. 1, 3, 4
+[20] Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr
+Doll´ar, and Ross Girshick. Masked autoencoders are scalable
+vision learners. In 2022 IEEE/CVF conference on computer
+vision and pattern recognition (CVPR), pages 15979–15988.
+IEEE, 2022. 1
+[21] Yufan He, Pengfei Guo, Mengya Xu, Zhaoshuo Li, An-
+driy Myronenko, Dillan Imans, Bingjie Liu, Dongren Yang,
+Mingxue Gu, Yongnan Ji, et al. Cosmos-h-surgical: Learn-
+ing surgical robot policies from videos via world modeling.
+arXiv preprint arXiv:2512.23162, 2025. 3
+[22] Olivier Henaff. Data-efficient image recognition with con-
+trastive predictive coding.
+In International conference on
+machine learning, pages 4182–4192. PMLR, 2020. 6
+[23] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-
+Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+Lora: Low-rank adaptation of large language models. arXiv
+preprint arXiv:2106.09685, 2021. 6, 15
+[24] Adam Hung, Bardienus Pieter Duisterhof, and Jeffrey Ich-
+nowski.
+3pointr: From human videos to robot policies
+9
+
+
+with 3d point-track plans. arXiv preprint arXiv:2603.08485,
+2026. 2
+[25] Peter Kazanzides et al. An open-source research kit for the
+da vinci surgical system. In ICRA, 2014. 3
+[26] Ji Woong Kim et al. Surgical robot transformer (SRT): Im-
+itation learning for surgical tasks. In Conference on Robot
+Learning (CoRL), 2024. 1, 3, 5
+[27] Seungjae Lee, Yoonkyo Jung, Inkook Chun, Yao-Chih
+Lee, Zikui Cai, Hongjia Huang, Aayush Talreja, Tan Dao,
+Yongyuan Liang, Jia-Bin Huang, et al.
+Tracegen: World
+modeling in 3d trace space enables learning from cross-
+embodiment videos. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+20721–20731, 2026. 2
+[28] Xiao Liang, Fei Liu, Yutong Zhang, Yuelei Li, Shan Lin,
+and Michael Yip. Real-to-sim deformable object manipula-
+tion: Optimizing physics models with residual mappings for
+robotic surgery. In 2024 IEEE international conference on
+robotics and automation (ICRA), pages 15471–15477. IEEE,
+2024. 1
+[29] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow matching for generative
+modeling. In ICLR, 2023. 5, 15
+[30] Dantong Niu, Yuvan Sharma, Haoru Xue, Giscard Biamby,
+Junyi Zhang, Ziteng Ji, Trevor Darrell, and Roei Herzig. Pre-
+training auto-regressive robotic models with 4d representa-
+tions. arXiv preprint arXiv:2502.13142, 2025. 2
+[31] Maxime Oquab et al. DINOv2: Learning robust visual fea-
+tures without supervision. Transactions on Machine Learn-
+ing Research, 2024. 1, 2, 4, 12
+[32] Abby O’Neill, Abdul Rehman, Abhiram Maddukuri, Ab-
+hishek Gupta, Abhishek Padalkar, Abraham Lee, Acorn Poo-
+ley, Agrim Gupta, Ajay Mandlekar, Ajinkya Jain, et al. Open
+x-embodiment: Robotic learning datasets and rt-x models:
+Open x-embodiment collaboration 0. In 2024 IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pages 6892–6903. IEEE, 2024. 1
+[33] William Peebles and Saining Xie. Scalable diffusion models
+with transformers. In ICCV, 2023. 5, 15
+[34] Alejandra Perez, Chinedu Nwoye, Ramtin Raji Kermani,
+Omid Mohareri, and Muhammad Abdullah Jamal.
+Sur-
+glavi: Large-scale hierarchical dataset for surgical vision–
+language representation learning. Medical Image Analysis,
+page 103982, 2026. 1
+[35] Physical Intelligence et al. π0.5: a vision-language-action
+model with open-world generalization.
+arXiv preprint
+arXiv:2504.16054, 2025. 1, 2, 6, 15
+[36] Alec Radford, Karthik Narasimhan, Tim Salimans, Ilya
+Sutskever, et al. Improving language understanding by gen-
+erative pre-training. 2018. 1
+[37] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario
+Amodei, Ilya Sutskever, et al. Language models are unsu-
+pervised multitask learners. OpenAI blog, 1(8):9, 2019. 1
+[38] St´ephane Ross, Geoffrey Gordon, and Drew Bagnell. A re-
+duction of imitation learning and structured prediction to no-
+regret online learning. In Proceedings of the fourteenth inter-
+national conference on artificial intelligence and statistics,
+pages 627–635. JMLR Workshop and Conference Proceed-
+ings, 2011. 5
+[39] Paul Maria Scheikl, Eleonora Tagliabue, Bal´azs Gyenes,
+Martin Wagner,
+Diego Dall’Alba,
+Paolo Fiorini,
+and
+Franziska Mathis-Ullrich. Sim-to-real transfer for visual re-
+inforcement learning of deformable object manipulation for
+robot-assisted surgery. IEEE Robotics and Automation Let-
+ters, 8(2):560–567, 2022. 1
+[40] Adam Schmidt, Mert Asim Karaoglu, Soham Sinha, Min-
+gang Jang, Ho-Gun Ha, Kyungmin Jung, Kyeongmo Gu, Ih-
+san Ullah, Hyunki Lee, Jon´aˇs ˇSer`ych, et al. Point tracking in
+surgery–the 2024 surgical tattoos in infrared (stir) challenge.
+arXiv preprint arXiv:2503.24306, 2025. 4
+[41] Oriane Sim´eoni, Huy V Vo, Maximilian Seitzer, Federico
+Baldassarre, Maxime Oquab, Cijo Jose, Vasil Khalidov,
+Marc Szafraniec, Seungeun Yi, Micha¨el Ramamonjisoa,
+et al. Dinov3. arXiv preprint arXiv:2508.10104, 2025. 1
+[42] Yihan Wang, Lahav Lipson, and Jia Deng. SEA-RAFT: Sim-
+ple, efficient, accurate RAFT for optical flow.
+In ECCV,
+2024. 2, 4, 11
+[43] Bowen Wen, Shaurya Dewan, and Stan Birchfield.
+Fast-
+foundationstereo: Real-time zero-shot stereo matching. In
+Proceedings of the IEEE/CVF conference on computer vi-
+sion and pattern recognition, pages 7513–7524, 2026. 2, 4,
+8, 11, 17
+[44] Chuan Wen, Jierui Lin, Trevor Darrell, Dinesh Jayaraman,
+and Yang Gao. Fighting copycat agents in behavioral cloning
+from observation histories. Advances in Neural Information
+Processing Systems, 33:2564–2575, 2020. 8
+[45] Chuan Wen, Xingyu Lin, John So, Kai Chen, Qi Dou, Yang
+Gao, and Pieter Abbeel. Any-point trajectory modeling for
+policy learning. In Robotics: Science and Systems (RSS),
+2024. 2
+[46] Xin Wen, Bingchen Zhao, Yilun Chen, Jiangmiao Pang, and
+Xiaojuan Qi.
+A data-centric revisit of pre-trained vision
+models for robot learning. In CVPR, 2025. 2, 8
+[47] Menglong Ye, Lin Zhang, Stamatia Giannarou, and Guang-
+Zhong Yang. Real-time 3d tracking of articulated tools for
+robotic surgery. In International conference on medical im-
+age computing and computer-assisted intervention, pages
+386–394. Springer, 2016. 1
+[48] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. In Robotics: Science and Systems (RSS),
+2023. 1, 2, 4
+[49] Haoyi Zhu, Honghui Yang, Yating Wang, Jiange Yang,
+Limin Wang, and Tong He. Spa: 3d spatial-awareness en-
+ables effective embodied representation.
+In International
+Conference on Learning Representations, pages 26361–
+26391, 2025. 2
+10
+
+
+Supplementary Material
+Section A describes the clinical video and how we turn it
+into scene-flow labels. Section B describes the robot, the
+tasks, and how we evaluate. Sections C to E give the train-
+ing details of the DINOv2, of pretraining and fine-tuning,
+and of the action heads. Section F reports the full rollout
+results, Sec. G additional analysis, and Sec. H additional
+experiments. Citation numbers refer to the reference list of
+the main paper.
+A. Clinical video and scene-flow labels
+A.1. Clinical video pool
+In collaboration and partnerships with various hospitals, we
+curate a dataset of recordings from a minimally invasive sur-
+gical robotic system containing real surgeries on patients.
+We sampled 1,296 procedure videos; 121 of them yield no
+anchor that passes the filters (for example, the camera never
+stays still while an instrument is driven), leaving 1,175 pro-
+cedures, split by video into 1,149 training and 26 validation
+videos so that no validation frame comes from a training
+procedure. Of the 2.69M candidate anchors (one every 10
+frames with a full 1.7 s window after it), 1.35M (50%) pass
+the anchor filters; the median video keeps 59% of its candi-
+dates.
+Ethics and broader impact statement.
+Our work con-
+cerns pretraining methods for surgical robot autonomy, a
+safety-critical domain in which policy errors could harm pa-
+tients. All robot experiments in this paper are performed on
+suture pads in a laboratory setting; no policy was deployed
+on humans or animals. FlowScope is not a clinical system:
+the success rates we report, while substantially improved,
+remain far below what clinical use would require, and any
+translation would require extensive validation, and regula-
+tory approval.
+The clinical videos were recorded during routine robot-
+assisted procedures, with patient consent for the use of their
+data, and were obtained under consent agreements overseen
+by an institutional review board or equivalent body; the data
+cannot be released. All recordings are de-identified. The
+institution and review body will be named upon acceptance,
+to preserve anonymity.
+A.2. Label generation
+Each training clip spans 100 frames: an anchor frame and
+ten keyframes spaced 10 frames apart after it. Depth comes
+from Fast-FoundationStereo [43] on the rectified stereo pair,
+and 2D motion from SEA-RAFT [42] between consecutive
+keyframes. Since the recordings are natively rectified, each
+frame’s stereo calibration converts disparity to metric depth.
+Points are chained through the optical flow from the anchor
+to each keyframe and lifted to 3D with the depth at each
+keyframe, giving each point’s metric 3D position at the an-
+chor, P0, and its displacement at each keyframe. We use
+H200 GPUs for pseudolabel generation and save labels on
+disk at 518 × 518 in hdf5 format.
+A.3. Filtering
+We keep a clip only if the camera is static and at least one
+instrument is driven, and a point’s track only while its depth
+and flow pass the consistency checks in Tab. S1. A track
+that fails at one keyframe is dropped from that keyframe
+onwards.
+Stage
+Test
+Threshold
+Clip
+Camera static
+< 0.5 mm and < 0.5◦
+over the clip
+An instrument is driven
+≥1 arm for the whole
+window
+Kinematics readable
+all frames
+Depth
+Left–right consistency
+< 1 px
+Brightness
+> 0.03
+Flying pixels
+3%
+Depth range
+5–300 mm
+Flow
+Fwd–bwd consistency
+<
+1 px + 5% |f| (half
+res.)
+Photometric change
+< 0.12
+Depth edge
+5%
+Depth change across keyframes |∆Z| < 25%
+Anchor Surviving points
+≥16
+Table S1. Label filters. We apply numerous filtering steps to en-
+sure training data quality. We only use clips where the camera is
+static, at least one instrument is being driven, and kinematic sig-
+nals are valid. We convert disparity maps in both L ↔R directions
+and only use pixels where they agree up to a pixel. We also ignore
+dark pixels and only use depth values between 5-300 mm. We ap-
+ply similar checks for optical flow.
+A.4. Point sampling
+We store 512 points per anchor: 256 sampled uniformly
+over the valid pixels and 256 sampled in proportion to their
+motion. During pretraining, each anchor contributes 256
+point queries, up to half of them drawn from points that
+move more than 5 mm and the rest uniformly.
+How much of the scene moves.
+Figure S1 (left) shows
+the 3D displacement of the uniformly sampled points over
+the 1.7 s horizon, measured on 232k anchors (200 per
+video). The median point moves 1.6 mm, and only 12.8%
+move 5 mm or more (3.8% move 10 mm or more). Motion
+is nevertheless present almost everywhere: 92% of anchors
+contain at least one such mover, and in 46% of anchors at
+least a tenth of the points move. This imbalance is why we
+sample points in proportion to their motion: among the 512
+11
+
+
+≤0.1
+1
+10
+100
+3D displacement in 1.7 s (mm)
+0
+1
+2
+3
+4
+5
+6
+% of points
+13% move
+≥5 mm
+0.0
+0.5
+1.0
+1.5
+time after anchor (s)
+0
+20
+40
+60
+80
+100
+% of tracks valid
+Figure S1. Label statistics. Left: 3D displacement of uniformly
+sampled points over the 1.7 s horizon (dotted: the 5 mm mover
+threshold). Right: fraction of tracked points still valid at each
+keyframe.
+stored points, the median anchor has 108 movers, and 42%
+of anchors have enough to fill all 128 mover queries.
+Track survival.
+A track ends at the first keyframe where
+it fails a check. 86% of tracked points are still valid after
+one keyframe (0.17 s) and 52% at the end of the horizon
+(Fig. S1, right).
+B. Robot setup, tasks, and evaluation
+B.1. Robot setup
+We use a minimally invasive surgical robotics system
+equipped with a stereo endoscope and two bipolar forceps
+for gripping. For all kinematics, we operate in the end-
+effector Cartesian space from the camera space. We use rel-
+ative translation deltas between each sample of each clip or
+episode and absolute rotations/gripper angles. This yields
+13 values per arm (3 translation, 9 rotation, 1 gripper an-
+gle), or 26 values for two arms. Similar to prior work, we
+insert the endoscope and two arms into a mock abdominal
+cavity, where we also place a suture pad and a needle. For
+the sake of these experiments, we cut the needle thread short
+to improve needle pickup and regrasp; future work will use
+a needle with thread of proper length for the full suture. The
+physical set up of the robot can be seen in Figure S3
+B.2. Tasks and needle configurations
+Needle pickup.
+The needle pick up task is simply using
+the dominant arm (right) to grab and lift the needle. We first
+collect 557 demonstrations to train a baseline ACT model
+with. We rollout this ACT model and further collect 341
+DAgger data to correct the policy when it starts to miss the
+needle. This yields 898 episodes. 3 trained operators per-
+formed data collection, and the average duration of the task
+is 4.9 ± 3.4 s. The policy is deemed to be successful if it
+is able to pick up the needle within 3 tries and 500 model
+steps.
+Needle regrasp.
+The needle regrasp task is comprised of
+3 subtasks: (1) pick up the needle with the dominant arm,
+(2) hand it over to the non-dominant arm, and (3) hand it
+back to the dominant arm. This is an essential step before
+the dominant arm throws the suture to pierce through the tis-
+sue. We first collect 1889 demonstrations with one skilled
+operator. We train a baseline ACT model with these demon-
+strations and then collect 366 DAgger demonstrations to
+correct the policy with human intervention. In total, this
+yields 2255 episodes. The average duration of the task is
+8.8 ± 2.9 s.
+Evaluation configurations.
+Every policy is evaluated on
+the same ten needle configurations, shown in Figure S4.
+These are chosen for a wide variety of needle poses and po-
+sitions throughout the suture pad. We initialize the arms at
+the beginning of each policy such that the grippers are along
+each side of the image boundaries. These needle configura-
+tions are outside of the training set to ensure generalizability
+of the models.
+C. Surgical DINOv2 Tokenizer
+Pretraining details.
+We refer to the DINOv2 as a tok-
+enizer rather than the encoder to reduce confusion with the
+ACT encoder. We pre-train the surgical vision model using
+the corpus described in Sec. 3.2. Training employs a dy-
+namic video data loader that samples and decodes frames
+directly from surgical videos on the fly, rather than rely-
+ing on a fixed set of pre-extracted frames. Following DI-
+NOv2 [31], we adopt a two-stage pretraining strategy. We
+first pretrain the ViT-L/14 at 224 × 224 resolution for 625K
+iterations, followed by 10K iterations of high-resolution
+adaptation at 518 × 518. This strategy enables the model
+to capture finer spatial details important for dense predic-
+tion tasks, such as segmentation and detection, without in-
+curring the computational cost of high-resolution training
+from scratch.
+Both stages are trained on eight NVIDIA
+H200 GPUs, using reduced global batch sizes relative to the
+original DINOv2 configuration due to computational con-
+straints. Additional training hyperparameters are provided
+in Tab. S2.
+C.1. Vision model comparison study
+To ensure the use of the best vision model, we train vanilla
+ACT with (1) off-the-shelf DINOv2, trained on LVD-142M,
+(2) off-the-shelf DINOv3, trained on LVD 1689M, and (3)
+the surgical DINOv2 used in the paper. To ensure equal
+comparison with the in-house DINOv2, we use the ViT-L
+4 register token variants, use IN-1k image normalization
+stats, and also train at 518px resolution. Since DINOv3 uses
+patch size of 16, we set the image size to 592 instead so that
+the number of tokens are the same.
+12
+
+
+Frame 1
+Frame T
+Figure S2. Samples of scene-flow pseudolabels. Tracks of the moving points over frames. For the purposes of visualization, we only
+draw the top 25 pixels that move more than 20 mm. In reality, our labeling pipeline stores 512 tracks per clip; during training, FlowScope
+samples 256.
+Figure S3. Physical setup for data collection and rollout for needle
+pickup and regrasp tasks.
+We train and evaluate on the needle pick up task over 5
+needle configurations and 5 checkpoints. Figure S5 shows
+the results. Off the shelf DINO models underperform com-
+pare to in-domain surgical models, despite the fact that su-
+ture pads are not in-vivo. However, surgical DINOv2 has
+been trained with images with surgical needles and robotic
+tools, which improves the downstream policy learning.
+D. Pretraining and fine-tuning details
+D.1. Architecture
+The encoder input is a latent token, a robot-state token, and
+the 1,369 DINOv2 image tokens. The decoder has 30 action
+Figure S4. Evaluation configurations. The ten evaluation needle
+configurations for needle pickup and regrasp.
+queries and, during pretraining, 256 point queries. Each
+point query is anchored at a pixel u: it is the sum of a pro-
+jected Fourier embedding of u, a projection of the encoder
+output bilinearly sampled at u, and a learned query-type
+embedding. Because the point features are read from the
+encoder output rather than from the frozen DINOv2 tokens,
+the flow loss trains the encoder both through these samples
+and through the decoder’s cross-attention. The flow head is
+a shallow MLP on the decoded point queries that predicts
+13
+
+
+Setting
+Stage 1
+Stage 2
+Architecture
+ViT-L/14
+ViT-L/14
+Input resolution
+224 × 224
+518 × 518
+Patch tokens
+256
+1,369
+Training iterations
+625K
+10K
+Global batch size
+1280
+256
+Optimizer
+AdamW
+AdamW
+Learning rate
+1.34e-4
+2.5e-5
+Training data
+Video frames (online sampling)
+Table S2. Surgical DINOv2 pretraining. The model is trained
+in two stages using frames sampled dynamically from surgical
+videos. Since training uses an iterable dataset, the number of dis-
+tinct frames encountered is not explicitly tracked.
+DINOv2
+(off the shelf)
+DINOv3
+(off the shelf)
+Surgical DINOv2
+(ours)
+0
+25
+50
+75
+100
+8/25
+8/25
+16/25
+Pickup success (%)
+Figure S5. Choice of vision model. Needle-pickup success of
+ACT trained from scratch with each frozen DINO (25 trials: 5
+configurations × 5 checkpoints, success within three attempts).
+The surgical DINOv2 doubles success over off-the-shelf DINOv2
+and DINOv3.
+P0 and the cumulative 3D displacement at each of the ten
+keyframes, trained with an L1 loss.
+Point queries are appended to the action queries in a sin-
+gle decoder pass. In all pretraining variants, a self-attention
+mask prevents the action queries from attending to the point
+queries, while the point queries may attend to the action
+queries. The action queries therefore see the same inputs
+during pretraining as at fine-tuning, when the point queries
+and flow head are removed and the decoder runs on the ac-
+tion queries alone. For flow-only pretraining, the robot state
+and the CVAE latent are set to zero and the action loss is off.
+The action head then receives no gradient, but the action-
+query embeddings still do, because the point queries attend
+to them.
+The architectural details of FlowScope are shown in
+Tab. S3.
+D.2. Hyperparameters
+Hyperparameters are shown in Table S4.
+E. Action heads and baselines
+E.1. Flow-matching action head
+The FM head denoises the whole 30-step action chunk at
+once (19.5M parameters).
+Each chunk step is a token:
+its noisy action is projected to the trunk width (512) and
+Architecture
+Width / heads (head dim)
+512 / 8 (64)
+Encoder / decoder layers
+4 / 7
+FFN width
+3,200
+Image tokens
+1,369 (1024→512-d)
+Parameters
+Transformer encoder
+17.33M
+Transformer decoder
+37.69M
+Input projection + positions
+1.23M
+Trunk (pretrained)
+56.25M
+Point queries + flow head (PT only)
+0.56M
+State / latent tokens
+0.03M
+Action queries + ACT action head
+0.03M
+CVAE encoder (FT only)
+17.41M
+Total, excluding DINOv2
+74.29M
+DINOv2 ViT-L/14 (frozen)
+304.37M
+Table S3. Policy architecture. Parameter counts from the flow-
+only pretraining checkpoint (PT: pretraining, FT: fine-tuning).
+Only the trunk is pretrained and transferred to fine-tuning; the
+point queries and flow head are discarded, and the state and la-
+tent tokens, the CVAE encoder, and the action head start from
+their initialization. The flow-matching action head (Sec. E.1) adds
+19.5M parameters in place of the CVAE encoder and the ACT ac-
+tion head.
+Pretraining
+Fine-tuning
+Data
+clinical video
+robot demos
+Iterations
+100k
+100k
+Batch size
+512
+128
+Optimizer
+AdamW
+AdamW
+Learning rate (trunk)
+8 × 10−5
+4 × 10−5
+LR schedule
+constant
+constant∗
+Weight decay
+10−4
+10−4
+Precision
+bf16
+bf16∗
+Action chunk
+–
+30 (2 s)
+Point queries / anchor 256 (≤128 movers)
+–
+Loss
+L1
+ACT / FM
+Augmentation
+photometric
++ state noise†
+Checkpoint selection
+best val flow
+every 20k steps
+GPUs / wall-clock
+4 H200
+1 A100
+Table S4. Training hyperparameters. Both stages warm up the
+learning rate over 500 steps; it is 10−5 at a reference batch of 8,
+scaled by the square root of the batch size. Pretraining uses an L1
+loss on P0 and the displacements; fine-tuning uses ACT’s L1 +
+KL (β=10) or the flow-matching loss. The DINOv2 is frozen and
+the input is the left image at 518×518 in both stages. ∗With the
+flow-matching action head: cosine decay to 10% of the peak rate,
+the head in fp32, and an EMA of the weights (decay 0.9995) for
+evaluation and checkpoints.
+†Gaussian noise on the robot state,
+1.5 mm and 3◦.
+summed with a learned step embedding and a condition-
+ing vector cτ, the decoder output of that step’s action query
+plus a sinusoidal embedding of the flow time t. Four trans-
+former blocks (8 heads, MLP ratio 4) let the steps attend to
+each other, so a sampled chunk is one coherent trajectory,
+and cτ modulates every attention and MLP sublayer through
+14
+
+
+adaptive layer norm with zero-initialized gates (AdaLN-
+Zero [33]).
+We use the linear (rectified-flow) path of flow match-
+ing [29]: for a normalized chunk x1 and Gaussian noise
+x0, xt = (1 −t) x0 + t x1 with t ∼U(0, 1), and the head
+regresses the velocity x1−x0 with a squared error, averaged
+over two (t, x0) draws per chunk and masked over padded
+steps. At test time we integrate from noise with 10 Euler
+steps.
+The head never sees the robot state directly. The state
+enters, as in ACT, through the state token of the transformer
+encoder, which the action queries attend to in the decoder;
+the CVAE is not used with this head. Actions are the same
+as for the ACT head (per arm: translation relative to the pre-
+vious step, absolute rotation matrix, absolute gripper angle)
+and are z-scored per dimension with the training statistics
+of the initialization’s data.
+E.2. Stabilizing flow-matching fine-tuning
+Our first FM runs (v1) diverged during fine-tuning: the
+training loss fell to about 0.07 and then rose to about 1.0
+between 9k and 22k steps. Three changes fixed this (v2):
+running the head in fp32 under mixed precision, a cosine
+learning-rate schedule decaying to 10% of its peak, and an
+exponential moving average of the weights (decay 0.9995)
+used for evaluation. All FM results in the paper use v2.
+E.3. Baselines
+Diffusion Policy.
+We train Diffusion Policy [11] with its
+official implementation and its real-robot UNet recipe, re-
+placing only the image tokenizer so that it matches FlowS-
+cope: our frozen surgical DINOv2 at 518×518, whose to-
+kens are pooled into 32 spatial-softmax keypoints and a
+128-d global feature. Demonstrations are converted with
+the same frame stride as ACT (every 4th native frame);
+the policy observes the left image and the 26-d robot state
+for nobs=2 steps, predicts a horizon of 16 steps (64 native
+frames), and executes 8. Actions use the same represen-
+tation as ACT (per arm: translation relative to the previ-
+ous step, absolute rotation matrix, absolute gripper angle),
+range-normalized as in Diffusion Policy. The Condition-
+alUnet1D is trained with 100 DDPM noise levels (squared-
+cosine schedule, ϵ-prediction) and sampled with 8 DDIM
+steps.
+We train with AdamW (learning rate 10−4, 500
+warmup steps, cosine decay), batch 64, and an EMA of the
+weights, for 60k gradient steps on one A100, and save six
+evenly spaced checkpoints. Validation loss reaches its min-
+imum near 20k steps and rises afterwards; we roll out 5
+checkpoints similar to FlowScope.
+π0.5 model.
+We fine-tune π0.5 [35] from the public base
+checkpoint with the openpi code, both fully and with
+LoRA [23]. Each episode is paired with its task instruc-
+tion, “pick up the needle” or “pickup the needle and regrasp
+with the other tool”. The model receives the left endoscope
+image and the 26-d robot state and predicts chunks of the
+same 26-d actions as ACT, normalized with statistics com-
+puted on the training demonstrations by openpi’s normal-
+ization script. LoRA fine-tuning uses 2 A100 GPUs and
+full fine-tuning 4; we roll out the checkpoints at 10k, 15k,
+20k, 25k, and 30k steps.
+F. Full rollout results
+F.1. Main results
+Table 1 reports success pooled over all checkpoints and con-
+figurations; here we break it down. Table S5 gives successes
+per fine-tuning checkpoint, and Fig. S6 shows every trial.
+The advantage of FlowScope holds at every checkpoint and
+with both action heads, and it is not driven by a few config-
+urations: the baselines fail repeatedly on the same configu-
+rations (2, 3, and 8) across checkpoints, where FlowScope
+mostly succeeds, often on the first attempt.
+Checkpoint
+Total
+Pretraining
+Head 20k 40k 60k 80k 100k
+1st
+≤3
+None
+ACT
+5
+7
+4
+5
+6
+11/50 27/50
+None
+FM
+4
+6
+5
+7
+7
+7/50
+29/50
+Kinematics
+ACT
+6
+7
+9
+4
+4
+15/50 30/50
+Kinematics
+FM
+5
+7
+4
+5
+7
+3/50
+28/50
+Flow (ours) ACT
+8
+10
+10
+8
+9
+27/50 45/50
+Flow (ours) FM
+10
+9
+8
+8
+10
+27/50 45/50
+Table S5. Needle pickup, by fine-tuning checkpoint. Successes
+within three attempts, out of the 10 needle configurations at each
+checkpoint, and totals over the 50 trials (first attempt and within
+three).
+Pretraining
+Head
+Pickup
+Handover 1
+Full task
+None
+ACT
+28
+4
+2
+Kinematics
+ACT
+46
+12
+2
+Kin. + flow
+ACT
+58
+16
+4
+Flow (ours)
+ACT
+76
+52
+14
+None
+FM
+36
+20
+0
+Kinematics
+FM
+14
+4
+0
+Kin. + flow
+FM
+30
+6
+2
+Flow (ours)
+FM
+68
+40
+12
+π0.5 (LoRA)
+–
+20
+10
+0
+π0.5 (full)
+–
+24
+8
+0
+Diffusion Policy
+–
+42
+18
+2
+Table S6. Needle regrasp, all policies (% of trials completing
+each stage).
+15
+
+
+None
+27/50, 11 on 1st
+1
+1
+2
+2
+1
+20k
+5
+2
+1
+1
+2
+2
+2
+2
+40k
+7
+1
+2
+3
+1
+60k
+4
+2
+1
+2
+2
+2
+80k
+5
+1
+1
+3
+3
+2
+1
+100k
+6
+Kinematics
+30/50, 15 on 1st
+1
+1
+3
+3
+1
+2
+20k
+6
+2
+3
+3
+1
+1
+2
+2
+40k
+7
+3
+2
+3
+1
+1
+1
+1
+3
+2
+60k
+9
+1
+1
+1
+1
+80k
+4
+2
+1
+1
+3
+100k
+4
+Flow (ours)
+45/50, 27 on 1st
+1
+3
+1
+1
+1
+2
+1
+2
+20k
+8
+1
+2
+1
+1
+1
+1
+2
+2
+1
+3
+40k
+10
+2
+2
+1
+1
+1
+1
+2
+1
+1
+3
+60k
+10
+2
+2
+1
+1
+1
+2
+1
+1
+80k
+8
+2
+2
+1
+1
+1
+1
+1
+2
+3
+100k
+9
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+/10
+needle configuration
+ACT head
+None
+29/50, 7 on 1st
+3
+2
+3
+3
+20k
+4
+1
+2
+1
+3
+1
+2
+40k
+6
+1
+2
+1
+2
+3
+60k
+5
+1
+3
+3
+2
+3
+3
+2
+80k
+7
+1
+2
+3
+2
+3
+2
+2
+100k
+7
+Kinematics
+28/50, 3 on 1st
+2
+3
+3
+2
+3
+20k
+5
+1
+1
+3
+3
+2
+3
+2
+40k
+7
+2
+2
+3
+1
+60k
+4
+2
+3
+2
+2
+2
+80k
+5
+2
+2
+2
+2
+2
+3
+3
+100k
+7
+Flow (ours)
+45/50, 27 on 1st
+1
+1
+1
+2
+1
+1
+1
+1
+1
+1
+20k
+10
+1
+1
+2
+1
+2
+2
+2
+1
+1
+40k
+9
+1
+3
+1
+3
+1
+1
+3
+1
+60k
+8
+1
+1
+2
+2
+2
+3
+1
+2
+80k
+8
+3
+3
+1
+1
+1
+1
+2
+2
+1
+2
+100k
+10
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+/10
+needle configuration
+FM head
+1st attempt
+2nd attempt
+3rd attempt
+failed
+Figure S6. Every needle-pickup trial. Rows: pretraining and fine-tuning checkpoint; columns: the 10 needle configurations, the same for
+every policy. Colour and number give the attempt on which the needle was picked up; grey marks a failure within three attempts. Counts
+on the right are successes per checkpoint.
+F.2. Data efficiency
+We fine-tune each initialization on a random 50% of the
+demonstrations of each task, with the same architecture,
+schedule, and number of steps as at 100%, and roll out the
+checkpoints at 20k, 40k, 60k, 80k, and 100k steps on the
+same 10 needle configurations (50 trials per policy).
+Needle pickup.
+Table S7 breaks down the 50% pickup
+results. With half of the demonstrations, flow pretraining
+nearly doubles success over training from scratch (52% vs.
+28%) and over kinematics pretraining (26%), and is the
+most consistent policy across checkpoints. Kinematics pre-
+training does not improve on scratch. For reference, scratch
+reaches 54% with all demonstrations, so FlowScope with
+half the data roughly matches scratch with all of it.
+Checkpoint (k steps)
+Total
+Pretraining
+20
+40
+60
+80
+100
+1st
+≤3
+vs. scratch
+None
+1
+2
+6
+2
+3
+6
+14/50 (28%)
+–
+Kinematics
+0
+3
+5
+4
+1
+7
+13/50 (26%)
+9 / 10
+Flow (ours)
+6
+3
+4
+7
+6
+11
+26/50 (52%)
+22 / 10
+Table S7. Needle pickup with 50% of the demonstrations (ACT
+head). Checkpoint columns count successes within three attempts
+out of 10 configurations; “1st” counts successes on the first at-
+tempt. The last column gives paired wins / losses against scratch
+(p = 1.0 and p = 0.050).
+Needle regrasp.
+Table S8 reports the 50% regrasp results
+next to the 100% results. FlowScope fine-tuned on half of
+the demonstrations reaches more stages than scratch fine-
+tuned on all of them and than both other initializations at
+50%. Halving the data costs FlowScope about a third of its
+mean stages (1.42 to 0.98), but it remains the best policy at
+either data size. Kinematics pretraining degrades sharply at
+50% (pickup 46% to 16%, no handovers), consistent with
+its reliance on the robot state (Sec. G): with fewer demon-
+strations, the state shortcut is less constrained by visual ev-
+idence. Scratch is near the floor at both data sizes (0.48
+vs. 0.34 mean stages), so its 50%-vs-100% difference is not
+informative.
+G. Additional analysis
+G.1. Reliance on the robot state
+Table S9 (top) measures how much each policy attends to
+the robot-state token, averaged over layers and heads on
+held-out frames.
+The kinematics-pretrained trunks route
+a large share of their attention to it. In the encoder, the
+image tokens give about a quarter of their attention to the
+state token after kinematics pretraining (24.5%) and about
+a sixth after kin. + flow pretraining (16.7%). This habit sur-
+vives fine-tuning (21.3% and 14.7%), compared with about
+8% for both scratch and FlowScope. The action queries
+in the decoder show the same ordering at a much smaller
+scale, with the kinematics-pretrained policy attending most
+16
+
+
+Checkpoint (k steps)
+Total (%)
+Pretraining
+Data
+20
+40
+60
+80
+100
+Pickup HO1 Full
+None
+100% 1/0/0 4/0/0 1/0/0 3/1/1 5/1/0
+28
+4
+2
+None
+50%
+1/0/0 2/0/0 4/1/0 5/2/1 3/3/2
+30
+12
+6
+Kinematics
+100% 3/1/0 3/1/0 5/0/0 6/4/1 6/0/0
+46
+12
+2
+Kinematics
+50%
+0/0/0 3/0/0 1/0/0 1/0/0 3/0/0
+16
+0
+0
+Flow (ours) 100% 5/3/0 9/4/1 9/8/3 8/5/2 7/6/1
+76
+52
+14
+Flow (ours) 50%
+5/2/0 6/3/2 5/3/0 5/3/0 8/5/2
+58
+32
+8
+Table S8. Needle regrasp at 50% and 100% of the demonstra-
+tions (ACT head). Checkpoint columns give pickup / handover 1
+/ full task out of 10 configurations; totals are over 50 trials. Mean
+stages reached (0–3): scratch 0.34 / 0.48, kinematics 0.60 / 0.16,
+flow 1.42 / 0.98 (100% / 50%).
+Pretraining target
+Scratch Kin. Kin. + flow Flow only
+Attention on the robot-state token (%)
+Image tokens (PT)
+–
+24.5
+16.7
+0.1†
+Image tokens (FT)
+7.7
+21.3
+14.7
+7.9
+Action queries (FT)
+0.21
+0.71
+0.25
+0.10
+Offline error after fine-tuning
+Translation (mm / step)
+0.31
+0.30
+0.31
+0.30
+Rotation (deg)
+8.9
+9.4
+9.5
+8.8
+Jaw (L1)
+0.10
+0.11
+0.11
+0.11
+Perturbed ∆(mm)
+0.20
+0.19
+0.30
+0.19
+Table S9. Reliance on the robot state, and offline metrics. Top:
+share of attention given to the robot-state token, from the image to-
+kens in the encoder and from the action queries in the decoder, av-
+eraged over layers and heads, after pretraining (PT) or fine-tuning
+(FT). Bottom: action error on held-out demonstrations; perturbed
+∆is the increase in translation error under 12 image perturbations
+(photometric changes, blur, noise, and occlusion). †The flow-only
+trunk is pretrained with a zero state, so its state token carries no
+information.
+(0.71%) and FlowScope least (0.10%).
+G.2. Offline metrics
+The differences in Sec. 5 do not show up in the usual offline
+metrics (Tab. S9, bottom). On held-out demonstrations, the
+four fine-tuned policies have nearly the same action error:
+0.30–0.31 mm per step in translation, 8.8–9.5◦in rotation,
+and 0.10–0.11 in jaw angle. The offline test below, robust-
+ness to image perturbations, is similarly flat.
+Image perturbations.
+We apply 12 perturbations to 400
+held-out frames from the validation demonstrations: bright-
+ness scaled by 0.75 and by 1.25, contrast reduced to 0.6,
+saturation reduced to 0.4, gamma 0.7 and 1.4, a warm and
+a cool white-balance shift (red and blue channels scaled by
+1.15 and 0.85 or the reverse), Gaussian blur with σ = 2
+and 4 px, additive Gaussian noise with standard deviation
+0.03, and an occluding square covering 15% of the image,
+filled with the image’s mean color at a random position. All
+perturbations act on the input image before the frozen DI-
+NOv2, so every policy receives the same perturbed features
+and differences come only from the trunk. For each policy,
+we integrate the predicted chunk into per-arm 3D positions
+and measure how much farther they land from the demon-
+strated positions than on the clean frame, averaged over the
+12 perturbations (perturbed ∆). The increase is small for
+every policy (0.19–0.30 mm) and does not follow real-robot
+success: FlowScope and training from scratch are equally
+robust by this measure.
+Discussion.
+The policies differ only in closed loop, when
+their own actions determine what they see next, including
+states that the demonstrations rarely contain, such as recov-
+ering from a missed grasp. The dense probes of needle ge-
+ometry in Sec. 5 tracked real-robot success where offline
+action error did not, which echoes the finding that object-
+centric structure predicts policy success better than down-
+stream accuracy [6]. We suggest probing what a policy en-
+codes, not only how accurately it imitates, when comparing
+pretraining methods.
+G.3. Dense probe details
+The dense probes of Tab. 3 are linear: batch normaliza-
+tion followed by a 1×1 convolution on the 37×37 grid of
+trunk features at the image tokens, upsampled to the im-
+age resolution. Semantic masks come from a segmenta-
+tion model trained on internal data, and disparity from Fast-
+FoundationStereo [43]. We use the needle pickup dataset
+demonstration data to perform these experiments.
+To train the probes, we use the AdamW optimizer
+with a weight decay of 1e-4 with a linear warmup and
+cosine decay scheduler.
+We sweep over learning rates
+{0.0003, 0.001, 0.003} and show the highest performance.
+We use BCE DICE loss and train with 63152 frames and
+validate on 4539 frames. Examples of the labeled dataset
+for the probing experiments can be seen in Fig. S7.
+G.4. Attention maps
+Figure S8 shows where the action queries of each fine-tuned
+needle-pickup policy look in the image, on held-out frames.
+Each map is the decoder cross-attention from the 30 action
+queries to the image tokens, averaged over layers, heads,
+and queries, and normalized by its own maximum. For ref-
+erence, we also show a randomly initialized policy on the
+same frozen DINOv2 features, whose action queries are un-
+trained.
+The policy trained from scratch spreads its attention over
+the image with no clear focus on the needle or the instru-
+ments. The kinematics-pretrained policy concentrates on
+the left instrument, which stays still during needle pickup.
+The FlowScope policy concentrates on the needle, with
+17
+
+
+Figure S7. Samples of the needle segmentation and depth datasets.
+From left to right: RGB image with needle segmentation overlaid,
+RGB image with instrument segmentation overlaid, and metric
+depth map generated from Fast-FoundationStereo. Segmentation
+maps are generated with an internal needle segmentation model.
+weaker peaks at the instrument tips. These maps are quali-
+tative and show where the policies read from, not what their
+actions depend on, but they agree with the probe results of
+Tab. 3: the policy whose trunk encodes the needle’s depth
+best is also the one that looks at it.
+H. Additional experiments
+H.1. Scene flow as a co-training target
+Instead of pretraining on clinical video, scene flow can be
+predicted from the robot demonstrations themselves as an
+auxiliary target while the policy is trained. We label the
+needle-pickup demonstrations with the same pipeline as
+the clinical video (Fast-FoundationStereo depth and SEA-
+RAFT flow chained over 10 keyframes, 10 frames apart,
+with the same consistency checks), using an anchor at ev-
+ery frame and storing 1,024 points per anchor, half uniform
+and half sampled in proportion to their motion. During ACT
+training we add the point queries and flow head of Sec. 3.3
+with the same settings as in pretraining (256 queries per
+sample, up to half movers above 5 mm, L1 on P0 and the
+RGB
+Scratch FT
+Kinematics
+FlowScope
+Random trunk
+Figure S8.
+Where the action queries look.
+Decoder cross-
+attention from the action queries to the image, averaged over lay-
+ers, heads, and queries, on held-out frames of needle pickup. Each
+map is normalized by its own maximum, limiting comparison be-
+tween columns. From left to right: input image, training from
+scratch, kinematics pretraining, FlowScope, and a randomly ini-
+tialized policy (untrained action queries) for reference.
+displacements), weighted by 0.1 relative to the ACT loss,
+with action queries masked from the point queries so that
+the deployed policy is unchanged. All other settings match
+the ACT baseline: frozen surgical DINOv2 at 518×518,
+chunks of 30 actions at stride 4, batch 128, 100k steps.
+Co-training on the demonstrations alone raises needle-
+pickup success from 26/50 to 36/50 within the same rollout
+session (one seed). This was our first sign that predicting
+scene flow shapes the trunk in a way that helps the policy,
+and it motivated pretraining the same head on clinical video,
+where far more motion is available than in the demonstra-
+tions.
+H.2. Stereo policies
+FlowScope uses stereo only to build its pretraining labels;
+the deployed policy sees the left image alone. A natural
+alternative is to give the policy both eyes and let it extract
+geometry itself. We test this with ACT, in the same setting
+as our other policies (frozen DINOv2 at 518×518, chunks
+of 30 actions at stride 4, batch 128, 100k steps, photometric
+augmentation with the same gains applied to both eyes). We
+build on StereoPolicy [16] for these experiments.
+Both images pass through the same frozen DINOv2 and
+the same input projection. The two token grids share their
+positional embeddings, since they cover the same pixel grid,
+and a learned eye embedding marks left and right. We com-
+pare three variants. Mono uses the left eye only and is the
+matched control. Concat passes the left and right tokens
+(2 × 1,369) directly to the ACT encoder. Fusion follows
+18
+
+
+StereoPolicy [16]: before ACT, a two-layer stereo trans-
+former (8 heads, feed-forward width 1,024, pre-norm) ap-
+plies self-attention within each eye and then bidirectional
+cross-attention, the left tokens querying the right and vice
+versa, with weights shared between the eyes, so the tokens
+that reach ACT carry correspondence and disparity cues.
+We run each variant with our surgical DINOv2 and with the
+off-the-shelf DINOv2.
+Encoder
+Stereo input
+Pickup 1st
+Pickup ≤3
+Surgical DINOv2
+mono (left)
+22
+54
+Surgical DINOv2
+concat
+28
+44
+Surgical DINOv2
+fusion
+20
+52
+DINOv2 (off the shelf)
+mono (left)
+14
+32
+DINOv2 (off the shelf)
+concat
+10
+34
+DINOv2 (off the shelf)
+fusion
+18
+40
+Table S10. Stereo at the policy input. Needle-pickup success
+(%) of ACT trained from scratch, with the left image or both eyes
+as input; n = 50 trials per row, all rolled out in one session.
+With our surgical DINOv2 tokenizer, neither stereo vari-
+ant improves on the left image alone: fusion matches it
+(52% vs. 54%) and concatenation is lower (44%), although
+concatenation succeeds slightly more often on the first at-
+tempt. With the off-the-shelf DINOv2, fusion gives a mod-
+est gain over mono (40% vs. 32%), but all three variants
+remain well below the surgical encoder with a single view.
+A domain-matched vision model thus matters more than a
+second view at the policy input. Since stereo input also dou-
+bles the cost of the frozen ViT-L at every control step, we
+use the left view alone in all other experiments; FlowScope
+instead exploits stereo where it is cheap and most useful, in
+constructing the pretraining targets.
+19

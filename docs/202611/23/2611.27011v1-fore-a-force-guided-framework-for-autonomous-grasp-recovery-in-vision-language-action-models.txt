@@ -1,0 +1,1070 @@
+FoRe: A Force-Guided Framework for Autonomous Grasp Recovery in
+Vision-Language-Action Models
+Shuai Peng
+Yongkai Liao
+Yuxin Cheng
+Haoyuan Wang
+Jian Huang
+Abstract
+Vision-language-action (VLA) models have demonstrated
+strong performance in grasp-based manipulation, yet re-
+liable recovery from local grasping failures remains chal-
+lenging. Specifically, in pick-and-place tasks, policies may
+continue transport after a failed grasp instead of retrying,
+potentially reflecting overreliance on proprioceptive cues
+for stage progression and limited retry supervision. Exist-
+ing recovery approaches typically rely on deployment-time
+guidance or demonstration augmentation. We introduce
+Force-guided Recovery (FoRe), a framework for autonomous
+recovery from local grasping failures. Using force feedback,
+FoRe partitions demonstrations into approach–grasp and
+transport–placement stages to train separate policies. To
+supplement limited retry supervision, FoRe then initializes a
+dedicated retry policy from the approach–grasp policy and
+refines it through local reinforcement learning (RL) from
+post-failure states. To avoid inappropriate stage progression,
+a controller combines force feedback with grasp-command
+status at inference to coordinate the stage policies, detect
+grasp failures, and invoke the retry policy. We also con-
+struct LIBERO-SUCTION, a force-augmented suction ma-
+nipulation benchmark adapted from LIBERO, with complete
+demonstration trajectories for policy training. FoRe consis-
+tently improves task success rates for VLA-Adapter and π0.5
+on LIBERO-SUCTION, LIBERO, and real-world tasks. On
+LIBERO-SUCTION, average absolute gains are 18.4% and
+6.5%, respectively. The corresponding real-world absolute
+gains are 25.0% and 21.7%. FoRe also remains effective
+with only one demonstration per task on both simulation
+benchmarks.
+1. Introduction
+Vision-language-action (VLA) models leverage pretrained
+visual-language knowledge and diverse robot data for gener-
+alizable manipulation [10, 11, 20, 25, 31], with advances in
+action generation, spatial understanding, reasoning, and long-
+horizon manipulation [2, 9, 12, 22, 30]. However, especially
+in pick-and-place tasks, reliable recovery from local execu-
+tion errors remains challenging: an imitation-trained VLA
+policy may continue transport after a failed grasp, instead of
+retrying [17, 29]. Such behavior can turn a recoverable local
+error into overall task failure, motivating autonomous retries
+and task resumption.
+Two related limitations may explain why VLA policies
+fail to recover after an unsuccessful grasp. First, as shown
+in Fig. 1, manipulation tasks can be viewed as sequences
+of stages, such as the approach–grasp stage and the trans-
+port–placement stage, each with its own distinct objective.
+Because robot proprioceptive states often correlate with task
+progress in successful demonstrations, a policy may rely
+excessively on these proprioceptive state cues to transition
+to the corresponding stage, regardless of the actual grasp
+outcome [4, 29]. Consequently, after a failed grasp, a robot
+proprioceptive state resembling those associated with trans-
+port may prompt the policy to persist in generating transport
+actions rather than retrying the grasp. Second, training dom-
+inated by uninterrupted successful demonstrations provides
+limited supervision for interrupting nominal execution and
+re-approaching the object after failure [29]. The policy may
+therefore lack an effective response even when failure cues
+are observable.
+Recent studies have explored several approaches for
+robotic recovery. One direction uses human feedback [1,
+16, 23] or vision-language model (VLM) guidance [5, 14,
+18, 28] to monitor execution outcomes and guide stage pro-
+gression. Another direction augments demonstrations [29]
+with varied robot poses and corrective trajectories to weaken
+correlations between pose and task progress and expand retry
+supervision. Force feedback provides direct physical cues
+about contact and load changes, making it an effective signal
+for detecting grasp failures. However, an explicit mechanism
+that uses such feedback to coordinate grasp retries and task
+resumption in VLA policies remains underexplored.
+We introduce Force-guided Recovery (FoRe), a frame-
+work for autonomous recovery from local grasping failures
+in VLA-based manipulation. FoRe first uses force feedback
+to partition successful demonstrations into approach–grasp
+and transport–placement stages, training a separate policy for
+each. To supplement limited retry supervision, FoRe then ini-
+tializes a dedicated retry policy from the approach–grasp pol-
+icy and refines it through local reinforcement learning (RL)
+1
+arXiv:2611.27011v1  [cs.RO]  20 Nov 2026
+
+
+Figure 1. Continued transport after grasp failure. During evaluation (top), the VLA policy continues transport while the object remains on the
+table. Its post-failure state resembles transport-stage states in the successful demonstration (bottom), prompting continued transport despite
+failure through overreliance on proprioceptive cues. Blue arrows indicate VLA-predicted actions; green arrows indicate desired retries.
+from post-failure states. To avoid inappropriate stage pro-
+gression, a controller combines force feedback with grasp-
+command status at inference to coordinate the stage policies,
+detect grasp failures, and invoke the retry policy. FoRe thus
+mitigates the adverse effects of relying on proprioceptive
+cues for stage progression through explicit stage control,
+while local retry learning supplements limited recovery su-
+pervision. Our main contributions are threefold:
+• We propose FoRe, a framework that integrates independent
+training of two stage-specific policies, local refinement of
+a dedicated retry policy, and force-guided stage control to
+enable autonomous grasp recovery across VLA backbones.
+• To support research on autonomous grasp recovery
+in suction-based manipulation, we construct LIBERO-
+SUCTION, a force-augmented benchmark adapted from
+LIBERO, comprising 22 tasks across three suites and
+1,100 complete demonstrations for VLA training. The
+benchmark and demonstrations will be publicly released.
+• We demonstrate that FoRe yields consistent improvements
+in task success with VLA-Adapter and π0.5, on LIBERO-
+SUCTION, LIBERO, and real-world tasks. Further evalu-
+ations show that FoRe also remains effective with only one
+demonstration per task on both simulation benchmarks.
+2. Related Work
+2.1. Vision-Language-Action Models
+Vision-language-action (VLA) models have substantially
+advanced robotic manipulation by transferring pretrained
+visual and linguistic knowledge to action generation [31].
+OpenVLA [11] demonstrates strong language grounding and
+adaptation to new tasks, while OpenVLA-OFT [12] further
+improves task performance and inference efficiency. π0 [2]
+and π0.5 [9] extend VLA capabilities to dexterous control
+and long-horizon manipulation in diverse environments. Spa-
+tialVLA [22] incorporates 3D spatial representations to im-
+prove spatial understanding, while CoT-VLA [30] introduces
+visual chain-of-thought reasoning by predicting intermediate
+goal images before action generation.
+Despite their strong generalization within the training
+task distribution, these models have limited autonomous
+recovery capabilities. Consequently, minor execution errors
+can escalate into task failures, substantially compromising
+the reliability of VLA task execution.
+2.2. Failure Recovery in Robotic Manipulation
+Human-guided approaches use language feedback to redi-
+rect execution and improve robot policies. RT-H [1] supports
+interventions through language descriptions of low-level mo-
+tions, while Yell at Your Robot [23] incorporates real-time
+verbal corrections into hierarchical policies. OLAF [16]
+uses verbal corrections to relabel actions for policy updates.
+Obtaining such corrective feedback requires human participa-
+tion, which can limit scalability. VLM-based approaches au-
+tomate failure analysis and recovery guidance: FailSafe [14]
+predicts recovery actions, and CycleVLA [18] combines
+VLM-guided subtask backtracking with minimum Bayes
+risk decoding for retries. FLARE [29] combines learned
+retries with reset skills invoked by an online multimodal
+monitor, while ReCoVLA [7] uses VLM-based failure de-
+tection to activate residual recovery policies. Online VLM
+supervision can introduce additional inference overhead and
+latency [18].
+In contrast to these approaches, FoRe introduces a novel
+2
+
+
+Figure 2. Overview of FoRe. (a) Force feedback and grasp commands partition successful demonstrations into approach–grasp and
+transport–placement stages for independently fine-tuning M1 and M2. (b) Initialized from M1, M3 is refined by local RL from simulated
+post-failure states. For G retries with the same initial state and instruction, lift tests yield binary rewards and group-relative advantages
+Ai = Ri −¯R. (c) Contact loss under an active grasp command triggers M2 →M3; restored contact resumes M2 for transport and placement.
+and physically grounded approach to autonomous grasp re-
+covery, using force feedback and grasp-command status to
+govern stage transitions, detect grasp failures and activate a
+retry policy refined through local RL.
+2.3. Reinforcement Learning for VLA Models
+RL improves VLA policies through interaction and task-
+outcome feedback, with gains in performance and execution
+generalization [13, 17]. ConRFT and RECAP study RL-
+based post-training for real-world policy improvement [3, 8].
+PLD trains residual specialists to collect recovery trajectories
+for fine-tuning the base policy [27]. SRPO uses model-
+generated successful trajectories as references for progress-
+based rewards on failed attempts [6].
+Compared to the above works, FoRe incorporates RL as
+a local refinement step within a broader recovery framework,
+optimizing only a dedicated retry policy from post-failure
+states.
+3. Methodology
+3.1. Problem Formulation
+We consider language-conditioned robotic manipulation.
+Given visual observation vt, robot proprioceptive state xt,
+and language instruction ℓ, a nominal VLA policy gen-
+erates actions as at ∼πθ(· | vt, xt, ℓ).
+The policy is
+trained by imitation learning on successful demonstrations
+Ddemo = {τi}N
+i=1.
+Let X demo
+tr
+denote robot proprioceptive states recorded
+during transport in successful demonstrations of the same
+task. After a failed grasp, the current proprioceptive state
+may still resemble one in this set. A policy that overrelies
+on proprioceptive state cues may consequently favor the
+associated transport actions over retry actions. One possible
+manifestation of this failure is
+xt ≈xdemo
+j
+,
+xdemo
+j
+∈X demo
+tr
+,
+πθ(Atr | vt, xt, ℓ) > πθ(Aretry | vt, xt, ℓ),
+(1)
+where Atr and Aretry denote transport and retry actions, re-
+spectively. Moreover, training on successful demonstrations
+provides limited supervision for retry after failed grasps.
+3.2. Framework Overview
+The FoRe aims to interrupt inappropriate task progression
+after a failed grasp and enable autonomous grasp retries
+through physical interaction feedback. Using force-guided
+stage annotation (Sec. 3.3), we partition Ddemo into ap-
+proach–grasp and transport–placement subsets, then inde-
+pendently fine-tune the approach–grasp policy M1 and the
+transport–placement policy M2 on their respective subsets,
+as illustrated in Fig. 2(a).
+As shown in Fig. 2(b), we initialize the retry policy M3
+from M1 and refine it through local RL focused on grasp
+retries (Sec. 3.4).
+At inference, a force-guided controller (Sec. 3.5) uses
+force measurements to select M1 for nominal approach and
+grasp, M2 for transport and placement, or M3 for retries
+following detected grasp failures, as shown in Fig. 2(c).
+3.3. Dataset Stage Annotation
+Initial grasp attempts and retries share the local objective of
+approaching and grasping the target. To reuse this behavior
+3
+
+
+for retry learning, we assign each demonstration time step
+a stage label ct ∈{1, 2}, corresponding to approach–grasp
+(Stage 1) and transport–placement (Stage 2), respectively.
+Robot motion introduces inertial contributions into force
+measurements. We use robot acceleration signals to reduce
+these contributions and denote the force by ft, with magni-
+tude ρt = ∥ft∥2. We then determine the detection thresh-
+old ϵc separately for each dataset through manual statistical
+analysis of its force signals. The threshold is selected to
+distinguish residual no-load fluctuations from contact and
+load signals. Within each setup, the threshold remains fixed
+and is shared by demonstration annotation, retry termination,
+and runtime policy switching. Let ut ∈{0, 1} denote the
+grasp command, with 0 indicating release and 1 indicating
+grasp activation. For t ≥1, we define
+gt = 1[ρt > ϵc ∧ut = 1] ,
+rt = 1[ρt ≤ϵc ∧ut = 0] .
+(2)
+Initializing c0 = 1, we update the stage label as
+ct =
+
+
+
+
+
+2,
+ct−1 = 1, gt = 1,
+1,
+ct−1 = 2, rt = 1,
+ct−1,
+otherwise.
+(3)
+The resulting labels partition Ddemo into Stage 1 (ct = 1)
+and Stage 2 (ct = 2) subsets for training VLA M1 and VLA
+M2, respectively, as shown in Fig. 2(a).
+3.4. RL-Based Retry Policy Optimization
+Successful demonstrations provide limited supervision for re-
+tries after failed grasps. To learn the retry behavior, we initial-
+ize the retry policy M3 from M1 to reuse the approach–grasp
+behavior learned through stage-specific training. We then
+refine M3 through local RL in grasp-retry scenarios to adapt
+this behavior to states encountered after failed grasps.
+To construct grasp-retry scenarios, we sample robot poses
+from an early temporal window of each Stage 2 demonstra-
+tion segment. These early transport poses resemble those
+the robot may assume after a failed grasp. During initial-
+ization, we set the robot to the sampled pose and leave the
+target object at its original, ungrasped pose. The resulting
+scene simulates the state after a failed grasp and serves as
+the starting point for optimizing M3 through RL.
+For each initialized scenario, as shown in Fig. 2(b), we
+collect G stochastic rollouts sharing the same initial state
+and instruction ℓ. Let oi,t = (vi,t, xi,t, ℓ) denote the pol-
+icy input. To explore alternative retry behaviors, we tailor
+stochastic sampling to the action-generation mechanism of
+each backbone. For flow-based action generation, repre-
+sented by π0.5 [9], we sample Gaussian initial noise and iter-
+atively integrate the learned flow to generate action chunks.
+For deterministic action regression, represented by VLA-
+Adapter [26], we introduce Gaussian exploration around the
+action predicted by M3:
+eπθ(a | o) = N
+ a; µθ(o), Σ
+
+,
+(4)
+where µθ(o) is the predicted action and Σ is a fixed explo-
+ration covariance.
+We assign a binary RL reward based on a lift test. Specif-
+ically, we terminate the retry under the joint condition
+ρt > ϵc ∧ui,t = ON, which indicates an active grasp
+attempt. The subsequent lift test verifies grasp success by
+checking whether the force signal remains stable above the
+near-zero no-load baseline during lifting. A rapid drop fol-
+lowed by fluctuations near zero indicates failure. We assign
+Ri = 1 if the grasp attempt passes the lift test, and Ri = 0
+otherwise.
+To compare alternative retry from the same initial state,
+we compute the group mean reward and a trajectory-level
+relative advantage:
+¯R = 1
+G
+G
+X
+i=1
+Ri,
+Ai = Ri −¯R.
+(5)
+All retry actions within trajectory i share the same Ai. In
+mixed-outcome groups, successful attempts receive positive
+advantages and failed attempts receive negative advantages.
+Groups with identical outcomes have zero relative advan-
+tages and do not contribute to the update.
+Treating the collected advantages as constants, we update
+M3 by minimizing the trajectory-weighted surrogate loss:
+LRL(θ) = −1
+Z
+G
+X
+i=1
+Ai
+Ti−1
+X
+t=0
+log eπθ
+ ai,t | oi,t
+
+.
+(6)
+Here, Z = PG
+i=1 Ti is the total number of retry actions in
+the group.
+3.5. Force-Guided Policy Switching
+At inference, as shown in Fig. 2(c), the controller combines
+force measurements with grasp-command status to switch
+among three policies: M1 for nominal approach and grasp,
+M2 for transport and placement, and M3 for retries following
+detected grasp failures.
+Nominal stage transitions. During nominal execution, the
+controller starts with M1 for routine approach and grasp,
+and switches to M2 for transport and placement once ut = 1
+and the force magnitude ρt exceeds ϵc, indicating contact
+during an active grasp attempt. After placement, a release
+command (ut = 0) indicates completion of the release, upon
+which the controller returns to M1 for the next grasp cycle if
+the task continues.
+Grasp-failure detection. If the grasp succeeds, the force
+magnitude remains approximately stable at a nonzero level
+during transport under M2. By contrast, grasp failure causes
+4
+
+
+the signal to drop rapidly toward zero and fluctuate near the
+no-load baseline, although the grasp command remains ac-
+tive. We therefore detect grasp failure during M2 execution
+by combining the ϵc with the grasp-command status:
+ft =
+(
+1
+
+ut = 1 ∧ρt ≤ϵc
+
+,
+if M2 is active,
+0,
+otherwise.
+(7)
+The active grasp command distinguishes this loss of contact
+from intentional release after placement.
+Unified policy switching. The controller starts execution
+with M1 and switches among the policies according to the
+following rules:
+M1
+ut=1, ρt>ϵc
+−−−−−−−−⇀
+↽−−−−−−−−
+ut=0
+M2
+ft=1
+−−−−−−−−⇀
+↽−−−−−−−−
+ut=1, ρt>ϵc
+M3.
+(8)
+At each timestep, only transitions from the active policy are
+evaluated, and the current policy is retained unless a transi-
+tion condition is satisfied. This switching strategy supports
+accurate and rapid nominal execution by coordinating M1
+and M2, while enabling real-time detection of grasp failures
+and efficient recovery through retries with M3.
+4. Experiments
+We evaluate whether the FoRe improves end-to-end task
+completion across manipulation tasks and VLA backbones.
+Our experiments address two questions:
+Question 1. How does the FoRe affect task success relative
+to VLA baselines in simulation and on a physical robot?
+(Secs. 4.1 and 4.2)
+Question 2. Does FoRe remain effective with one trajectory
+per task? (Sec. 4.3)
+We evaluate FoRe on LIBERO-SUCTION, LIBERO [15],
+and real-world tasks, including one-demonstration training
+on both simulation benchmarks. Experiments use a server
+with eight NVIDIA 4090 GPUs.
+4.1. Performance on Simulation Benchmarks
+LIBERO-SUCTION Benchmark. We construct LIBERO-
+SUCTION to study autonomous grasp recovery in suction
+manipulation, adapting LIBERO with a suction gripper and
+force feedback for monitoring physical interaction. Its 22
+tasks span Suction-Spatial, Suction-Object, and Suction-
+Goal, assessing spatial relations, object identification, and
+goal-directed execution, respectively. The benchmark in-
+cludes 1,100 complete demonstration trajectories for VLA
+training, matched to the evaluation environments.
+LIBERO Benchmark.
+We also evaluate FoRe on
+four LIBERO task suites—Spatial, Object, Goal, and
+Long—using the original gripper and environments aug-
+mented with force feedback. Together, the two benchmarks
+cover parallel-jaw and suction-based grasping.
+Baselines.
+We compare eight VLA baselines:
+Open-
+VLA [11], OpenVLA-OFT [12], π0 [2], π0-FAST [21],
+SmolVLA [24], GR00T N1 [19], VLA-Adapter [26], and
+π0.5 [9]. We evaluate FoRe on VLA-Adapter and π0.5, com-
+paring its performance with CycleVLA [18].
+Evaluation protocol. Each model is evaluated over 50
+episodes per task: 1,100 episodes across 22 tasks in three
+LIBERO-SUCTION suites, and 2,000 episodes across 40
+tasks in four LIBERO suites. We report success rates (%)
+per suite and across all evaluated tasks in each benchmark.
+Figure 3. Inference-time grasp recovery on LIBERO-SUCTION.
+Force feedback ρt and grasp-command status ut guide policy
+switching (M1 →M2 →M3 →M2), enabling autonomous re-
+covery from grasping failures. Blue arrows indicate VLA-predicted
+actions.
+Results on LIBERO-SUCTION. Table 1 shows that the
+FoRe improves the overall success rate of VLA-Adapter
+from 69.2% to 87.6%, an absolute gain of 18.4%. For π0.5,
+the success rate increases from 85.9% to 92.4%, an absolute
+gain of 6.5%. This is the highest overall score among the
+evaluated models in this table. The recovery sequence is
+illustrated in Fig. 3. These results show that the FoRe im-
+proves task completion across the evaluated task groups and
+with both tested action-generation mechanisms.
+Figure 4. Inference-time grasp recovery on LIBERO. All details
+are as in Fig. 3.
+5
+
+
+Table 1. Task success rates (%) on LIBERO-SUCTION (higher is better). Bold and underlining mark the best and second-best results. “w/
+FoRe” applies the FoRe to the backbone immediately above it; red ∆values are absolute gains in percentage points.
+Model
+LIBERO-SUCTION
+Suction-Spatial
+Suction-Object
+Suction-Goal
+Avg
+OpenVLA
+69.3
+50.5
+66.8
+61.9
+OpenVLA-OFT
+82.2
+66.0
+83.2
+76.5
+π0
+79.1
+61.3
+82.0
+73.3
+π0-FAST
+84.2
+66.3
+81.2
+77.0
+SmolVLA
+80.4
+63.0
+79.6
+73.9
+GR00T N1
+81.3
+65.0
+82.4
+75.6
+VLA-Adapter
+77.3
+52.3
+81.6
+69.2
+w/ FoRe
+91.3
+78.8
+95.2
+87.6
+∆
++14.0
++26.5
++13.6
++18.4
+π0.5
+94.0
+70.3
+96.4
+85.9
+w/ FoRe
+98.9
+81.8
+97.6
+92.4
+∆
++4.9
++11.5
++1.2
++6.5
+Table 2. Task success rates (%) on LIBERO (higher is better). Bold and underlining mark the best and second-best results. “w/” denotes
+applying the method to the corresponding backbone. Parentheses indicate absolute gains over the corresponding base policy.
+Model
+LIBERO
+Spatial
+Object
+Goal
+Long
+Avg
+OpenVLA
+84.7
+88.4
+79.2
+53.7
+76.5
+OpenVLA-OFT
+97.6
+98.4
+97.9
+94.5
+97.1
+π0-FAST
+96.4
+96.8
+88.6
+60.2
+85.5
+GR00T N1
+94.4
+97.6
+93.0
+90.6
+93.9
+VLA-Adapter
+92.4
+92.6
+91.2
+87.8
+91.0
+w/ CycleVLA
+98.2
+99.0
+97.8
+95.4
+97.6 (+6.6)
+w/ FoRe
+99.2
+99.6
+98.2
+97.4
+98.6 (+7.6)
+π0.5
+93.8
+92.2
+92.8
+89.4
+92.1
+w/ CycleVLA
+98.8
+99.4
+97.6
+95.8
+97.9 (+5.8)
+w/ FoRe
+99.6
+99.4
+98.0
+96.2
+98.3 (+6.2)
+Results on LIBERO. Table 2 compares FoRe with the base
+policies and CycleVLA across four LIBERO suites. FoRe
+achieves average success rates of 98.6% and 98.3% for VLA-
+Adapter and π0.5, respectively, corresponding to absolute
+gains of 7.6% and 6.2% over the base policies. FoRe also
+outperforms CycleVLA for both backbones, with average
+absolute gains of 1.0% and 0.4%, respectively. Fig. 4 illus-
+trates FoRe’s policy switching and grasp recovery during
+inference on LIBERO.
+4.2. Performance on Real-World Tasks
+Experimental setup. We evaluate FoRe on a six-degree-
+of-freedom DOBOT CR10AF robot with a Robotiq EPick
+vacuum gripper and Intel RealSense D435i cameras captur-
+ing third-person and wrist views (Fig. 5).
+Task categories. We evaluate three task categories with
+increasing complexity: (i) Simple: pick-and-place tasks with-
+Figure 5. Real-world experimental setup.
+out distractors; (ii) Cluttered: pick-and-place tasks with dis-
+tractors, requiring target selection based on object identities
+6
+
+
+Table 3. Task success rates (%) on LIBERO-SUCTION with one demonstration per task (higher is better). “w/ FoRe” applies the FoRe
+under the corresponding demonstration regime; ∆is the absolute gain over the SFT baseline in percentage points.
+Model
+LIBERO-SUCTION
+Suction-Spatial
+Suction-Object
+Suction-Goal
+Avg
+One-Trajectory SFT
+VLA-Adapter
+42.0
+23.8
+30.8
+32.8
+w/ FoRe
+66.9
+43.8
+53.6
+55.5
+∆
++24.9
++20.0
++22.8
++22.7
+π0.5
+48.4
+30.5
+36.4
+39.2
+w/ FoRe
+72.0
+56.3
+58.8
+63.3
+∆
++23.6
++25.8
++22.4
++24.1
+Table 4. Task success rates (%) on LIBERO with one demonstration per task (higher is better). “w/ FoRe” applies the FoRe under the
+corresponding demonstration regime; ∆is the absolute gain over the SFT baseline in percentage points.
+Model
+LIBERO
+Spatial
+Object
+Goal
+Long
+Avg
+One-Trajectory SFT
+VLA-Adapter
+63.6
+72.6
+45.4
+15.8
+49.4
+w/ FoRe
+84.2
+90.6
+61.2
+32.2
+67.1
+∆
++20.6
++18.0
++15.8
++16.4
++17.7
+π0.5
+59.4
+62.0
+36.8
+27.8
+46.5
+w/ FoRe
+76.8
+76.2
+57.0
+48.8
+64.7
+∆
++17.4
++14.2
++20.2
++21.0
++18.2
+and spatial relations; and (iii) Long: multi-object manipula-
+tion tasks requiring sequential execution, such as stacking
+steel plates, acrylic sheets, and cardboard panels.
+Baselines and evaluation. All policies are trained on real-
+robot data, with retry policy M3 refined via on-robot RL.
+We compare π0.5, VLA-Adapter, and their FoRe-enhanced
+counterparts over 40 trials per task, reporting success rates
+under randomized initial object positions.
+Results. FoRe improves both backbones across Simple,
+Cluttered, and Long tasks (Fig. 6). Average success rises
+from 26.7% to 51.7% for VLA-Adapter and from 48.3% to
+70.0% for π0.5. On Long tasks, FoRe more than doubles
+VLA-Adapter’s success rate from 20.0% to 42.5% and raises
+π0.5’s success from 42.5% to 60%. Fig. 7 illustrates FoRe’s
+inference-time process for autonomous recovery from local
+grasp failures in real-world tasks.
+4.3. Performance with Fewer Demonstrations
+Experimental Settings. On both LIBERO-SUCTION and
+LIBERO, we compare VLA-Adapter and π0.5 under One-
+Trajectory SFT with their FoRe-enhanced counterparts using
+one demonstration per task. FoRe’s stage-specific SFT and
+RL initial-state sampling use only that trajectory.
+Figure 6. Real-world experimental results.
+Figure 7. Inference-time grasp recovery on Real-World Tasks. All
+details are as in Fig. 3.
+7
+
+
+Table 5. Ablation settings of FoRe with VLA-Adapter on LIBERO-SUCTION. w/o Grasp Retries disables failure-triggered retries; w/o
+Retry Policy Optimization reuses M1 for retries instead of M3 ; w/o Stage-Specific SFT uses a full-trajectory policy for nominal execution
+and retry-policy initialization. With trained policies fixed, w/o Gripper-State Conditions uses force-only switching; w/o Force Switching uses
+command-only switching, leaving M3 uninvoked.
+Variant
+LIBERO-SUCTION
+Suction-Spatial
+Suction-Object
+Suction-Goal
+Avg
+VLA-Adapter + FoRe
+91.3
+78.8
+95.2
+87.6
+w/o Grasp Retries
+81.1
+64.0
+86.8
+76.2
+w/o Retry Policy Optimization
+85.8
+73.0
+91.2
+82.4
+w/o Stage-Specific SFT
+84.2
+65.3
+90.4
+78.7
+w/o Gripper-State Conditions
+86.7
+71.0
+82.8
+80.1
+w/o Force Switching
+80.2
+60.8
+85.2
+74.3
+Results. Tables 3 and 4 show that FoRe consistently im-
+proves both backbones with one demonstration per task.
+On LIBERO-SUCTION, VLA-Adapter’s overall success
+rate increases from 32.8% to 55.5%, while π0.5 improves
+from 39.2% to 63.3%, yielding absolute gains of 22.7% and
+24.1%, respectively. On LIBERO, the corresponding suc-
+cess rates increase from 49.4% to 67.1% and from 46.5%
+to 64.7%, with absolute gains of 17.7% and 18.2%. Both
+backbones improve on every task suite across the two bench-
+marks, supporting FoRe’s effectiveness under scarce task-
+specific demonstrations.
+5. Ablation Experiments
+We ablate FoRe’s components and switching rules on
+LIBERO-SUCTION using VLA-Adapter, the full demon-
+stration set, and the protocol in Sec. 4.1 (Table 5).
+Disabling failure-triggered retries (w/o Grasp Retries)
+while retaining M1, M2, and their force-guided switching
+rules reduces overall success from 87.6% to 76.2%. Reusing
+M1 directly for retries without RL refinement (w/o Retry
+Policy Optimization) achieves 82.4%. Thus, the approach–
+grasp policy alone provides an absolute gain of 6.2% over
+disabling retries, indicating a degree of retry capability, while
+RL refinement contributes a further 5.2% by adapting this
+policy to retry scenarios.
+Replacing M1 and M2 with a unified policy P trained
+on complete trajectories (w/o Stage-Specific SFT) reduces
+overall success to 78.7%, an absolute decrease of 8.9%. This
+variant retains phase tracking for switching; M3 is initialized
+from P and optimized with the same RL procedure and retry-
+state sampling protocol. This result supports stage-specific
+training, which isolates the approach–grasp policy as the
+initialization for M3, providing a better starting point for RL
+refinement and more effective grasp retries.
+We further examine switching rules while keeping demon-
+stration annotation and policy training unchanged. Remov-
+ing the ON/OFF grasp-command conditions while retain-
+ing force thresholds (w/o Gripper-State Conditions) reduces
+overall success to 80.1%, an absolute decrease of 7.5%. Here,
+low force during M2 always invokes M3, making intentional
+release indistinguishable from grasp failure and potentially
+triggering unnecessary retries that interrupt task progression.
+Removing force from switching rules (w/o Force Switch-
+ing) reduces overall success to 74.3%, an absolute decrease
+of 13.3%. ON and OFF commands now trigger M1 →M2
+and M2 →M1, respectively, while M3 is never invoked with-
+out force-based failure detection. This result underscores the
+necessity of force feedback for post-failure recovery.
+6. Conclusion and Limitation
+We presented FoRe, a framework that combines force-guided
+stage control with local retry learning for autonomous grasp
+recovery in VLA-based manipulation. We observed con-
+tinued transport after failed grasps, potentially reflecting
+overreliance on proprioceptive cues for stage progression
+and limited retry supervision. To address these issues, FoRe
+combines separate training of two stage-specific policies
+with local RL refinement of a dedicated retry policy, using
+force feedback alongside grasp-command status to detect
+grasp failures and control stage transitions. Experiments on
+LIBERO-SUCTION, LIBERO, and real-world tasks show
+consistent improvements, with average real-world success
+increasing from 26.7% to 51.7% for VLA-Adapter and from
+48.3% to 70.0% for π0.5. These findings suggest that force
+feedback grounds stage control and retry learning in phys-
+ical grasp outcomes, enabling more reliable autonomous
+recovery in VLA policies.
+However, as an external recovery framework, FoRe relies
+on the approach–grasp policy to establish contact with the
+target object. If the policy consistently fails to make contact
+with the target, this may impair the ability of FoRe’s force-
+guided controller to advance stages, detect grasp failures,
+and invoke the retry policy, thereby limiting autonomous
+grasp recovery. Future work will focus on guiding VLA
+policies to reliably bring the gripper into contact with the
+target object.
+8
+
+
+References
+[1] Suneel Belkhale, Tianli Ding, Ted Xiao, Pierre Sermanet,
+Quan Vuong, Jonathan Tompson, Yevgen Chebotar, Debidatta
+Dwibedi, and Dorsa Sadigh. RT-H: Action Hierarchies using
+Language. In Proceedings of Robotics: Science and Systems,
+2024. 1, 2
+[2] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim
+Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mo-
+hith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang Shi,
+James Tanner, Quan Vuong, Anna Walling, Haohuan Wang,
+and Ury Zhilinsky. π0: A vision-language-action flow model
+for general robot control, 2026. 1, 2, 5
+[3] Yuhui Chen, Shuai Tian, Shugao Liu, Yingting Zhou, Haoran
+Li, and Dongbin Zhao. Conrft: A reinforced fine-tuning
+method for vla models via consistency policy, 2025. 3
+[4] Pim de Haan, Dinesh Jayaraman, and Sergey Levine. Causal
+confusion in imitation learning. In Advances in Neural In-
+formation Processing Systems. Curran Associates, Inc., 2019.
+1
+[5] Jiafei Duan, Wilbert Pumacay, Nishanth Kumar, Yi Ru Wang,
+Shulin Tian, Wentao Yuan, Ranjay Krishna, Dieter Fox, Ajay
+Mandlekar, and Yijie Guo. Aha: A vision-language-model for
+detecting and reasoning over failures in robotic manipulation.
+In International Conference on Learning Representations,
+pages 45493–45517, 2025. 1
+[6] Senyu Fei, Siyin Wang, Li Ji, Ao Li, Shiduo Zhang, Lim-
+ing Liu, Jinlong Hou, Jingjing Gong, Xianzhong Zhao, and
+Xipeng Qiu. Srpo: Self-referential policy optimization for
+vision-language-action models, 2025. 3
+[7] Haodi Hu, Chung-Ta Huang, Jing Liu, Ye Wang, Kei Suzuki,
+Matthew Brand, and Toshiaki Koike-Akino. Recovla: Vlm-
+guided reward compilation for failure recovery in vision-
+language-action policies, 2026. 2
+[8] Physical Intelligence, Ali Amin, Raichelle Aniceto, Ashwin
+Balakrishna, Kevin Black, Ken Conley, Grace Connors, James
+Darpinian, Karan Dhabalia, Jared DiCarlo, Danny Driess,
+Michael Equi, Adnan Esmail, Yunhao Fang, Chelsea Finn,
+Catherine Glossop, Thomas Godden, Ivan Goryachev, Lachy
+Groom, Hunter Hancock, Karol Hausman, Gashon Hussein,
+Brian Ichter, Szymon Jakubczak, Rowan Jen, Tim Jones,
+Ben Katz, Liyiming Ke, Chandra Kuchi, Marinda Lamb,
+Devin LeBlanc, Sergey Levine, Adrian Li-Bell, Yao Lu,
+Vishnu Mano, Mohith Mothukuri, Suraj Nair, Karl Pertsch,
+Allen Z. Ren, Charvi Sharma, Lucy Xiaoyang Shi, Laura
+Smith, Jost Tobias Springenberg, Kyle Stachowicz, Will
+Stoeckle, Alex Swerdlow, James Tanner, Marcel Torne, Quan
+Vuong, Anna Walling, Haohuan Wang, Blake Williams, Suk-
+won Yoo, Lili Yu, Ury Zhilinsky, and Zhiyuan Zhou. π∗
+0.6: a
+vla that learns from experience, 2025. 3
+[9] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Gal-
+liker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian
+Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin
+LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri,
+Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi,
+Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz,
+James Tanner, Quan Vuong, Homer Walke, Anna Walling,
+Haohuan Wang, Lili Yu, and Ury Zhilinsky. π0.5: a vision-
+language-action model with open-world generalization, 2025.
+1, 2, 4, 5
+[10] Alexander Khazatsky, Karl Pertsch, Suraj Nair, Ashwin Bal-
+akrishna, Sudeep Dasari, Siddharth Karamcheti, Soroush
+Nasiriany, Mohan Kumar Srirama, Lawrence Yunliang Chen,
+Kirsty Ellis, Peter David Fagan, Joey Hejna, Masha Itk-
+ina, Marion Lepert, Yecheng Jason Ma, Patrick Tree Miller,
+Jimmy Wu, Suneel Belkhale, Shivin Dass, Huy Ha, Arhan
+Jain, Abraham Lee, Youngwoon Lee, Marius Memmel, Sung-
+jae Park, Ilija Radosavovic, Kaiyuan Wang, Albert Zhan,
+Kevin Black, Cheng Chi, Kyle Beltran Hatch, Shan Lin,
+Jingpei Lu, Jean Mercat, Abdul Rehman, Pannag R Sanketi,
+Archit Sharma, Cody Simpson, Quan Vuong, Homer Rich
+Walke, Blake Wulfe, Ted Xiao, Jonathan Heewon Yang,
+Arefeh Yavary, Tony Z. Zhao, Christopher Agia, Rohan Bai-
+jal, Mateo Guaman Castro, Daphne Chen, Qiuyu Chen, Trin-
+ity Chung, Jaimyn Drake, Ethan Paul Foster, Jensen Gao,
+David Antonio Herrera, Minho Heo, Kyle Hsu, Jiaheng Hu,
+Donovon Jackson, Charlotte Le, Yunshuang Li, Roy Lin, Ze-
+han Ma, Abhiram Maddukuri, Suvir Mirchandani, Daniel
+Morton, Tony Nguyen, Abigail O’Neill, Rosario Scalise, De-
+rick Seale, Victor Son, Stephen Tian, Emi Tran, Andrew E.
+Wang, Yilin Wu, Annie Xie, Jingyun Yang, Patrick Yin,
+Yunchu Zhang, Osbert Bastani, Glen Berseth, Jeannette Bohg,
+Ken Goldberg, Abhinav Gupta, Abhishek Gupta, Dinesh
+Jayaraman, Joseph J Lim, Jitendra Malik, Roberto Mart´ın-
+Mart´ın, Subramanian Ramamoorthy, Dorsa Sadigh, Shuran
+Song, Jiajun Wu, Michael C. Yip, Yuke Zhu, Thomas Kollar,
+Sergey Levine, and Chelsea Finn. DROID: A Large-Scale
+In-The-Wild Robot Manipulation Dataset. In Proceedings of
+Robotics: Science and Systems, 2024. 1
+[11] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-
+ter, Grace Lam, Pannag Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn. Openvla: An open-
+source vision-language-action model, 2024. 1, 2, 5
+[12] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess, 2025. 1, 2, 5
+[13] Haozhan Li, Yuxin Zuo, Jiale Yu, Yuhao Zhang, Zhaohui
+Yang, Kaiyan Zhang, Xuekai Zhu, Yuchen Zhang, Tianxing
+Chen, Ganqu Cui, Dehui Wang, Dingxiang Luo, Yuchen Fan,
+Youbang Sun, Jia Zeng, Jiangmiao Pang, Shanghang Zhang,
+Yu Wang, Yao Mu, Bowen Zhou, and Ning Ding. Simplevla-
+rl: Scaling vla training via reinforcement learning, 2025. 3
+[14] Zijun Lin, Jiafei Duan, Haoquan Fang, Dieter Fox, Ranjay
+Krishna, Cheston Tan, and Bihan Wen. Failsafe: Reasoning
+and recovery from failures in vision-language-action models,
+2026. 1, 2
+[15] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-
+edge transfer for lifelong robot learning, 2023. 5
+[16] Huihan Liu, Alice Chen, Yuke Zhu, Adith Swaminathan,
+9
+
+
+Andrey Kolobov, and Ching-An Cheng. Interactive Robot
+Learning from Verbal Correction, 2023. 1, 2
+[17] Jijia Liu, Feng Gao, Bingwen Wei, Xinlei Chen, Qingmin
+Liao, Yi Wu, Chao Yu, and Yu Wang. What can rl bring to
+vla generalization? an empirical study, 2026. 1, 3
+[18] Chenyang Ma, Kai Lu, Guangyu Yang, Jiuming Liu, Shi-
+tong Xu, Bill Byrne, Ioannis Havoutis, Niki Trigoni, and
+Andrew Markham. Cyclevla: Proactive self-correcting vision-
+language-action models via subtask backtracking and mini-
+mum bayes risk decoding, 2026. 1, 2, 5
+[19] NVIDIA, :, Johan Bjorck, Fernando Casta˜neda, Nikita Cher-
+niadev, Xingye Da, Runyu Ding, Linxi ”Jim” Fan, Yu Fang,
+Dieter Fox, Fengyuan Hu, Spencer Huang, Joel Jang, Zhenyu
+Jiang, Jan Kautz, Kaushil Kundalia, Lawrence Lao, Zhiqi
+Li, Zongyu Lin, Kevin Lin, Guilin Liu, Edith Llontop, Loic
+Magne, Ajay Mandlekar, Avnish Narayan, Soroush Nasiriany,
+Scott Reed, You Liang Tan, Guanzhi Wang, Zu Wang, Jing
+Wang, Qi Wang, Jiannan Xiang, Yuqi Xie, Yinzhen Xu, Zhen-
+jia Xu, Seonghyeon Ye, Zhiding Yu, Ao Zhang, Hao Zhang,
+Yizhou Zhao, Ruijie Zheng, and Yuke Zhu. Gr00t n1: An
+open foundation model for generalist humanoid robots, 2025.
+5
+[20] Open X-Embodiment Collaboration. Open X-Embodiment:
+Robotic Learning Datasets and RT-X Models, 2023. 1
+[21] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess,
+Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and
+Sergey Levine. Fast: Efficient action tokenization for vision-
+language-action models, 2025. 5
+[22] Delin Qu, Haoming Song, Qizhi Chen, Yuanqi Yao, Xinyi Ye,
+Jiayuan Gu, Zhigang Wang, Yan Ding, Bin Zhao, Dong Wang,
+and Xuelong Li. SpatialVLA: Exploring Spatial Representa-
+tions for Visual-Language-Action Models. In Proceedings of
+Robotics: Science and Systems, 2025. 1, 2
+[23] Lucy Xiaoyang Shi, Zheyuan Hu, Tony Z. Zhao, Archit
+Sharma, Karl Pertsch, Jianlan Luo, Sergey Levine, and
+Chelsea Finn. Yell At Your Robot: Improving On-the-Fly
+from Language Corrections. In Proceedings of Robotics:
+Science and Systems, 2024. 1, 2
+[24] Mustafa Shukor, Dana Aubakirova, Francesco Capuano,
+Pepijn Kooijmans, Steven Palma, Adil Zouitine, Michel Ar-
+actingi, Caroline Pascal, Martino Russi, Andres Marafioti, Si-
+mon Alibert, Matthieu Cord, Thomas Wolf, and Remi Cadene.
+Smolvla: A vision-language-action model for affordable and
+efficient robotics, 2025. 5
+[25] Homer Rich Walke, Kevin Black, Tony Z. Zhao, Quan Vuong,
+Chongyi Zheng, Philippe Hansen-Estruch, Andre Wang He,
+Vivek Myers, Moo Jin Kim, Max Du, Abraham Lee, Kuan
+Fang, Chelsea Finn, and Sergey Levine. Bridgedata v2: A
+dataset for robot learning at scale. In Proceedings of The 7th
+Conference on Robot Learning, pages 1723–1736. PMLR,
+2023. 1
+[26] Yihao Wang, Pengxiang Ding, Lingxiao Li, Can Cui, Zirui Ge,
+Xinyang Tong, Wenxuan Song, Han Zhao, Wei Zhao, Pengxu
+Hou, Siteng Huang, Yifan Tang, Wenhui Wang, Ru Zhang,
+Jianyi Liu, and Donglin Wang. Vla-adapter: An effective
+paradigm for tiny-scale vision-language-action model, 2025.
+4, 5
+[27] Wenli Xiao, Haotian Lin, Andy Peng, Haoru Xue, Tairan He,
+Yuqi Xie, Fengyuan Hu, Jimmy Wu, Zhengyi Luo, Linxi ”Jim”
+Fan, Guanya Shi, and Yuke Zhu.
+Self-improving vision-
+language-action models with data generation via residual rl,
+2025. 3
+[28] Xianchao Zeng, Xinyu Zhou, Youcheng Li, Jiayou Shi, Tianle
+Li, Liangming Chen, Lei Ren, and Yong-Lu Li. Diagnose, cor-
+rect, and learn from manipulation failures via visual symbols,
+2026. 1
+[29] Ganlong Zhao, Zijia Tang, Xingping Chen, Zhanghui Kuang,
+Ye Tian, and Guanbin Li. Flare: A failure-aware framework
+for autonomous correction and recovery in visual-language
+robotic manipulation, 2026. 1, 2
+[30] Qingqing Zhao, Yao Lu, Moo Jin Kim, Zipeng Fu, Zhuoyang
+Zhang, Yecheng Wu, Zhaoshuo Li, Qianli Ma, Song Han,
+Chelsea Finn, Ankur Handa, Tsung-Yi Lin, Gordon Wetzstein,
+Ming-Yu Liu, and Donglai Xiang. Cot-vla: Visual chain-of-
+thought reasoning for vision-language-action models. In Pro-
+ceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 1702–1713, 2025. 1,
+2
+[31] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted
+Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker,
+Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong
+Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre
+Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S.
+Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor
+Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine, Lisa
+Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng Kuang,
+Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi, Alex Ir-
+pan, Brian Ichter, Jasmine Hsu, Alexander Herzog, Karol
+Hausman, Keerthana Gopalakrishnan, Chuyuan Fu, Pete Flo-
+rence, Chelsea Finn, Kumar Avinava Dubey, Danny Driess,
+Tianli Ding, Krzysztof Marcin Choromanski, Xi Chen, Yev-
+gen Chebotar, Justice Carbajal, Noah Brown, Anthony Bro-
+han, Montserrat Gonzalez Arenas, and Kehang Han. Rt-2:
+Vision-language-action models transfer web knowledge to
+robotic control. In Proceedings of The 7th Conference on
+Robot Learning, pages 2165–2183. PMLR, 2023. 1, 2
+10

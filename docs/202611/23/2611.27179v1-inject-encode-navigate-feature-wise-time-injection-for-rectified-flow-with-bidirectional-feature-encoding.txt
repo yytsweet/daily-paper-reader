@@ -1,0 +1,1047 @@
+Inject, Encode, Navigate: Feature-Wise Time Injection for Rectified Flow
+with Bidirectional Feature Encoding
+Xiaogang Wang1 Debasish Mishra1 Jia Hao Toh2 Wangsheng Liu2 Yash Shah1
+Abstract— Vision-model-based robotic navigation has gained
+increasing popularity, yet existing approaches still struggle
+to deliver effective and efficient navigation performance, e.g.,
+diffusion-based policies that require costly iterative denoising.
+In this work, we propose three improvements to bridge these
+gaps. First, we adopt a rectified flow framework to reduce the
+required inference steps to one while achieving comparable or
+even superior performance. Second, we leverage a bidirectional
+Mamba-based visual encoder that employs selective state-space
+modeling to more effectively capture bidirectional temporal
+dependencies across observation frames, even with longer input
+sequences. Most importantly, we find that na¨ıvely combining
+these two components to balance accuracy with inference speed
+yields no further performance gains or even produces inferior
+results. Upon extensive analysis, we realized that the root
+cause lies in the fact that the Hydra-derived temporal context
+is shared unchanged across all flow timesteps, and timestep
+information is introduced only within the velocity network.
+This weak coupling limits the model’s ability to adaptively
+exploit temporal visual features at different flow states. To
+address this, we propose a feature-wise timestep conditioning
+design that explicitly conditions the visual embedding on the
+flow timestep, enabling noise-level-aware trajectory generation,
+thereby restoring a meaningful gradient pathway and enabling
+coherent interaction between the rectified flow and the temporal
+encoder. Extensive quantitative and qualitative experiments
+across multiple datasets demonstrate that our approach consis-
+tently outperforms both baseline and competitive methods.
+I. INTRODUCTION
+Autonomous visual navigation is the ability of a robot
+to perceive its surroundings through onboard sensors and
+navigate toward a designated goal without relying on pre-
+built maps, which is a cornerstone capability for deploying
+intelligent agents in the real world. The importance of this
+task spans a broad spectrum of applications. In security and
+surveillance, mobile robots need to patrol large facilities,
+detect anomalies, and autonomously navigate to points of
+interest in dynamic and unstructured environments. In search
+and rescue, agents are required to traverse disaster-stricken
+terrains where GPS signals are unavailable and pre-existing
+maps are rendered obsolete. Moreover, warehouse logis-
+tics, last-mile delivery, agricultural inspection, and assistive
+robotics for the elderly all demand robust, real-time visual
+navigation that generalizes across diverse and previously
+unseen environments.
+The recent emergence of large vision navigation mod-
+els [1], [2], [3], [4], [5], [6] has opened a promising avenue
+1Xiaogang Wang, Debasish Mishra and Yash Shah are with Amazon Web
+Services. {xiaogawa, misdebas, syash}@amazon.com
+2Jia
+Hao
+Toh
+and
+Wangsheng
+Liu
+are
+with
+Certis
+Group.
+{EvinJH TOH, wangsheng liu}@certisgroup.com
+Image Encoding
+Time Step
+Denoising
+…
+Fig. 1.
+Our navigation model takes visual observations and generates
+denoised action trajectories, enabling a mobile robot to navigate toward the
+target in real-world environments.
+for this task, enabling robots to ground visual goals into
+actionable navigation policies. These advances have brought
+the community closer than ever to deploying general-purpose
+navigation agents that can operate reliably outside controlled
+laboratory settings. Early learning-based approaches such as
+ViNT [1] introduced the idea of training a general-purpose
+navigation policy across diverse robotic platforms and envi-
+ronments, demonstrating impressive cross-embodiment trans-
+fer. More recently, NoMaD [2] extended this line of work
+by incorporating a diffusion-based action generation pol-
+icy, leveraging the expressiveness of Denoising Diffusion
+Probabilistic Models (DDPM) [7] to produce multi-modal
+waypoint distributions and achieving strong performance
+in topological navigation tasks. However, diffusion-based
+policies inherently require multiple iterative denoising steps
+at inference time which introduces additional computa-
+tional latency. Furthermore, existing methods mostly rely on
+transformer-based [8] or convolutional encoders to process
+multi-frame visual observations. While effective for short
+observation histories, these encoders struggle to capture long-
+range temporal dependencies as the number of input frames
+grows, due to the quadratic complexity of self-attention [8]
+or the limited receptive fields of convolutional architectures.
+This results in less accurate waypoint predictions, especially
+in scenarios that require reasoning over extended navigation
+histories to resolve ambiguities in the environment.
+To address these challenges, we propose three synergis-
+tic improvements built upon state-of-the-art diffusion-based
+framework NoMad [2]. Firstly, to speed up the inference
+steps, we propose to replace the conventional DDPM de-
+noising process [7] with a Rectified Flow Matching [9], [10]
+formulation that reformulates waypoint prediction as learn-
+ing straight-line trajectories in data space. This principled
+reformulation reduces the required inference steps from ten
+to just one via a single Euler integration step, while achiev-
+arXiv:2611.27179v1  [cs.RO]  20 Nov 2026
+
+
+ing on-par or even superior waypoint prediction accuracy
+compared to the DDPM strategy [7]. Secondly, to strengthen
+temporal context modeling across multi-frame observations,
+we propose to adopt the bidirectional Mamba-based model
+Hydra [11] to process the input observation images inspired
+by [3]. Unlike the transformer’s quadratic self-attention,
+Mamba’s linear recurrence mechanism captures long-range
+temporal dependencies far more effectively as the context
+window grows, yielding richer goal-conditioned visual rep-
+resentations particularly when processing large numbers of
+input frames. In our experiments, we are able to consume
+up to ten frames. Thirdly and most critically, we observe
+that naively combining the above two improvements does not
+provide cumulative gains and can even degrade performance.
+We attribute this behavior to insufficient interaction between
+the flow state and the temporally enriched visual represen-
+tation. Specifically, the Hydra encoder produces a context
+vector that remains unchanged across flow timesteps, while
+the timestep is provided only to the downstream velocity
+network. As a result, the same visual feature representation
+is used throughout flow-matching training, regardless of the
+current interpolation state. To address this, we introduce a
+lightweight feature-wise conditioning mechanism that injects
+the flow timestep into the visual conditioning signal before it
+enters the denoising network, restoring noise-level awareness
+so that the two components work in synergy. Extensive
+quantitative and qualitative experiments across multiple robot
+navigation benchmarks demonstrate that our unified frame-
+work achieves superior waypoint prediction accuracy and
+navigation success rates compared to existing works.
+Last but not least, we further extend our proposed ar-
+chitecture with a detection-guided mechanism to tackle a
+two-phase security inspection task using the Deep Robotics
+X30 Pro quadruped robot: first navigating the robot toward
+a target object, then executing a circular motion around
+it for detailed inspection. By incorporating a lightweight
+object detection head [12] into our framework, the robot can
+approach a specific target without relying on a goal frame
+image, using the bounding box area as an additional indicator
+for autonomous stopping. This mechanism builds naturally
+upon our flow matching policy and the learned model gen-
+erates the overall navigation and circling trajectories, while
+the detection head enhances target-aware approaching. An
+illustration of our navigation task is shown in Figure 1.
+Our main contributions can be summarized as follows:
+• We carefully incorporate rectified flow matching into
+the diffusion-based framework [2] to reduce inference
+steps from teens to one while also improving waypoint
+prediction accuracy.
+• We propose to replace the transformer-based tempo-
+ral encoder with a bidirectional Mamba state-space
+model Hydra, which more effectively captures long-
+range temporal dependencies across multi-frame obser-
+vations with linear computational complexity.
+• We introduce a feature-wise timestep conditioning
+mechanism that directly modulates the temporally en-
+riched visual context according to the current flow
+state, enabling stronger interaction between temporal
+perception and trajectory generation.
+• We conduct extensive experiments on multiple datasets,
+demonstrating that our unified framework achieves
+state-of-the-art performances.
+• We extend our framework with a detection-guided
+mechanism for a two-phase security inspection task,
+where the object detector enables goal-image-free target
+approaching.
+II. RELATED WORKS
+A. Vision-Based Robot Navigation
+Vision-based navigation has evolved from classical map-
+based planning to modern learning-based methods. Re-
+cent works have focused on general-purpose, transferable
+navigation policies including ViNT [1] learned a univer-
+sal policy from heterogeneous multi-robot datasets with
+zero-shot transfer, GNM [13] established the foundation
+model paradigm for goal-conditioned navigation, and No-
+MaD [2] integrated diffusion-based action generation to
+capture multi-modal action distributions for state-of-the-art
+topological navigation. Despite this progress, these methods
+still face limitations in larger temporal context modeling, and
+diffusion-based method needs several inference steps to get
+reasonable results.
+B. Diffusion Models for Robot Control
+Diffusion models have achieved remarkable success in
+image generation and have been increasingly adopted for
+robot control. Diffusion Policy [14] pioneered applying
+DDPM [7] to visuomotor policy learning, demonstrating that
+iterative denoising effectively captures multi-modal action
+distributions in manipulation tasks. This approach has since
+been extended to navigation [2] and other robotic domains.
+However, diffusion-based policies suffer from high inference
+latency due to multiple sequential denoising steps. While
+DDIM [15] has attempted to reduce sampling steps through
+non-Markovian processes, our work takes a fundamentally
+different approach by reformulating action generation using
+flow matching [9], which inherently supports single-step
+inference without requiring distillation or additional training
+stages.
+C. Flow Matching and Rectified Flow
+Flow matching [10], [9] has emerged as an elegant alter-
+native to diffusion models, learning a deterministic velocity
+field that transports samples from a simple prior to the
+data distribution, rather than reversing a stochastic noising
+process. Rectified Flow [9] further simplifies this by defining
+straight-line interpolation paths, enabling accurate single-
+step Euler integration. While flow matching has shown
+competitive or superior performance in image [16] and
+video generation with significant sampling efficiency gains,
+its application in robotics remains underexplored. To our
+knowledge, no prior work has systematically investigated
+flow matching for visual navigation or its integration with
+advanced temporal encoders, which is the focus of our work.
+
+
+D. State Space Models and Mamba
+State
+space
+models
+(SSMs)[17]
+introduced
+efficient
+continuous-time SSM parameterization, while Mamba [11]
+achieved a breakthrough with input-dependent selective
+mechanisms and hardware-aware parallel scanning. Mamba-
+2 [18] further bridged SSMs and attention mechanisms theo-
+retically, and bidirectional extensions such as Hydra [19] and
+Vision Mamba [20] adapted the architecture for tasks requir-
+ing bidirectional context. While SSMs have been explored
+for robotic policy learning [3], their application to temporal
+encoding in visual navigation remains largely unexplored.
+Our work is the first to systematically investigate Mamba
+as a temporal encoder combined with flow matching [10],
+demonstrating its advantages over Transformer-based en-
+coders, particularly for long observation histories.
+III. METHOD
+In this section, we present our proposed framework for
+efficient and accurate visual navigation. Our baseline archi-
+tecture is built upon the NoMaD [2] model, and we introduce
+three principled improvements that collectively address the
+key limitations of existing navigation policies. Our frame-
+work consists of: (1) a rectified flow matching formulation
+that replaces the conventional DDPM denoising [15] process
+to enable single-step inference; (2) a bidirectional Hydra [19]
+encoder that replaces the transformer-based temporal encoder
+to more effectively capture long-range dependencies across
+multi-frame observations; and (3) a feature-wise conditioning
+mechanism that resolves the critical incompatibility between
+the Hydra encoder and flow matching, enabling the two
+improvements to work synergistically. An overview of the
+complete architecture is illustrated in Figure 2.
+Input Images
+Image 
+Encoder
+Hydra SSM Encoder
+Forward SSM Scan
+Backward SSM Scan
+Image 
+embeddings
+…
+Rectified Flow Loop
+Feature-Wise Time-Aware 
+Embedding
+MLP
+Output Trajectory
+Time Step
+Fig. 2.
+The pipeline of our architecture. The pipeline processes images
+through an image encoder to generate image embeddings, which are refined
+by a Hydra SSM Encoder performing bidirectional temporal scans. The
+temporally-enriched features are converted to time-injected embeddings
+through an MLP , which feed into a rectified flow loop to compute the
+final output trajectory.
+A. Rectified Flow Matching for Action Generation
+The NoMaD [2] baseline employs a DDPM-based [7] dif-
+fusion policy to generate waypoint action trajectories. During
+training, the forward diffusion process progressively corrupts
+a ground-truth action trajectory a0 by adding Gaussian noise
+over T discrete timesteps according to a predefined variance
+schedule {β1,...,βT}:
+q(at | at−1) = N (at;
+p
+1−βt at−1,βtI).
+(1)
+At inference time, the model must iteratively reverse this
+process starting from pure Gaussian noise aT ∼N (0,I), ap-
+plying the learned denoising network for each of the T steps
+to recover the clean action trajectory. NoMaD [2] requires
+T = 10 denoising steps, each involving a full forward pass
+through the UNet-based denoising network. To speed up the
+inference, we carefully replace the DDPM [7] formulation
+with rectified flow matching [9], which enables high-quality
+action trajectory generation in as few as a single integration
+step.
+Flow matching [10] defines a continuous-time generative
+model by learning a velocity field vθ that transports samples
+from a simple prior distribution p0 (e.g., standard Gaussian)
+to the data distribution p1. The transport is governed by an
+ODE:
+dxt
+dt = vθ(xt,t),
+t ∈[0,1],
+(2)
+where x0 ∼p0 = N (0,I) is a noise sample and x1 ∼p1 is a
+data sample. The key insight of rectified flow [9] is to define
+the interpolation path between noise and data as a simple
+straight line:
+xt = (1−t)x0 +t x1,
+t ∈[0,1],
+(3)
+where x0 ∼N (0,I) is a noise sample and x1 is a ground-truth
+action trajectory. The time derivative of this interpolation
+yields the constant velocity:
+dxt
+dt = x1 −x0,
+(4)
+which is independent of t. The velocity prediction network
+vθ is trained to regress this target velocity conditioned on
+the noisy sample xt, the timestep t, and the context vector c:
+Lflow = Et∼U (0,1),x0∼N (0,I),x1∼pdata ∥vθ(xt,t,c)−(x1 −x0)∥2 .
+(5)
+Because the rectified flow formulation learns straight-line
+transport paths, the ODE in Eq. (2) can be approximated
+with a single Euler integration step at inference time:
+ˆx1 = x0 +vθ(x0,t = 0,c),
+x0 ∼N (0,I),
+(6)
+where ˆx1 is the predicted action trajectory. This reduces the
+inference cost from T = 10 sequential forward passes in
+DDPM [7] to a single forward pass, yielding a decrease in
+latency.
+Compared to the DDPM [7] formulation, the flow match-
+ing approach offers several advantages for the navigation
+task: (1) the straight-line interpolation provides a more direct
+and stable training signal than the curved noising schedule
+of DDPM [7]; (2) the single-step inference eliminates the
+
+
+accumulation of errors across multiple denoising steps; and
+(3) the continuous-time formulation provides a natural frame-
+work for trading off between speed and quality by adjusting
+the number of Euler steps if needed.
+B. Hydra-Based Temporal Encoder
+To capture input images’ bidirectional dependency, we
+adopt a bidirectional Hydra architecture [19] that processes
+the observation sequence in both forward and backward
+directions. The Hydra [19] architecture is built upon the
+Structured State Space Sequence (S4) model [17], which
+maps a one-dimensional input sequence x(t) ∈R to an output
+y(t) ∈R through a latent state h(t) ∈RN via the following
+continuous-time linear ODE:
+h(t) = Ah(t)+Bx(t),
+(7)
+y(t) = Ch(t)+Dx(t),
+(8)
+where A ∈RN×N is the state transition matrix, B ∈RN×1 is
+the input projection matrix, C ∈R1×N is the output projection
+matrix, and D ∈R is the skip connection parameter.
+Concretely,
+given
+the
+observation
+sequence
+{ot−K+1,...,ot}, each frame is first encoded by a frozen
+ViT
+[21]
+backbone
+to
+obtain
+per-frame
+embeddings
+{e1,e2,...,eK,eg}. These embeddings are then processed by
+the Hydra [19] encoder:
+{z1,z2,...,zK,zg} = Hydra({e1,e2,...,eK,eg}),
+(9)
+followed by a learned pooling operation to produce the goal-
+conditioned context vector c.
+This context vector c encodes the full spatiotemporal
+observation history along with goal information, and serves
+as the conditioning signal for the downstream action gen-
+eration policy. The linear complexity of the Hydra encoder
+ensures that increasing the context window size incurs only
+a proportional increase in computation, enabling the use of
+significantly longer observation histories compared to the
+transformer-based baseline.
+C. Feature-Wise Time-Aware Conditioning
+Having introduced rectified flow and the Hydra encoder as
+two individual improvements, a natural question is whether
+they can be directly combined to obtain cumulative benefits.
+Surprisingly, our experiments show that the naive combi-
+nation provides little additional gain and can even under-
+perform the Hydra-only variant. We therefore examine how
+the rectified-flow state interacts with the temporally enriched
+visual representation produced by Hydra. Following Sec. III-
+A, rectified flow constructs a linear interpolation between
+a Gaussian sample x0 ∼N (0,I) and a ground-truth action
+trajectory x1:
+xt = (1−t)x0 +tx1,
+t ∈[0,1].
+(10)
+The velocity network is trained with
+LFM = Et,x0,x1
+h
+∥vθ(xt,t,c)−(x1 −x0)∥2
+2
+i
+,
+(11)
+where c denotes the goal-conditioned temporal context pro-
+duced by the Hydra encoder. Under the squared regression
+objective, the optimal predictor can be expressed as
+v∗(x,t,c) = E[x1 −x0 | xt = x, t, c].
+(12)
+The conditional distribution of (x0,x1) given the current state
+xt = x generally changes with t. Consequently, the velocity
+field can remain flow-state dependent even though the target
+associated with each individual interpolation pair is constant.
+Explicit timestep conditioning therefore remains useful for
+rectified-flow generation. However, in the naive combination
+of rectified flow and Hydra, the timestep t is provided to
+the downstream velocity network, while the Hydra-derived
+context c remains unchanged for all interpolation states.
+Therefore, the model must learn the interaction between the
+current flow state and the temporally enriched visual context
+implicitly inside the velocity network. We hypothesize that
+this weak coupling limits the effective use of the rich tempo-
+ral representation provided by Hydra, particularly when the
+observation history becomes long.
+To strengthen the interaction between the flow state and the
+temporal visual representation, we introduce Feature-Wise
+Time-Aware Conditioning (FTC). Rather than using the same
+Hydra feature c for all t, FTC directly modulates the context
+according to the current flow timestep. Given t ∈[0,1], we
+first compute a sinusoidal timestep embedding
+e(t) = [sin(tω0),cos(tω0),...,sin(tωd/2−1),cos(tωd/2−1)],
+(13)
+where
+ωk = exp
+
+−ln10000
+d/2−1 k
+
+,
+k = 0,...,d/2−1,
+(14)
+and d is the context dimension. The timestep embedding
+is then projected through a two-layer MLP with a SiLU
+activation:
+h(t) = W2σ(W1e(t)+b1)+b2.
+(15)
+From h(t), we predict feature-wise scale and shift parameters
+[γ(t),β(t)] = W3h(t)+b3,
+γ(t),β(t) ∈Rd.
+(16)
+The Hydra context is then modulated as
+˜c(t) = (1+γ(t))⊙c+β(t),
+(17)
+where ⊙denotes element-wise multiplication. The resulting
+flow-matching objective becomes
+L = Et,x0,x1
+h
+∥vθ(xt,t, ˜c(t))−(x1 −x0)∥2
+2
+i
+.
+(18)
+Compared with conventional timestep conditioning, FTC
+introduces an additional direct pathway from the flow
+timestep to the visual conditioning signal. Conceptually, the
+dependence of the velocity prediction on t can be decom-
+posed as
+∂vθ
+∂t =
+∂vθ
+∂e(t)
+∂e(t)
+∂t
+|
+{z
+}
+conventional timestep pathway
++
+∂vθ
+∂˜c
+∂˜c
+∂t
+| {z }
+feature-wise conditioning pathway
+.
+(19)
+
+
+The first pathway is already available when the timestep
+is provided directly to the velocity network. FTC adds
+the second pathway, allowing the flow timestep to directly
+control how the temporally aggregated visual features are
+scaled and shifted. Thus, instead of requiring the velocity
+network to learn the interaction between t and c entirely
+implicitly, the proposed mechanism explicitly exposes this
+interaction at the feature level.
+IV. EXPERIMENTS
+We conduct extensive experiments to evaluate our pro-
+posed framework across multiple public benchmarks and
+a challenging internal dataset. We compare against state-
+of-the-art models ViNT [1] and NoMaD [2] together with
+several ablation variants to validate the contribution of
+each proposed component. In addition to offline quantitative
+evaluation, we deploy our model on a physical quadruped
+robot to assess real-world navigation performance. In our
+experiments, F10 represents for increasing NoMad [2]’s input
+number of image frames from three to ten, which is a ablation
+study to verify the effectiveness of our architecture when
+inputting long image sequences; Ours (RF) represents for
+our model with rectified flow, Ours (Hydra) represents for
+our model with Hydra encoder, Ours (Na¨ıve) represents for
+the na¨ıve combination of RF and Hydra, and Ours (Full)
+represens for our full architecture.
+A. Datasets
+We evaluate our framework on two widely used public
+benchmarks and one internally collected dataset, covering
+diverse environments and navigation scenarios. For fair com-
+parison, we train separate models for each dataset across
+all our model variants and baseline methods from existing
+works.
+RECON [22]. The RECON dataset contains navigation tra-
+jectories collected across a variety of outdoor environments
+including parks, trails, and urban sidewalks. The dataset
+features diverse visual conditions such as varying lighting,
+seasonal changes, and different terrain types. We select 150
+representative trajectories for train and 20 trajectories for
+testing.
+TartanDrive [23]. The TartanDrive dataset consists of off-
+road driving data collected on an all-terrain vehicle equipped
+with multiple sensors. The dataset features challenging un-
+structured environments with rough terrain, vegetation, and
+varying weather conditions. This dataset tests the model’s
+ability to handle visually complex and geometrically chal-
+lenging navigation scenarios. We select 150 representative
+trajectories for train and 20 trajectories for testing.
+Internal Quadruped Dataset. To evaluate our framework in
+a more challenging real-world setting, we collect a custom
+dataset using the Deep Robotics X30 Pro quadruped plat-
+form. The robot is equipped with a front-facing RGB camera
+and records navigation trajectories across indoor office en-
+vironments, outdoor paths, and semi-structured warehouse
+settings. Critically, our internal task is more demanding
+than standard point-goal navigation: the robot must not only
+navigate to the target location but also execute a circling
+motion around the target upon arrival. This compound task
+requires the policy to generate smooth, continuous trajecto-
+ries that testing the model’s ability to produce diverse and
+temporally coherent action sequences. The dataset contains
+120 navigation trajectories, split into 80%/10%/10% for
+training, validation, and testing, respectively.
+B. Implementation Details
+All models are trained using the AdamW optimizer with
+an initial learning rate of 1 × 10−4, weight decay of 1 ×
+10−2, and a cosine annealing learning rate schedule with a
+linear warmup of 500 steps. The batch size is set to 256
+across all experiments. For the flow matching formulation,
+the timestep t is uniformly sampled from U (0,1) during
+training. For real-world deployment on the X30 Pro platform,
+the model runs on an onboard NVIDIA Jetson Orin module.
+For experimental comparisons, we fine-tune ViNT [1] and
+NoMad [2] using suggested hyper-parameters of their official
+code.
+C. Evaluation Metrics
+We employ a comprehensive set of evaluation metrics to
+assess both offline prediction quality and real-world naviga-
+tion performance.
+Waypoint Cosine Similarity (WCS). We compute the
+cosine similarity between the predicted waypoint trajec-
+tory ˆa = { ˆw1,..., ˆwH} and the ground-truth trajectory a =
+{w1,...,wH} following NoMad [2]:
+WCS = 1
+H
+H
+∑
+i=1
+ˆwi ·wi
+∥ˆwi∥∥wi∥,
+(20)
+where H is the trajectory horizon. Higher values indicate
+better directional alignment between predicted and ground-
+truth trajectories.
+Average Displacement Error (ADE). We report the mean
+Euclidean distance between all predicted waypoints and their
+corresponding ground-truth waypoints:
+ADE = 1
+H
+H
+∑
+i=1
+| ˆwi −wi|2.
+(21)
+This metric measures the overall trajectory accuracy by
+averaging the displacement error across all H waypoints,
+capturing how closely the predicted path aligns with the
+ground-truth trajectory as a whole. In Figures. 3 & 4, ADE
+is reported as the the mean of all the frames in world
+coordinates, while ADE in Tabs I, II, VI, III & IV is reported
+as the mean of predicted waypoints in robot coordinates. The
+same for FDE.
+Final Displacement Error (FDE). We report the Euclidean
+distance between the final predicted waypoint and the final
+ground-truth waypoint:
+FDE = ∥ˆwH −wH∥2.
+(22)
+This metric specifically measures the accuracy of the pre-
+dicted goal-reaching position.
+
+
+TABLE I
+QUANTITATIVE COMPARISON OF NAVIGATION PERFORMANCE ON THE
+RECON DATASET [22]. WE REPORT WCS ↑, ADE ↓AND FDE ↓.
+Method
+WCS ↑
+ADE ↓
+FDE ↓
+ViNT [1]
+0.8785
+2.6486m
+4.8585m
+NoMaD [2]
+0.9024
+2.6336m
+4.6816m
+NoMaD [2] (F10)
+0.9090
+2.6359m
+4.7013m
+Ours (RF)
+0.9093
+2.0675m
+4.1776m
+Ours (Hydra)
+0.9191
+1.1651m
+1.4249m
+Ours (Na¨ıve)
+0.9178
+1.5301m
+1.9512m
+Ours (Full)
+0.9550
+0.0872m
+0.1170m
+TABLE II
+QUANTITATIVE COMPARISON OF NAVIGATION PERFORMANCE ON OUR
+COLLECTED DATASET. WE REPORT WCS ↑, ADE ↓AND FDE ↓.
+Method
+WCS ↑
+ADE ↓
+FDE ↓
+ViNT [1]
+0.8512
+0.5740m
+1.1212m
+NoMaD [2]
+0.8672
+0.5280m
+0.9272m
+NoMaD [2] (F10)
+0.9012
+0.0618m
+0.1058m
+Ours (RF)
+0.9004
+0.0640m
+0.1034m
+Ours (Hydra)
+0.9195
+0.0590m
+0.0994m
+Ours (Na¨ıve)
+0.9105
+0.0610m
+0.1004m
+Ours (Full)
+0.9411
+0.0178m
+0.0233m
+Navigation Success Rate (SR). For real-world experiments
+on the X30 Pro platform, we define a navigation trial as
+successful if the robot reaches around a 1-meter radius of
+the target location and successfully finish the circular motion
+around the target object.
+Inference Time. We report the average time to generate
+one action trajectory, measured on an NVIDIA RTX PRO
+6000 GPU in Table V. Inference latency is dominated by the
+number of sequential passes through the action (denoising)
+network rather than by the visual encoder, since the encoder
+runs only once per prediction whereas the denoising network
+is invoked repeatedly. NoMaD [2] requires ten sequential
+U-Net passes to iteratively denoise the trajectory, while
+our rectified-flow formulation recovers the trajectory in a
+single Euler integration step. Adopting the bidirectional
+Hydra encoder does add per-call cost, which is shown in
+Ours (Hydra) at 98.7 ms under the same ten-step sampling,
+but this cost is incurred only once, and Mamba’s linear-time
+recurrence keeps its growth modest even as the number of
+input frames increases. Consequently, combining single-step
+rectified flow with the Hydra encoder (Ours (Full)) reduces
+the latency to 68.4 ms, which is not only below the multi-
+step Hydra variant but also faster than the NoMaD baseline’s
+79.9 ms [2], despite our model processing substantially
+longer observation sequences.
+D. Quantitative Comparisons
+Tables I and II summarize the quantitative results on
+the public RECON [22] dataset and our internal dataset,
+respectively. We also report the randomness evaluation in
+Table III, demonstrating the stability of our model across
+two datasets.
+On the public RECON dataset (Table I), our full model
+with feature-wise timestep conditioning achieves the best
+performance across all three metrics. Compared to the
+strongest baseline NoMaD [2], Ours-Full improves WCS
+by 5.83% while reducing ADE and FDE by 96.69% and
+97.50%, respectively. Among our ablation variants, replacing
+only the diffusion policy with rectified flow (Ours-RF) yields
+TABLE III
+RANDOMNESS EVALUATION WITH MEAN AND STANDARD DEVIATION
+FOR OUR FULL MODEL.
+Datasets
+WCS
+ADE
+FDE
+RECON [22]
+0.9550±3.11×10−3
+0.0872±9.95×10−3m
+0.1170±1.71×10−3m
+Ours
+0.9411±6.77×10−3
+0.0178±3.81×10−3m
+0.0233±7.18×10−3m
+TABLE IV
+QUANTITATIVE COMPARISON OF NAVIGATION PERFORMANCE ON THE
+TARTANDRIVE DATASET [23]. WE REPORT WCS ↑, ADE ↓AND FDE ↓.
+TartanDrive [23]
+WCS ↑
+ADE ↓
+FDE ↓
+NoMaD [2]
+0.8054
+0.5951m
+1.0573m
+Ours (Full)
+0.7953
+0.1955m
+0.2593m
+a modest WCS improvement over NoMaD and provides
+gains in ADE and FDE, indicating that one-step generation
+alone can slightly improve the performance at the same
+time increases the inference speed. Adopting the bidirec-
+tional Hydra encoder (Ours-Hydra) brings more substantial
+improvements, reducing ADE to 1.1651 m and FDE to
+1.4249 m, which highlights the benefit of temporal model-
+ing across observation frames. However, na¨ıvely combining
+rectified flow with the Hydra encoder (Ours-Na¨ıve) degrades
+performance relative to Ours-Hydra. This result suggests
+that simply providing the flow timestep to the downstream
+velocity network is insufficient to fully exploit the temporally
+enriched Hydra representation. In contrast, Ours-Full directly
+adapts the context according to the current flow state.
+The results on our internal dataset (Table II) exhibit
+consistent trends. Ours-Full again achieves the best overall
+performance with a WCS of 0.9411, an ADE of 0.0184 m,
+and an FDE of 0.0240 m, substantially outperforming ex-
+isting works. Notably, all four of our variants including
+Ours-RF surpass the baselines by a considerable margin on
+this dataset, suggesting the generalization of the single-step
+inference from rectified flow formulation. Nevertheless, the
+same pattern that the na¨ıve combination underperforming
+Ours-Hydra in both ADE and FDE persists, while Ours-Full
+reduces these errors further. This consistent improvement
+across both datasets validates the effectiveness and general-
+izability of the proposed feature-wise timestep conditioning
+mechanism in bridging the rectified flow policy and the
+bidirectional Hydra encoder. Similar trends are also observed
+in TartanDrive [23] dataset as shown in Table IV.
+Furthermore, we also conduct an experiment to increase
+the number of input frames from three to ten for NoMad
+(NoMad F10) to compare with the results of Our-Hydra,
+we can see that even though simply increase the input
+number can obtain better performances, but they are inferior
+compared to ours Hydra variant.
+E. Qualitative Results
+To further illustrate the effectiveness of our approach,
+we visualize different predicted trajectories alongside the
+ground truth on both our self-collected dataset and the public
+RECON [22] dataset in Figures 3 and 4, respectively.
+As shown in Figure 3. NoMaD exhibits the largest de-
+viation from the ground truth, and Ours-Hydra achieves
+a superior performances, with its trajectory visually closer
+to the ground truth yet still exhibiting minor deviations at
+turning points. Our full model produces the most faithful
+
+
+Fig. 3.
+Qualitative comparisons on predicted trajectories from different models on our self-collected dataset.
+Fig. 4.
+Qualitative comparisons on predicted trajectories from different models on the RECON [22] dataset.
+TABLE V
+INFERENCE TIME COMPARISON AMONG DIFFERENT MODELS ON THE
+RECON [22] DATASET.
+Method
+Nomad [2]
+Ours (Hydra)
+Ours (Full)
+Time
+79.9ms
+98.7ms
+68.4ms
+TABLE VI
+QUANTITATIVE COMPARISON ON THE REAL-WORLD DEPLOYMENT ON
+THE NAVIGATION ACCURACY (SR). FDT REPRESENTS FOR THE TIME
+PERCENTAGE THAT ROBOT CAN DETECT THE FULL TARGET DURING THE
+CIRCULAR MOTION.
+Method
+ViNT [1]
+NoMaD [2]
+Ours (Hydra)
+Ours (Full)
+SR ↑
+86.7%
+86.7%
+86.7%
+100%
+FDT ↑
+75.8%
+76.1%
+79.9%
+80.2%
+trajectory, achieving the lowest ADE and FDE, closely
+tracing the ground-truth path throughout the entire navigation
+sequence. Similarly, as shown in Figure 4, the baseline
+NoMaD produces trajectories that deviate substantially from
+the ground truth. Introducing the bidirectional Hydra en-
+coder (Ours-Hydra) further improves trajectory alignment,
+which suggests that capturing temporal dependencies across
+observation frames contributes meaningfully to directional
+accuracy. However, a large gap relative to the ground truth
+still persists. In contrast, our full model with feature-wise
+timestep conditioning produces a trajectory that nearly over-
+laps with the ground truth, achieving a dramatically lower
+ADE and FDE.
+Notably, while there are differences in environment scale
+and complexity for the two datasets with the absolute error
+magnitudes differ between them, the relative ranking among
+methods remains similar. This cross-dataset consistency re-
+inforces the generalizability of our approach and confirms
+that the feature-wise timestep conditioning mechanism is es-
+sential for unlocking the full potential of combining rectified
+flow with bidirectional temporal encoding.
+Starting Image
+Starting Image
+3rd-person view
+3rd-person view
+Fig. 5.
+Visualization of the detection-guided navigation with two phases,
+the 1st one is normal motion and the 2nd one is circular motion around a
+target object.
+F. Real-World Deployment with Navigation and Circling
+To evaluate the practical effectiveness of our framework
+beyond offline metrics, we deploy all methods on a physical
+robot platform tasked with navigating toward a designated
+target and subsequently performing a circular inspection
+motion around it. We train two separate models for the
+two phases, namely navigation toward the target and circular
+inspection, and combine them during deployment. Both mod-
+els share the same architecture but are trained on different
+data corresponding to their respective phases. We report two
+metrics: navigation success rate (SR) and full detection time
+(FDT), defined as the percentage of the circular inspection
+phase during which the robot maintains continuous full
+visibility of the target. Results are summarized in Table VI.
+We designed a comprehensive set of experiments across
+five distinct starting points, each tested three times for a total
+of fifteen trials. The robot’s camera is equipped with a 130-
+degree field of view (FOV), which informed the selection of
+starting positions. 1) The first starting point was positioned
+directly in front of the target object at 5 meters, serving
+as a baseline for straight-line navigation accuracy. 2) The
+second and third starting points were placed at the leftmost
+and rightmost extremes of the camera’s FOV at the 5-meter
+range, which is designed to test whether the robot could
+
+
+accurately reach the object from the farthest perceivable
+positions, thereby verifying that cumulative navigation error
+remained sufficiently small over long distances. 3) The fourth
+and fifth starting points were positioned at a very short
+vertical distance of 1.5 meters from the robot, but at the
+maximum horizontal offset where the camera could just
+barely detect the object at the edges of its FOV. These near-
+but-lateral positions were specifically chosen to test whether
+the robot could execute a sufficiently large turning angle
+within a very short distance to orient itself toward and reach
+the target. The examples are shown in Figure 5.
+The quantitative comparisons among different models are
+shown in Table VI. Existing works or our model variants suf-
+fer from the inability to simultaneously achieve a sufficiently
+large turning angle in a short period of time and maintain
+sufficiently small accumulated error over long distances,
+and they failed 2 times out of 15 trials. The performance
+gap in SR (86.7% →100%) demonstrates that our model
+provides a meaningful improvement in navigation reliability,
+particularly in challenging starting positions. Most notably,
+Ours-Full achieves the highest FDT of 80.2% among all
+methods. This metric is particularly meaningful as it directly
+reflects the quality of the predicted circular trajectory during
+the inspection phase: a higher FDT indicates that the robot
+maintains a consistent and appropriate radius around the
+target, keeping it fully within the sensor’s field of view
+throughout the circular motion. This capability is essential
+for security inspection scenarios, where the robot must per-
+form a complete circumnavigation of a potentially hazardous
+target to gather comprehensive visual information from all
+angles. We attached a video showing the robot navigating
+toward the bag from both lateral directions and executing a
+full circular motion around the target.
+V. CONCLUSIONS
+In this work, we presented a unified framework for
+efficient vision-based robotic navigation comprising three
+contributions: a rectified flow formulation that reduces multi-
+step denoising to a single inference step, a bidirectional
+Mamba-based visual encoder for capturing temporal de-
+pendencies across observation frames, and a feature-wise
+timestep conditioning mechanism that bridges the two by
+modulating encoded features via learned scale and shift
+parameters derived from the flow timestep. Our key finding
+is that na¨ıvely combining rectified flow with the temporal
+encoder degrades performance, and our feature-wise con-
+ditioning addresses this limitation by allowing the visual
+context to adapt as a function of the flow timestep during
+training. Experiments across multiple datasets and real-world
+deployment demonstrate consistent improvements over the
+corresponding baselines.
+REFERENCES
+[1] D. Shah, A. Sridhar, N. Dashora, K. Stachowicz, K. Black, N. Hirose,
+and S. Levine, “Vint: A foundation model for visual navigation,” arXiv
+preprint arXiv:2306.14846, 2023.
+[2] A. Sridhar, D. Shah, C. Glossop, and S. Levine, “Nomad: Goal
+masked diffusion policies for navigation and exploration,” in 2024
+IEEE International Conference on Robotics and Automation (ICRA).
+IEEE, 2024, pp. 63–70.
+[3] J. Cao, Q. Zhang, J. Sun, J. Wang, H. Cheng, Y. Li, J. Ma, Y. Shao,
+W. Zhao, G. Han et al., “Mamba policy: Towards efficient 3d
+diffusion policy with hybrid selective state models,” arXiv preprint
+arXiv:2409.07163, 2024.
+[4] D. Peng, J. Cao, Q. Zhang, and J. Ma, “Lovon: Legged open-
+vocabulary object navigator,” arXiv preprint arXiv:2507.06747, 2025.
+[5] Y.
+Du,
+T.
+Fu,
+Z.
+Chen,
+B.
+Li,
+S.
+Su,
+Z.
+Zhao,
+and
+C. Wang, “VL-Nav: Real-time vision-language navigation with
+spatial reasoning,” arXiv preprint arXiv:2502.00931, 2025. [Online].
+Available: https://arxiv.org/abs/2502.00931
+[6] M. Zhang, Y. Du, C. Wu, J. Zhou, Z. Qi, J. Ma, and B. Zhou, “Apex-
+nav: An adaptive exploration strategy for zero-shot object navigation
+with target-centric semantic fusion,” IEEE Robotics and Automation
+Letters, vol. 10, no. 11, pp. 11 530–11 537, 2025.
+[7] J. Ho, A. Jain, and P. Abbeel, “Denoising diffusion probabilistic
+models,” Advances in neural information processing systems, vol. 33,
+pp. 6840–6851, 2020.
+[8] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N.
+Gomez, Ł. Kaiser, and I. Polosukhin, “Attention is all you need,”
+Advances in neural information processing systems, vol. 30, 2017.
+[9] X.
+Liu,
+C.
+Gong,
+and
+qiang
+liu,
+“Flow
+straight
+and
+fast:
+Learning to generate and transfer data with rectified flow,” in The
+Eleventh International Conference on Learning Representations, 2023.
+[Online]. Available: https://openreview.net/forum?id=XVjTT1nw5z
+[10] Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le, “Flow
+matching for generative modeling,” in The Eleventh International
+Conference on Learning Representations, 2023. [Online]. Available:
+https://openreview.net/forum?id=PqvMRDCJT9t
+[11] A. Gu and T. Dao, “Mamba: Linear-time sequence modeling with
+selective state spaces,” in First conference on language modeling,
+2024.
+[12] S. Ren, K. He, R. Girshick, and J. Sun, “Faster r-cnn: Towards real-
+time object detection with region proposal networks,” IEEE transac-
+tions on pattern analysis and machine intelligence, vol. 39, no. 6, pp.
+1137–1149, 2016.
+[13] D. Shah, A. Sridhar, A. Bhorkar, N. Hirose, and S. Levine, “Gnm:
+A general navigation model to drive any robot,” arXiv preprint
+arXiv:2210.03370, 2022.
+[14] C. Chi, Z. Xu, S. Feng, E. Cousineau, Y. Du, B. Burchfiel, R. Tedrake,
+and S. Song, “Diffusion policy: Visuomotor policy learning via action
+diffusion,” The International Journal of Robotics Research, vol. 44,
+no. 10-11, pp. 1684–1704, 2025.
+[15] J. Song, C. Meng, and S. Ermon, “Denoising diffusion implicit
+models,” arXiv preprint arXiv:2010.02502, 2020.
+[16] P. Esser, S. Kulal, A. Blattmann, R. Entezari, J. M¨uller, H. Saini,
+Y. Levi, D. Lorenz, A. Sauer, F. Boesel et al., “Scaling rectified
+flow transformers for high-resolution image synthesis,” in Forty-first
+international conference on machine learning, 2024.
+[17] A. Gu, K. Goel, and C. R´e, “Efficiently modeling long sequences with
+structured state spaces,” arXiv preprint arXiv:2111.00396, 2021.
+[18] T. Dao and A. Gu, “Transformers are ssms: Generalized models and
+efficient algorithms through structured state space duality, 2024,” URL
+https://arxiv. org/abs/2405.21060, p. 1, 2021.
+[19] S. Hwang, A. Lahoti, R. Puduppully, T. Dao, and A. Gu, “Hydra:
+Bidirectional state space models through generalized matrix mixers,”
+Advances in Neural Information Processing Systems, vol. 37, pp.
+110 876–110 908, 2024.
+[20] L. Zhu, B. Liao, Q. Zhang, X. Wang, W. Liu, and X. Wang, “Vision
+mamba: Efficient visual representation learning with bidirectional state
+space model,” 2024.
+[21] A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai,
+T. Unterthiner, M. Dehghani, M. Minderer, G. Heigold, S. Gelly et al.,
+“An image is worth 16x16 words: Transformers for image recognition
+at scale,” arXiv preprint arXiv:2010.11929, 2020.
+[22] D. Shah, B. Eysenbach, G. Kahn, N. Rhinehart, and S. Levine, “Rapid
+exploration for open-world navigation with latent goal models,” arXiv
+preprint arXiv:2104.05859, 2021.
+[23] S. Triest, M. Sivaprakasam, S. J. Wang, W. Wang, A. M. Johnson, and
+S. Scherer, “Tartandrive: A large-scale dataset for learning off-road
+dynamics models,” in 2022 International Conference on Robotics and
+Automation (ICRA).
+IEEE, 2022, pp. 2546–2552.

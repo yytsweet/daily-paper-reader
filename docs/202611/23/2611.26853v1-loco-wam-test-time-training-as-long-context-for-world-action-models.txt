@@ -1,0 +1,1601 @@
+LoCo-WAM: Test-Time Training as Long Context for World-Action Models
+Sheng Cheng1
+Deqian Kong2
+1Amazon AGI
+2University of California, Los Angeles
+Abstract
+World-action models guide robot actions by predicting what
+happens next, but typically condition on a short observation
+history. Extending this history increases computation at ev-
+ery decision and can require a separately trained model.
+We introduce LoCo-WAM, which learns from the outcomes
+of its actions through test-time training while keeping the
+same short history length. It uses newly observed frames
+to update a low-rank adapter in the video expert, whose
+adapted predictions guide subsequent actions.
+The up-
+dates accumulate within each episode and are reset between
+episodes, allowing past observations to influence decisions
+after they leave the input window. LoCo-WAM thus learns
+from a longer stream of experience without expert action la-
+bels, additional data or meta-training. Experiments on two
+world-action models show improved task success across
+four simulation benchmarks. On RoboCasa GR-1, a model
+with 2.4 s of history matches one trained with 9.6 s, while a
+model with 4.8 s exceeds it by 4.8 percentage points. Our
+analysis shows that the updates improve prediction of up-
+coming frames, affect the action mainly through adaptation
+of the imagined future, and have an increasing effect on ac-
+tions as the episode unfolds.
+1. Introduction
+Human behavior combines knowledge acquired over time
+with rapid learning from new experience, as described by
+complementary learning systems theory [35]. In motor con-
+trol, discrepancies between predicted and observed sensory
+outcomes can drive adaptation during action [43]. These
+findings motivate learning during robot execution, where
+the outcomes of actions provide feedback for the predic-
+tions that guide subsequent behavior [37].
+World-action models [13, 21, 24, 30, 31] provide a nat-
+ural setting for such learning. They predict future frames
+together with actions, drawing on video pretraining to learn
+how scenes evolve. In the models we study, the imagined
+future guides action generation. After the robot acts, the
+observed frames provide targets for the model’s own video
+loss. As interactions within a task share objects, surround-
+0 s
+2.4 s
+4.8 s
+9.6 s
+history observed by the model
+60
+65
+70
+75
+80
+success rate (%)
+base model
+LoCo-WAM
+66.2
+63.9
+73.6
+67.9
+78.3
+71.1
+74.3
+73.5
+base model, 9.6 s history
+Figure 1. Test-time training as long context. Success rate of
+Long-WAM on RoboCasa GR-1 for each history length, without
+and with LoCo-WAM. With LoCo-WAM, a model with 2.4 s of
+history matches the base model with 9.6 s, and a model with 4.8 s
+of history exceeds it.
+ings and dynamics, learning from these frames may im-
+prove predictions of what happens next. The updated pre-
+dictions can then guide subsequent actions.
+This learning allows experience to influence behavior be-
+yond a fixed observation window. Most world-action mod-
+els condition on a short history, which limits the past ob-
+servations available at each decision. Extending the his-
+tory [21, 30] increases computation and can require a sep-
+arately trained model. Selecting or compressing the his-
+tory requires components that are trained together with the
+policy [46, 49, 54]. Updating the model on the observed
+frames provides another way to use the past observations.
+These updates are a form of test-time training, a family of
+methods that update a model on each test input with a self-
+supervised loss [40], which has been extended to language
+and video generation models [12, 17, 41, 42, 50].
+We introduce LoCo-WAM, a test-time training method
+for world-action models, which trains the video expert dur-
+ing execution with its video loss on the observed frames.
+At every decision, LoCo-WAM takes one gradient step on
+a low-rank adapter [18] of the video expert to predict the
+most recently observed frames from the history that pre-
+1
+arXiv:2611.26853v1  [cs.RO]  19 Nov 2026
+
+
+ceded them. It keeps the action expert unchanged and resets
+the adapter at the start of every episode. Since the adapter
+accumulates these updates over the episode, the video ex-
+pert is trained on frames that have already left its history.
+The action expert then generates the next action from the
+imagined future and the features of the adapted video ex-
+pert. LoCo-WAM thereby requires no labels, rewards, ad-
+ditional data, new layers or meta-training, keeps the history
+length of the model, and can run its update while the robot
+executes the current action chunk.
+We evaluate LoCo-WAM on two world-action models,
+Long-WAM [21] and LingBot-VA [30], and four simula-
+tion benchmarks: RoboCasa GR-1 [4], RoboCasa365 [36],
+LIBERO-Mem [11] and RoboTwin 2.0 [8]. LoCo-WAM
+improves the base model on all four benchmarks.
+On
+RoboCasa GR-1, Long-WAM with 2.4 s of history reaches
+73.6% with LoCo-WAM, on par with the base model trained
+with 9.6 s of history, at 0.76 s per decision compared with
+0.67 s and without training a separate model. With 4.8 s
+of history, it reaches 78.3%, 4.8 points above the 9.6 s
+model (Fig. 1). On LIBERO-Mem, LingBot-VA with an
+8-chunk history matches its default 30-chunk history. On
+both benchmarks, LoCo-WAM also outperforms test-time
+methods for robot policies, including AdaWorldPolicy [55],
+which adapts the world model across the episodes of a task,
+and RoboTTT [23], which meta-trains fast-weight layers.
+Our analysis on RoboCasa GR-1 examines what an up-
+date of the video expert learns from the observed frames,
+how it reaches the action, and how its effect develops over
+the episode. The update improves the prediction of upcom-
+ing frames before they are used for training, with larger
+reductions in video loss for shorter histories.
+Using the
+model’s own predictions as targets in place of the observed
+frames removes the gain in success rate. The update af-
+fects the action mainly through the imagined future, since
+applying it only when the video expert predicts this future
+recovers most of the gain. We further show that updating
+only the video expert performs better than also updating the
+action expert with the action loss. Over the episode, the
+change of the action accumulates, and stopping the updates
+early removes most of the gain.
+In summary, our contributions are:
+• We introduce LoCo-WAM, test-time training as long con-
+text for world-action models: the video expert is trained
+during execution with its video loss on the observed
+frames, without labels, additional data or meta-training.
+• On two world-action models and four simulation bench-
+marks, LoCo-WAM improves the base model on all four
+benchmarks, enables a model with a short history to
+match or exceed the base model with a longer history, and
+outperforms prior test-time methods for robot policies.
+• We analyze how the update of the video expert reaches
+the action: it improves the prediction of upcoming frames
+from the observed frames, affects the action mainly
+through the imagined future, and the change of the action
+it causes accumulates over the episode.
+2. Related Work
+World-action models.
+World-action models predict fu-
+ture frames together with actions, which enables them to
+benefit from large-scale video pretraining and to use the pre-
+dicted future to choose actions [9, 13, 26, 27, 37]. Exam-
+ples include UniPi [13], GR-1 [52], VPP [19], UVA [31],
+UWM [62], Cosmos Policy [24], OpenWAM [51], Fast-
+WAM [56] and LingBot-VA [30], many of which pair a pre-
+trained video model that predicts the future frames with an
+action model that generates the actions from this prediction.
+Many manipulation tasks are long-horizon, and the in-
+formation needed to act, such as which steps have already
+been completed, is often no longer visible in the current ob-
+servation, so a policy has to rely on its history. Most world-
+action models, however, condition on a single frame or a
+short history. Some methods train the model with longer
+histories, with a separate model for each history length in
+Long-WAM [21] and with long video-action sequences in
+LingBot-VA [30]. Others select or compress the history,
+with a downsampled history stream in HiLo-WAM [49], an-
+chor frames and gist tokens in MemoryWAM [54], event
+memory banks in DiM-WAM [46], and the first observa-
+tion next to the recent history in ReCAP [53]. LoCo-WAM
+keeps the short-history model and trains it at test time on the
+observed frames, which enables it to reach the performance
+of a longer history.
+Test-time training.
+Test-time training updates a model on
+each test input with a self-supervised loss and was intro-
+duced to handle distribution shift [15, 40, 45, 47]. For long
+context, dynamic evaluation [28], Temp-LoRA [50], TTT-
+E2E [42] and SlowFast-VGen [17] update the weights of
+the model, or a temporary LoRA, on the context during in-
+ference, and TTT layers [41], Titans [2], LaCT [59] and
+One-Minute Video Generation [12] build such updates into
+the architecture as fast-weight layers. LoCo-WAM belongs
+to the first group and trains a low-rank adapter of a world-
+action model with its own video loss. In a world-action
+model, the self-supervised task, video prediction, shares the
+video expert with the main task, the prediction of the action.
+In robotics, PAD [16] adapts a visuomotor policy dur-
+ing deployment with a self-supervised loss. AdaWorldPol-
+icy [55], WorldAgen [44] and T3VF [38] adapt a world
+model with its prediction loss, mainly to handle distribu-
+tion shift, and SALT [29] adapts the action side under visual
+disruptions. RoboTTT [23] and WAM-TTT [14] meta-train
+fast-weight layers, to extend the context of a policy and to
+learn from human videos, respectively. Test-time reinforce-
+ment learning [1, 32] updates a policy with a reward signal.
+2
+
+
+LoCo-WAM updates the video expert with its own video
+loss on the observed frames and resets the adapter after ev-
+ery episode, without meta-training or rewards.
+3. Method
+This section presents LoCo-WAM. We first describe how
+a world-action model acts from a fixed history (Sec. 3.1).
+We then introduce LoCo-WAM, which trains a world-action
+model at test time on the current episode with its pretraining
+losses (Sec. 3.2). Finally, we describe the setting used in our
+experiments, which updates only the video expert, and how
+the update reaches the action (Sec. 3.3).
+3.1. World-action models with a fixed history
+A world-action model consists of a video expert with pa-
+rameters Φv and an action expert with parameters Φa. At
+decision t, it receives the recent observation history Ht of
+a fixed length P, together with the language instruction and
+the proprioceptive state. The video expert first predicts the
+latents of the upcoming frames from the history, indepen-
+dently of the action tokens of the current chunk, and the ac-
+tion expert then samples the next action chunk conditioned
+on the history and this prediction:
+ˆzt = RolloutΦv
+ ϵv | Ht
+
+,
+(1)
+at = DenoiseΦa
+ ϵa | Ht, ˆzt; Φv
+
+,
+(2)
+where Rollout and Denoise are multi-step denoising pro-
+cesses, ϵv and ϵa are independent Gaussian noise, and ˆzt
+denotes the predicted latents of the imagined future. In this
+predict-then-act structure, the action expert acts as an in-
+verse dynamics model that infers the action from the obser-
+vation history and the predicted future. The video expert
+thus not only produces the imagined future in Rollout but
+also computes the features of the history and the imagined
+future that the action expert reads in Denoise. The executed
+action chunk then produces the next observations, which en-
+ter the history Ht+1 of the next decision.
+Both experts are trained with flow matching. For a noise
+level σ ∈[0, 1], distinct from the decision index t, a clean
+target x is mixed with Gaussian noise ϵ as xσ = (1−σ) x+
+σ ϵ, and the model predicts the velocity ϵ −x:
+Lvideo(Φv) = E
+vΦv(zσ, σ | H) −(ϵ −z)
+2
+2,
+(3)
+Laction(Φa) = E
+uΦa(aσ, σ | H, ˜z; Φv) −(ϵ −a)
+2
+2, (4)
+where H is the history of a training window, z the ground-
+truth latents of the frames that follow it, and ˜z the corre-
+sponding noisy latents. The total objective is L = Lvideo +
+λ Laction. Because the history length P is fixed during train-
+ing, information older than P frames is not available to the
+model. Using a longer history requires training a model
+with a longer context, which also processes more tokens at
+every decision.
+3.2. Test-time training of world-action models
+LoCo-WAM trains a world-action model at test time on the
+current episode, without changing its pretrained weights or
+its history length. LoCo-WAM parameterizes the test-time
+update with a low-rank adapter [18] in each expert, so that
+each adapted linear layer computes
+W ′ = W + α
+r BA,
+(5)
+where W is the frozen pretrained weight, A and B are ma-
+trices of rank r, α is a scaling factor, and B is initialized to
+zero, so that the adapted model equals the pretrained model
+at the start of every episode.
+We denote the adapters of the video and action experts
+by Θv and Θa. At every decision t, LoCo-WAM forms a
+training sample from the most recent window of the episode
+whose future frames have all been observed. Its input is
+the history H preceding the window, and its targets are the
+latents z of the frames observed in it and the action chunk
+a executed at its start. Each loss updates the adapter of the
+expert it supervises:
+Θv ←Θv −ηv clip
+ ∇ΘvLvideo(Φv + Θv)
+
+,
+(6)
+Θa ←Θa −ηa clip
+ ∇ΘaLaction(Φa + Θa)
+
+,
+(7)
+where clip denotes gradient clipping, and at every decision
+Eq. (6) and Eq. (7) are applied for Sv and Sa steps, with
+learning rates and step counts chosen independently for the
+two experts. The adapters persist across the decisions of
+an episode and are reset at the beginning of each episode.
+LoCo-WAM therefore requires no labels, no additional data
+and no meta-training, since its targets are the observations
+and actions of the episode and its losses are those of pre-
+training.
+3.3. From the video update to the action
+In our design, LoCo-WAM updates only the video expert
+with Eq. (6). The targets of the video loss are frames pro-
+duced by the environment, which the model could not ob-
+serve when it made its prediction, and updating the video
+expert thus corrects its prediction with information from the
+episode. Algorithm 1 summarizes the procedure.
+At inference, the adapted video expert Φv + Θt, with Θt
+the adapter after the update at decision t, replaces Φv in both
+Eq. (1) and Eq. (2), while the action expert is unchanged:
+ˆzt = RolloutΦv+Θt
+ ϵv | Ht
+
+,
+(8)
+at = DenoiseΦa
+ ϵa | Ht, ˆzt; Φv + Θt
+
+.
+(9)
+Equation (8) describes the effect of the update on the video.
+Since Θt is trained on the frames observed in the episode, it
+adapts the imagined future to the dynamics of this episode.
+Equation (9) describes its effect on the action, which arises
+3
+
+
+Algorithm 1 LoCo-WAM
+Input: video expert Φv, action expert Φa, history length P,
+learning rate ηv, steps Sv
+1: initialize Θv with B = 0
+▷every episode
+2: for each decision t = 0, 1, 2, . . . do
+3:
+Ht ←the last P observations
+4:
+if a new chunk is fully observed then
+5:
+for s = 1, . . . , Sv do
+6:
+Θv ←Θv −ηv clip
+ ∇ΘvLvideo(Φv +Θv)
+
+▷Eq. (6)
+7:
+end for
+8:
+end if
+9:
+Θt ←Θv
+10:
+ˆzt ←RolloutΦv+Θt(ϵv | Ht)
+▷Eq. (8)
+11:
+at ←DenoiseΦa(ϵa | Ht, ˆzt; Φv + Θt)
+▷Eq. (9)
+12:
+execute at
+13:
+append the resulting observations to the history
+14: end for
+in two ways, through the imagined future ˆzt and through
+the features of the history and the imagined future that the
+adapted video expert computes in Denoise. Section 4.5 an-
+alyzes both effects empirically.
+Asynchronous update. In the synchronous form, the Sv
+update steps of each decision, each requiring one forward
+and one backward pass through the adapted layers of the
+video expert, add to the latency from observation to action.
+To reduce this latency, the update can run asynchronously.
+Since the robot executes the current action chunk before the
+next decision, the update runs concurrently with execution,
+and Θt in Eqs. (8) and (9) is replaced by Θt−1, the adapter
+obtained after all Sv steps of the previous decision. This
+requires the Sv steps to finish within the execution of one
+action chunk. Unless marked as asynchronous, results use
+the synchronous update.
+4. Experiments
+4.1. Setup
+Evaluation benchmarks.
+We apply LoCo-WAM to
+Long-WAM [21] and LingBot-VA [30], two world-action
+models that condition on a fixed history. We evaluate each
+base model on two closed-loop simulation benchmarks un-
+der the official protocols, run each setting three times, and
+report the mean and standard deviation of the success rate
+in percent.
+RoboCasa GR-1. RoboCasa GR-1 [4] consists of 24
+tabletop tasks for a GR-1 humanoid, 18 pick-and-place and
+6 articulated tasks, whose demonstrations last 10 to 18 s on
+average. Long-WAM provides models trained with 0, 2.4,
+4.8 and 9.6 s of history, which serve as our short- and long-
+context models, and each evaluation runs 10 trials per task.
+RoboCasa365. RoboCasa365 [36] contains atomic and
+composite household tasks in simulated kitchens. Follow-
+ing Long-WAM, we evaluate its released model with 2.4 s
+of history on the 50 target tasks with 50 trials per task.
+LIBERO-Mem.
+LIBERO-Mem [11] consists of 10
+tabletop tasks in which a Franka arm repeatedly manipu-
+lates the same objects, so that the progress of the task can-
+not be inferred from the current observation. We fine-tune
+LingBot-VA on its demonstrations and evaluate it on 20
+held-out initial states per task with an 8-chunk history, using
+the default 30-chunk history as the long-history reference,
+and report the success rate and the subgoal completion rate.
+RoboTwin 2.0. RoboTwin 2.0 [8] is a bimanual bench-
+mark with 50 tasks, on which LingBot-VA with its default
+72-chunk history already reaches 91.5% average success.
+We therefore select the 8 tasks with the lowest success
+rate and split them into the 4 tasks on which the 72-chunk
+history clearly outperforms a 16-chunk history in the full-
+benchmark evaluation and the remaining 4, with 100 trials
+per task in scenes without domain randomization.
+Baselines.
+We compare LoCo-WAM with three kinds of
+baselines, namely prior methods with the results reported in
+the literature, the base model without test-time updates, and
+test-time methods that we reimplement on the same base
+models. The base model is evaluated both with the same
+history as LoCo-WAM and with a longer history, up to 9.6 s
+for Long-WAM and 30 and 72 chunks for LingBot-VA on
+LIBERO-Mem and RoboTwin 2.0.
+• AdaWorldPolicy [55] updates a LoRA with the prediction
+loss of the world model and accumulates the adaptation
+across the episodes of a task.
+• RoboTTT [23] adds fast-weight layers to the action ex-
+pert, meta-trains them on the benchmark demonstrations
+and updates them at every decision. We also evaluate it
+without the memory update.
+• Future Consensus [39] samples several candidate futures
+at every decision and executes the one closest to their
+mean, which increases the inference cost by the number
+of candidates.
+• ReCAP [53] keeps the first observation as an anchor next
+to the most recent history and thus extends the input of
+the model.
+Experiment setting.
+Unless stated otherwise, LoCo-
+WAM adds a LoRA of rank 32 to the self-attention and
+feed-forward layers of the video expert and takes one up-
+date step per decision, Sv = 1, with a learning rate that
+depends on the base model and the benchmark.
+4.2. Main results
+Long-WAM on RoboCasa GR-1.
+Table 1 shows that
+LoCo-WAM enables Long-WAM with a short history to
+4
+
+
+Method
+Pick-and-place
+Articulated
+All
+∆
+Latency (s)
+Memory (GB)
+Prior methods
+Fast-WAM (reproduced) [25]
+33.8
+53.7
+38.8
+GR00T-N1.5 [34]
+41.2
+44.0
+41.8
+GR00T-N1.6 [25]
+55.4
+24.2
+47.6
+DiT4DiT [25]
+50.9
+50.3
+50.8
+Cosmos3-Nano (reproduced) [25]
+48.3
+64.3
+52.3
+ABot-M0 [57]
+57.1
+61.7
+58.3
+OpenWAM-α [51]
+–
+–
+60.5
+MoGAP [25]
+60.8
+66.7
+62.3
+JoyAI-RA [57]
+60.3
+71.7
+63.2
+Fast-WAM [57]
+73.6
+67.3
+72.0
+WALA [57]
+73.4
+80.3
+75.2
+CF-WAM (+EgoDex data) [57]
+85.0
+75.0
+82.5
+Long-WAM, 0 s history
+Base model
+68.7
+49.4
+63.9±2.5 (63.3)
+0.57
+13.6
+LoCo-WAM
+69.4
+56.7
+66.2±1.1
++2.3
+0.73
+14.6
+Long-WAM, 2.4 s history
+Base model
+70.9
+58.9
+67.9±0.8 (66.3)
+0.57
+13.7
+AdaWorldPolicy [55]
+75.4
+55.6
+70.4±1.1
++2.5
+0.90
+15.4
+RoboTTT [23]
+76.3
+57.8
+71.7±2.7
++3.8
+1.06
+14.4
+RoboTTT w/o memory
+75.7
+60.0
+71.8±3.8
++3.9
+0.92
+14.4
+LoCo-WAM
+78.3
+59.4
+73.6±0.5
++5.7
+0.76
+14.6
+LoCo-WAM (async)
+78.3
+64.4
+74.9±1.7
++7.0
+0.62
+14.6
+Long-WAM, 4.8 s history
+Base model
+74.8
+60.0
+71.1±3.5 (71.2)
+0.60
+13.8
+LoCo-WAM
+83.3
+63.4
+78.3±1.9
++7.2
+0.77
+14.5
+LoCo-WAM (async)
+81.9
+62.2
+76.9±2.3
++5.8
+0.64
+14.5
+Long-WAM, 9.6 s history
+Base model
+79.8
+54.5
+73.5±2.7 (74.5)
+0.67
+14.0
+LoCo-WAM
+77.9
+63.3
+74.3±1.7
++0.8
+0.89
+15.9
+Table 1. RoboCasa GR-1. On 18 pick-and-place tasks and 6 articulated tasks that place an object into a drawer, cabinet or microwave and
+close it. Latency: time from observation to action per decision on one GPU, including the LoRA update, which the asynchronous variant
+runs during the execution of the previous action chunk. Memory: peak GPU memory.
+reach the performance of a longer history. It improves the
+base model by 2.3, 5.7 and 7.2 points with 0, 2.4 and 4.8 s
+of history, and by 0.8 points with 9.6 s. With 2.4 s of his-
+tory, it matches the 9.6 s base model, 73.6% compared with
+73.5%, and with 4.8 s of history, it reaches 78.3%, 4.8 points
+above the 9.6 s base model and the best result among all
+prior methods trained on the same data.
+With 2.4 s of history, LoCo-WAM also improves the base
+model more than the other test-time methods, by 5.7 points
+compared with 2.5 points for AdaWorldPolicy and 3.8 and
+3.9 points for RoboTTT with and without memory.
+On the 18 pick-and-place tasks, LoCo-WAM improves
+the 4.8 s model by 8.5 points to 83.3%, above the 9.6 s base
+model at 79.8% and all prior methods trained on the same
+data. On the 6 articulated tasks, a longer history does not
+help the base model, which drops from 60.0% at 4.8 s to
+54.5% at 9.6 s, whereas LoCo-WAM improves it at every
+history length, by 7.3, 0.5, 3.4 and 8.8 points.
+Long-WAM on RoboCasa365.
+Table 2 shows that
+LoCo-WAM also improves Long-WAM on RoboCasa365.
+With 2.4 s of history, it improves the base model by 1.4
+Method
+Atomic
+Seen
+composite
+Unseen
+composite All
+∆
+Prior methods
+Diffusion Policy [10]
+15.7
+0.2
+1.3
+6.1
+π0 [5]
+34.6
+6.1
+1.1
+14.8
+π0.5 [22]
+39.6
+7.1
+1.2
+16.9
+GR00T-N1.6
+51.1
+9.4
+1.7
+21.9
+GR00T-N1.5
+50.7
+14.8
+2.7
+23.9
+Qwen-RobotManip [21]
+68.6
+20.1
+14.9
+35.9
+ABot-M0.5
+75.6
+37.7
+3.3
+40.3
+PatchWAM [48]
+78.7
+46.4
+13.8
+47.6
+Long-WAM, 2.4 s history
+Base model
+68.0
+14.9
+5.1
+30.9±0.0 (31.4)
+AdaWorldPolicy
+67.8
+15.2
+5.2
+30.9±0.1
++0.0
+LoCo-WAM
+69.2
+16.2
+6.7
+32.2±0.2
++1.4
+Table 2. RoboCasa365. On 18 atomic tasks and 16 composite
+tasks seen during baseline model training, and 16 composite tasks
+not seen during baseline training.
+points, with gains on all three task categories, by 1.2 points
+on atomic tasks, 1.3 points on seen composite tasks and 1.6
+points on unseen composite tasks, whereas AdaWorldPol-
+icy leaves the success rate unchanged.
+5
+
+
+Method
+Success
+∆
+Subgoal
+∆
+Prior methods
+π0 [20]
+12.3
+70.8
+2AM [20]
+11.8
+76.3
+LingBot-VA, 30-chunk history
+Base model
+32.2±1.8
+85.8±2.1
+LingBot-VA, 8-chunk history
+Base model
+27.5±2.0
+82.7±1.2
+AdaWorldPolicy [55]
+27.7±3.3
++0.2
+82.9±0.8
++0.2
+ReCAP [53]
+24.7±1.5
+−2.8
+84.8±0.6
++2.1
+RoboTTT [23]
+27.8±1.0
++0.3
+83.1±2.3
++0.4
+RoboTTT w/o memory
+29.2±1.0
++1.7
+84.5±1.2
++1.7
+Future Consensus [39]
+30.3±3.3
++2.8
+85.5±2.0
++2.8
+LoCo-WAM
+32.2±0.3
++4.7
+85.8±1.0
++3.1
+Table 3. LIBERO-Mem. Success: all subgoals completed with-
+out overshooting. Subgoal: subgoal completion rate.
+Method
+Long-context (4) Other (4)
+All (8)
+Prior methods
+π0, from [30]
+25.8
+59.5
+42.6
+π0.5, from [30]
+50.3
+69.8
+60.0
+X-VLA [60], from [3]
+58.5
+69.3
+63.9
+Fast-WAM [56]
+67.8
+80.8
+74.3
+AHA-WAM [6]
+73.3
+82.8
+78.0
+Motus [3]
+77.5
+81.0
+79.3
+HiLo-WAM-k8 [49]
+80.5
+79.0
+79.8
+GeoMem-VLA [58]
+76.5
+85.0
+80.8
+Rolling-WAM [61]
+79.5
+84.5
+82.0
+StageWAM [33]
+79.5
+86.3
+82.9
+LingBot-VA (reported) [30]
+62.8
+86.3
+74.5
+LingBot-VA (re-eval.) [7]
+53.3
+78.3
+65.8
+LingBot-VA, 72-chunk history (default)
+Base model
+54.2
+77.7
+66.0±0.8
+AdaWorldPolicy
+54.1
+78.3
+66.2±0.6
+LoCo-WAM
+55.1
+79.1
+67.1±3.0
+LingBot-VA, 16-chunk history
+Base model
+51.8
+77.3
+64.5±1.2
+LoCo-WAM
+53.3
+77.3
+65.3±1.7
+Table 4.
+RoboTwin 2.0.
+On the 8 hardest tasks: the 4 tasks
+on which a 72-chunk history outperforms a 16-chunk history, the
+other 4 tasks, and all 8.
+LingBot-VA on LIBERO-Mem.
+Table 3 shows that
+LoCo-WAM closes the gap between a short and a long his-
+tory for LingBot-VA. With an 8-chunk history, it improves
+the base model by 4.7 points in success rate and 3.1 points
+in subgoal completion, matching the default 30-chunk his-
+tory on both metrics. LoCo-WAM also improves the base
+model more than the other test-time methods, by 4.7 points
+in success rate compared with at most 2.8 points for Future
+Consensus.
+LingBot-VA on RoboTwin 2.0.
+Table 4 shows that
+LoCo-WAM also improves LingBot-VA on RoboTwin 2.0.
+On the 8 tasks with the lowest success rate, it improves
+LingBot-VA with the default 72-chunk history by 1.1
+Ablation
+Success
+LoRA rank r (8 / 16 / 64)
+73.2 / 73.4 / 74.1
+Updates per decision Sv (2 / 4)
+73.6 / 73.9
+Learning rate ηv (×1/3 / ×5/3)
+72.8 / 77.7
+LoRA placement (SA only / FFN only)
+71.4 / 72.8
+Table 5. Ablations on RoboCasa GR-1. Long-WAM with 4.8 s
+of history.
+Loss of the update
+2.4 s
+4.8 s
+None, base model
+67.9±0.8
+71.1±3.5
+Laction, Eq. (4)
+72.2±2.1
+73.3±0.4
+Lvideo + Laction, Eq. (3) + Eq. (4)
+72.6±1.5
+73.7±2.2
+Lvideo, Eq. (3), LoCo-WAM
+73.6±0.5
+78.3±1.9
+Table 6. Which loss to update with, RoboCasa GR-1. Each
+loss trains a low-rank adapter on the expert it supervises, the video
+expert for Lvideo and the action expert for Laction. Long-WAM with
+2.4 and 4.8 s of history.
+points, compared with 0.2 points for AdaWorldPolicy. With
+a 16-chunk history, it improves the base model from 51.8%
+to 53.3% on the 4 tasks that benefit most from a long history,
+compared with 54.2% for the 72-chunk history. In contrast,
+on the other 4 tasks, where the two histories perform alike,
+it leaves the 16-chunk model unchanged at 77.3%. The gain
+of LoCo-WAM with a short history is thus concentrated on
+the tasks that benefit from a long history.
+4.3. Compute cost
+LoCo-WAM substitutes for a longer history at a moderate
+cost in latency. With the synchronous update, a decision
+of LoCo-WAM with 2.4 s of history takes 0.76 s, compared
+with 0.67 s for the base model with 9.6 s of history, whose
+success rate it matches, as the latency column of Tab. 1
+shows. The asynchronous update of Sec. 3.3 removes the
+update from the time between observation and action, since
+it runs while the robot executes the current action chunk.
+With it, a decision takes 0.62 s with 2.4 s of history and
+0.64 s with 4.8 s, less than the 0.67 s of the 9.6 s base model,
+at success rates of 74.9% and 76.9%, the latter 3.4 points
+above the 9.6 s base model. The update still runs at every
+decision, so the compute per decision remains 0.81 s. LoCo-
+WAM increases the peak GPU memory in Tab. 1 from 13.7
+to 14.6 GB with 2.4 s of history, for the adapter and its back-
+ward pass, compared with 14.0 GB for the base model with
+9.6 s and 15.4 GB for AdaWorldPolicy. LoCo-WAM also
+needs no additional offline training, whereas the 9.6 s model
+is a separately trained model, and RoboTTT requires about
+136 GPU-hours of meta-training and takes 1.06 s per deci-
+sion.
+6
+
+
+4.4. Ablations
+We ablate LoCo-WAM on Long-WAM on RoboCasa GR-1
+in two parts, the configuration of the adapter and its update
+in Tab. 5, and the loss used for the update in Tab. 6. With
+4.8 s of history, the default configuration of Sec. 4.1 reaches
+78.3%, and Tab. 5 changes one of its components at a time.
+A sufficiently large learning rate ηv is needed, since a three
+times smaller one lowers the success rate to 72.8%, whereas
+a larger one keeps it at 77.7%. More update steps on the
+same training sample do not help, however, as Sv = 2 and
+Sv = 4 lower the success rate to 73.6% and 73.9%. The
+adapter needs both the self-attention and the feed-forward
+layers of the video expert, since either part alone loses most
+of the gain, with 71.4% and 72.8%. The rank shows no clear
+trend, and the default r = 32 performs best. All variants in
+Tab. 5 remain at or above the base model at 71.1%.
+Table 6 updates with the video loss, as in LoCo-WAM,
+with the action loss, or with both, each training an adapter
+on the expert it supervises with its own learning rate. Every
+update improves the base model, but the video loss alone
+performs best with both history lengths, and adding the ac-
+tion loss to it lowers the success rate from 78.3% to 73.7%
+with 4.8 s of history. The video update changes the action
+in two ways in Eq. (9), through the imagined future ˆzt and
+through the features of the history and the imagined future
+that the adapted video expert computes, and it thus adapts
+the action without training the action expert. The action
+update, in contrast, changes only the action expert, and it
+affects later decisions only through the executed actions,
+which change the observed frames in their history.
+4.5. Analysis of LoCo-WAM
+This section analyzes how test-time training of the video
+expert improves the action. In a world-action model, the
+update changes the prediction of the video expert in Eq. (8),
+and the action expert reads this prediction in Eq. (9). We
+examine what the update learns from the observed frames,
+how it affects the action, and how this effect develops over
+an episode. Unless stated otherwise, we use Long-WAM
+with 4.8 s of history on RoboCasa GR-1, and the appendix
+reports further analysis.
+The update improves the prediction of upcoming frames
+from the observed frames.
+The update of Eq. (6) trains
+the video expert on the prediction that Rollout performs in
+Eq. (8), and we first examine whether it improves this pre-
+diction on frames that it has not been trained on. At every
+decision t, we measure the relative reduction of the video
+loss on the next chunk, 1−Lvideo(Φv +Θt)/Lvideo(Φv), be-
+fore this chunk is used for the update. In Fig. 2a, the reduc-
+tion is close to zero at the start of an episode and increases
+toward its end, reaching 4.9%, 2.5%, 1.2% and 1.0% in the
+0
+2
+4
+loss reduction (%)
+9.6 s
+4.8 s
+2.4 s
+0 s
+base model
+(a) Prediction of upcoming frames
+0
+25
+50
+75
+100
+episode progress (%)
+0.10
+0.15
+action change
+4.8 s
+9.6 s
+2.4 s
+0 s
+random
+direction
+(b) Change of the action
+Figure 2. Prediction and action during an episode. (a) Relative
+reduction of the video loss on the next chunk. (b) L2 distance
+between the action chunks with and without the update, and with
+a random direction of the same norm, averaged over the history
+lengths. Long-WAM on RoboCasa GR-1.
+Video weights used in
+Rollout, Eq. (8)
+Denoise, Eq. (9)
+Success
+Base model
+Φv
+Φv
+71.1±3.5
+Rollout only
+Φv + Θt
+Φv
+77.6±1.7
+Denoise only
+Φv
+Φv + Θt
+75.4±1.9
+LoCo-WAM
+Φv + Θt
+Φv + Θt
+78.3±1.9
+Table 7. Where the update reaches the action, RoboCasa GR-1.
+The update Θt is trained as in LoCo-WAM and applied at infer-
+ence in Rollout, in Denoise, or in both; the action expert Φa is
+unchanged. Long-WAM with 4.8 s of history.
+last tenth for 0, 2.4, 4.8 and 9.6 s of history, which con-
+firms such an improvement. We then determine whether the
+gain originates from the observed frames or from the up-
+date itself, by replacing the targets z of Eq. (3), the latents
+of these frames, with the prediction of the video expert from
+the same history H. With these targets, the success rate is
+70.8%, the level of the base model at 71.1%, which indi-
+cates that the gain requires the observed frames.
+The update affects the action through the imagined fu-
+ture and the features.
+In Eq. (9), the adapted video ex-
+pert enters Denoise twice, as the source of the imagined
+future ˆzt and as the network that computes the features of
+the history and this future, which the action expert reads.
+We separate the two by applying Θt at inference only in
+Rollout or only in Denoise, with the update trained as in
+7
+
+
+without TTT
+2 s
+4 s
+6 s  (first divergence)
+8 s
+10 s
+12 s
+14 s
+fails
+16 s
+with LoCo-WAM
+success
+succeeds at 11 s
+Placing a can into a drawer
+without TTT
+0 s
+2 s
+4 s  (first divergence)
+6 s
+8 s
+10 s
+12 s
+fails
+14 s
+with LoCo-WAM
+success
+succeeds at 12 s
+Moving a pepper from a placemat into a basket
+Figure 3. Episodes from the same initial state without and with LoCo-WAM. Frames every 2 s. The first decision at which the two runs
+differ and the frame at which LoCo-WAM completes the task are outlined. Long-WAM with 4.8 s of history on RoboCasa GR-1.
+LoCo-WAM and Φa unchanged. Table 7 reports a success
+rate of 77.6% with Θt in Rollout alone and 75.4% with
+Θt in Denoise alone, against 71.1% for the base model and
+78.3% with Θt in both. Both therefore contribute to the
+gain, the imagined future more than the features.
+The gain depends on updating throughout the episode.
+The improvement of the prediction in Fig. 2a increases over
+an episode, and we study whether the change of the ac-
+tion also increases as the updates accumulate.
+At every
+decision t, we measure this change as the L2 distance be-
+tween the action chunks at sampled with Φv + Θt and
+with Φv for the same history and noise. In Fig. 2b, this
+distance increases toward the end of the episode for every
+history length, whereas a random direction with the norm
+of Θt, averaged over the history lengths, keeps it at its ini-
+tial value, which shows that the change of the action ac-
+cumulates with the learned updates. Since such a random
+direction leaves the action nearly unchanged, we scale it to
+match the change of the imagined future under Θt and eval-
+uate whether, at this size, a random change also yields the
+gain. The scaled random direction reaches 71.1%, the level
+of the base model, which indicates that the gain requires the
+change learned by the update. Finally, we examine whether
+an adapter learned early in the episode suffices, by stop-
+ping the update after 4, 12 or 24 decisions and keeping Θt
+fixed afterward. The success rate then decreases to 72.9%,
+71.9% and 71.7%, and the gain therefore depends on updat-
+ing throughout the episode. Figure 3 shows two episodes
+from the same initial state in which the trajectories sepa-
+rate after a few seconds and only LoCo-WAM completes
+the task.
+5. Conclusion
+We presented LoCo-WAM, which trains the video expert of
+a world-action model at test time with its own video loss on
+the observed frames, while keeping the architecture and the
+history length of the model. On two world-action models
+and four simulation benchmarks, LoCo-WAM improves the
+base model on all of them, and on RoboCasa GR-1, a model
+with 2.4 s of history matches the base model with 9.6 s, and
+a model with 4.8 s exceeds it by 4.8 points. Our analy-
+sis shows that the update learns from the observed frames
+to predict upcoming frames, and that it affects the action
+mainly through the imagined future. This change of the ac-
+tion accumulates over the episode and depends on updating
+throughout it. In a world-action model, the environment
+provides the targets of the video loss at every decision, and
+LoCo-WAM shows that training on these targets at test time
+enables a short history to reach the performance of a longer
+one.
+8
+
+
+References
+[1] Zechen Bai, Chen Gao, and Mike Zheng Shou. Evolve-vla:
+Test-time training from environment feedback for vision-
+language-action models. arXiv preprint arXiv:2512.14666,
+2025. 2
+[2] Ali Behrouz, Peilin Zhong, and Vahab Mirrokni.
+Ti-
+tans: Learning to memorize at test time.
+arXiv preprint
+arXiv:2501.00663, 2024. 2
+[3] Hongzhe Bi, Hengkai Tan, Shenghao Xie, Zeyuan Wang,
+Shuhe Huang, Haitian Liu, Ruowen Zhao, Yao Feng, Chen-
+dong Xiang, Yinze Rong, et al. Motus: A unified latent ac-
+tion world model. arXiv preprint arXiv:2512.13030, 2025.
+6
+[4] Johan Bjorck, Fernando Casta˜neda, Nikita Cherniadev,
+Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Dieter Fox,
+Fengyuan Hu, Spencer Huang, et al. Gr00t n1: An open
+foundation model for generalist humanoid robots.
+arXiv
+preprint arXiv:2503.14734, 2025. 2, 4
+[5] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 5
+[6] Jisong Cai, Long Ling, Shiwei Chu, Zhongshan Liu, Ji-
+ayue Kang, Zhixuan Liang, Wenjie Xu, Yinan Mao, Weinan
+Zhang, Xiaokang Yang, et al.
+Aha-wam:asynchronous
+horizon-adaptive world-action modeling with observation-
+guided context routing. arXiv preprint arXiv:2606.09811,
+2026. 6
+[7] Jialei Chen, Kai Wang, Kang Chen, Shuaihang Chen, Feng
+Gao, Wenhao Tang, Zhiyuan Li, Weilin Liu, Zhuyu Yao,
+Boxun Li, et al.
+Lawam:
+Latent world action models
+for efficient dynamics-aware robot policies. arXiv preprint
+arXiv:2606.15768, 2026. 6
+[8] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge,
+Zhenyu Gu, et al.
+Robotwin 2.0: A scalable data gen-
+erator and benchmark with strong domain randomization
+for robust bimanual robotic manipulation.
+arXiv preprint
+arXiv:2506.18088, 2025. 2, 4
+[9] Sheng Cheng, Deqian Kong, Jianwen Xie, Kookjin Lee,
+Ying Nian Wu, and Yezhou Yang. Latent space energy-based
+neural ODEs. Transactions on Machine Learning Research,
+2025. 2
+[10] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun
+Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song.
+Diffusion policy: Visuomotor policy learning via action dif-
+fusion. arXiv preprint arXiv:2303.04137, 2023. 5
+[11] Nhat Chung, Taisei Hanyu, Toan Nguyen, Huy Le, Freder-
+ick Bumgarner, Duy Minh Ho Nguyen, Khoa Vo, Kashu Ya-
+mazaki, Chase Rainwater, Tung Kieu, et al. Rethinking pro-
+gression of memory state in robotic manipulation: An object-
+centric perspective. arXiv preprint arXiv:2511.11478, 2025.
+2, 4
+[12] Karan Dalal, Daniel Koceja, Gashon Hussein, Jiarui Xu,
+Yue Zhao, Youjin Song, Shihao Han, Ka Chun Cheung, Jan
+Kautz, Carlos Guestrin, et al. One-minute video generation
+with test-time training.
+arXiv preprint arXiv:2504.05298,
+2025. 1, 2
+[13] Yilun Du, Mengjiao Yang, Bo Dai, Hanjun Dai, Ofir
+Nachum, Joshua B. Tenenbaum, Dale Schuurmans, and
+Pieter Abbeel. Learning universal policies via text-guided
+video generation. arXiv preprint arXiv:2302.00111, 2023.
+1, 2
+[14] Yusen Feng, Bingchen Han, Jiangran Lyu, Kai Liu, Yixin
+Zheng, Yuxuan Wan, Weiheng Liu, Sun Han, Ruiqin Li, Yu-
+long Zhang, et al.
+Wam-ttt: Steering world-action mod-
+els by watching human play at test time.
+arXiv preprint
+arXiv:2607.06988, 2026. 2
+[15] Yossi Gandelsman, Yu Sun, Xinlei Chen, and Alexei A.
+Efros. Test-time training with masked autoencoders. arXiv
+preprint arXiv:2209.07522, 2022. 2
+[16] Nicklas Hansen, Rishabh Jangir, Yu Sun, Guillem Aleny`a,
+Pieter Abbeel, Alexei A. Efros, Lerrel Pinto, and Xiaolong
+Wang. Self-supervised policy adaptation during deployment.
+arXiv preprint arXiv:2007.04309, 2020. 2
+[17] Yining Hong, Beide Liu, Maxine Wu, Yuanhao Zhai, Kai-
+Wei Chang, Linjie Li, Kevin Lin, Chung-Ching Lin, Jian-
+feng Wang, Zhengyuan Yang, et al. Slowfast-vgen: Slow-
+fast learning for action-driven long video generation. arXiv
+preprint arXiv:2410.23277, 2024. 1, 2
+[18] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-
+Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+LoRA: Low-rank adaptation of large language models. In In-
+ternational Conference on Learning Representations, 2022.
+1, 3
+[19] Yucheng Hu, Yanjiang Guo, Pengchao Wang, Xiaoyu Chen,
+Yen-Jen Wang, Jianke Zhang, Koushil Sreenath, Chaochao
+Lu, and Jianyu Chen. Video prediction policy: A general-
+ist robot policy with predictive visual representations. arXiv
+preprint arXiv:2412.14803, 2024. 2
+[20] Yutong Hu, Fengjiao Chen, Xuezhi Cao, and Renaud De-
+try.
+2am: Grounding agent-side memory as guidance for
+steerable action models in long-horizon manipulation. arXiv
+preprint arXiv:2609.11308, 2026. 6
+[21] Wei Huang, Bohan Zhang, Chenzhi Liu, Isabella Liu, Shuai
+Yang, Weian Mao, Luozhou Wang, Yicheng Xiao, Weifeng
+Lin, Qixin Hu, et al.
+Long-wam:
+Scaling the context
+of world-action models. arXiv preprint arXiv:2610.10528,
+2026. 1, 2, 4, 5
+[22] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 5
+[23] Yunfan Jiang, Yevgen Chebotar, Ruijie Zheng, Fengyuan
+Hu, Yunhao Ge, Jimmy Wu, Tianyuan Dai, Scott Reed, Li
+Fei-Fei, Yuke Zhu, et al. Robottt: Context scaling for robot
+policies. arXiv preprint arXiv:2607.15275, 2026. 2, 4, 5, 6
+[24] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin,
+Yunhao Ge, Grace Lam, Percy Liang, Shuran Song, Ming-
+Yu Liu, Chelsea Finn, et al.
+Cosmos policy: Fine-tuning
+video models for visuomotor control and planning. arXiv
+preprint arXiv:2601.16163, 2026. 1, 2
+9
+
+
+[25] Taeyoung Kim, Junyoung Sung, Heeseung Kwon, Minseop
+Kim, and Jinwoo Shin. Adapting video models for robot con-
+trol via motion-guided asymmetric prediction. arXiv preprint
+arXiv:2610.36624, 2026. 5
+[26] Deqian Kong, Dehong Xu, Minglu Zhao, Bo Pang, Jian-
+wen Xie, Andrew Lizarraga, Yuhao Huang, Sirui Xie, and
+Ying Nian Wu. Latent plan transformer for trajectory ab-
+straction: Planning as latent space inference.
+Advances
+in Neural Information Processing Systems, 37:123379–
+123401, 2024. 2
+[27] Deqian Kong, Guangyan Sun, Sheng Cheng, Sirui Xie, Bo
+Pang, Jianwen Xie, Tony Geng, Caiwen Ding, and Ying Nian
+Wu.
+Learning to plan from random exploration.
+arXiv
+preprint arXiv:2609.38383, 2026. 2
+[28] Ben Krause, Emmanuel Kahembwe, Iain Murray, and Steve
+Renals. Dynamic evaluation of neural sequence models. In
+Proceedings of the 35th International Conference on Ma-
+chine Learning, pages 2766–2775, 2018. 2
+[29] Ahin Lee,
+Jinwoo Seo,
+Youngsoo Jang,
+and Taesik
+Gong.
+Adapting vision-language-action models to un-
+known visual disruptions during execution. arXiv preprint
+arXiv:2610.07946, 2026. 2
+[30] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin
+Wang, Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing
+Zhu, et al. Causal world modeling for robot control. arXiv
+preprint arXiv:2601.21998, 2026. 1, 2, 4, 6
+[31] Shuang Li,
+Yihuai Gao,
+Dorsa Sadigh,
+and Shuran
+Song.
+Unified video action model.
+arXiv preprint
+arXiv:2503.00200, 2025. 1, 2
+[32] Changyu Liu, Yiyang Liu, Taowen Wang, Qiao Zhuang,
+James Chenhao Liang, Wenhao Yang, Renjing Xu, Qifan
+Wang, Dongfang Liu, and Cheng Han. On-the-fly vla adap-
+tation via test-time reinforcement learning. arXiv preprint
+arXiv:2601.06748, 2026. 2
+[33] Xiao Liu, Yuguang Yang, Xi Wang, Kai Jiang, Cheng
+Chi, Yong Xu, Wenchao Ding, Yilun Chen, and Yan
+Wang.
+Stagewam: Joint-embedding stage prediction for
+world-action models in robot manipulation. arXiv preprint
+arXiv:2608.10780, 2026. 6
+[34] Teli Ma, Jia Zheng, Zifan Wang, Chunli Jiang, Andy Cui,
+Junwei Liang, and Shuo Yang. Dit4dit: Jointly modeling
+video dynamics and actions for generalizable robot control.
+arXiv preprint arXiv:2603.10448, 2026. 5
+[35] James L. McClelland, Bruce L. McNaughton, and Randall C.
+O’Reilly. Why there are complementary learning systems in
+the hippocampus and neocortex: Insights from the successes
+and failures of connectionist models of learning and memory.
+Psychological Review, 102(3):419–457, 1995. 1
+[36] Soroush Nasiriany, Sepehr Nasiriany, Abhiram Maddukuri,
+and Yuke Zhu.
+Robocasa365: A large-scale simulation
+framework for training and benchmarking generalist robots.
+arXiv preprint arXiv:2603.04356, 2026. 2, 4
+[37] Donghun Noh,
+Deqian Kong,
+Minglu Zhao,
+Andrew
+Lizarraga, Jianwen Xie, Ying Nian Wu, and Dennis Hong.
+Latent adaptive planner for dynamic manipulation. In Con-
+ference on Robot Learning, pages 2430–2448. PMLR, 2025.
+1, 2
+[38] Sangwu Park, Wonjoong Kim, Yeonjun In, Sein Kim,
+Hongseok Kang, and Chanyoung Park. Test-time training
+for visual foresight vision-language-action models.
+arXiv
+preprint arXiv:2605.08215, 2026. 2
+[39] Bo-Kai Ruan, Teng-Fang Hsiao, Ling Lo, and Hong-
+Han Shuai.
+Is the future compatible?
+diagnosing dy-
+namic consistency in world action models. arXiv preprint
+arXiv:2605.07514, 2026. 4, 6
+[40] Yu Sun, Xiaolong Wang, Zhuang Liu, John Miller, Alexei A.
+Efros, and Moritz Hardt.
+Test-time training with self-
+supervision for generalization under distribution shifts.
+arXiv preprint arXiv:1909.13231, 2019. 1, 2
+[41] Yu Sun, Xinhao Li, Karan Dalal, Jiarui Xu, Arjun Vikram,
+Genghan Zhang, Yann Dubois, Xinlei Chen, Xiaolong
+Wang, Sanmi Koyejo, et al.
+Learning to (learn at test
+time): Rnns with expressive hidden states. arXiv preprint
+arXiv:2407.04620, 2024. 1, 2
+[42] Arnuv Tandon, Karan Dalal, Xinhao Li, Daniel Koceja, Mar-
+cel Rød, Sam Buchanan, Xiaolong Wang, Jure Leskovec,
+Sanmi Koyejo, Tatsunori Hashimoto, et al.
+End-to-
+end test-time training for long context.
+arXiv preprint
+arXiv:2512.23675, 2025. 1, 2
+[43] Ya-weng Tseng, J¨orn Diedrichsen, John W. Krakauer, Reza
+Shadmehr, and Amy J. Bastian. Sensory prediction errors
+drive cerebellum-dependent adaptation of reaching. Journal
+of Neurophysiology, 98(1):54–62, 2007. 1
+[44] Chi Wan, Kangrui Wang, Yuan Si, Pingyue Zhang, and
+Manling Li.
+Worldagen:
+Unified state-action predic-
+tion with test-time world model training.
+arXiv preprint
+arXiv:2609.08162, 2026. 2
+[45] Dequan Wang, Evan Shelhamer, Shaoteng Liu, Bruno Ol-
+shausen, and Trevor Darrell. Tent: Fully test-time adaptation
+by entropy minimization. arXiv preprint arXiv:2006.10726,
+2020. 2
+[46] Kai Wang, Zhaopeng Gu, Yixiang Chen, Yuan Xu, Qisen
+Ma,
+Jiabing Yang,
+Zhaowen Li,
+Yan Huang,
+Liang
+Wang, and Peng Su.
+DIM-WAM: World-action model-
+ing with diverse historical event memory.
+arXiv preprint
+arXiv:2606.27677, 2026. 1, 2
+[47] Renhao Wang, Yu Sun, Arnuv Tandon, Yossi Gandelsman,
+Xinlei Chen, Alexei A. Efros, and Xiaolong Wang. Test-time
+training on video streams. arXiv preprint arXiv:2307.05014,
+2023. 2
+[48] Tianheng Wang, Zhou Xie, Heng Jia, Jianhua Xu, Tong
+Zhang, and Kaicheng Yu. An action is worth one patch: Uni-
+fied world-action modeling with patchwam. arXiv preprint
+arXiv:2609.25961, 2026. 5
+[49] Xingyu Wang, Yanjiang Guo, Zhijing Ding, Jiaxin Fang,
+Zeyu Lai, Jiayu Dong, Weikang Wan, Jianyu Chen, Yuxiang
+Gao, and Mengdi Xu. Hilo-wam: Decoupling long-horizon
+task evolution and local dynamics in world action models.
+arXiv preprint arXiv:2611.05023, 2026. 1, 2, 6
+[50] Y. Wang, D. Ma, and D. Cai. With greater text comes greater
+necessity: Inference-time training helps long text generation.
+arXiv preprint arXiv:2401.11504, 2024. 1, 2
+[51] Yuran Wang, Siqiao Huang, Mingleyang Li, Chenhao Zhang,
+Jiaqi Liang, Weiyang Jin, Yue Chen, Xuemin Chi, Dong-
+hao Zhou, Qize Yu, et al.
+Openwam: An open, modular
+10
+
+
+exploration towards systematic world-action model pretrain-
+ing. arXiv preprint arXiv:2609.07398, 2026. 2, 5
+[52] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen,
+Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and
+Tao Kong.
+Unleashing large-scale video generative pre-
+training for visual robot manipulation.
+arXiv preprint
+arXiv:2312.13139, 2023. 2
+[53] Hao Wu, Tianyu Shao, Shengju Qian, Yizhou Zhao,
+Fan Zhang, Penghao Zhao, Weiyan Wang, Yufei Huang,
+Fan Xu, Kun Wang, et al.
+Remembering what matters
+for long-horizon robotic world models.
+arXiv preprint
+arXiv:2610.14583, 2026. 2, 4, 6
+[54] Sizhe Yang, Juncheng Mu, Tianming Wei, Chenhao Lu,
+Xiaofan Li, Linning Xu, Zhengrong Xue, Zhecheng Yuan,
+Dahua Lin, Jiangmiao Pang, and Huazhe Xu.
+Memory-
+wam: Efficient world action modeling with persistent mem-
+ory. arXiv preprint arXiv:2606.20562, 2026. 1, 2
+[55] Ge Yuan, Qiyuan Qiao, Jing Zhang, and Dong Xu. Ada-
+worldpolicy: World-model-driven diffusion policy with on-
+line adaptive learning for robotic manipulation.
+arXiv
+preprint arXiv:2602.20057, 2026. 2, 4, 5, 6
+[56] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+Fast-wam: Do world action models need test-time future
+imagination?
+arXiv preprint arXiv:2603.16666, 2026. 2,
+6
+[57] Tingyu Yuan, Ziming Ji, Biaoliang Guan, Wen Ye, Wenrui
+Tian, Zhaopeng Gu, Feihong Zhang, Xu Yang, Yan Huang,
+Zhaowen Li, et al.
+From world models to world action
+models: Rethinking next-state prediction.
+arXiv preprint
+arXiv:2609.34414, 2026. 5
+[58] Qinfan Zhang, Yifan Luo, Haoyuan Shi, Guanlin Liu, Han
+Dong, Haozhe Shan, Yong Dai, Xiangcong Ren, and Xi-
+aozhu Ju. Geomem-vla: Internalizing 3d scene understand-
+ing into temporal memory for vision-language-action mod-
+els. arXiv preprint arXiv:2610.29866, 2026. 6
+[59] Tianyuan Zhang, Sai Bi, Yicong Hong, Kai Zhang, Fujun
+Luan, Songlin Yang, Kalyan Sunkavalli, William T. Free-
+man, and Hao Tan.
+Test-time training done right.
+arXiv
+preprint arXiv:2505.23884, 2025. 2
+[60] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu,
+Xirui Kang, Yuchun Feng, Yinan Zheng, Jiayin Zou, Yilun
+Chen, Jia Zeng, et al.
+X-vla: Soft-prompted transformer
+as scalable cross-embodiment vision-language-action model.
+arXiv preprint arXiv:2510.10274, 2025. 6
+[61] Yinghua
+Zhou,
+Junjie
+Ye,
+Yiqi
+Zhao,
+Hao
+Dong,
+Celina Shiyu Wang, Ruohai Ge, Tingyi Yang, Basile Van
+Hoorick, Gaurav Sukhatme, Vitor Guizilini, et al. Rolling-
+wam: World action models with rolling imagination. arXiv
+preprint arXiv:2609.30247, 2026. 6
+[62] Chuning Zhu, Raymond Yu, Siyuan Feng, Benjamin Burch-
+fiel, Paarth Shah, and Abhishek Gupta. Unified world mod-
+els: Coupling video and action diffusion for pretraining on
+large robotic datasets.
+arXiv preprint arXiv:2504.02792,
+2025. 2
+11
+
+
+Appendix
+A. Additional results
+More visualization results.
+Figures 4 and 5 show six further pairs of episodes from the same initial state without and with
+LoCo-WAM.
+without TTT
+0 s
+4 s  (first divergence)
+7 s
+11 s
+14 s
+18 s
+21 s
+fails
+25 s
+with LoCo-WAM
+success
+succeeds at 25 s
+Moving an object from a tray onto a plate
+without TTT
+0 s
+5 s  (first divergence)
+9 s
+14 s
+19 s
+24 s
+28 s
+fails
+33 s
+with LoCo-WAM
+success
+succeeds at 33 s
+Placing a potato into a microwave and closing it
+without TTT
+0 s
+2 s
+4 s  (first divergence)
+6 s
+8 s
+10 s
+12 s
+fails
+14 s
+with LoCo-WAM
+success
+succeeds at 14 s
+Placing a bottle into a cabinet and closing it
+Figure 4. More episodes from the same initial state without and with LoCo-WAM. The first decision at which the two runs differ and
+the frame at which LoCo-WAM completes the task are outlined, and the frames are spaced evenly up to this frame. Long-WAM with 4.8 s
+of history on RoboCasa GR-1.
+12
+
+
+without TTT
+0 s
+5 s  (first divergence)
+10 s
+15 s
+21 s
+26 s
+31 s
+fails
+36 s
+with LoCo-WAM
+success
+succeeds at 35 s
+Placing a milk carton into a microwave and closing it
+without TTT
+0 s
+3 s
+6 s  (first divergence)
+9 s
+11 s
+14 s
+17 s
+fails
+20 s
+with LoCo-WAM
+success
+succeeds at 20 s
+Moving an object from a tray into a tiered basket
+without TTT
+2 s
+5 s
+7 s  (first divergence)
+10 s
+12 s
+14 s
+17 s
+fails
+19 s
+with LoCo-WAM
+success
+succeeds at 18 s
+Moving an object from a cutting board into a tiered basket
+Figure 5. More episodes from the same initial state without and with LoCo-WAM, continued. Same layout as Fig. 4.
+B. Additional analysis
+Resetting the adapter at every episode.
+LoCo-WAM resets the adapter at the start of every episode, so that each episode
+is adapted only to its own observed frames. A natural alternative keeps the adapter across the episodes of a task, as Ada-
+WorldPolicy does with its world model. On LingBot-VA with LIBERO-Mem, this alternative lowers the success rate by 3.7
+points and the subgoal completion rate by 4.0 points relative to the base model in the same runs, and all three runs fall below
+the base model. The adaptation to one episode therefore does not carry over to later episodes, which is why LoCo-WAM
+resets the adapter.
+A larger step does not help the action update.
+In Tab. 6, updating the action expert alone improves the base model less
+than updating the video expert, and it also takes much smaller steps, changing the adapter by 0.002 in norm per update
+compared with 0.059 and 0.035 for the video update with 2.4 and 4.8 s of history. When we scale its learning rate to match
+these steps, the action update reaches 63.2% and 69.3% on RoboCasa GR-1, against 71.0% and 69.6% for the base model in
+the same runs, and thus no longer improves the base model. The smaller step therefore does not account for the lower success
+rate of the action update, which supports updating the video expert in LoCo-WAM.
+13
