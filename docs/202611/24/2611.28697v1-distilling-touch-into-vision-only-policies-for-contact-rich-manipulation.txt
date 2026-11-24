@@ -1,0 +1,2448 @@
+Distilling Touch into Vision-Only Policies for Contact-Rich Manipulation
+Chen Yang1,* Linhao Wang1,* Linzhe Shi2
+Guohui Zhang1
+Changjie Wu2
+Hang Zhang2
+Haoyu Li1
+Mu Xu2
+Jiansheng Fan1
+Chen Wang1,†
+1Tsinghua University
+2Amap, Alibaba Group
+Abstract
+Tactile feedback benefits contact-rich manipulation, yet de-
+ploying tactile sensors introduces additional hardware and
+maintenance requirements. Tactile experience can still pro-
+vide effective supervision for policies that operate without
+tactile sensors at deployment. Tactile imagination meth-
+ods such as TacImag remove this hardware dependency
+by predicting tactile observations, but retain a reconstruc-
+tion stage whose errors can propagate into action gen-
+eration. We present TacitTouch, a distillation framework
+that transfers tactile-guided behavior directly into a vision-
+only policy. The core shift is from “learn to imagine what
+touch would feel like” to “learn to behave as if you could
+feel touch”: the student directly learns tactile-guided ac-
+tion patterns without reconstructing tactile observations. A
+frozen visuotactile teacher supervises the student’s denois-
+ing predictions and intermediate action representations at
+the same noisy action and flow time. Training also uses
+demonstrated-action supervision. Deployment retains only
+the visual policy, with no tactile encoder, expert, or gener-
+ator. Across four simulated UniVTAC tasks and four real-
+world tasks, TacitTouch achieves absolute improvements of
+16.0% and 22.5% in mean success rate over vision-only
+control, respectively. The absolute gaps to the teacher us-
+ing measured tactile input are only 2.0% and 3.75%, re-
+spectively. In robustness tests, it also outperforms TacImag,
+with absolute gains of up to 20.0% in mean success rate.
+Project page:
+https://pier-lab.github.io/
+tacittouch/
+1. Introduction
+Contact-rich manipulation depends on physical interactions
+that are only partly visible.
+A grasp can appear secure
+while an object slips; an insertion can appear aligned while
+contact blocks further motion. Pretrained vision-language-
+action policies provide strong visual and language pri-
+*These authors contributed equally.
+†Corresponding author.
+Tactile imagination
+TacImag
+Vision
+Vision
+Tac.
+generator
+Predicted Tac.
+Policy
+Actions
+Tactile distillation
+TacitTouch
+Teacher
+Vision + Tac.
+Action + feature
+supervision
+Vision
+Vision policy
+Actions
+No tactile prediction
+Train only
+Li
+ft
+B
+ot
+tl
+e
+Li
+ft
+C
+a
+n
+In
+s
+er
+t
+T
+u
+b
+e
+P
+ut
+B
+ot
+tl
+e
+In
+s
+er
+t
+U
+S
+B
+B
+al
+l
+S
+o
+rt
+in
+g
+W
+ip
+e
+B
+o
+ar
+d
+C
+hi
+p
+M
+o
+vi
+n
+g
+20
+20
+40
+40
+60
+60
+80
+80
+100
+100
+Real world
+UniVTAC
+Success rate (%)
+π 
+0 
+. 
+5
+SimpleTouch
+TacImag
+TacitTouch
+Figure 1. Imagination versus distillation. Left: TacImag [46]
+predicts touch at inference; TacitTouch distills actions and features
+during training. Language and state are omitted. Right: success
+(%) across four UniVTAC and four real-world tasks.
+ors [2], while tactile sensing supplies complementary con-
+tact information [38, 43]. Tactile feedback benefits contact-
+rich manipulation, yet deploying tactile sensors introduces
+additional hardware and maintenance requirements.
+We
+therefore ask whether tactile experience can strengthen a
+vision-only policy.
+Tactile imagination offers one route to this goal:
+TacImag [46] predicts tactile observations from vision and
+state to guide action generation. This removes the need for
+physical tactile sensors but retains tactile generation and
+processing along the deployed action path, where predic-
+tion errors may affect subsequent actions. HapticVLA’s re-
+leased procedure trains a visual student using demonstrated
+and teacher-generated actions [1, 16], but does not explic-
+itly distill intermediate action representations. These rep-
+resentations capture how the teacher uses touch to generate
+actions and provide a key source of supervision for transfer-
+ring tactile-guided behavior.
+We introduce TacitTouch, a framework that trans-
+fers tactile-guided behavior from a frozen SimpleTouch
+1
+arXiv:2611.28697v1  [cs.RO]  21 Nov 2026
+
+
+(a) Offline training
+(b) Shared denoising query
+(c) Vision-only deployment
+Visuotactile teacher (φ)
+Visual student (θ)
+Observation
+(shared)
+Vision
+Language
+“Insert the USB drive.”
+State
+Measured tactile RGB
+T3
+encoder
+Tactile
+expert
+Visual-language backbone
+Action expert
+…
+Bm
+…
+B18
+Visual-language backbone
+Action expert
+…
+Bm
+…
+B18
+Q = (z̄j, τj)
+Same noisy action
++ same flow time
+Feature loss
+LFD
+Action loss
+LAD
+MSE across
+18 matching layers
+MSE(vθ, vφ)
+Teacher detached
+hφ
+(m)
+hθ
+(m)
+vφ
+(Velocity)
+vθ
+(Velocity)
+Student denoising • K = 10
+ε = z0
+z1
+z̄j
+…
+stop-grad
+(prefix run without gradients)
+sample j
+τj = 1 − j/10
+Shared Q
+Q = (z̄j, τj)
+Trained student only
+No tactile sensing or generation
+Vision +
+language +
+state
+Visual-language
+backbone
+Action expert
+10 denoising steps
+…
+Action
+chunk
+Execute
+GT loss
+LGT
+MSE(vθ, ε̃ − A)
+Demonstration target
+Demonstrated A
+Independent ε̃, τ̃
+x̃ = (1 − τ̃) A + τ̃ ε̃
+Same student θ
+(separate pass)
+(x̃, τ̃)
+vθ
+(x̃, τ̃)
+ε̃ − A
+Figure 2. TacitTouch training and deployment. (a) A frozen visuotactile teacher supervises student velocities and 18-layer action features
+at shared noisy actions and flow times; demonstrated actions use a separate pass with independent noise and time. (b) Queries follow the
+student’s ten-step denoising trajectory. (c) Deployment retains only the visual backbone and action expert.
+teacher [38] to a vision-only student. The teacher receives
+measured touch alongside the visual, language, and propri-
+oceptive inputs available to the student. We jointly match
+its denoising velocities and intermediate action-expert fea-
+tures to supervise both outputs and their computation. Fol-
+lowing on-policy distillation [37], both share a noisy action
+and flow time sampled from the student’s denoising trajec-
+tory. Training uses offline demonstration observations with-
+out environment rollouts, with independent flow-matching
+supervision from demonstrated actions.
+This use of interaction experience to guide action gen-
+eration parallels how humans draw on prior manipulation
+experience: recognizing familiar objects allows people to
+scale lifting forces before weight feedback becomes avail-
+able [10, 15].
+Fingertip forces can also adapt to an ob-
+ject’s actual weight while subjective weight judgments re-
+main biased [13]. The distinction between motor adaptation
+and perceptual experience offers an intuitive motivation for
+transferring experience through behavior.
+Figure 1 captures this behavioral focus: learn to imag-
+ine what touch would feel like versus learn to behave as if
+you could feel touch. TacitTouch places tactile guidance
+in the training objective and retains the student’s standard
+visual control path at deployment, without a tactile sensor,
+encoder, expert, or generator. Compared with tactile imag-
+ination, this removes both the cost of tactile reconstruction
+and the dependence of action generation on its predicted
+output.
+On four contact-rich UniVTAC tasks [6], TacitTouch
+reaches 77.5% mean success, compared with 61.5% for
+vision-only control and 79.5% for the live-touch teacher.
+On four real-world tasks, mean success increases from
+50.00% to 72.50% over vision-only control. Deployment
+timing shows that TacitTouch reduces policy-call latency by
+25.8% relative to TacImag. Its mean success is also higher
+than that baseline under image-brightness and camera-pose
+perturbations.
+Our contribution is a tactile-to-visual distillation frame-
+work that transfers a visuotactile teacher’s behavior and ac-
+tion representations into a vision-only policy through joint
+denoising velocity and action-feature supervision. Tactile
+experience thereby directly shapes the student’s behavior
+learning. The framework retains the student’s standard vi-
+sual control path without tactile sensing, reconstruction, or
+additional tactile processing at deployment. Simulation and
+real-world experiments demonstrate its benefits for contact-
+rich manipulation and higher success under visual perturba-
+tions.
+2. Related Work
+Visuotactile
+Policy
+Learning.
+Visual
+policies
+span
+action-chunk prediction [9, 48], scalable Transformer con-
+trol [4, 50], and generalist robot models [2, 3, 19, 27].
+Optical sensors such as GelSight and DIGIT [21, 44] ex-
+pose local contact information.
+GelSight-based policies
+learn grasp and regrasp adjustments [5], while combined
+visual and haptic representations support insertion [22].
+Human-collected paired data [39] and multimodal, multi-
+2
+
+
+(a) Ball Sorting
+L
+R
+Approach
+L
+R
+Grasp
+L
+R
+Transport
+(b) Insert USB
+L
+R
+Grasp
+L
+R
+Align
+L
+R
+Insert
+(c) Wipe Board
+L
+R
+Approach
+L
+R
+Wipe
+L
+R
+Continue wiping
+(d) Chip Moving
+L
+R
+Approach
+L
+R
+Grasp
+L
+R
+Transfer
+Figure 3. Real-world visuotactile task sequences. Demonstration wrist images and paired left/right TacRGB for (a) Ball Sorting, (b)
+Insert USB, (c) Wipe Board, and (d) Chip Moving, from left to right. Purple insets enlarge interaction regions.
+sensor learning [12, 40, 47] support tactile representations
+across settings. FTP-1 develops cross-sensor tactile poli-
+cies [43], while VITaL pretrains policies with and with-
+out deployment-time touch [14]. SimpleTouch combines a
+frozen tactile encoder with a task-trained tactile expert [38];
+Dream-Tac jointly models actions, future vision, and tac-
+tile dynamics conditioned on current touch [26]. UniVTAC
+supplies a common simulation benchmark [6]. We use task-
+trained SimpleTouch as a teacher to transfer tactile-guided
+behavior while retaining the student’s visual architecture.
+Tactile Knowledge Transfer.
+Learning with privileged
+information uses training-only signals to guide models with
+restricted inputs [24, 35, 36]. Robotic approaches exploit
+privileged state through asymmetric critics [29], teacher-
+trained visual driving policies [7], and learned motor-
+adaptation modules [20]. For tactile transfer, TacImag pre-
+dicts touch from vision and state, retaining tactile gener-
+ation and processing at deployment [46].
+HapticVLA’s
+released action-mixing procedure trains visual students
+with demonstrated and teacher-generated actions [1, 16].
+TacitTouch jointly supervises denoising predictions and
+intermediate action representations, transferring tactile-
+guided behavior without tactile reconstruction at deploy-
+ment.
+Knowledge Distillation.
+Output distillation [18] extends
+to control [31], while intermediate-feature supervision [30]
+supports cross-modal transfer [17].
+Other representation
+targets include attention [45], inter-sample relations [28],
+contrastive representations [34], and cross-layer feature re-
+view [8]. Generative models accelerate sampling via pro-
+gressive [32], consistency [33], and distribution-matching
+distillation [41, 42].
+STEP-OPD aligns inter-block rep-
+resentation changes and uses extrapolated velocities in
+student-trajectory distillation [37].
+We use ordinary on-
+policy velocity matching at shared noisy actions and flow
+times, directly aligning corresponding action-expert hidden
+states with mean squared error.
+3. Method
+TacitTouch distills a visuotactile teacher’s action compu-
+tation into a visual student, allowing tactile experience to
+guide policy learning while preserving the original visual
+policy’s deployment architecture. Figure 2 shows the train-
+ing and deployment pipeline.
+3.1. Problem Formulation
+Given a visual policy πV , we train an architecturally iden-
+tical student πθ using action supervision from a visuotactile
+teacher πϕ with access to measured touch. The student re-
+tains the original backbone, action generation module, and
+input and output interfaces.
+A demonstration dataset D contains synchronized cam-
+era observations It, a language instruction ℓ, proprioceptive
+state st, measured tactile observations Ut, and demonstrated
+action chunks At = (at, . . . , at+H−1) of length H. The
+teacher and student observations are
+oV T
+t
+= (It, ℓ, st, Ut),
+oV
+t = (It, ℓ, st).
+(1)
+The teacher generates actions from oV T
+t
+and the student
+from oV
+t , with
+Arch(πθ) = Arch(πV ).
+(2)
+Here, vision-only denotes the absence of tactile input; lan-
+guage and proprioception remain available to the base pol-
+icy.
+This formulation is not tied to a particular visual back-
+bone or tactile encoding scheme. Distillation requires com-
+3
+
+
+Table 1.
+Manipulation success (%).
+(a) UniVTAC simulation; (b) real-world tasks.
+Train/Test Tac.: tactile access during train-
+ing/inference. HapticVLA and TacImag use the π0.5/SimpleTouch backbone. Bold: best without measured touch at inference.
+(a) Simulation (UniVTAC)
+Category
+Method
+Train Tac.
+Test Tac.
+Lift Bottle
+Lift Can
+Put Bottle
+Insert Tube
+Avg.
+Vision-only
+ACT [48]
+×
+×
+42
+20
+28
+45
+33.8
+π0.5 [2]
+×
+×
+92
+59
+31
+64
+61.5
+Vision + Tac.
+VITaL [14]
+✓
+✓
+72
+8
+32
+34
+36.5
+UniVTAC-ACT [6]
+✓
+✓
+71
+29
+31
+56
+46.8
+FTP-1 [43]
+✓
+✓
+97
+65
+47
+79
+72.0
+SimpleTouch [38]
+✓
+✓
+100
+68
+50
+100
+79.5
+Train-time Tac.
+HapticVLA [16]
+✓
+×
+97
+61
+35
+69
+65.5
+TacImag [46]
+✓
+×
+100
+63
+45
+87
+73.8
+TacitTouch
+✓
+×
+96
+85
+37
+92
+77.5
+(b) Real world
+Category
+Method
+Train Tac.
+Test Tac.
+Ball Sorting Insert USB Wipe BoardChip Moving
+Avg.
+Vision-only
+π0.5 [2]
+×
+×
+75
+5
+65
+55
+50.00
+Vision + Tac.
+SimpleTouch [38]
+✓
+✓
+100
+25
+90
+90
+76.25
+Train-time Tac.
+TacImag [46]
+✓
+×
+55
+15
+75
+75
+55.00
+TacitTouch
+✓
+×
+80
+25
+85
+100
+72.50
+parable action predictions and intermediate representations
+between the teacher and student.
+3.2. Tactile-Guided Distillation
+TacitTouch uses on-policy distillation [37] to supervise
+action outputs and intermediate representations along the
+student’s denoising trajectory, alongside an independent
+demonstrated-action objective.
+Shared Denoising Query.
+Both policies predict action
+velocities through conditional flow matching [23], denoted
+by vϕ and vθ, with flow time τ = 1 corresponding to noise
+and τ = 0 to clean actions. For an observation drawn from
+D, sample Gaussian noise ϵ ∼N(0, I) and a query index
+j ∼Uniform{0, . . . , K −1}. Starting from z0 = ϵ, set
+τk = 1 −k/K and execute the first j student Euler steps
+without gradients:
+zk+1 = zk −1
+K vθ(zk, τk | oV
+t ),
+k = 0, . . . , j −1. (3)
+The detached state ¯zj = stopgrad(zj) defines the shared
+query Qj = (¯zj, τj). Teacher and student receive the same
+noisy action, flow time, and non-tactile observations; only
+the teacher additionally receives measured touch.
+Action Distillation.
+At the shared query, we match
+teacher and student denoising velocities:
+LAD = E
+vθ(¯zj, τj | oV
+t )
+−stopgrad
+ vϕ(¯zj, τj | oV T
+t
+)
+2
+MSE
+
+.
+(4)
+Here, ∥· ∥2
+MSE averages squared differences over all ele-
+ments of the action tensor. Neither the teacher targets nor
+the student prefix that generates the query participates in
+backpropagation; gradients update the student only through
+its predictions at the shared query.
+Action-Feature
+Distillation.
+Velocity
+matching
+con-
+strains action outputs but does not explicitly align the inter-
+mediate representations that generate them. We therefore
+also match teacher and student action features at the same
+query. Let h(m)
+θ
+and h(m)
+ϕ
+denote the action-token hidden
+states output by the mth corresponding action layer. We
+minimize
+LFD = E
+"
+1
+M
+M
+X
+m=1
+h(m)
+θ
+−stopgrad
+
+h(m)
+ϕ
+
+2
+MSE
+#
+.
+(5)
+We extract the hidden states after each Transformer block
+and before the final action-expert normalization, averaging
+over samples, layers, action tokens, and hidden channels.
+Corresponding features have the same shape, allowing di-
+rect comparison of raw hidden states without a learned pro-
+jection, feature normalization, or differences between lay-
+ers. This objective supervises the visual student with the
+teacher’s tactile-conditioned action representations.
+Demonstrated-Action Supervision.
+The base visual pol-
+icy’s flow-matching objective provides direct supervision
+from demonstrated actions. A separate student forward pass
+4
+
+
+Table 2. Visual robustness on UniVTAC (%). Clean: unperturbed; Light: half camera-image brightness; Camera: random pose shifts
+including occlusion. Bold: best without measured touch at inference. Same 100 scheduled seeds per method and task; errors are excluded.
+Only SimpleTouch receives measured tactile input at inference. Mean changes from Clean (Light / Camera, percentage points): π0.5: 0.0 /
+−11.5; SimpleTouch: −1.8 / −14.5; TacImag: −9.3 / −30.5; TacitTouch: 0.0 / −19.0.
+Clean
+Light
+Camera
+Method
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube
+Avg.
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube
+Avg.
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube
+Avg.
+π0.5
+92
+59
+31
+64
+61.5
+89
+59
+28
+70
+61.5
+85
+41
+16
+58
+50.0
+SimpleTouch
+100
+68
+50
+100
+79.5
+100
+65
+47
+99
+77.8
+100
+38
+23
+99
+65.0
+TacImag
+100
+63
+45
+87
+73.8
+72
+64
+24
+98
+64.5
+85
+37
+30
+21
+43.3
+TacitTouch
+96
+85
+37
+92
+77.5
+95
+86
+41
+88
+77.5
+92
+64
+20
+58
+58.5
+draws independent Gaussian noise ˜ϵ and flow time ˜τ, both
+independent of the distillation query. Flow time follows the
+base policy’s supervised sampling distribution rather than
+the discrete student-trajectory distribution. We construct
+˜x˜τ = (1 −˜τ)At + ˜τ˜ϵ,
+(6)
+and optimize
+LGT = E
+hvθ(˜x˜τ, ˜τ | oV
+t ) −(˜ϵ −At)
+2
+MSE
+i
+.
+(7)
+The full training objective is
+L = LAD + λFDLFD + λGTLGT.
+(8)
+Our flow-matching implementation uses all M = 18 action-
+expert layers, with default weights λFD = 0.01 and λGT =
+1.
+3.3. Training and Deployment
+We use frozen, task-trained SimpleTouch [38] as the
+teacher,
+initialize
+the
+student
+from
+pretrained
+π0.5
+weights [2], and jointly train its visual-language back-
+bone and action expert. Offline training uses synchronized
+demonstrations without environment rollouts; teacher and
+student share augmented images, action representations,
+and normalization.
+Main simulation training uses eight-GPU FSDP [49],
+global batch size 64, and 20,000 AdamW [25] updates. We
+evaluate the final checkpoint; learning-rate schedules and
+further settings appear in Appendix A.1.
+At deployment, the student uses current images, instruc-
+tions, and proprioception to generate a 50-action chunk
+from Gaussian noise through ten Euler steps (Eq. 3). The
+base policy’s inverse normalization and action adapter pro-
+duce control commands; task settings determine how many
+actions execute before the next observation. No teacher or
+tactile processing is used.
+4. Experiments
+We evaluate manipulation performance, visual robustness,
+and deployment cost, then use ablations and analysis to ex-
+amine the effects and scope of tactile-guided transfer.
+4.1. Experimental Setup
+Tasks and Platforms.
+The main simulation experiments
+use four UniVTAC tasks [6]: Lift Bottle, Lift Can, Put
+Bottle, and Insert Tube.
+Real-world experiments use a
+Franka FR3 robot, GelSight Mini tactile sensors, and a
+wrist-mounted D405 camera to evaluate Ball Sorting, In-
+sert USB, Wipe Board, and Chip Moving; representative
+task sequences appear in Fig. 3. Our trained configurations
+use the same 50 demonstrations per task. Four additional
+simulation tasks examine transfer scope in Sec. 4.6.2.
+Baselines.
+The
+primary
+comparisons
+share
+the
+π0.5/SimpleTouch backbone [2, 38], including vision-
+only control, measured-touch SimpleTouch, TacImag [46],
+and TacitTouch.
+Simulation additionally includes Hap-
+ticVLA [1, 16].
+Among these methods, SimpleTouch
+receives measured touch at deployment, TacImag uses pre-
+dicted touch, and HapticVLA and TacitTouch deploy visual
+students directly. Additional ACT, VITaL, UniVTAC-ACT,
+and FTP-1 results come from the SimpleTouch benchmark
+study [38]; implementation details are provided in the
+appendix.
+Evaluation Protocol.
+Simulation schedules 100 episodes
+per method and task, excluding runtime and video-decoding
+errors from the valid denominator; real-world evaluation
+uses 20 rollouts per method and task. We report task suc-
+cess rates and their unweighted mean, evaluating the final
+training checkpoints. Section 3.3 describes training; en-
+vironment versions, camera configurations, random seeds,
+and full evaluation details are given in the appendix.
+5
+
+
+(a) Lift Bottle · Dimmed input
+Original
+Dimmed
+RGB brightness: 50%
+TacImag
+Failed
+TacitTouch
+Success
+(b) Insert Tube · Camera shift
+Original
+Shifted
+Head yaw: +26.7°
+Wrist yaw: −12.5°
+TacImag
+Failed
+TacitTouch
+Success
+Figure 4. Contact-rich behavior under visual perturbations. Selected matched TacImag/TacitTouch rollouts under (a) dimmed input
+and (b) shifted cameras. Top pairs show original/perturbed head views; trajectories use head/wrist views, respectively. Insets enlarge
+contact. Dimming affects policy inputs, not trajectory colors; selection details: Appendix A.4.
+Table 3. Real-world brightness robustness (%). Camera RGB
+×0.5; 20 rollouts per method/task. Bold: best without measured
+touch at inference.
+Method
+Ball
+Sorting
+Insert
+USB
+Wipe
+Board
+Chip
+Moving
+Avg.
+π0.5
+65
+5
+50
+35
+38.75
+SimpleTouch
+100
+20
+85
+90
+73.75
+TacImag
+45
+5
+70
+65
+46.25
+TacitTouch
+85
+25
+75
+80
+66.25
+4.2. Manipulation Performance
+Simulation Results.
+TacitTouch improves all four Uni-
+VTAC tasks over vision-only control (Table 1(a)), raising
+mean success from 61.5% to 77.5%; Lift Can and Insert
+Tube gain most. In mean success, it leads shared-backbone
+methods deployed without measured touch and approaches
+SimpleTouch.
+TacImag outperforms the student on Lift
+Bottle and Put Bottle; the student exceeds the teacher on
+Lift Can.
+Real-World
+Results.
+TacitTouch
+also
+outperforms
+vision-only control and TacImag on every physical task,
+raising the vision baseline’s mean from 50.00% to 72.50%
+(Table 1(b)). Chip Moving gives the largest improvement;
+teacher and student tie on Insert USB.
+4.3. Visual Robustness
+Visual perturbations are also studied in dedicated VLA
+benchmarks [11]. We evaluate fixed checkpoints against
+unperturbed Clean. Light halves camera RGB values be-
+fore model preprocessing in simulation and the real world,
+leaving scene lighting and tactile preprocessing unchanged.
+Simulation-only Camera uniformly shifts head-camera yaw
+within ±30◦and, when used, wrist-camera yaw within
+±15◦. Methods share environment seeds and per-episode
+perturbations, including views that cause occlusion.
+TacitTouch outperforms TacImag under brightness per-
+turbations on both platforms. Its simulation mean remains
+77.5%, compared with 64.5% for TacImag (Table 2). Its
+real-world mean is 66.25%, compared with 46.25% for
+TacImag (Table 3). On the real robot, TacitTouch exceeds
+both vision-only control and TacImag on all four tasks and
+shows a smaller decrease from Clean.
+SimpleTouch re-
+tains the highest mean on both platforms, while TacImag re-
+mains stronger on simulated Insert Tube. Figure 4(a) shows
+a Lift Bottle case with matched seeds and perturbations:
+TacitTouch completes the lift, while TacImag fails. Trajec-
+tory frames retain their original recorded brightness because
+dimming is applied in the policy-input path.
+In TacImag’s two-stage inference path, tactile-prediction
+errors can propagate into subsequent action generation;
+TacitTouch generates actions directly without this interme-
+diate prediction, providing a plausible explanation for the
+robustness gains.
+Camera perturbations reduce mean success for every
+method.
+TacitTouch reaches 58.5% versus 43.3% for
+TacImag (Table 2). The largest task-level margin appears
+on Insert Tube: TacitTouch succeeds in 58% of episodes,
+versus 21% for TacImag.
+This gap exceeds the differ-
+ence in Clean, where TacitTouch and TacImag achieve
+92% and 87%, respectively. SimpleTouch remains stronger
+overall, while TacImag leads on Put Bottle. Figure 4(b)
+shows an Insert Tube comparison under matched condi-
+6
+
+
+0
+20
+40
+60
+80
+100
+Success rate (%)
+Lift Bottle
+93
+95
+96
+97
+96
+Lift Can
+75
+72
+60
+76
+85
+Put Bottle
+37
+38
+37
+37
+37
+Insert Tube
+55
+93
+92
+95
+92
+Avg.
+65.0
+74.5 71.3
+76.3 77.5
+Without FD
+Without GT
+Vision init.
+Visuotactile init.
+Full TacitTouch
+Figure 5. Components of tactile-guided transfer. Variants share a frozen tactile teacher and 20,000 updates; task-trained initializations
+inherit prior training. FD: feature distillation; GT: demonstrated-action supervision. Full values: Appendix A.8.
+Table 4. Inference latency (s/call). Mean policy-call time; A100
+GPU, batch one, ten flow steps.
+Method
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube
+Avg.
+Vision + Tac.
+0.372
+0.379
+0.360
+0.376
+0.372
+TacImag
+0.452
+0.456
+0.452
+0.455
+0.454
+TacitTouch
+0.336
+0.337
+0.334
+0.340
+0.337
+tions: TacitTouch completes insertion, while TacImag fails.
+These selected cases illustrate behavioral differences.
+4.4. Deployment Efficiency
+After stable warmup, we measure 100 calls per method and
+task, synchronizing the GPU before and after each call. The
+timed interval includes preprocessing, model computation,
+and CPU action output, excluding checkpoint loading, input
+decoding, simulation, and communication. The complete
+protocol is given in Appendix A.5.
+TacitTouch achieves 0.337 seconds per call, reducing
+mean latency by 25.8% relative to TacImag and 9.5% rel-
+ative to SimpleTouch (Table 4). The deployed model con-
+tains 3.35B parameters and retains only the visual-language
+backbone and action expert.
+Timing uses GT0 student
+checkpoints (λGT = 0, without demonstrated-action super-
+vision), while the main performance results use GT1 check-
+points (λGT = 1, with this supervision). Both share the
+same inference architecture, so the measurements charac-
+terize their common deployment cost.
+4.5. Ablation Studies
+Feature Distillation.
+With action distillation and GT su-
+pervision retained, removing feature distillation reduces
+mean success from 77.5% to 65.0%, the largest decrease
+among the tested variants (Fig. 5). The loss ablations fix the
+Table 5. Teacher and student modalities (%). V: vision, lan-
+guage, and state; VT: V plus measured tactile input. A dash de-
+notes a directly trained reference. The middle rows use matched
+distillation-only objectives to isolate teacher modality through
+V→V versus VT→V; the final row uses the full objective.
+Teacher
+input
+Student
+input
+GT
+loss
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube
+Avg.
+V
+–
+–
+92
+59
+31
+64
+61.5
+VT
+–
+–
+100
+68
+50
+100
+79.5
+V
+V
+×
+95
+63
+38
+68
+66.0
+VT
+VT
+×
+100
+70
+47
+99
+79.0
+VT
+V
+×
+95
+72
+38
+93
+74.5
+VT
+V
+✓
+96
+85
+37
+92
+77.5
+teacher, initialization, and update budget. The largest task-
+level decrease occurs on Insert Tube, where success falls
+from 92% to 55%. The decrease supports feature supervi-
+sion alongside velocity matching.
+Demonstrated-Action Supervision.
+Removing the inde-
+pendent demonstration loss gives 74.5% mean success, with
+Lift Can falling from 85% to 72%. Success rates on the
+other three tasks differ by at most 1% in absolute terms, in-
+dicating task-dependent benefits from direct demonstration
+supervision.
+Student Initialization.
+Pretrained base weights yield
+higher mean success than task-trained vision or shared
+teacher weights (Fig. 5). Both task-trained variants retain
+the full objective and restart the optimizer for 20,000 distil-
+lation updates, while inheriting prior task training. Teacher
+initialization omits tactile modules, keeping the student
+vision-only.
+7
+
+
+Real world
+(a) Ball Sorting
+Input
+π0.5
+TacImag
+(b) Insert USB
+Input
+π0.5
+TacImag
+(c) Wipe Board
+Input
+π0.5
+TacImag
+(d) Chip Moving
+Input
+π0.5
+TacImag
+Attention density 0
+≥15.3× uniform
+TacitTouch
+TacitTouch
+TacitTouch
+TacitTouch
+Figure 6. Task-relevant visual attention on real-world tasks. Matched wrist observations and attention maps from π0.5, TacImag, and
+TacitTouch. Warmer colors indicate higher attention density relative to uniform, on a common scale. The inset in Wipe Board enlarges
+residual writing in the original input.
+Table 6. Tactile benefit and transfer scope on additional tasks
+(%). Bold values highlight the measured-touch policy’s advantage
+on the first three tasks.
+Method
+Pull-out
+Key
+Insert
+Hole
+Grasp
+Classify
+Insert
+HDMI
+Avg.
+Vision only
+36
+25
+48
+3 28.0
+Vision + Tac.
+62
+85
+99
+3 62.3
+TacitTouch
+42
+25
+51
+4 30.5
+Teacher and Student Modalities.
+Vision-to-vision distil-
+lation raises mean success from 61.5% to 66.0% (Table 5),
+showing that distillation itself can provide some benefit
+even without tactile guidance. With the visual student archi-
+tecture, distillation objectives, and update budget held fixed,
+a visuotactile teacher further raises mean success to 74.5%.
+This absolute gain of 8.5% supports the additional value
+of transferring tactile-guided behavior beyond the common
+distillation procedure.
+4.6. Analysis
+4.6.1. Task-Relevant Visual Attention
+Figure 6 compares π0.5, TacImag, and TacitTouch with
+matched wrist images, instructions, and initial action noise;
+each retains its native state input and receives no measured
+touch.
+TacitTouch emphasizes ball-surface texture for discrim-
+ination in Ball Sorting and the receiving socket for align-
+ment in Insert USB. In Wipe Board, attention highlights
+residual writing beside the eraser, enlarged in the input in-
+set, indicating where further cleaning is needed. In Chip
+Moving, it emphasizes the gripper fingers adjacent to the
+chip, highlighting contact geometry relevant to grasp sta-
+bility. Because the visual input is matched across meth-
+ods, the comparison concerns how each policy weights the
+same scene rather than differences in camera framing. The
+highlighted regions span object appearance, the interaction
+target, and the gripper-object interface. These patterns are
+consistent with the transfer of tactile-guided behavior into
+task-relevant visual weighting, and the attention maps pro-
+vide qualitative evidence of where the policies attend.
+4.6.2. Scope of Tactile Transfer
+The benefit of measured touch does not transfer uniformly
+across tasks (Table 6).
+On Pull-out Key, Insert Hole,
+and Grasp Classify, tactile input substantially improves the
+teacher, while the visual student remains close to the vision-
+only baseline. For example, measured touch raises Insert
+Hole success from 25% to 85%, but the student remains
+at 25%. These tasks separate effective tactile control from
+successful vision-only transfer: a capable teacher does not
+ensure that a visual student recovers its advantage under the
+evaluated training setup.
+On Insert HDMI, all three methods remain at 3–4% suc-
+cess, indicating that adding measured touch alone does not
+resolve this task under the evaluated setup. Here, there is lit-
+tle measured-touch benefit for the student to recover. These
+results do not distinguish insufficient observation informa-
+tion from training-objective or optimization effects.
+5. Conclusion
+We present TacitTouch, which transfers tactile-guided be-
+havior into a vision-only policy through joint distillation
+of a frozen visuotactile teacher’s denoising predictions
+and intermediate action representations, combined with
+demonstrated-action supervision. This allows the student to
+retain its original visual control path without tactile sens-
+ing or reconstruction at deployment.
+Across four UniV-
+TAC simulation tasks and four real-world tasks, the student
+8
+
+
+achieves absolute gains of 16.0% and 22.5% in mean suc-
+cess over the vision-only baseline, respectively, approach-
+ing the measured-touch teacher on this metric.
+Further
+comparisons show that, relative to TacImag, TacitTouch
+achieves higher mean success under visual perturbations
+and its deployment architecture reduces policy-call latency
+by 25.8%.
+LLM Usage Statement
+Under author direction, OpenAI Codex was used to as-
+sist with code implementation and debugging, experi-
+ment execution and result analysis, literature retrieval,
+manuscript drafting and revision, and the preparation of
+plotting scripts.
+OpenAI’s image generation tool was
+used to assist in refining schematic illustrations.
+These
+tools were used in an assistive role, and the authors take
+full responsibility for the research methods, experimen-
+tal results, scientific claims, and final content of the pa-
+per.
+References
+[1] Advanced Robotic Manipulation Team (ARM).
+Crab:
+Official HapticVLA Code Repository.
+Official code
+repository.
+https : / / github . com / Advanced -
+Robotic - Manipulation / crab,
+2026.
+Commit
+e5529718e5160f787c8ec962644744afbb411653;
+accessed
+November 16, 2026. 1, 3, 5
+[2] Kevin Black, Noah Brown, James Darpinian, Karan Dha-
+balia, Danny Driess, Adnan Esmail, Michael Robert Equi,
+Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya
+Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szy-
+mon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc,
+Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj
+Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura
+Smith, Jost Tobias Springenberg, Kyle Stachowicz, James
+Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan
+Wang, Lili Yu, and Ury Zhilinsky. π0.5: a vision-language-
+action model with open-world generalization. In Proceed-
+ings of The 9th Conference on Robot Learning, pages 17–40.
+PMLR, 2025. 1, 2, 4, 5
+[3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy
+Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak,
+Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell,
+Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-
+aoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna
+Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-
+language-action flow model for general robot control. In Pro-
+ceedings of Robotics: Science and Systems, 2025. 2
+[4] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Joseph Dabis, Chelsea Finn, Keerthana Gopalakr-
+ishnan, Karol Hausman, Alexander Herzog, Jasmine Hsu,
+Julian Ibarz, Brian Ichter, Alex Irpan, Tomas Jackson,
+Sally Jesmonth, Nikhil Joshi, Ryan Julian, Dmitry Kalash-
+nikov, Yuheng Kuang, Isabel Leal, Kuang-Huei Lee, Sergey
+Levine, Yao Lu, Utsav Malla, Deeksha Manjunath, Igor
+Mordatch, Ofir Nachum, Carolina Parada, Jodilyn Peralta,
+Emily Perez, Karl Pertsch, Jornell Quiambao, Kanishka Rao,
+Michael S Ryoo, Grecia Salazar, Pannag R Sanketi, Kevin
+Sayed, Jaspiar Singh, Sumedh Sontakke, Austin Stone, Clay-
+ton Tan, Huong Tran, Vincent Vanhoucke, Steve Vega,
+Quan H Vuong, Fei Xia, Ted Xiao, Peng Xu, Sichun Xu,
+Tianhe Yu, and Brianna Zitkovich. RT-1: Robotics trans-
+former for real-world control at scale.
+In Proceedings of
+Robotics: Science and Systems, 2023. 2
+[5] Roberto Calandra, Andrew Owens, Dinesh Jayaraman,
+Justin Lin, Wenzhen Yuan, Jitendra Malik, Edward H. Adel-
+son, and Sergey Levine. More than a feeling: Learning to
+grasp and regrasp using vision and touch. IEEE Robotics
+and Automation Letters, 3(4):3300–3307, 2018. 2
+[6] Baijun Chen, Weijie Wan, Tianxing Chen, Xianda Guo, Con-
+gsheng Xu, Yuanyang Qi, Haojie Zhang, Longyan Wu, Tian-
+ling Xu, Zixuan Li, Yizhe Wu, Rui Li, Xiaokang Yang, Ping
+Luo, Wei Sui, and Yao Mu. UniVTAC: A unified simula-
+tion platform for visuo-tactile manipulation data generation,
+learning, and benchmarking. arXiv:2602.10093, 2026. 2, 3,
+4, 5
+[7] Dian Chen, Brady Zhou, Vladlen Koltun, and Philipp
+Kr¨ahenb¨uhl. Learning by cheating. In Proceedings of the
+Conference on Robot Learning, pages 66–75. PMLR, 2020.
+3
+[8] Pengguang Chen, Shu Liu, Hengshuang Zhao, and Jiaya Jia.
+Distilling knowledge via knowledge review. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 5008–5017, 2021. 3
+[9] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric
+Cousineau, Benjamin CM Burchfiel, and Shuran Song. Dif-
+fusion policy: Visuomotor policy learning via action dif-
+fusion. In Proceedings of Robotics: Science and Systems,
+2023. 2
+[10] Philippe A. Chouinard, Gabriel Leonard, and Tom´as Paus.
+Role of the primary motor and dorsal premotor cortices in
+the anticipation of forces during object lifting. The Journal
+of Neuroscience, 25(9):2277–2284, 2005. 2
+[11] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai,
+Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye Fei,
+Jinlan Fu, Jingjing Gong, and Xipeng Qiu. LIBERO-Plus:
+A progressive robustness benchmark for visual-language-
+action models. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 38574–
+38583, 2026. 6
+[12] Ruoxuan Feng, Yuxuan Zhou, Siyu Mei, Dongzhan Zhou,
+Pengwei Wang, Shaowei Cui, Bin Fang, Guocai Yao, and
+Di Hu. AnyTouch 2: General optical tactile representation
+learning for dynamic tactile perception.
+In International
+Conference on Learning Representations, 2026. 3
+[13] J. Randall Flanagan and Michael A. Beltzner.
+Indepen-
+dence of perceptual and sensorimotor predictions in the size–
+weight illusion. Nature Neuroscience, 3(7):737–741, 2000.
+2
+[14] Abraham George, Selam Gano, Pranav Katragadda, and
+Amir Barati Farimani. VITaL pretraining: Visuo-tactile pre-
+training for tactile and non-tactile manipulation policies. In
+9
+
+
+2025 IEEE International Conference on Robotics and Au-
+tomation (ICRA), pages 258–264, 2025. 3, 4
+[15] A. M. Gordon, G. Westling, K. J. Cole, and R. S. Johansson.
+Memory representations underlying motor commands used
+during manipulation of common and novel objects. Journal
+of Neurophysiology, 69(6):1789–1796, 1993. 2
+[16] Konstantin
+Gubernatorov,
+Mikhail
+Sannikov,
+Ilya
+Mikhalchuk, Egor Kuznetsov, Makar Artemov, Faith Oluwa-
+tobi Ogunwoye, Marcelino Julio Fernando, Artem Asanov,
+Ziang Guo, and Dzmitry Tsetserukou. HapticVLA: Contact-
+rich manipulation via vision-language-action model without
+inference-time tactile sensing. arXiv:2603.15257, 2026. 1,
+3, 4, 5
+[17] Saurabh Gupta, Judy Hoffman, and Jitendra Malik. Cross
+modal distillation for supervision transfer. In Proceedings
+of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 2827–2836, 2016. 3
+[18] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the
+knowledge in a neural network. arXiv:1503.02531, 2015. 3
+[19] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P
+Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn.
+OpenVLA: An
+open-source vision-language-action model. In Proceedings
+of The 8th Conference on Robot Learning, pages 2679–2713.
+PMLR, 2025. 2
+[20] Ashish Kumar, Zipeng Fu, Deepak Pathak, and Jitendra Ma-
+lik. RMA: Rapid motor adaptation for legged robots. In
+Proceedings of Robotics: Science and Systems, 2021. 3
+[21] Mike Lambeta, Po-Wei Chou, Stephen Tian, Brian Yang,
+Benjamin Maloon, Victoria Rose Most, Dave Stroud, Ray-
+mond Santos, Ahmad Byagowi, Gregg Kammerer, Dinesh
+Jayaraman, and Roberto Calandra. DIGIT: A novel design
+for a low-cost compact high-resolution tactile sensor with ap-
+plication to in-hand manipulation. IEEE Robotics and Au-
+tomation Letters, 5(3):3838–3845, 2020. 2
+[22] Michelle A. Lee, Yuke Zhu, Peter Zachares, Matthew Tan,
+Krishnan Srinivasan, Silvio Savarese, Li Fei-Fei, Animesh
+Garg, and Jeannette Bohg. Making sense of vision and touch:
+Learning multimodal representations for contact-rich tasks.
+IEEE Transactions on Robotics, 36(3):582–596, 2020. 2
+[23] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxim-
+ilian Nickel, and Matthew Le. Flow matching for genera-
+tive modeling. In The Eleventh International Conference on
+Learning Representations, 2023. 4
+[24] David Lopez-Paz, L´eon Bottou, Bernhard Sch¨olkopf, and
+Vladimir Vapnik. Unifying distillation and privileged infor-
+mation. In International Conference on Learning Represen-
+tations, 2016. 3
+[25] Ilya Loshchilov and Frank Hutter.
+Decoupled weight de-
+cay regularization. In International Conference on Learning
+Representations, 2019. 5
+[26] Yunfan Lou, Yifan Ye, Yankai Fu, Jun Cen, Xiaowei
+Chi, Yaoxu Lyu, Peidong Jia, Sirui Han, Zhihe Lu,
+and Shanghang Zhang.
+Dream-Tac:
+A unified tactile
+world action model for contact-rich robot manipulation.
+arXiv:2606.08737, 2026. 3
+[27] Octo Model Team, Dibya Ghosh, Homer Walke, Karl
+Pertsch, Kevin Black, Oier Mees, Sudeep Dasari, Joey
+Hejna, Tobias Kreiman, Charles Xu, Jianlan Luo, You Liang
+Tan, Lawrence Yunliang Chen, Pannag Sanketi, Quan
+Vuong, Ted Xiao, Dorsa Sadigh, Chelsea Finn, and Sergey
+Levine. Octo: An open-source generalist robot policy. In
+Proceedings of Robotics: Science and Systems, 2024. 2
+[28] Wonpyo Park, Dongju Kim, Yan Lu, and Minsu Cho.
+Relational knowledge distillation.
+In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 3967–3976, 2019. 3
+[29] Lerrel Pinto, Marcin Andrychowicz, Peter Welinder, Woj-
+ciech Zaremba, and Pieter Abbeel. Asymmetric actor critic
+for image-based robot learning. In Proceedings of Robotics:
+Science and Systems, 2018. 3
+[30] Adriana Romero, Nicolas Ballas, Samira Ebrahimi Kahou,
+Antoine Chassang, Carlo Gatta, and Yoshua Bengio.
+Fit-
+Nets: Hints for thin deep nets. In International Conference
+on Learning Representations, 2015. 3
+[31] Andrei A. Rusu, Sergio Gomez Colmenarejo, Caglar Gul-
+cehre, Guillaume Desjardins, James Kirkpatrick, Razvan
+Pascanu, Volodymyr Mnih, Koray Kavukcuoglu, and Raia
+Hadsell. Policy distillation. In International Conference on
+Learning Representations, 2016. 3
+[32] Tim Salimans and Jonathan Ho. Progressive distillation for
+fast sampling of diffusion models. In International Confer-
+ence on Learning Representations, 2022. 3
+[33] Yang Song, Prafulla Dhariwal, Mark Chen, and Ilya
+Sutskever.
+Consistency models.
+In Proceedings of the
+40th International Conference on Machine Learning, pages
+32211–32252. PMLR, 2023. 3
+[34] Yonglong Tian, Dilip Krishnan, and Phillip Isola.
+Con-
+trastive representation distillation. In International Confer-
+ence on Learning Representations, 2020. 3
+[35] Vladimir Vapnik and Rauf Izmailov. Learning using privi-
+leged information: Similarity control and knowledge trans-
+fer. Journal of Machine Learning Research, 16(61):2023–
+2049, 2015. 3
+[36] Vladimir Vapnik and Akshay Vashist.
+A new learning
+paradigm: Learning using privileged information. Neural
+Networks, 22(5-6):544–557, 2009. 3
+[37] Qingyan Wei, Guangzhao Li, Xiaobing Tu, Yinggui Wang,
+Xiantao Zhang, Jinkui Ren, Xiaohong Liu, and Linfeng
+Zhang.
+STEP-OPD: Rethinking output targets and inter-
+nal dynamics in on-policy distillation for diffusion models.
+arXiv:2608.04887, 2026. 2, 3, 4
+[38] Chen Yang, Linzhe Shi, Changjie Wu, Hang Zhang, Rong-
+han Chen, Lingjun Zhang, Xu Hu, Mu Xu, Jiansheng Fan,
+and Chen Wang. SimpleTouch: Can vision-language-action
+models master contact-rich manipulation without tactile pol-
+icy pretraining? arXiv:2610.02784, 2026. 1, 2, 3, 4, 5
+[39] Fengyu Yang, Chenyang Ma, Jiacheng Zhang, Jing Zhu,
+Wenzhen Yuan, and Andrew Owens. Touch and go: Learn-
+ing from human-collected vision and touch. In Advances in
+Neural Information Processing Systems, pages 8081–8103.
+Curran Associates, Inc., 2022. 2
+[40] Fengyu Yang, Chao Feng, Ziyang Chen, Hyoungseob Park,
+Daniel Wang, Yiming Dou, Ziyao Zeng, Xien Chen, Rit
+10
+
+
+Gangopadhyay, Andrew Owens, and Alex Wong. Binding
+touch to everything: Learning unified multimodal tactile rep-
+resentations. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+26340–26353, 2024. 3
+[41] Tianwei Yin, Micha¨el Gharbi, Taesung Park, Richard Zhang,
+Eli Shechtman, Fr´edo Durand, and William T. Freeman. Im-
+proved distribution matching distillation for fast image syn-
+thesis. In Advances in Neural Information Processing Sys-
+tems, pages 47455–47487. Curran Associates, Inc., 2024. 3
+[42] Tianwei Yin, Micha¨el Gharbi, Richard Zhang, Eli Shecht-
+man, Fr´edo Durand, William T. Freeman, and Taesung Park.
+One-step diffusion with distribution matching distillation.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 6613–6623,
+2024. 3
+[43] Chengbo Yuan, Zicheng Zhang, Mingjie Zhou, Wendi Chen,
+Yi Wang, Zhuoyang Liu, Dantong Niu, Shuo Wang, Hui
+Zhang, Wenkang Zhang, Yingdong Hu, Yuanqing Gong,
+Wanli Xing, Chuan Wen, Cewu Lu, Kaifeng Zhang, and
+Yang Gao.
+FTP-1: A generalist foundation tactile pol-
+icy across tactile sensors for contact-rich manipulation.
+arXiv:2606.13102, 2026. 1, 3, 4
+[44] Wenzhen Yuan, Siyuan Dong, and Edward H. Adelson. Gel-
+Sight: High-resolution robot tactile sensors for estimating
+geometry and force. Sensors, 17(12):2762, 2017. 2
+[45] Sergey Zagoruyko and Nikos Komodakis. Paying more at-
+tention to attention: Improving the performance of convolu-
+tional neural networks via attention transfer. In International
+Conference on Learning Representations, 2017. 3
+[46] Zhiyuan Zhang, Adeesh Desai, Jyun-Chi Hu, Yosuke Saka,
+Quan Khanh Luu, Jiuzhou Lei, Davood Soleymanzadeh, Bi-
+hao Zhang, Minghui Zheng, and Yu She. Imagining the sense
+of touch: Touch-informed manipulation via imagined tactile
+representations. arXiv:2607.01684, 2026. 1, 3, 4, 5
+[47] Jialiang Zhao, Yuxiang Ma, Lirui Wang, and Edward Adel-
+son.
+Transferable tactile transformers for representation
+learning across diverse sensors and tasks. In Proceedings
+of the 8th Conference on Robot Learning, pages 3766–3779,
+2025. 3
+[48] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. In Proceedings of Robotics: Science and
+Systems, 2023. 2, 4
+[49] Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-
+Chin Huang, Min Xu, Less Wright, Hamid Shojanazeri,
+Myle Ott, Sam Shleifer, Alban Desmaison, Can Balioglu,
+Pritam Damania, Bernard Nguyen, Geeta Chauhan, Yuchen
+Hao, Ajit Mathews, and Shen Li. PyTorch FSDP: Experi-
+ences on scaling fully sharded data parallel. Proceedings of
+the VLDB Endowment, 16(12):3848–3860, 2023. 5
+[50] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted
+Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker,
+Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong
+Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre
+Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S.
+Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor
+Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine,
+Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng
+Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi,
+Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog,
+Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu,
+Pete Florence, Chelsea Finn, Kumar Avinava Dubey, Danny
+Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi
+Chen, Yevgen Chebotar, Justice Carbajal, Noah Brown, An-
+thony Brohan, Montserrat Gonzalez Arenas, and Kehang
+Han.
+RT-2: Vision-language-action models transfer web
+knowledge to robotic control.
+In Proceedings of The 7th
+Conference on Robot Learning, pages 2165–2183. PMLR,
+2023. 2
+11
+
+
+A. Methods and Experimental Details
+Sections A.1–A.3 describe training, baselines, and evalua-
+tion. Section A.4 details the visual perturbations and the
+selection of examples in Fig. 4. Section A.5 describes the
+inference benchmark. Sections A.6–A.8 report ablations,
+additional tasks, and per-task results. Section A.9 describes
+the real-world demonstrations and attention maps.
+A.1. Training Configuration and Distillation
+A.1.1. Learning-Rate Schedule,
+Optimization,
+and
+Checkpoints
+We train the four main simulation tasks separately on 50
+demonstrations per task. For each task, we freeze a task-
+trained SimpleTouch teacher, initialize the student from
+pretrained π0.5 weights, and jointly optimize its vision-
+language backbone and action expert. We denote the config-
+urations with demonstration-supervision weights λGT = 1
+and λGT = 0 by GT1 and GT0, respectively. Table S1 gives
+the GT1 configuration used in the main simulation exper-
+iments. We disable periodic simulation validation during
+training and evaluate the checkpoint at update 20,000.
+For each real-world task, we freeze the task-trained Sim-
+pleTouch teacher and initialize the TacitTouch student from
+pretrained π0.5 weights. Training uses FSDP with eight pro-
+cesses, a microbatch of 8 per process, and a global batch
+Table S1. TacitTouch training configuration for the main sim-
+ulation experiments (GT1).
+Setting
+Value
+Teacher / student ini-
+tialization
+Task-trained SimpleTouch / pre-
+trained π0.5
+Parallelism / processes
+FSDP / 8
+Microbatch
+per
+pro-
+cess / global batch
+8 / 64, with one gradient accu-
+mulation step
+FSDP mixed precision
+bfloat16 parameters for compu-
+tation, float32 gradient reduction
+and buffers
+Optimizer
+AdamW
+Peak / final learning
+rate
+5 × 10−5 / 5 × 10−6
+Learning-rate schedule
+1,000 warm-up updates, then co-
+sine decay
+AdamW β and ϵ
+(0.9, 0.95), 10−8
+Weight decay / gradi-
+ent clipping norm
+10−10 (effectively no weight de-
+cay) / 1
+Updates / checkpoint
+interval
+20,000 / 5,000
+Feature
+distillation
+/
+demonstration weights
+0.01 / 1
+Action horizon / infer-
+ence denoising steps
+50 / 10
+of 64. Computation uses bfloat16 parameters, and gradi-
+ent reduction and buffers use float32, as in simulation. The
+optimizer, learning-rate schedule, and checkpoint interval
+follow Table S1. Each task uses the 50 demonstrations de-
+scribed in Sec. A.3.3. We disable periodic validation and
+deploy the checkpoint at update 20,000.
+A.1.2. Proprioception, Action Representation, and Data
+Following Sec. 3.1, st denotes the proprioceptive state at
+the current sample time. The teacher receives images, the
+instruction, st, and measured touch. The student receives
+the same images, instruction, and st.
+In simulation, both training and evaluation use the cur-
+rent eight-dimensional joint state as proprioceptive input.
+The actions are eight-dimensional absolute joint targets.
+The first seven entries are arm joint angles in radians, and
+the eighth is the displacement of one finger in meters. The
+joint-position interface receives the denormalized target and
+writes the eighth entry to both symmetric finger joints. Sec-
+tion A.3.1 specifies the simulation step.
+On the robot, the first seven state dimensions are mea-
+sured joint angles in radians.
+The eighth is the mea-
+sured total gripper opening in meters.
+The raw control
+command specifies absolute targets for the seven arm joints
+and the total opening. Matching source timestamps yields
+the action labels, as described in Sec. A.3.3. Contact can
+leave the measured opening larger than the target, so the
+eighth action dimension is taken from the command.
+For real-world training, we subtract the corresponding
+joint angles in st from the first seven action dimensions and
+retain the absolute opening in the eighth. At inference, we
+denormalize the model output and add the same state an-
+gles back to obtain absolute targets. We compute state and
+action normalization statistics separately for each task and
+reuse the checkpoint statistics at inference. Real-world nor-
+malization uses the first and 99th percentiles q01 and q99 in
+each dimension as follows.
+˜x = 2
+x −q01
+q99 −q01 + 10−6 −1.
+Each prediction contains 50 actions, with each eight-
+dimensional action zero-padded to 32 dimensions. If fewer
+than 50 actions remain in a demonstration, we repeat its fi-
+nal action. The repeated actions contribute to demonstration
+supervision when that loss is enabled. In the main simula-
+tion experiments, action distillation and demonstration su-
+pervision both compute mean squared error over all 50×32
+elements.
+A.1.3. Image Augmentation and the Distillation Update
+Following Sec. 3.2, the teacher and student make predic-
+tions at the same noisy action and flow time. Training uses
+offline demonstrations. The query follows the current stu-
+dent’s ten-step Euler denoising trajectory, so query selection
+is on-policy. Algorithm S1 gives one GT1 update.
+12
+
+
+For the main simulation experiments, we resize camera
+images while preserving their aspect ratios and pad them to
+224 × 224 pixels. For the head image, we sample a crop
+spanning 95% of the input height and width, draw an in-
+plane rotation uniformly from [−5◦, 5◦], and resample to
+the input size. The wrist image receives color augmentation
+only. Each view receives color jitter with probability 0.5.
+Brightness, contrast, and hue offsets are sampled uniformly
+from [−0.3, 0.3], [−0.4, 0.4], and [−0.1, 0.1], respectively.
+Hue uses a unit interval for a full turn, and saturation stays
+fixed. We preprocess the teacher’s measured tactile images
+separately.
+The shared augmentation in Sec. 3.3 applies only to the
+distillation pass. The teacher and student use the same aug-
+mented camera images for LAD and LFD. To compute LGT
+in GT1, the student samples a fresh augmentation of the
+same source images for a separate forward pass.
+Algorithm S1. One TacitTouch distillation update (main
+simulation, GT1).
+1. Load the demonstration observations and action chunks.
+Sample one camera augmentation for both teacher and
+student during distillation.
+2. Draw ϵ ∼N(0, I) and set z0 = ϵ. Draw j uniformly
+from {0, . . . , 9} and share j across training processes.
+3. With gradients disabled, run student denoising steps k =
+0, . . . , j −1, updating zk+1 = zk −vθ(zk, 1−k/10)/10.
+For j = 0, use the initial noise z0 directly.
+4. Query both teacher and student at (¯zj, 1 −j/10), using
+the detached query state ¯zj.
+5. Provide the teacher with the visuotactile observation and
+the student with its non-tactile inputs. Read both veloc-
+ity predictions and the features from all 18 action-expert
+layers.
+6. Use the frozen teacher outputs to compute LAD and
+LFD.
+7. Draw a fresh augmentation of the source images and in-
+dependently sample noise and flow time. Run a separate
+student forward pass to compute LGT.
+8. Update the student with LAD + 0.01LFD + LGT.
+The distribution for j described before Eq. 3 is the
+marginal distribution for each sample. In the GT1 configu-
+ration, each optimizer update shares a single draw of j from
+rank zero across the global batch. This gives all processes
+the same number of gradient-free prefix steps. Across up-
+dates, j is drawn uniformly from {0, . . . , 9}.
+In the main simulation experiments, we use the out-
+puts of all 18 action-expert Transformer blocks before the
+final normalization.
+Teacher and student hidden states
+have matching shapes, allowing direct elementwise mean
+squared error averaged over samples, layers, action tokens,
+and channels.
+For LGT, we independently draw b ∼Beta(1.5, 1) and
+Table S2. Tactile inputs and modules used at inference.
+Method
+Tactile input
+Tactile modules
+π0.5
+None
+None
+SimpleTouch
+Measured
+RGB
+T3 encoder, tactile ex-
+pert
+TacImag
+Generated
+RGB
+Tactile generator, T3 en-
+coder, tactile expert
+HapticVLA
+None
+None
+TacitTouch
+None
+None
+use flow time 0.001 + 0.999b. We interpolate the demon-
+strated actions with fresh noise and train the student to pre-
+dict the noise minus the demonstrated actions. The gradi-
+ents from distillation and demonstration supervision con-
+tribute to the same student update.
+A.2. Baseline Implementations and Inputs
+A.2.1. π0.5 and SimpleTouch
+In Table 1, π0.5 uses images, language, and proprioception.
+SimpleTouch adds a tactile branch to the same backbone. A
+frozen T3 encoder extracts features from the current tactile
+observation, and a separate tactile expert processes them.
+TacitTouch uses SimpleTouch as the teacher and deploys
+the visual student alone. Table S2 lists the tactile inputs and
+modules used at inference.
+Real-world π0.5 and SimpleTouch start from the same
+pretrained π0.5 checkpoint, use the real-world optimiza-
+tion settings in Sec. A.1, and use the checkpoint at update
+20,000. SimpleTouch randomly initializes the tactile expert
+and keeps the T3 encoder frozen during training.
+Real-world SimpleTouch conditions on current touch
+and predicts T3 features from future measured touch as an
+auxiliary objective. It samples a target every five steps over
+a 50-step horizon and pools the spatial features to 6 × 6.
+It normalizes the targets by a reference root mean square
+(RMS) from the frozen T3 encoder. Let γ and β denote the
+per-channel scale and bias in the last LayerNorm. Under the
+assumption of zero mean and unit variance in each channel
+before the affine transform, each output channel has second
+moment γ2 + β2. The reference RMS is
+p
+meanc(γ2c + β2c),
+where c indexes the channels. The auxiliary loss weight
+is fixed at 0.01 throughout training, with no warm-up or
+scheduling. At the end of a trajectory, we repeat the last
+target.
+A.2.2. Tactile Generator and Action Policy in TacImag
+TacImag trains in two stages. In the first stage, the generator
+takes the current images and normalized proprioception and
+jointly predicts left and right tactile RGB images at the same
+13
+
+
+Table S3. TacImag generator training in simulation. Each task
+uses eight AMD Instinct MI308 GPUs. Time is cumulative at the
+final logged training step.
+Task
+Stage 1
+samples
+Epochs
+Final
+step
+Time
+(h)
+Lift Bottle
+15,334
+200
+47,800
+3.9
+Lift Can
+9,172
+200
+28,600
+3.5
+Put Bottle
+14,665
+200
+45,800
+4.5
+Insert Tube
+9,427
+200
+29,400
+3.6
+time, each 320 × 240 pixels. The simulation generator uses
+the task-specific camera views in Sec. A.3.1, with a separate
+ResNet-18 encoder and group normalization for each view.
+We downsample the tactile images by a factor of four
+with bilinear interpolation before feeding them to a con-
+ditional one-dimensional U-Net. The channel widths are
+512, 1,024, and 2,048. Time embeddings have dimension
+128, the kernel size is 5, and group normalization uses eight
+groups. The DDPM predicts the clean sample with a cosine
+noise schedule of 100 training diffusion steps and 10 infer-
+ence denoising steps. The generator trains for 200 epochs
+per simulation task, as listed in Table S3. Training uses
+eight processes with a microbatch of 8 per process, a global
+batch of 64, and one gradient accumulation step. AdamW
+uses a learning rate of 10−4, β = (0.95, 0.999), weight de-
+cay 10−6, and 500 warm-up steps followed by cosine decay.
+In the second stage, we freeze the exponential moving
+average weights of the generator and train a SimpleTouch
+action policy for 20,000 updates. Generated tactile images
+use the RGB channel order and tensor layout of measured
+images. We use task-specific statistics to map them to the
+T3 input range, resize the shorter side to 256 pixels, and take
+a 224 × 224 center crop. The action policy takes generated
+current touch as input. Latent features of future measured
+touch are used during training, with auxiliary loss weight
+0.01.
+For real-world TacImag, the generator and action policy
+share the current wrist image and the state input. The gen-
+erator predicts tactile images for both fingers at the obser-
+vation time. The action policy also receives the generated
+touch and the instruction. Its targets are the 50 demonstrated
+commands starting from at. The real-world generators re-
+tain the output resolution, fourfold downsampling, U-Net
+channel widths, and diffusion step counts described above,
+and train for 200 epochs. The generators for Ball Sorting,
+Insert USB, Wipe Board, and Chip Moving take 75,000,
+61,000, 72,600, and 86,800 updates, respectively. The sec-
+ond stage trains for 20,000 updates with future-touch auxil-
+iary loss weight 0.01.
+Table S4. Episode action-call limits for the main simulation
+tasks.
+Task
+Action-call limit
+Lift Bottle
+500
+Lift Can
+300
+Put Bottle
+300
+Insert Tube
+300
+A.2.3. Mixed-Action Training for HapticVLA
+Our HapticVLA baseline follows the student-stage action
+mixing in the official Crab implementation [1]. A frozen,
+task-trained SimpleTouch teacher precomputes a 50-action
+chunk for each demonstration observation using ten flow-
+matching steps. For each action step in the chunk, we aver-
+age the demonstration target and teacher prediction elemen-
+twise in the eight action dimensions, Amix = 0.5AGT +
+0.5Ateacher, then zero-pad to 32 dimensions.
+The student inherits the teacher’s shared vision-language
+backbone and action weights, with the tactile modules re-
+moved. We use the precomputed mixed actions as super-
+vision, restart the optimizer and scheduler, and train for
+20,000 updates with a global batch of 64. The learning rate
+warms up to 5 × 10−5 over 1,000 updates and then decays
+along a cosine schedule to 5 × 10−6.
+A.2.4. Published Benchmark Results
+The ACT, VITaL, UniVTAC-ACT, and FTP-1 success rates
+in Table 1(a) come from the SimpleTouch benchmark
+study [38] on the same four simulation tasks.
+A.3. Experimental Platforms, Demonstrations, and
+Evaluation
+A.3.1. Simulation Platform and Tasks
+The four main UniVTAC tasks are Lift Bottle, Lift Can, Put
+Bottle, and Insert Tube. We use the UniVTAC environment
+snapshot dated 2026-09-13 with Isaac Sim 4.5.0 and TacEx
+0.1.0. Cameras use high-quality rendering with FXAA. The
+head and wrist cameras provide native RGB images at 640×
+360, and the native tactile resolution is 400 × 300. Lift
+Bottle and Put Bottle use the head view. Lift Can and Insert
+Tube also use the wrist view.
+All methods we evaluate in UniVTAC use its default
+joint-position interface.
+The interface sets the simulated
+joint state directly to the target without dynamic tracking,
+then advances one physics step of 1/120 s. All π0.5-based
+methods in our simulation evaluation predict from the cur-
+rent observation using ten flow-matching steps, without ob-
+servation history or temporal ensembling. The episode bud-
+gets count action calls, as shown in Table S4.
+Each simulation condition schedules 100 evaluation
+episodes per method and task.
+14
+
+
+Table S5. Real-world task objectives.
+Task
+Objective
+Ball Sorting
+Pick up the ball and sort it into the cor-
+responding container by surface texture
+(smooth or rough).
+Insert USB
+Grasp the USB plug, align it, and insert
+it into the target port.
+Wipe Board
+Pick up the eraser, make contact with the
+board, and erase the designated writing.
+Chip Moving
+Move the chip from the source bottle
+mouth to the target bottle mouth and re-
+lease it so it rests intact.
+We use the task-specific UniVTAC success criteria. For
+Insert Tube, we verify lateral alignment in the recorded suc-
+cessful episodes using the absolute offsets |x| < 5 mm and
+|y| < 5 mm in the hole frame. The task also checks in-
+sertion depth, orientation, and relative grasp height. Sec-
+tion A.7 gives the criteria for the additional tasks. Figure S2
+shows execution sequences from the main and additional
+tasks.
+A.3.2. Real-World Platform and Tasks
+The Franka FR3 uses an Intel RealSense D405 on the wrist
+and a GelSight Mini on each gripper finger. Two external
+RealSense D435i cameras record side and overhead views.
+The deployed policies use the wrist image as visual input,
+with tactile inputs listed in Table S2. Figure S1 shows the
+arm, sensing hardware, and teleoperation devices. Table S5
+defines the four tasks.
+A.3.3. Demonstration Collection and Processing
+Each real-world task uses 50 teleoperated demonstrations,
+indexed 0–49 after conversion.
+Ball Sorting uses 25
+smooth-ball and 25 rough-ball demonstrations. During tele-
+operation, we record three camera streams, tactile images
+from both fingers, measured arm and gripper state, and joint
+and gripper commands.
+For export, we construct a regular 15 Hz grid with an in-
+terval of approximately 66.7 ms. At each grid time, we take
+the latest available frames from the three cameras (wrist,
+side, and overhead) and two tactile sensors, and the latest
+measured arm and gripper state. For each of the two com-
+mand streams, we take the earliest command at or after the
+grid time. The state thus contains the most recent mea-
+sured feedback, and every action traces back to its source
+command. Camera source timestamps use the host’s mono-
+tonic clock at the end of each frame read.
+Each image stream contributes fresh frames only, with
+a maximum frame age of one grid interval. We also limit
+the wait for each command to one interval. We allow the
+latest state feedback to be up to 1 s old. The maximum
+observed gripper-feedback age is 44.35 ms for Ball Sort-
+ing, 100.41 ms for Insert USB, 46.14 ms for Wipe Board,
+and 129.76 ms for Chip Moving. Alignment selects source
+records directly, without interpolation. Rows that fail the
+matching criteria stay on the grid with an invalid mask. Fig-
+ure S3 shows aligned wrist and tactile frames through grasp
+and release in Ball Sorting.
+Wrist images retain their native 640 × 480 field of view.
+We resize the full tactile image to 320 × 240 by area resam-
+pling, keep the RGB channel order, and encode it at JPEG
+quality 95. For each task, we estimate tactile statistics using
+both fingers’ images from all 50 training demonstrations.
+For T3, we resize the shorter side to 256 pixels and take a
+224 × 224 center crop.
+A.3.4. Real-World Action Execution
+All four tasks send the seven absolute joint-position tar-
+gets obtained in Sec. A.1.2 as references to their low-level
+arm controllers.
+Ball Sorting passes these targets to the
+Franka SDK’s joint-position interface. Wipe Board uses
+the follower-arm controller from FACTR, a bilateral force-
+feedback teleoperation system. It tracks the targets with
+a joint-space proportional–derivative torque law based on
+scaled position error and measured joint velocity.
+Insert USB and Chip Moving reuse the controller from
+our Pico teleoperation setup, which records demonstrations
+using a PICO headset and a tracked handheld controller.
+The controller computes the target end-effector pose by for-
+ward kinematics and uses the SDK’s desired joint state to
+compute pose and posture errors. It maps proportional pose
+feedback to joint velocities through a damped Jacobian in-
+verse and adds a projected joint-posture correction. Ruckig
+smooths the resulting joint-velocity reference before execu-
+tion. The gripper uses the Move interface to execute the
+total opening specified by the eighth action dimension.
+A.3.5. Success Rates
+Under the simulation protocol in Sec. 4.1, the success rate
+for a task is ˆp = S/n, where S is the number of successful
+episodes and n is the number of episodes included in the
+reported score.
+For cross-task simulation means in the main paper, we
+round each task’s success rate to an integer percentage be-
+fore averaging the four rounded rates equally. On the robot,
+each method runs 20 trials per task under Clean and 20 un-
+der Light. Each set of 20 Ball Sorting trials includes ten
+smooth-ball and ten rough-ball trials. Tables 1(b) and 3 re-
+port the results.
+A.4. Visual Perturbations and Matched Examples
+A.4.1. Visual Perturbation Protocol
+Section 4.3 evaluates the Light and Camera conditions at
+fixed checkpoints. Light multiplies the RGB values of the
+15
+
+
+(a)
+Franka FR3
+Seven­axis robot arm
+(b)
+FACTR
+Force­feedback leader arm
+(c)
+PICO 4 Ultra
+Headset and tracked controllers
+(d)
+Instrumented gripper
+D405 wrist camera and two GelSight Mini sensors
+(e)
+3D­printed finger adapter
+Mount for the GelSight Mini
+Figure S1. Hardware for real-world experiments. (a) Franka FR3 arm. (b) FACTR leader arm for force-feedback teleoperation. (c) PICO
+4 Ultra headset and tracked controllers. (d) Instrumented gripper with a RealSense D405 wrist camera and two GelSight Mini sensors. (e)
+3D-printed finger adapter for the GelSight Mini.
+policy camera images by 0.5 before preprocessing. The tac-
+tile brightness multiplier stays at 1.0. We use the same input
+transform in simulation and on the robot. Scene illumina-
+tion and physical contact conditions remain fixed.
+Camera is a simulation-only condition. We sample the
+camera perturbations before evaluation. The head-camera
+yaw is uniform over [−30◦, 30◦] about the world Z axis
+through the workspace point (0.70, 0, 0.04) m.
+Its posi-
+tion follows a horizontal arc and its orientation rotates by
+the same angle. We add no independent random transla-
+tion. For tasks with a wrist view, we independently sam-
+ple yaw uniformly over [−15◦, 15◦] about that camera’s lo-
+cal Y axis, with the mount position fixed. We apply each
+perturbation after the environment reset and use the same
+perturbed views for corresponding episodes across meth-
+ods. Evaluation retains views that occlude the target, such
+as those in Put Bottle where the shelf opening is hidden.
+A.4.2. Selection and Display of Matched Episodes
+Figure 4 pairs TacImag and full TacitTouch trajectories with
+the same initial scene and visual perturbation. We select one
+pair per condition in which TacImag fails and TacitTouch
+succeeds, before inspecting the frames. The Insert Tube ex-
+ample uses head- and wrist-camera yaw offsets of +26.7◦
+and −12.5◦, respectively.
+We show the first and last decoded frames and one in-
+termediate frame from each recording. The reference im-
+ages above the sequences use the head camera, with de-
+coded RGB values multiplied by 0.5 in the dimmed exam-
+ple. Trajectory frames retain their recorded brightness be-
+cause Light applies only to policy inputs. Lift Bottle shows
+the head view, and Insert Tube shows the wrist view.
+The video writer resizes the native 640 × 360 image to
+320 × 320. We restore the 16:9 aspect ratio for display.
+Both methods use the same crop and magnification within
+each task.
+A.5. Inference Latency, Parameters, and Memory
+For Table 4, we measure the latency of a single policy call
+on an idle NVIDIA A100-SXM4-80GB GPU with PyTorch
+2.7.1, CUDA 12.6, bfloat16, and 16 CPU threads. Inputs
+come from ten decoded demonstration observations and use
+batch size one. Timing starts at input conversion, includes
+vision-language processing, each method’s tactile modules,
+and ten action denoising steps, and ends when the predicted
+50-action chunk returns to the CPU. We synchronize the
+GPU before and after each call. Checkpoint loading, file
+16
+
+
+Earlier
+Later
+Lift Bottle
+Lift Can
+Put Bottle
+Insert Tube
+Pull­out Key
+Insert Hole
+Grasp
+Classify
+Insert HDMI
+Figure S2. TacitTouch rollouts on eight UniVTAC tasks. Each row shows four frames from one successful evaluation episode. The top
+four rows show the main simulation tasks, and the bottom four show the additional tasks. The fixed-camera views are cropped around the
+workspace.
+decoding, simulation, and RPC communication fall outside
+the timed interval.
+Warm-up proceeds in groups of ten calls, with a min-
+imum of 20 and a maximum of 100 calls.
+It stops
+when the relative difference between the median laten-
+cies of two consecutive groups is at most 5%.
+In prac-
+tice, warm-up stopped after 20–30 calls for every method–
+task setting.
+We measure five rounds of 20 calls, for
+17
+
+
+Smooth ball
+Before contact
+Grasp
+After release
+Rough ball
+Before contact
+Grasp
+After release
+Wrist view
+Left
+GelSight
+Right
+GelSight
+Figure S3. Contact during real-world Ball Sorting. Aligned wrist and left/right GelSight images from a smooth-ball and a rough-ball
+demonstration at three stages. Each column uses the wrist image and the two measured tactile images from the same aligned sample.
+Table S6. Inference latency and deployment cost. Vision + Tac.
+denotes measured-touch SimpleTouch, as in Table 4.
+Method
+Latency
+(s/call)
+Parameters
+(billions)
+Peak memory
+(GiB)
+Vision + Tac.
+0.37209
+3.98
+7.62
+TacImag
+0.45363
+4.25–4.28
+8.13–8.18
+TacitTouch
+0.33660
+3.35
+6.45
+100 measured calls per method and task.
+Table S6 re-
+ports average latency across tasks, deployment parame-
+ter counts, and the peak allocated memory measured by
+torch.cuda.max memory allocated.
+The π0.5 backbone in SimpleTouch and TacitTouch uses
+three fixed image slots. We fill absent views with zero im-
+ages and mask their positions in attention. The total number
+of image tokens and the parameter count are constant across
+view configurations. At two decimal places, the per-task
+peak memory is 7.62 GiB for SimpleTouch and 6.45 GiB
+for TacitTouch on all four tasks. TacImag’s generator uses a
+dedicated visual encoder for each available view. Lift Bot-
+tle and Put Bottle use the head image and give the lower
+bounds in Table S6. Lift Can and Insert Tube use both head
+and wrist images and give the upper bounds.
+Using unrounded mean latencies, TacitTouch reduces la-
+tency by 25.8% relative to TacImag and by 9.5% relative
+to Vision + Tac. The simulation timing benchmark uses a
+GT0 student with feature distillation weight 0.01. The main
+performance experiments use a GT1 student with the same
+deployment architecture.
+A.6. Ablation Settings
+The component ablations in Fig. 5 share a frozen teacher
+and train for 20,000 distillation updates. Removing feature
+distillation retains LAD and LGT. Removing demonstration
+supervision retains LAD and LFD. Table S8 reports per-task
+success rates.
+Both initialization ablations in Fig. 5 use the full objec-
+tive LAD + 0.01LFD + LGT. The visual initialization starts
+from task-trained π0.5 weights. The visuotactile initializa-
+tion inherits the weights shared with the task’s SimpleTouch
+teacher and removes its tactile modules. Both restart the
+optimizer and learning-rate scheduler. The 20,000-update
+budget counts only the distillation stage.
+In Table 5, V denotes images, language, and proprio-
+ception, and VT adds measured touch.
+The three GT0
+students initialize their vision-language backbone and ac-
+tion expert from pretrained π0.5 and share the objective
+LAD + 0.01LFD. V→V distills from a visual π0.5 teacher
+trained on the task.
+VT→V uses the task-trained Sim-
+pleTouch teacher and keeps the visual student architecture
+fixed. VT→VT uses that visuotactile teacher and adds a
+randomly initialized tactile expert to the student, which re-
+ceives measured touch during both training and inference.
+The last VT→V row uses the full GT1 objective from Ta-
+ble S1.
+A.7. Additional Simulation Tasks and Success Cri-
+teria
+Table 6 and Sec. 4.6.2 report transfer to Pull-out Key, In-
+sert Hole, Grasp Classify, and Insert HDMI. We train sepa-
+rate policies on 50 demonstrations per task and evaluate the
+18
+
+
+checkpoint at update 20,000.
+All four tasks use the head camera and the eight-
+dimensional state in Sec. A.1.2.
+We use the simulation
+snapshot in Sec. A.3.1. Inference uses ten flow-matching
+steps with the current observation and no temporal en-
+sembling. Each additional task contributes 100 evaluation
+episodes to its reported success rate.
+The environment applies the following task-specific suc-
+cess criteria.
+• Pull-out Key. The key height exceeds 0.09 m. The envi-
+ronment also checks the orientation of the key relative to
+the slot and the end-effector height relative to the key.
+• Insert Hole. The absolute relative x and y coordinates are
+both below 0.01 m and the relative z coordinate is below
+−0.04 m. The environment also checks orientation and
+the change in relative grasp height.
+• Grasp Classify. The absolute relative position compo-
+nents are below 0.02 m, 0.02 m, and 0.01 m, respectively.
+The environment also checks orientation.
+• Insert HDMI. The environment checks relative height,
+end-effector height, and orientation. The lateral position
+check uses the y component alone.
+A.8. Per-Task Success Rates and Complete Ablation
+Results
+Table S7 reports the integer-rounded success rates for full
+TacitTouch on the four main simulation tasks under Clean,
+Light, and Camera.
+Table S7. Per-task success rates for full TacitTouch (%).
+Condition
+Task
+Rate (%)
+Clean
+Lift Bottle
+96
+Lift Can
+85
+Put Bottle
+37
+Insert Tube
+92
+Light
+Lift Bottle
+95
+Lift Can
+86
+Put Bottle
+41
+Insert Tube
+88
+Camera
+Lift Bottle
+92
+Lift Can
+64
+Put Bottle
+20
+Insert Tube
+58
+Table 2 first rounds each task-condition success rate to an
+integer percentage. It then subtracts the rounded Clean rate
+for each task and takes the equal-weight mean of the four
+differences, rounded to one decimal place. For TacitTouch,
+the rounded Clean rates are 96%, 85%, 37%, and 92%. Un-
+der Camera they are 92%, 64%, 20%, and 58%. The differ-
+ences are −4, −21, −17, and −34 percentage points, for a
+mean of −19.0 percentage points.
+Table S8. Success rates for each setting in Fig. 5 (%). Means
+weight the rounded task rates equally.
+Configuration
+Lift
+Bottle
+Lift
+Can
+Put
+Bottle
+Insert
+Tube Mean
+Without feature
+distillation
+93
+75
+37
+55
+65.0
+Without demonstration
+supervision
+95
+72
+38
+93
+74.5
+Task-trained visual
+initialization
+96
+60
+37
+92
+71.3
+Task-trained
+visuotactile
+initialization
+97
+76
+37
+95
+76.3
+Full TacitTouch
+96
+85
+37
+92
+77.5
+A.9. Real-World Demonstrations and Visual Atten-
+tion
+A.9.1. Task Stages and Two-Finger Touch
+Figure 3 shows teleoperated demonstrations for four tasks
+in execution order. Each wrist image and the two adjacent
+measured tactile images come from the same aligned sam-
+ple, with L and R denoting the left and right gripper fingers.
+Images retain their original RGB channel order and colors.
+The purple insets crop and enlarge the local interaction re-
+gions from the original images.
+A.9.2. Attention Extraction and Display
+Figure 6 shows attention from action queries to regions of
+the wrist image. The models predict 50 actions with ten de-
+noising steps. At the final step, we take the attention prob-
+abilities after masking and softmax. We average over all
+attention heads, the first two future action queries, and the
+last four action-expert layers to obtain a 16×16 patch map.
+The π0.5, TacImag, and TacitTouch policies use the same
+wrist frame, instruction, and initial action noise. For this
+figure, each policy retains its native state input. TacImag
+encodes the frozen generator’s tactile RGB output with T3.
+All three run without measured touch.
+We resize the 640 × 480 wrist image while retaining its
+aspect ratio, then pad the top and bottom by 28 pixels to
+form the 224 × 224 encoder input. For display, we remove
+patch rows fully within the padding. We express attention
+density relative to a uniform distribution on the visible im-
+age and bilinearly interpolate it to the original frame. All
+tasks and models share a color scale capped at 15.3 times
+the uniform density. Values above this cap are clipped to
+the top color.
+The Wipe Board inset enlarges writing still visible in the
+original wrist image.
+19

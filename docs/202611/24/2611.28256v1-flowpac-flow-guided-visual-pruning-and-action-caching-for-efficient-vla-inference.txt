@@ -1,0 +1,308 @@
+Title: FlowPAC: Flow-Guided Visual Pruning and Action Caching for Efficient VLA Inference
+
+URL Source: https://arxiv.org/pdf/2611.28256v1
+
+Published Time: Tue, 24 Nov 2026 01:16:53 GMT
+
+Number of Pages: 7
+
+Markdown Content:
+# FlowPAC: Flow-Guided Visual Pruning and Action Caching for Efficient VLA Inference 
+
+Jintao Cheng 1, Yipu Zhang 1, Haozhe Wang 2,Lin Jiang 3, Jiang Xu 4, Wei Zhang 1,* 
+
+> 1
+
+The Hong Kong University of Science and Technology 
+
+> 2
+
+South China Normal University 
+
+> 3
+
+Northeastern University, China 
+
+> 4
+
+The Hong Kong University of Science and Technology (Guangzhou) 
+
+Abstract —Vision-Language-Action (VLA) models have emerged as a powerful paradigm for embodied AI, yet their high inference latency and memory footprint remain major barriers to edge deployment. Existing training-free acceleration techniques, such as visual token pruning and action caching, typically rely on static resource allocation. This mismatch with dynamic robotic interactions not only degrades control performance but also causes severe hardware inefficiencies, including fragmented KV-cache layouts and wasted compute on non-critical regions. To address this, we propose FlowPAC, a locality-aware framework that leverages task-aware optical flow as a shared physical signal to jointly optimize visual and action computation. Specifically, we introduce Direction-Aware Trajectory Propagation (DATP) and Locality-Aware Contiguous Token Selection (LACT) to jointly handle visual token dynamics and enforce spatial locality, re-ducing memory fragmentation and enabling efficient KV-cache compression. This is complemented by Flow-Conditioned Action-Block Refresh (FCAR) for adaptive action computation based on motion dynamics. Extensive closed-loop evaluations on LIBERO demonstrate that FlowPAC achieves a 2.13 × end-to-end speedup over the dense baseline while essentially maintaining the success rate with 30% visual-token retention. These results validate that aligning computation allocation with both physical dynamics and hardware constraints is essential for efficient VLA deployment on edge systems. 
+
+Index Terms —vision-language-action models, robotic manipu-lation, token pruning, diffusion caching, inference acceleration 
+
+I. I NTRODUCTION 
+
+Vision-Language-Action (VLA) models have emerged as a promising solution to enhance generalization of robotic con-trol in embodied intelligence [1]–[4]. The mainstream VLA architecture pairs a pretrained VLM backbone with a dedicated action expert to unify visual, textual, and action information within a token-domain framework [5], [6]. While implementa-tions like the π series demonstrate strong generalization, they suffer from prohibitive end-to-end latency on device deploy-ment. Recent work on model efficiency spans quantization of VLA policies [7] and visual geometry transformers [8], layer skip-ping [9], knowledge distillation [10], visual token pruning [11], and action-head feature caching [12]. Efficient multimodal in-ference has also been explored in robotic perception, including training-free visual place recognition [13]. Among these, visual 
+
+> *Corresponding author: Wei Zhang.
+
+token pruning and action caching have emerged as effective techniques for improving VLA inference efficiency, as they offer the distinct advantage of significantly reducing compu-tational and memory overheads without requiring costly model retraining or architectural modifications [14]–[16]. Visual token pruning reduces spatial redundancy by scoring patches with instruction-conditioned attention, action-decoding relevance, or recent action dynamics and retaining a compact token set under a prescribed budget, thereby reducing subsequent token processing and KV-cache storage [14], [17]. Caching-based methods reduce temporal redundancy either by reusing visual-token KV states across adjacent observations [15] or by retriev-ing intermediate action trajectories from similar multimodal contexts to warm-start iterative action generation [16]. How-ever, the holistic impact of these disjointed optimizations on the end-to-end VLA pipeline remains under-explored. Crucially, adapting these isolated optimizations to resource-constrained robotic platforms is non-trivial [18]–[20]. First, existing pruning methods typically decide which visual tokens to keep based on their importance in the current frame [14], [17]. However, a region that is unimportant in the current frame may become critical in the next few frames, for example, when the gripper moves toward it or approaches a contact boundary. Pruning decisions must be made before this future importance becomes directly observable. Premature pruning can therefore discard future-critical information and misallocate the compute budget, degrading control accuracy. Second, existing action-side caching methods typically use a fixed refresh rule, such as recomputing the action expert every few steps or when a predefined threshold is reached [16], [21]. Yet recomputa-tion needs vary throughout an interaction: frequent refreshes during smooth phases waste computation by repeating similar work, whereas infrequent refreshes during rapid or contact-rich transitions can reuse outdated action updates and introduce control lag. Fixed refresh rules thus fail to adapt computation to changing interaction dynamics. Both problems arise from the same limitation: the computational value of visual tokens and the freshness of cached action updates change with the interaction dynamics. This motivates a shared dynamic signal that can capture both where visual information is likely to become important and when cached action updates need to be (a) Dense VLA Profile  
+
+> Runtime(ms) Prefix KV(MiB)
+> Action denoising 77.6% | 236.3ms Vision 12.0% | 36.5ms Prefix 10.2% | 31.1ms Vision tokens 79.3% | 13.50MiB Other tokens 20.7% | 3.52MiB
+> View&text Inputs
+> “Pick up the target and place it in the basket”
+
+(b) FlowPAC: Predictive Spatial-Temporal Allocation                   
+
+> Text Encoder Vision Encoder
+> Task-Aware Motion Signal
+> ·Instruction-conditioned relevance
+> ·Signed optical flow
+> ·Semantic-weighted motion Consecutive Frames ( 𝐀 𝐀−𝐀 ,𝐀 𝐀 )
+> WHERE to Preserve WHEN to Refresh
+> DATP future-critical LACT exact-budget mask
+> free Approach Contact
+> Causal Motion Indicator
+> (Along Time)
+> single gather
+> Deferred Physical Packing Compact Visual Prefix Prefix KV
+> (Less Memory)
+> Action Solver Sequence (Universal)
+> 123... i i+1 j+1 j... ... NFree Motion (Mainly Reuse) Approach (Adaptive) Contact (High Refresh)
+> Action Expert
+> Action Output
+> Prefix-state scaling
+> Prefix KV (MiB)
+> Physical prefix length (tokens)
+> Optical-flow magnitude varied within an episode
+> Normalized optical-flow magnitude
+> Episode progress (%)
+> Profiled 𝐀 𝐀.𝐀 action path
+
+Ⅰ. Ⅱ. Ⅲ. Fig. 1. Profiling and overview of FlowPAC. (a) Dense π0.5 profiling exposes two resource imbalances: action denoising dominates runtime (77.6%), while visual tokens dominate the prefix KV state (79.3%). The rightmost profiling panel shows optical-flow magnitude between consecutive observations, normalized within one representative rollout to visualize relative changes across task phases. (b) FlowPAC uses instruction-conditioned optical flow as a shared signal to coordinate where visual tokens are preserved (DATP, LACT) and when action-expert computation is refreshed (FCAR). 
+
+refreshed. To tackle these bottlenecks, we present FlowPAC , a training-free framework that leverages task-aware optical flow as a 
+
+shared physical signal to restore the temporal and spatial continuity overlooked by existing acceleration methods. We design this framework to directly address the aforementioned bottlenecks. First, to mitigate the compute budget misallocation 
+
+caused by current-frame-only pruning, we introduce Direction-Aware Trajectory Propagation (DATP) . DATP exploits the fact that optical flow is a pixel-wise temporal derivative to propagate token importance along the signed flow field, ex-plicitly preserving tokens in future interaction regions regard-less of their current redundancy. Second, we introduce Flow-Conditioned Action-Block Refresh (FCAR) , which adapts cache refreshes to optical-flow dynamics, reducing updates during stable phases and increasing them during transients to match computation with task demands. Furthermore, to ensure these optimizations yield genuine end-to-end speedups on resource-constrained robotic platforms instead of being negated by fragmented masking, we incorporate Locality-Aware Contiguous Token Selection (LACT) . By leveraging the inherent spatial locality of optical flow, LACT enforces con-tiguous block selection after a dense warm-up phase, reducing memory fragmentation while preserving physically meaningful token groups, thereby making the above dynamic scheduling practically deployable. To summarize, this work makes the following contributions: 
+
+• We propose DATP, which combines instruction-conditioned semantic relevance with signed optical flow to propagate semantic relevance toward future interaction regions and allocate visual tokens along predicted trajectories. 
+
+• We introduce FCAR, which maps semantic-weighted dual-view motion to a causal, episode-calibrated refresh budget. FCAR selectively reuses action-expert residuals during stable solver steps without shortening the original flow-matching trajectory. 
+
+• We develop LACT with deferred physical packing. LACT constructs an exact-budget, spatially coherent token mask, while deferred packing preserves early cross-token interac-tion and physically shortens the position-preserving visual prefix and its KV cache for subsequent layers. II. P ROFILING AND MOTIVATION 
+
+As illustrated in the introduction, VLA systems typically consist of a VLM backbone and an action expert. To gain deeper insights into their execution efficiency, we profile π0.5
+
+as our representative model. 
+
+A. Profiling Setup 
+
+To identify the computational and memory bottlenecks of flow-matching VLA inference, we profile the complete π0.5
+
+policy inference under the same closed-loop rollout protocol used for evaluation. Our analysis targets three questions: (1) where execution time concentrates, (2) how the visual-prefix KV state scales with token count, and (3) whether optical-flow magnitude between consecutive observations varies across task phases. All measurements are taken on a single NVIDIA A100-PCIE-40GB GPU with BF16 precision and batch size one. The live tensor allocation of the visual-prefix KV state is captured at each retention setting. To construct the optical-flow magnitude trace, we compute dense optical flow between each pair of consecutive rollout frames and average the magnitudes of the top 15% of pixels within each frame pair. Here, the magnitude of a flow vector denotes its Euclidean norm, consistent with Sec. III-D. We show the raw trace together with an offline cen-tered moving-average trace to suppress frame-level noise and apply within-rollout percentile normalization for visualization. 
+
+B. Bottleneck Analysis 
+
+Panel I of Fig. 1(a) reveals two distinct resource imbalances between the sources of latency and persistent memory in dense 
+
+π0.5 inference: action denoising dominates runtime (77.6%), while visual tokens dominate the prefix KV state (79.3%). As shown in panel II of Fig. 1(a), visual tokens account for 768 of the 968 prefix tokens (79.3%) and occupy 13.50 of the 17.02 MiB live KV state. Across the evaluated reten-tion settings, physical packing reduces the prefix KV state from 17.02 MiB to 9.81, 8.02, and 6.19 MiB, showing that physically shortening the prefix substantially reduces persistent KV storage. However, vision encoding and prefix computation together account for only 22.2% of policy-core latency, so even their idealized removal yields a visual-only speedup ceiling of 1/0.778 = 1 .29 ×. Visual pruning alone is therefore insufficient; repeated action denoising, the dominant latency component, must also be addressed. At each control query, the π0.5 action expert performs ten flow-matching denoising steps, consuming 236.3 ms, or 77.6% of the 304.6 ms policy-core latency. However, the action expert does not need to be recomputed at every step. When the in-teraction changes slowly, consecutive observations are similar, so the previous action update can be reused. During more dynamic interactions, such as grasping or contact, the scene changes more quickly and the cached update may no longer be accurate, requiring more frequent recomputation. Therefore, the key is to decide when the cached update can be reused and when it should be refreshed. As shown in the rightmost panel (III) of Fig. 1(a), the optical-flow magnitude also changes across different interaction phases, with larger values during more active interactions. This suggests that optical flow can provide a simple observable signal for deciding when to reuse the cached update and when to recompute the action expert. III. M ETHOD 
+
+A. Overview 
+
+FlowPAC jointly optimizes visual and action computation by using task-aware optical flow as a shared physical signal to coordinate two complementary axes: where visual computation is preserved and when action-expert computation is refreshed. As summarized in Fig. 1(b), the spatial branch comprises DATP, which predicts future-critical tokens using instruction-conditioned relevance and signed motion, and LACT, which converts the spatial score into an exact-budget, spatially co-herent mask followed by deferred physical packing. The tem-poral branch, FCAR, aggregates the same task-aware motion evidence into a causal refresh signal that adapts action-expert recomputation to the current dynamics of the interaction. Let Ivt denote the observation from view v ∈ { g, w } at control query t, where g and w denote the global and wrist camera views, respectively, and let x be the language instruc-tion. At each query, FlowPAC constructs per-view task-aware motion evidence from instruction-conditioned visual relevance and signed optical flow between consecutive observations. This shared signal drives both the spatial and temporal branches described below. 
+
+B. Direction-Aware Trajectory Propagation 
+
+As illustrated in Fig. 2, DATP addresses a key limitation of current-frame token selection: patches that appear redundant now may become important shortly after due to object or camera motion. Rather than selecting tokens solely based on their importance in the current frame, DATP extends the current task-relevant regions along their observed motion direction, forming a short-horizon spatial prior that preserves regions likely to become important in future interaction. We first compute dense optical flow between consecutive observations Ivt−1 and Ivt , then aggregate pixel-wise flow to patch-level motion vectors F vt,i , preserving both magnitude and direction. We then identify task-relevant regions using the instruction-conditioned relevance score ssem ,v t,i and estimate their collective motion center p0,v t and dominant direction dvt
+
+by semantic-weighted pooling of the flow field. Starting from this center, DATP propagates along the motion direction for H
+
+steps: 
+
+ph,v t = p0,v t + h∆dvt , 1 ≤ h ≤ H, (1) where ∆ controls the spatial step size. If the propagated locations move outside the image, we limit them to the nearest image boundary. If the task-conditioned motion signal is too weak, DATP does not use the spatial prior for the current observation to avoid introducing an unreliable spatial bias. Each visual patch then receives a trajectory score based on its proximity to the propagated path: 
+
+straj ,v t,i = max 
+
+> 1≤h≤H
+
+κh−1 exp 
+
+−
+
+pi − ph,v t
+
+> 22
+
+2σ2
+
+ , (2) where pi is the normalized center of patch i, κ ∈ (0 , 1] 
+
+discounts distant future locations, and σ controls the corridor width. The max operation allows a patch to receive high relevance if it lies near any propagated location. Finally, we combine instantaneous relevance, motion magni-tude, and future spatial relevance into the token-selection score: 
+
+svt,i = Norm 
+
+
+
+αNorm  ssem ,v t,i 
+
+ + βNorm  mvt,i 
+
+ + γs traj ,v t,i 
+
+
+
+.
+
+(3) Tokens are ranked independently per view by svt,i and allocated to the fixed budget Kv .Overall, DATP extends token importance estimation from a purely current-frame perspective to a short-horizon spatial per-spective, without introducing additional training or an explicit trajectory prediction model. Fig. 2. Direction-aware trajectory propagation. DATP advects instruction-conditioned semantic relevance along signed optical flow over multiple future horizons and merges them into a future-critical interaction corridor. 
+
+C. Locality-aware Contiguous Token Selection 
+
+Common global Top-K selection often produces spatially fragmented masks, where selected tokens are scattered across the image. Here, one memory access refers to reading one contiguous span of selected patches in raster order during the packing gather; fragmented masks therefore require many sep-arate memory accesses, reducing the hardware benefit of token pruning. As shown in Fig. 3, LACT groups visual tokens into aligned b × b blocks and searches over one- or two-component block templates around high-score trajectory regions. Complete blocks are selected first to preserve spatial coherence, while the remaining budget is filled by a partial block drawn from adjacent high-score patches. In this way, LACT replaces the scattered token selection of global Top-K with the selection of spatially contiguous blocks. This makes the retained tokens easier to gather and physically compact, while the block budget is adjusted to keep exactly the same number of tokens as the original Top-K selection. Conceptually, this procedure approximates the following structured selection objective: 
+
+max 
+
+> mvt
+
+X
+
+> i
+
+svt,i mvt,i − λC(mvt ), X
+
+> i
+
+mvt,i = Kv , (4) where mvt is the binary selection mask for view v, Kv
+
+is the retained visual-token budget for that view, and C(·)
+
+measures the spatial and memory fragmentation of the selected tokens. LACT primarily enables downstream physical sequence shortening rather than optimizing memory access in isolation. Its contiguous block selection reduces the number of memory accesses required by the packing gather, while preserving spatially coherent interaction regions and producing a stable selection mask. This mask then allows a single gather operation to compact the retained tokens into a physically shorter prefix, directly reducing prefix length and KV-cache footprint. DATP importance map                  
+
+> Same
+> budget
+> =
+> Global Top -K
+> LACT
+> Task -aware patch
+> scores
+> More memory accesses
+> Scattered addresses
+> Few er memory accesses
+> Contiguous addresses
+> Physical compaction is deferred until after the dense warm -up layers
+> Dense warm -up Single gather Compact prefix Subsequent layers
+> Layers 1 ... 𝑳 𝑤 Gather at 𝑳 𝑤
+> Original position IDs
+> preserved
+> Layers 𝑳 𝑤 +1 ... 𝑳
+> KV
+> Shorter
+> context Smaller
+> KV
+> Selected visual token Unselected visual token Language token KV cache
+
+Fig. 3. LACT and deferred physical packing. At the same exact budget 
+
+K, LACT converts fragmented selections into fewer packing-gather memory accesses. A single intermediate gather preserves language tokens and original visual positions while shortening all subsequent prefix and KV computation. 
+
+However, directly packing the selected visual tokens at the input would disrupt early visual–language interaction and lead to substantial closed-loop performance degradation. We there-fore defer physical pruning to a designated prefix layer Lw. The first Lw layers operate on the original dense sequence, after which a single gather operation packs only the selected visual states. Language tokens remain unchanged and preserve their original order, while retained visual tokens keep their original rotary position IDs. The corresponding prefix KV tensors are compacted using the same index map. Consequently, all subsequent prefix layers and action-expert cross-attention operations operate on a genuinely shorter con-text of length 
+
+N ′ 
+
+> t
+
+= Kg + Kw + Nlang < N g + Nw + Nlang , (5) where N ′ 
+
+> t
+
+denotes the packed prefix length at query t, Ng and 
+
+Nw are the original global- and wrist-view token counts, Kg
+
+and Kw are the retained counts after LACT, and Nlang is the language-token count. 
+
+D. Flow-Conditioned Action-Block Refresh 
+
+Physical visual packing reduces the prefix computation cost, but the action expert is still repeatedly evaluated across the flow-matching process. As shown in Fig. 4, FCAR addresses this redundancy by converting task-aware visual dynamics into an episode-adaptive recomputation budget. For each view, we measure the semantic-weighted motion magnitude as 
+
+rvt = X
+
+> i
+
+ˆssem ,v t,i F vt,i 2 , rt = max( rgt , r wt ), (6) where ˆssem ,v t,i is normalized to sum to one. Taking the maximum across the global and wrist views makes the gate conservative: significant motion in either view is sufficient to trigger addi-tional computation. Fig. 4. Flow-conditioned action-block refresh. Dual-view task-aware motion is calibrated by the causal episode history and converted into a refresh budget. Refresh steps compute and store attention/FFN residuals, whereas stable steps reuse them while preserving all action-state updates. 
+
+Rather than relying on a hand-tuned task-dependent thresh-old, FCAR converts rt into a causal empirical percentile within the current episode: 
+
+qt = 1 + P 
+
+> τ <t
+
+1{rτ ≤ rt}
+
+t + 1 . (7) The first query is assigned q0 = 1 , and the motion history is cleared whenever a new episode begins. Given the minimum and maximum refresh fractions (ρmin , ρ max ), the number of action-expert evaluations retained at step t is determined by 
+
+Bt = clip (round [ D (ρmin + qt(ρmax − ρmin ))] , 2, D ) , (8) where D denotes the original number of flow-matching steps (D = 10 in our π0.5 evaluation). The Bt refresh locations are distributed uniformly along the trajectory, including its two boundaries. At a refresh location, each action-expert layer performs its attention and feed-forward network (FFN) operations normally and caches the resulting residual updates. At a reuse location, both operators are skipped, and the most recently cached resid-uals are added to the current hidden state. Importantly, FCAR does not alter the flow-matching solver or reduce its integration steps: the action state and timestep embedding are updated at all D solver steps. FCAR therefore reduces computation by selectively reusing action-expert block evaluations while preserving the original solver trajectory. As a result, low task-conditioned motion leads to more aggressive reuse, whereas significant motion in either the global or wrist view automatically increases the refresh budget. This enables FCAR to allocate computation according to the instantaneous dynamics of the interaction rather than using a fixed temporal caching schedule. 
+
+E. Joint Inference Procedure 
+
+For every control query, DATP computes semantic and mo-tion evidence once and exposes it to both branches. LACT uses the spatial field to physically pack a future-aware visual prefix, while FCAR reduces action-expert recomputation according to the scalar dual-view motion risk. The modules are therefore coupled by a shared physical signal but optimize different axes: token packing reduces prefix length and KV storage, and action refresh reduces repeated temporal computation. IV. E VALUATION 
+
+A. Experimental Setup 
+
+We evaluate on the official π0.5 LIBERO checkpoint [22] with two active camera views and the original 10-step flow-matching solver. LIBERO comprises four suites (Spatial, Ob-ject, Goal, Long) with 10 tasks each; every success-rate entry averages 50 trials per task (2,000 episodes total). We compare against dense inference, FastV [23], VLA-ADP [17], and VLA-Cache [15] at matched 70%, 50%, and 30% control ratios. For pruning methods (FastV, VLA-ADP), the ratio denotes visual-token retention; for VLA-Cache, the complementary non-reuse ratio. All FlowPAC results share one fixed architecture (physical packing + FCAR) and differ only in retention. All measure-ments run on one NVIDIA A100-PCIE-40GB with BF16 and batch size one, using synchronized CUDA events over the full inference path. We report median (P50) and 95th-percentile (P95) latencies, corresponding to the values below which 50% and 95% of runs fall, respectively; speedup is computed from P50. 
+
+B. End-to-End Results 
+
+Table I reports the full success grid. Current-frame pruning methods such as FastV and VLA-ADP cannot reliably identify and preserve regions that become relevant in subsequent inter-actions. Discarding these future-critical visual tokens deprives the policy of visual evidence needed for later action generation, reducing task success; this limitation is particularly evident on the long-horizon LIBERO-Long suite. Under the tight 30% budget, FastV and VLA-ADP achieve only 71.2% and 83.2% success on LIBERO-Long, respectively, compared with 92.6% for dense inference. VLA-Cache retains all visual tokens but reaches only 89.2% on LIBERO-Long under aggressive visual-state reuse. In comparison, FlowPAC achieves 92.2% on the same suite and 97.15%, 96.15%, and 95.80% average success at 70%, 50%, and 30% retention, respectively. Our flow-guided mask ranking preserves predicted future interaction regions while removing less task-relevant tokens, as qualitatively il-lustrated in Fig. 5. Table II compares end-to-end latency and visual-prefix KV storage. The visual-path baselines, including token pruning and visual KV caching, achieve at most a 1.09 × speedup because they optimize only the visual path while leaving the dominant action-denoising cost unchanged. FlowPAC addresses both sources of overhead: at 30% retention, median latency decreases from 306.19 to 143.45 ms (2.134 × speedup) and P95 latency from 313.89 to 147.51 ms (2.128 × speedup), while TABLE I LIBERO SUCCESS RATE (%). E ACH COMPLETED ENTRY AVERAGES 10  
+
+> TASKS
+
+× 50 TRIALS . F LOW PAC USES ONE PHYSICAL TOKEN -PACKING AND 
+
+FCAR ARCHITECTURE AT THREE VISUAL -TOKEN RETENTION SETTINGS .                                                                        
+
+> Method (ratio) Spa. Obj. Goal Long Avg. Dense π0.5(100%) 98.4 98.0 95.6 92.6 96.15 FastV (70%) 97.4 99.4 97.6 93.0 96.85 FastV (50%) 97.0 98.4 93.2 91.6 95.05 FastV (30%) 86.4 96.6 87.2 71.2 85.35 VLA-ADP (70%) 96.6 98.8 96.8 90.8 95.75 VLA-ADP (50%) 95.4 97.6 95.8 88.0 94.20 VLA-ADP (30%) 93.4 97.4 95.8 83.2 92.45 VLA-Cache (70%) 97.4 99.2 95.8 92.2 96.15 VLA-Cache (50%) 97.4 99.8 96.0 90.2 95.85 VLA-Cache (30%) 97.8 99.2 95.4 89.2 95.40 FlowPAC (70%) 97.8 98.4 97.8 94.6 97.15
+> FlowPAC (50%) 96.0 98.4 96.6 93.6 96.15
+> FlowPAC (30%) 96.2 98.2 96.6 92.2 95.80
+
+TABLE II END -TO -END LATENCY AND VISUAL -PREFIX STORAGE ON A100 OVER 40  
+
+> TASKS
+
+× 5 REPEATS . P50/P95 ARE IN MS , SPEEDUP IS COMPUTED FROM 
+
+P50, AND KV IS IN MIB. Method (ratio) P50 P95 Spd. KV Dense π0.5 (100%) 306.19 313.89 1.000 17.02 FastV (70%) 285.02 290.98 1.074 9.81 FastV (50%) 283.53 288.89 1.079 8.02 FastV (30%) 280.54 286.59 1.091 6.22 VLA-ADP (70%) 285.47 291.03 1.073 11.43 VLA-ADP (50%) 285.45 298.76 1.073 10.72 VLA-ADP (30%) 283.05 290.03 1.082 10.00 VLA-Cache (70%) 288.85 295.55 1.060 12.52 VLA-Cache (50%) 284.31 290.11 1.077 12.52 VLA-Cache (30%) 283.51 293.79 1.080 12.52 FlowPAC (70%) 144.42 148.35 2.120 9.81 FlowPAC (50%) 144.36 148.00 2.121 8.02 FlowPAC (30%) 143.45 147.51 2.134 6.19 
+
+the live prefix KV state decreases from 17.02 to 6.19 MiB (2.75 × reduction). Taken together with the success results in Table I, FlowPAC is the only evaluated method that maintains at least 95.8% average success across all matched budgets while achieving over 2 × end-to-end speedup. 
+
+C. Component Ablation 
+
+Fig. 5 visualizes the roles of the two spatial components. Compared with current-frame pruning, DATP preserves the predicted future interaction region, while LACT restructures the retained tokens into a contiguous mask that is easier to pack. Table III separates the temporal and spatial contributions. Rows 1–4 run on the full dense visual prefix with no visual pruning, varying only the action-reuse policy. The no-reuse row repro-duces dense inference exactly (306.19 ms, 96.15%), validating the measurement pipeline. Both fixed-refresh configurations reduce latency relative to dense inference, but their success rates decrease to 95.15% and 94.50%, respectively, against 96.15% for dense inference. FCAR alone refreshes 27.5% of the action-expert blocks on average yet reaches 96.10% success at 152.43 ms (2.01 ×). Unlike a fixed schedule that applies the “Put the wine bottle on top of the cabinet.”    
+
+> Current-frame pruner DATP mask LACT mask
+> Lose future critical region Keep future critical region Keep future critical region
+
+fragmentary fragmentary contiguous 
+
+Fig. 5. Qualitative comparison of visual token masks. TABLE III ACTION -REUSE AND VISUAL -PRUNING ABLATION ON LIBERO. R EF .
+
+> DENOTES THE REFRESHED ACTION
+
+-EXPERT BLOCK RATIO ; P50/P95  
+
+> REPORT POLICY LATENCY
+
+(MS ).                            
+
+> Configuration Ref. (%) Succ. (%) P50 P95 No reuse ( Bt= 10 )100.0 96.15 306.19 313.89 Fixed ( Bt= 5 )50.0 95.15 180.73 185.75 Fixed ( Bt= 3 )30.0 94.50 158.49 162.57 FCAR (caching only) 27.5 96.10 152.43 158.76 Full FlowPAC (FCAR + pruning) 27.5 97.15 144.42 148.35
+
+same reuse pattern to every query, FCAR uses task-conditioned motion score to adjust the refresh budget, allowing more reuse under relatively stable observations and more recompu-tation when the observations change. This adaptive allocation helps preserve dense-level success while reducing action-expert computation. Adding flow-guided visual pruning and physical packing at 70% retention further reduces latency by 8.0 ms to 144.42 ms and increases success to 97.15%. Together, these results show that the spatial and temporal components provide complementary gains. To compare memory-access efficiency at the same prefix length, Fig. 6 compares LACT with Global Top-K over 172 frames from eight real rollout traces using the same K = 76 to-ken budget. Across the 172 observation frames, LACT reduces the mean number of packing-gather memory accesses per frame from 17.7 to 12.2 (31.2% fewer). This more regular access pattern reduces prefix-materialization time from 1.509 ms to 0.905 ms per frame, corresponding to a 1.67 × speedup relative to the fragmented Global Top-K layout (Fig. 6(b)). Under the matched budget, both selectors produce the same compact KV capacity, so the measured materialization-speed difference is attributable to the memory-access pattern rather than prefix length. LACT  
+
+> 1.509 0.905 1.67x P50 Latency
+> (b) Same-K memory accesses and materialization latency
+> memory access / frame
+> Memory accesses / frame
+> (a) Same-K memory-access fragmentation
+
+Fig. 6. Same-budget packing-gather memory accesses and prefix-materialization latency of Global Top-K and LACT. 
+
+V. C ONCLUSION 
+
+We presented FlowPAC, a training-free framework that uses task-aware optical flow to jointly optimize visual token selec-tion and action-expert refresh for VLA models. DATP predicts future-critical tokens via motion propagation, LACT enforces contiguous masks for physical packing, and FCAR adapts refresh to causal motion dynamics. On LIBERO, FlowPAC achieves 2.13 × speedup and 2.75 × KV reduction while pre-serving 95.80% success at 30% retention. REFERENCES [1] A. Brohan, N. Brown, J. Carbajal, Y. Chebotar, J. Dabis, C. Finn, K. Gopalakrishnan, K. Hausman, A. Herzog, J. Hsu et al. , “Rt-1: Robotics transformer for real-world control at scale,” arXiv preprint arXiv:2212.06817 , 2022. [2] A. Brohan, N. Brown, J. Carbajal, Y. Chebotar, X. Chen, K. Choromanski, T. Ding, D. Driess, A. Dubey, C. Finn et al. , “Rt-2: Vision-language-action models transfer web knowledge to robotic control,” arXiv preprint arXiv:2307.15818 , 2023. [3] O. M. Team, D. Ghosh, H. Walke, K. Pertsch, K. Black, O. Mees, S. Dasari, J. Hejna, T. Kreiman, C. Xu et al. , “Octo: An open-source generalist robot policy,” arXiv preprint arXiv:2405.12213 , 2024. [4] M. J. Kim, K. Pertsch, S. Karamcheti, T. Xiao, A. Balakrishna, S. Nair, R. Rafailov, E. Foster, G. Lam, P. Sanketi et al. , “Openvla: An open-source vision-language-action model,” arXiv preprint arXiv:2406.09246 ,2024. [5] K. Black, N. Brown, D. Driess, A. Esmail, M. Equi, C. Finn, N. Fusai, L. Groom, K. Hausman, B. Ichter et al. , “ π0: A vision-language-action flow model for general robot control,” arXiv preprint arXiv:2410.24164 ,2024. [6] P. Intelligence, K. Black, N. Brown, J. Darpinian, K. Dhabalia, D. Driess, A. Esmail, M. Equi, C. Finn, N. Fusai et al. , “π0.5: a vision-language-action model with open-world generalization,” arXiv preprint arXiv:2504.16054 , 2025. [7] J. Zhang, Y. Hsieh, Z. Wang, H. Lin, X. Wang, Z. Wang, Y. Lei, and M. Zhang, “Quantvla: Scale-calibrated post-training quantization for vision-language-action models,” arXiv preprint arXiv:2602.20309 , 2026. [8] Y. Zhang, J. Cheng, W. Feng, J. Luo, C. Yang, Z. An, Y. Xu, and W. Zhang, “Not All Tasks Quantize Equally: Fisher-Guided Quantization for Visual Geometry Transformer,” arXiv preprint arXiv:2605.15828 ,2026. [9] R. Zhang, M. Dong, Y. Zhang, L. Heng, X. Chi, G. Dai, L. Du, D. Wang, Y. Du, and S. Zhang, “Mole-vla: Dynamic layer-skipping vision language action model via mixture-of-layers for efficient robot manipulation,” in 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , vol. 40, no. 22, 2026, pp. 18 764–18 772. [10] S. Dong, C. Fu, H. Gao, Y.-F. Zhang, C. Yan, C. Wu, X. Liu, Y. Shen, J. Huo, D. Jiang, H. Cao, Y. Gao, X. Sun, R. He, and C. Shan, “Vita-vla: Efficiently teaching vision-language models to act via action expert distillation,” arXiv preprint arXiv:2510.09607 , 2025. [11] J. Cheng, W. Li, H. Wang, G. Wang, Y. Zhang, X. Tang, J. Wu, X. Chen, Y. Liu, and W. Zhang, “Training-free interaction-aligned vi-sual token pruning for efficient embodied manipulation,” arXiv preprint arXiv:2603.22991 , 2026. [12] Y. Yang, Y. Wang, Z. Wen, L. Zhongwei, C. Zou, Z. Zhang, C. Wen, and L. Zhang, “Efficientvla: Training-free acceleration and compression for vision-language-action models,” Advances in Neural Information Processing Systems , vol. 38, pp. 40 891–40 914, 2026. [13] J. Cheng, W. Li, J. Luo, X. Tang, Z. He, J. Wu, Y. Zou, and W. Zhang, “Scale, don’t fine-tune: Guiding multimodal LLMs for efficient visual place recognition at test-time,” IFAC-PapersOnLine , vol. 59, no. 35, pp. 97–102, 2025. [14] Z. Liu, Y. Chen, H. Cai, T. Lin, S. Yang, Z. Liu, and B. Zhao, “Vla-pruner: Temporal-aware dual-level visual token pruning for efficient vision-language-action inference,” arXiv preprint arXiv:2511.16449 , 2025. [15] S. Xu, Y. Wang, C. Xia, D. Zhu, T. Huang, and C. Xu, “Vla-cache: Efficient vision-language-action manipulation via adaptive token caching,” Advances in Neural Information Processing Systems , vol. 38, pp. 164 448–164 473, 2026. [16] R. Oi, H. Otsuka, K. Matsushima, Y. Ichikawa, M. Motomura, T. Kaneko, and D. Fujiki, “Training-free acceleration for vision-language-action mod-els with action caching and refinement,” arXiv preprint arXiv:2607.06370 ,2026. [17] X. Pei, Y. Chen, S. Xu, Y. Wang, Y. Shi, and C. Xu, “Action-aware dynamic pruning for efficient vision-language-action manipulation,” in 
+
+International Conference on Learning Representations , vol. 2026, 2026, pp. 10 832–10 851. [18] E. Kwon, H. Song, J. Park, and S. Kang, “Mobile accelerator exploiting sparsity of multi-heads, lines, and blocks in transformers in computer vision,” in 2023 Design, Automation & Test in Europe Conference & Exhibition (DATE) . IEEE, 2023, pp. 1–6. [19] S. Lee, K. Cho, E. Kwon, S. Park, S. Kim, and S. Kang, “Vit-togo: Vision transformer accelerator with grouped token pruning,” in 2024 Design, Automation & Test in Europe Conference & Exhibition (DATE) . IEEE, 2024, pp. 1–6. [20] Z. Fan, Z. Wan, C.-K. Liu, A. S. Lele, W.-S. Khwa, B. Zhang, M.-F. Chang, and A. Raychowdhury, “Sata: Sparsity-aware scheduling for selective token attention,” in 2026 Design, Automation & Test in Europe Conference (DATE) . IEEE, 2026, pp. 1–7. [21] B. Chen, X. Feng, J. Lin, C. Tang, H. Yang, and Y. Liu, “A real-time robotic diffusion policy accelerator exploiting self-and cross-guided modal similarity,” in 2026 Design, Automation & Test in Europe Confer-ence (DATE) . IEEE, 2026, pp. 1–7. [22] B. Liu, Y. Zhu, C. Gao, Y. Feng, Q. Liu, Y. Zhu, and P. Stone, “Libero: Benchmarking knowledge transfer for lifelong robot learning,” Advances in Neural Information Processing Systems , vol. 36, pp. 44 776–44 791, 2023. [23] L. Chen, H. Zhao, T. Liu, S. Bai, J. Lin, C. Zhou, and B. Chang, “An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models,” in European Conference on Computer Vision . Springer, 2024, pp. 19–35.

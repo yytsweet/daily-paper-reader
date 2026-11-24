@@ -1,0 +1,1096 @@
+Intervention-Robust VLA:
+Diverse Demonstrations for Robot Deployment with Safety Filters
+Tzu-Yuan Huang1, Shao-Hsuan Chang1, Dai-Jie Wu2, Ralf R¨omer3, Yung-Hui Li4,
+Stefan Sosnowski1, Angela P. Schoellig3,5, Kenneth Marino2 and Sandra Hirche1,5,6
+Abstract— Vision-Language-Action
+models
+(VLAs)
+have
+shown strong potential for learning complex robotic behav-
+iors from demonstrations. However, learning safe behavior
+directly from data requires extensive coverage of safety-critical
+situations, which is often impractical in real-world settings.
+Test-time safety filters provide an alternative by correcting
+unsafe actions during deployment, but these interventions can
+drive the robot into states poorly covered by the training
+data, thereby degrading task performance. We introduce InteR-
+VLA, an intervention-robust framework for VLAs that lever-
+ages diverse task-completing demonstrations to broaden task-
+relevant state coverage and maintain competence under safety
+interventions. By better aligning the training distribution with
+safety-filtered deployment under the same data budget, our
+approach mitigates intervention-induced distribution shift while
+preserving task performance. Real-world experiments across
+in-distribution and out-of-distribution settings show that InteR-
+VLA maintains safety, increases Safe Success Rate up to 90%
+from 0% for nominal policies, and consistently outperforms
+nominal-data training on both evaluated VLAs.
+I. INTRODUCTION
+Vision–language–action
+models
+(VLAs)
+[1]–[3]
+have
+emerged as a promising direction toward generalist robot
+policies capable of performing diverse tasks from multi-
+modal instructions. Building on vision–language foundation
+models, VLAs map language instructions and visual obser-
+vations to robot actions within an end-to-end framework.
+Through imitation learning on expert demonstrations col-
+lected via robot teleoperation [4] or portable interfaces such
+as UMI [5], these models can acquire complex manipulation
+behaviors without manually designing task-dependent con-
+trollers. Recent VLAs have demonstrated increasingly broad
+capabilities across objects, tasks, and environments, high-
+lighting the potential of large-scale demonstration learning
+for general-purpose robotic manipulation.
+Despite this progress, deploying VLAs in real-world en-
+vironments introduces a critical requirement beyond task
+completion: safety. In particular, robots must avoid collisions
+even when deployment conditions differ from those repre-
+sented during training. Recent approaches [6], [7] address
+this challenge by broadening the training distribution with
+1Chair of Information-oriented Control, TUM School of Computation,
+Information and Technology, Technical University of Munich, Germany.
+2SPARK Lab, University of Utah, USA.
+3Learning Systems and Robotics Lab, TUM School of Computation,
+Information and Technology, Technical University of Munich, Germany.
+4AI Research Center, Hon Hai Research Institute, Taiwan.
+5Munich Institute of Robotics and Machine Intelligence (MIRMI).
+6Munich Data Science Institute (MDSI).
+Corresponding Email: {tzu-yuan.huang}@tum.de.
+diverse safety-critical scenarios and incorporating safety ob-
+jectives through safe reinforcement learning (SafeRL). This
+includes incorporating multiple unsafe and safety-critical
+behaviors during training [8] and providing safety-critical
+benchmark environments and datasets for learning safe be-
+haviors [9]. Such approaches improve safety by increasing
+exposure to risky situations, but their effectiveness depends
+on how well these scenarios cover deployment conditions and
+may be further limited by sim-to-real gaps. This motivates
+complementary test-time safety enforcement.
+Safety filters [10], [11] provide such test-time enforcement
+by modifying policy actions when necessary to satisfy safety
+constraints. Control barrier functions (CBFs) [12], [13] are a
+widely used realization, enabling real-time safety correction
+without retraining the policy. This principle has been applied
+to generative robot policies [14], [15] and extended to VLA
+deployment using vision–language reasoning and perception
+to derive safety constraints directly from the scene [16].
+However, these test-time corrections can alter the policy’s
+behavior and drive the robot toward out-of-distribution states,
+as shown in Figure 1, thereby substantially degrading task
+performance [17]. Path-consistent intervention can reduce
+this mismatch by keeping execution close to the nominal
+trajectory [17], but becomes restrictive when safe task com-
+pletion requires deviating from the nominal path. Thus, ex-
+isting inference-time safety mechanisms alone do not ensure
+task completion after intervention. This limitation motivates
+our key insight that intervention robustness can be improved
+by broadening the distribution of task-relevant behaviors
+represented in the demonstrations, as shown in Figure 1.
+We introduce InteR-VLA (Intervention Robustness for
+VLA), a framework for successful task completion which
+accounts for deviations induced by safety-filter interven-
+tions. InteR-VLA combines complementary roles: diverse
+demonstrations preserve task competence under interven-
+tion, while a safety filter enforces safety at deployment.
+We propose and analyze two offline collection strategies:
+diverse demonstrations, which complete tasks in different
+ways without obstacles to broaden task-relevant coverage,
+and multimodal avoidance demonstrations, which use path-
+blocking obstacles to provide direct intervention coverage
+when hazards are known during collection.
+Our main contributions are:
+• Analysis of intervention-induced covariate shift. We
+analyze how demonstration coverage affects VLA robust-
+ness to safety-filter interventions and characterize the shift
+between training and safety-filtered deployment.
+arXiv:2611.28289v1  [cs.RO]  20 Nov 2026
+
+
+Safe but OOD
+Unsafe
+InteR-VLA
+Fig. 1: Standard VLA fine-tuning covers only nominal states
+(white band) and can produce unsafe trajectories (red).
+Learning safety from data requires extensive safety-critical
+coverage, while safety filters may drive execution into out-of-
+distribution (OOD) states (grey), degrading task competence.
+Our InteR-VLA framework uses diverse task-completing
+demonstrations to broaden task-relevant coverage (blue re-
+gion), preserving competence while the filter enforces safety.
+• Intervention-robust data collection. We propose InteR-
+VLA, using diverse task-completing offline demonstrations
+to broaden task-relevant coverage at a fixed data budget.
+By increasing behavioral modes rather than data quantity,
+our strategy better covers states induced by safety-filter in-
+terventions without policy rollouts or filter-specific tuning.
+• Real-world validation. We validate InteR-VLA across in-
+distribution (ID) and out-of-distribution (OOD) settings on
+two VLA models, achieving Safe Success Rate up to 90%
+and consistently outperforming nominal-data baselines.
+II. RELATED WORK
+A. Vision-Language-Action Models and Safety Learning
+VLAs [1]–[3] leverage pretrained vision–language repre-
+sentations and large-scale robot demonstrations [18], [19]
+to learn multimodal policies for diverse manipulation tasks.
+These demonstrations naturally capture variations across
+tasks, environments, embodiments, and task-completing be-
+haviors [20], [21], from which VLAs acquire broad capa-
+bilities such as cross-embodiment transfer [22] and dex-
+terous manipulation [23]. However, since most VLAs are
+trained through imitation learning, their performance remains
+strongly dependent on the state–action coverage of the
+demonstration data. To facilitate VLA deployment in safety-
+critical scenarios, several works introduce safety objectives
+during training [6] and optimize them through SafeRL,
+commonly formulated as constrained Markov decision pro-
+cesses (CMDPs) [24]. SafeVLA [8], for example, models
+safety requirements and generates diverse unsafe and safety-
+critical behaviors for SafeRL, while SafeLab [9] provides
+safety-critical environments and safety learning frameworks.
+These methods broaden safety-relevant training coverage, but
+provide no hard constraint when deployment conditions fall
+outside their training scenarios. Unlike these approaches,
+InteR-VLA leaves safety to a test-time filter and uses demon-
+strations to maintain competence under safety interventions.
+B. Safety Filtering for Learned Robot Policies
+Safety filters [10], [11] enforce constraints at deployment
+by modifying nominal policy actions, often through online
+optimization. Predictive safety filters [25] explicitly optimize
+for safe actions, while control barrier functions (CBFs) [12]
+provide safety conditions enforceable through lightweight
+optimization. When applied to collision avoidance, CBFs are
+commonly constructed from differentiable distances between
+geometric approximations such as spheres [26] and ellip-
+soids [27], while recent work learns barrier functions from
+high-dimensional latent representations [28]. CBF constraints
+have been integrated into generative robot policies [14],
+[15], and VLSA [16] uses vision–language reasoning and
+perception to construct explicit geometric constraints for
+VLA filtering. However, safety interventions can deviate
+from demonstrated actions and drive the system toward
+underrepresented states. Path-consistent braking mitigates
+this shift by preserving the nominal trajectory [17], but
+cannot provide alternative task-completing motions when
+the nominal path must be bypassed. Unlike path-consistent
+braking, InteR-VLA lets the filter deviate from the nominal
+path and maintains competence under safety interventions
+by training on demonstrations that complete the task along
+different task-space paths.
+III. PRELIMINARIES AND PROBLEM SETTING
+A. Imitation Learning with Vision-Language-Action Models
+VLAs learn to execute language-specified tasks from a
+demonstration dataset D = {S(n), A(n)}N
+n=1. It encodes the
+desired behavior for the task and contains N episodes with
+state S(n) = {s(0), s(1),· · ·, s(T)}(n) and action A(n) =
+{a(0), a(1),· · ·, a(T)}(n) sequence of length T. Each state
+s(t) = {l, o(t)} ∈S belongs to the VLA state space S and
+contains the language instruction l and current observation
+o(t), typically comprising camera images and robot propri-
+oception, e.g., joint angles. The action a(t) ∈A belongs
+to the action space A and typically specifies a high-level
+command such as the relative Cartesian displacement.
+Given an expert dataset D, a VLA policy πθ(·|s(t))
+parameterized by θ is trained through imitation learning
+to model the conditional action distribution ρ(·|s(t)) rep-
+resented by the demonstrations:
+a(t) ∼πθ(·|s(t)) ≈ρ(·|s(t)).
+(1)
+Modern VLAs often predict actions in chunks of horizon
+H [20], executing the first m ≤H actions before replanning
+from the latest state, resulting in receding-horizon closed-
+loop execution. However, imitation learning only reproduces
+behaviors represented in D and does not explicitly enforce
+safety at test time. Thus, even a well-trained VLA policy
+πθ(·|s(t)) ≈ρ(·|s(t)) cannot guarantee safe execution.
+
+
+Data collection
+diverse demonstrations
+Deployment
+safety-filter interventions
+Fig. 2: InteR-VLA leverages diverse demonstrations during
+data collection (left) to improve robustness to safety-filter
+interventions during deployment (right).
+B. Safety Filter for Vision-Language-Action Models
+To ensure safety during deployment, a common approach
+is to integrate a safety filter [10] into the VLA inference
+pipeline. The safety filter can be interpreted as an operator
+S : S × A →A that modifies the action proposed by VLA:
+aS(t) = S
+ s(t), a(t)
+
+,
+(2)
+such that executing the corrected action aS(t) satisfies the
+safety requirements while deviating minimally from the
+originally proposed VLA action. The filter is applied at each
+time step before the action is executed. For safety analysis,
+we denote the physical robot state by x(t) and its dynamics
+with filtered action aS(t) as follows
+˙x(t) = f(x(t)) + g(x(t))aS(t).
+(3)
+Following standard safety-filter formulations [12], safety is
+characterized by the safe set with
+C = {x | h(x) ≥0},
+(4)
+where h(x) is a continuously differentiable function [12] that
+encodes the system safety. For collision avoidance, h(x) can
+encode the distance between an ellipsoidal approximation of
+the robot body and the perceived obstacle [16]. The safety
+filter is designed such that the state transition induced by
+aS(t) keeps the robot within C. If the robot state remains in
+the safe set (4), i.e., x(t) ∈C for all t ∈[0, T] whenever
+x(0) ∈C, then the set C is forward invariant, ensuring
+collision-free execution throughout the task.
+While a safety filter can enforce safety at test time, its
+intervention can shift the VLA away from the behavior dis-
+tribution represented by the demonstrations. In particular, the
+distribution induced by filtering the VLA actions ρS(·|s(t))
+can differ from the original data distribution ρ(·|s(t)) as:
+S
+ s(t), a(t)
+
+∼ρS(· | s(t)),
+ρS(· | s(t))̸≈ρ(· | s(t)). (5)
+When such corrected actions are absent from D, executing
+them drives the system toward unseen states, where the VLA
+policy produces unreliable actions and causes task failure.
+C. Problem Statement
+Our goal is to enable the robot to complete the commanded
+task while maintaining safety, e.g., by avoiding collisions
+with surrounding objects. Given a VLA policy πθ(· | s(t))
+trained on a demonstration dataset D, the policy is executed
+in closed loop until task termination. At each time step, an
+action a(t) ∼πθ(· | s(t)) is sampled and executed, affecting
+the evolution of the robot state x(t). Safe execution requires
+x(t) to remain within the safe set defined in (4) at all times.
+Let Esucc and Esafe denote the sets of rollouts achiev-
+ing
+successful
+task
+completion
+and
+satisfying
+safety
+throughout the episode, respectively. We aim to obtain a
+VLA policy with high probability of safe task success,
+Prπθ(Esucc ∩Esafe) . When task-completing behaviors sat-
+isfy the safety requirement in (4), safety and task success
+need not conflict. Our objective is therefore to enforce safety
+while preserving the task competence of the VLA policy.
+IV. METHODOLOGY
+Safety filters guarantee constraint satisfaction by modi-
+fying actions at deployment time, but the resulting state
+transitions can push the VLA away from the distribution rep-
+resented by its demonstrations. We address this intervention-
+induced covariate shift from the data-collection perspective
+by allocating a fixed demonstration budget across diverse
+task-completing behaviors rather than repeated nominal ex-
+ecutions, thereby broadening task-relevant state coverage.
+The demonstrations are collected offline and do not require
+repeated rollout and retraining of the learned policy.
+A. Distribution Shift caused by CBF-based Safety Filters
+Control barrier functions (CBFs) enable real-time safety
+filtering. Given the safe set C in (4), h(x) measures the
+safety margin between the robot and unsafe configurations.
+We approximate the robot and obstacles as ellipsoids [27]
+and construct h from their differentiable separation.
+For the robot dynamics (3), a CBF imposes
+˙h(x, a) + α(h(x)) ≥0,
+(6)
+where α is an extended class-K function. Enforcing (6) ren-
+ders C forward invariant: if x(0) ∈C, then x(t) ∈C, equiva-
+lently h(x(t)) ≥0, throughout execution, thereby satisfying
+the safety requirement. Since ˙h(x, a) = ∇h(x)⊤[f(x) +
+g(x)a] is affine in a, the safety filter S can be implemented
+by solving the quadratic program (QP)
+aS(t) = arg min
+˜a
+1
+2 ∥˜a −a(t)∥2
+2
+s.t.
+∇h(x)⊤[f(x) + g(x)˜a] + α(h(x)) ≥0.
+(7)
+The lightweight QP minimally modifies the VLA action as
+needed to satisfy the CBF constraint, thereby enabling real-
+time safety enforcement without altering the VLA policy.
+To construct the collision function h from visual ob-
+servations, we follow the pipeline of VLSA [16], which
+identifies safety-critical obstacles from RGB-D observations
+and derives a differentiable geometric collision constraint in
+(7). During deployment, the CBF-QP acts as the filter S
+and changes a VLA action only when the constraint is
+active. Consequently, the executed actions follow the filtered
+distribution ρS(·|s), which can differ from the demonstrated
+distribution ρ(·|s). The resulting distribution shift motivates
+the learning formulation in the following subsection.
+
+
+B. Deployment-Coverage Analysis under Safety Filter
+Applying a safety filter changes the executed action dis-
+tribution from the demonstrated distribution ρ(·|s) to the
+filtered distribution ρS(·|s). Since executed actions determine
+subsequent states, these interventions can also shift the
+closed-loop state distribution. We denote by p0(s) the nom-
+inal state-visitation distribution represented by the demon-
+strations and by pS(s) the fixed state-visitation distribution
+induced by deploying the VLA with a safety filter. Safety
+interventions can induce a covariate shift, i.e.,
+pS(s)̸ ≈p0(s).
+(8)
+Intervention robustness requires policies to remain task-
+competent over pS, rather than only the nominal distribution
+p0. We formulate the corresponding learning objective as
+θ⋆= arg min
+θ Es∼pS
+
+D
+ ρ⋆(·|s) ∥πθ(·|s)
+
+,
+(9)
+where ρ⋆(·|s) denotes the desired task-completing action
+distribution and D(·∥·) measures the distributional discrep-
+ancy. Minimizing (9) encourages task competence over states
+encountered under safety-filtered deployment.
+Directly matching pS is generally infeasible because it
+depends on the policy, safety filter, and environment. Cru-
+cially, safety interventions can move execution away from
+nominal behavior, requiring the policy to remain competent
+from alternative task-relevant states. This motivates broad-
+ening the task-completing behaviors seen during training
+rather than explicitly matching pS. We therefore augment the
+nominal dataset D with demonstrations Dν collected under a
+scheme ν that induces alternative task-completing behaviors.
+Let pν(s) denote the corresponding state-visitation distribu-
+tion. Combining D and Dν yields D′ = D ∪Dν with
+pD′(s) = (1 −β)p0(s) + βpν(s),
+(10)
+where β =
+|Dν|
+|D|+|Dν| ∈[0, 1] denotes the fraction of the
+demonstration budget collected under ν.
+To characterize when such demonstrations improve de-
+ployment coverage, we use the total variation distance
+TV(q, r) :=
+Z
+|q(s) −r(s)| ds.
+(11)
+We call a collection strategy ν deployment-relevant if
+TV (pν, pS) < TV (p0, pS) ,
+(12)
+i.e., demonstrations induced by ν cover the safety-filtered
+distribution more closely than nominal demonstrations.
+Proposition 1: (Deployment-Coverage Improvement). If
+the collection strategy ν satisfies (12), then for any β ∈
+(0, 1], the state-visitation distribution represented by D′ is
+closer to the safety-filtered deployment distribution than the
+demonstrated distribution, i.e.,
+TV (pD′, pS) < TV (p0, pS) .
+(13)
+Proof: Using (10) and the definition of TV(·, ·) in (11),
+TV(pD′, pS) =
+Z (1 −β)
+ p0 −pS
+
++ β
+ pν −pS
+ ds
+≤(1 −β)TV(p0, pS) + βTV(pν, pS),
+where the inequality follows from the triangle inequality.
+Applying (12) with β ∈(0, 1] gives
+TV(pD′, pS) < (1 −β)TV(p0, pS) + βTV(p0, pS)
+= TV(p0, pS),
+Proposition 1 therefore gives a sufficient condition for
+improved deployment coverage, motivating our practical
+data-collection strategy described in the next subsection.
+C. Intervention-Robust Data Collection
+Since pS is unavailable during offline data collection,
+we seek a general way to broaden task-relevant coverage
+without targeting a specific deployment distribution. Our key
+principle is to diversify along task-state dimensions that can
+be altered by safety interventions. For collision avoidance,
+this corresponds to collecting alternative task-completing
+paths around the nominal trajectory. We instantiate the
+demonstration scheme ν by collecting such diverse behaviors
+under a fixed demonstration budget, increasing the likelihood
+of covering states reached after safety-filter interventions.
+We consider two collection strategies. Diverse demonstra-
+tions vary the task-space path without path-blocking obsta-
+cles, e.g., curved, left-offset, and right-offset motions, requir-
+ing neither safety-critical scene construction nor deployment
+of a policy or safety filter. This broadly covers alternative
+states that may be reached when the nominal trajectory is
+perturbed. Multi demonstrations use path-blocking obsta-
+cles and collect multiple successful avoidance modes, e.g.,
+above, left, and right, directly targeting task-space deviations
+induced by collision-avoidance interventions when hazards
+are known. In both cases, the VLA is trained offline on the
+augmented dataset D′, while the safety filter is applied only
+at deployment: demonstrations preserve task competence
+under intervention, and the filter enforces safety.
+V. EVALUATION
+We evaluate InteR-VLA through a series of real-world
+robotic experiments across multiple deployment settings. The
+source code is in https://anonymous.4open.science/r/InteR-
+VLAs-POLICY.
+A. Real-World Experimental Setup
+We conduct real-world evaluations on a Franka Emika
+Panda manipulator equipped with a Franka parallel-jaw
+gripper. The experiments involve language-conditioned ma-
+nipulation tasks in environments where obstacles obstruct
+the nominal task path, enabling us to evaluate both task
+performance and collision avoidance.
+a) Robot
+Platform:
+Demonstrations
+are
+collected
+through leader–follower teleoperation using CRISP [29]. The
+system uses two Intel RealSense D435 RGB-D cameras for
+wrist and third-person views. VLA inference runs at 15 Hz
+and the low-level controller at 1 kHz.
+b) Tasks: We consider two language-specified tabletop
+manipulation tasks, visualized in Figure 3 (a), requiring
+successful completion without colliding with obstacles:
+
+
+TABLE I: ID evaluation. Mean±std over 20 rollouts; best per metric per VLA model in bold; ∗marks our data-collection
+strategies. Obstacle type, size, and placement match training, blocking the nominal path in every episode. Safety: collision-
+free fraction; Score: partial progress in [0, 1]; S-Rate: task-success fraction; SS-Rate: their conjunction. The safety filter
+ensures safety for every method, but only the broader coverage demonstration we proposed also restores success.
+Task
+Metrics
+VLA Model: π0.5
+VLA Model: GR00T N1.5
+VLA
+(Normal)
+VLA-SF
+(Normal)
+VLA-SF
+(Diverse)∗
+VLA-SF
+(Multi)∗
+VLA
+(Normal)
+VLA-SF
+(Normal)
+VLA-SF
+(Diverse)∗
+VLA-SF
+(Multi)∗
+Task 1 - Put sponge into basket
+Safety
+0.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00 0.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00
+Score
+0.38±0.43
+0.13±0.24
+0.76±0.35
+0.84±0.31
+0.46±0.42
+0.55±0.38
+0.84±0.31
+0.89±0.21
+S-Rate
+0.30±0.47
+0.05±0.22
+0.65±0.49
+0.75±0.44
+0.35±0.49
+0.40±0.50
+0.75±0.44 0.75±0.44
+SS-Rate 0.00±0.00
+0.05±0.22
+0.65±0.49
+0.75±0.44
+0.00±0.00
+0.40±0.50
+0.75±0.44 0.75±0.44
+Task 2 - Close the teacup drawer
+Safety
+0.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00 0.00±0.00 1.00±0.00 1.00±0.00 1.00±0.00
+Score
+0.73±0.26
+0.33±0.29
+0.88±0.22
+0.95±0.15
+0.85±0.24
+0.70±0.25
+0.85±0.24
+0.95±0.15
+S-Rate
+0.45±0.51
+0.05±0.22
+0.75±0.44
+0.90±0.31
+0.70±0.47
+0.40±0.50
+0.70±0.47
+0.90±0.31
+SS-Rate 0.00±0.00
+0.05±0.22
+0.75±0.44
+0.90±0.31
+0.00±0.00
+0.40±0.50
+0.70±0.47
+0.90±0.31
+(a) Tasks for evaluation
+(b) OOD for obstacle size.
+(c) OOD for obstacle type.
+(d) OOD for obstacle location.
+Fig. 3: Evaluation setup. Figure 3a: Task 1: Put sponge into basket (top) and Task 2: Close the teacup drawer (bottom),
+with the obstacle on the nominal path to the goal. Figures 3b to 3d: the three OOD settings, each varying obstacle size,
+type, or location relative to the data-collection configurations.
+• Task 1 - Put sponge into basket. The robot approaches
+and grasps a sponge placed on the table, transports it to
+the basket, and places it inside.
+• Task 2 - Close the teacup drawer. The robot approaches
+an initially open drawer, makes contact with the drawer
+front, and pushes it until the drawer is closed.
+c) Safety Constraint: For each task, an obstacle is
+placed along the nominal shortest path to the task goal,
+requiring the robot to deviate from its direct motion to
+avoid collision. We use GroundingDINO [30] to localize the
+obstacle in the RGB image and obtain its bounding box. The
+corresponding depth measurements from the RGB-D camera
+are then used to reconstruct the obstacle point cloud, which is
+approximated by an ellipsoid. The robot end effector is sim-
+ilarly represented by an ellipsoid. Following [16], the safety
+constraint is defined through the separation between these
+two ellipsoids, and the safety filter modifies the commanded
+motion to prevent their intersection.
+d) Evaluation Metrics: We evaluate each method using
+the following metrics calculated from 20 rollouts and report
+the mean and standard deviation:
+• Safety: The fraction of episodes that remain collision-
+free throughout the entire execution.
+• Score: A progress score in [0, 1] that measures partial
+task completion through predefined task milestones.
+For Put sponge into basket, the milestones are: (i)
+approach the sponge, (ii) grasp the sponge, (iii) move
+the sponge to the basket, and (iv) place it inside the
+basket. For Close the teacup drawer, the milestones
+are: (i) approach the drawer, (ii) make contact with the
+drawer, and (iii) push the drawer until closed.
+• Success Rate (S-Rate): The fraction of episodes in
+which the complete task is successfully accomplished.
+• Safe Success Rate (SS-Rate): The fraction of episodes
+in which the task is successfully completed while re-
+maining collision-free throughout the entire execution.
+e) VLA Policies: We evaluate two representative VLA
+models, π0.5 [3] and GR00T N1.5 [2]. The policy observation
+consists of robot joint states together with RGB images
+from the wrist-mounted and third-person cameras. The action
+specifies the desired Cartesian end effector displacement and
+gripper width. For each task, we first collect 50 nominal
+demonstrations as a base dataset shared for all VLAs.
+f) Data-Collection Strategies: We further collect 150
+demonstrations beyond the base dataset for each of the
+following settings. The first two are nominal-data baselines;
+the last two are the InteR-VLA strategies of section IV-B:
+• VLA (Normal): The VLA policy is fine-tuned using
+nominal demonstrations and directly deployed without a
+safety filter. During data collection, obstacles are present
+
+
+π0.5
+GR00T
+π0.5
+GR00T
+π0.5
+GR00T
+0
+.5
+1
+OOD Size
+OOD Type
+OOD Location
+0
+0
+0
+0
+0
+.05
+.55
+.55
+.35
+.70
+.75
+.65
+0
+0
+0
+.20
+.45
+.40
+.80
+.80
+.70
+.90
+.80
+.65
+Task 1: Put sponge into basket
+SS-Rate
+π0.5
+GR00T
+π0.5
+GR00T
+π0.5
+GR00T
+0
+.5
+1
+0
+0
+0
+0
+0
+.10
+.60
+.70
+.50
+.70
+.65
+.70
+0
+0
+0
+.25
+.15
+.50
+.50
+.70
+.70
+.70
+.70
+.80
+Task 2: Close the teacup drawer
+SS-Rate
+VLA (Normal)
+VLA-SF (Normal)
+VLA-SF (Diverse)
+VLA-SF (Multi)
+Fig. 4: OOD evaluation. Mean SS-Rate over 20 rollouts across all strategies with π0.5 and GR00T N1.5 under three OOD
+shifts (obstacle size, type, location) for Task 1: Put sponge into basket (top) and Task 2: Close the teacup drawer (bottom).
+Both InteR-VLA strategies consistently outperform nominal-data baselines across all OOD shifts.
+(a) Collision
+VLA (Normal)
+(b) Safe failure
+VLA-SF (Normal)
+OOD
+(c) Safe success
+VLA-SF (Diverse)
+Goal
+Obstacle
+Safety filter
+Demo coverage
+Fig. 5: Intervention robustness schematic. A nominal-
+data policy collides unfiltered (a). Filtering (dashed: safe-
+set boundary) pushes it beyond nominal coverage, causing
+failure (b); broader coverage contains the corrected path (c).
+in the environment but do not block the nominal task
+path; therefore, the demonstrator completes the task
+directly without explicit collision-avoidance maneuvers.
+This tests whether nominal demonstrations alone teach
+the policy to avoid a blocking obstacle.
+• VLA-SF (Normal): The same policy and nominal
+demonstrations as VLA (Normal) are used, while a
+safety filter is additionally applied during deployment,
+following the implementation in VLSA [16]. This tests
+whether the safety filter alone yields safe task success
+without changing the data.
+• VLA-SF (Diverse): Obstacle-free diverse demonstra-
+tions (see Section IV-C), e.g., curved, left-offset, and
+right-offset motions, with the safety filter at deployment.
+• VLA-SF (Multi): Obstacle-aware multimodal demon-
+strations (see Section IV-C), e.g., above, left, and right
+avoidance, with the safety filter at deployment.
+B. Real-World Experiment Results
+a) In-distribution (ID) Obstacle Evaluation: We first
+evaluate all strategies under ID deployment conditions across
+both manipulation tasks and both VLA models. The obstacle
+type, size, and placement are sampled from the same dis-
+tribution used for data collection, and in every episode the
+obstacle blocks the nominal shortest path to the goal. This
+setting evaluates whether different data-collection strategies
+and safety-filter integration can improve safe task execution
+when the environment remains within the training distribu-
+tion under the same demonstration budget.
+As shown in Table I, VLA-SF (Multi) achieves the
+best overall performance across both VLA models and
+tasks, with consistently high success and safety. VLA-SF
+(Diverse) also outperforms VLA-SF (Normal) in SS-Rate
+on both tasks and models, even without obstacle-specific
+data collection. For Task 1 with GR00T N1.5, VLA-SF
+(Diverse)
+matches
+VLA-SF
+(Multi)
+at
+0.75
+SS-Rate,
+showing that deployment-relevant coverage can arise from
+naturally collected diverse demonstrations without designing
+obstacle-specific scenarios. The observed trend is consistent
+with Proposition 1: strategies designed to better align
+demonstration
+coverage
+with
+safety-filtered
+deployment
+show higher SS-Rate than nominal-data training. In contrast,
+VLA (Normal) collides in every episode despite seeing the
+same obstacle types during training, showing that collision-
+free nominal demonstrations with non-blocking obstacles do
+not teach avoidance behavior. VLA-SF (Normal) improves
+safety but sacrifices task success because filter corrections
+drive the robot toward states poorly covered by nominal
+demonstrations. Figure 5 schematically summarizes this
+mechanism: nominal-data policies may either collide without
+filtering or fail after safety correction, whereas broader
+demonstration coverage can support safe task completion.
+b) Out-of-distribution (OOD) Obstacle Evaluation:
+We evaluate intervention robustness under OOD obstacle
+configurations across both tasks and VLA models. We con-
+sider distribution shifts from data collection along three
+dimensions, which are visualized in Figure 3-(b) to (d):
+Obstacle Size. We evaluate three unseen obstacle geome-
+tries: 2×1 the nominal width, 1.3×1 the height, and their
+combination. The height scaling is limited to 1.3×1 to leave
+sufficient free space for collision-free task execution.
+
+
+0
+.5
+1
+all 1.00
+Safety
+Score
+50
+100
+150
+0
+.5
+1
+S-Rate
+50
+100
+150
+SS-Rate
+Demonstrations
+VLA-SF:
+Normal
+Diverse
+Multi
+Fig. 6: Effect of reducing demonstration budget (Task 1).
+Each panel plots one metric across budget for VLA π0.5.
+Both InteR-VLA strategies degrade but keep a clear SS-Rate
+advantage over VLA-SF (Normal) at the smallest budget.
+Obstacle Type. We replace the obstacles with unseen
+types to test generalization across appearance and geometry.
+Obstacle Location. We place obstacles at unseen locations
+outside the training region that block the nominal path
+while preserving a collision-free solution, testing spatial
+generalization beyond observed placements.
+As shown in Figure 4, VLA-SF (Multi) and VLA-SF (Di-
+verse) consistently outperform nominal-data baselines across
+tasks, VLA models, and OOD settings under the same data-
+collection budget. GR00T N1.5 generally performs better
+than π0.5, with VLA-SF (Multi) reaching up to 0.90 SS-
+Rate under OOD obstacle sizes. VLA-SF (Diverse) remains
+competitive with, and sometimes surpasses, VLA-SF (Multi),
+e.g., 0.70 vs. 0.65 under OOD obstacle locations in Task 1
+with GR00T N1.5, despite training without obstacles. This
+shows that diverse demonstrations can provide sufficient
+task-relevant coverage to preserve competence under strong
+safety-filter corrections without obstacle-specific data. All
+safety-filtered methods satisfy the safety constraints, whereas
+VLA-SF (Normal) underperforms both InteR-VLA strate-
+gies by at least 0.20 SS-Rate in every OOD setting be-
+cause nominal demonstrations poorly cover post-intervention
+states. Without the safety filter, VLA (Normal) achieves
+zero SS-Rate across OOD settings due to collisions. Overall,
+diverse demonstration coverage improves the robustness of
+interventions to unseen obstacle configurations, enabling safe
+and successful task completion with safety filters.
+1
+2
+3
+0
+.5
+1
+.50
+.60
+.75
+(a) Avoidance modes
+SS-Rate
+VLA-SF (Multi)
+Normal
+Mixed
+.05±.22
+.65±.49
+(b) Task transfer
+Fig. 7: Avoidance modes and task transfer (SS-Rate,
+equal dataset sizes). (a) Task 1: SS-Rate rises with the
+number of avoidance modes. (b) Task 2 with π0.5: mixing
+100 Task 1 Multi demonstrations with 100 Task 2 nominal
+demonstrations (Mixed) reaches 0.65, compared with 0.05
+for only mixing nominal data (Normal).
+TABLE II: Safety without the filter (Task 1). π0.5 policies
+trained with our data strategies are deployed without the
+filter (VLA) and with it (VLA-SF). Safety decreases without
+filtering, especially under OOD conditions, showing that our
+data cannot replace test-time filtering.
+Safety
+w/o filter: VLA
+w/ filter: VLA-SF
+Diverse
+Multi
+Diverse
+Multi
+ID case
+0.80
+0.65
+1.00
+1.00
+OOD case
+0.50
+0.35
+1.00
+1.00
+C. Ablation Study
+We conduct a series of ablation studies to better understand
+how different factors affect safe task execution.
+a) Effect of Reduced Dataset Size: We evaluate reduced
+demonstration budgets. As shown in Figure 6, VLA-SF
+(Multi) and VLA-SF (Diverse) perform worse as datasets
+shrink. Yet, with only 50 further demonstrations, both still
+exceed VLA-SF (Normal) in SS-Rate (0.60 & 0.50 vs.0.05).
+b) Effect of Avoidance Modes: We vary avoidance
+diversity during data collection using one mode (above), two
+modes (left and right), and three modes (above, left, and
+right) in Task 1. As shown in Figure 7-(a), SS-Rate increases
+with more modes under the same data budget. Thus, the gain
+in intervention robustness stems from behavioral diversity
+rather than data quantity, consistent with our hypothesis that
+additional modes broaden task-relevant coverage and overlap
+more with states reached after safety-filter interventions.
+c) Cross-Task Transfer: To assess whether InteR-VLA
+can transfer intervention robustness across tasks, we train
+π0.5 under the same data budget using 100 demonstrations
+(Multi) from Task 1 and 100 demonstrations (Normal) from
+Task 2, and evaluate on Task 2. As shown in Figure 7-(b), the
+mixed dataset yields 0.65 SS-Rate, compared with 0.05 for
+nominal-only training, indicating that diverse demonstrations
+can improve intervention robustness across tasks.
+d) Safety Without a Safety Filter: To test whether
+our demonstrations alone ensure safe execution, we deploy
+π0.5 policies trained with both strategies without filtering.
+In Table II, safety drops from 1.00 with filtering to 0.80
+(Diverse) and 0.65 (Multi) in ID, and further to 0.50 and 0.35
+in OOD. These results show that demonstrations alone are
+Task 1: Two cans
+Task 2: A gooseneck
+0
+.5
+1
+Multi
+Diverse
+Normal
+Multi
+Diverse
+Normal
+Task 1
+Task 2
+SS-Rate
+0
+.05
+.55
+.55
+.65
+.55
+Fig. 8: Extreme OOD layouts. Scenarios beyond the OOD
+settings of Figure 4: two obstacles blocking the path in
+Task 1, and an unseen gooseneck obstacle in Task 2. SS-Rate
+of VLA-SF with π0.5 (mean, 20 rollouts, right) shows nom-
+inal demonstrations failing almost everywhere; both InteR-
+VLA strategies complete over half the episodes.
+
+
+insufficient for safety, highlighting the need for InteR-VLA
+combining diverse demonstrations with test-time filtering.
+e) Extreme OOD Evaluation:
+We further evaluate
+InteR-VLA under extreme OOD scenarios beyond the single-
+obstacle variations considered above. As shown in Figure 8,
+Task 1 involves two simultaneous obstacles blocking the
+nominal path, whereas Task 2 uses an unseen object with
+substantially different geometry and visual appearance from
+the objects seen during data collection. InteR-VLA achieves
+at least 0.55 SS-Rate in both settings, compared with 0 and
+0.05 for nominal-data training, demonstrating intervention
+robustness under novel layouts, geometries, and visual shifts.
+VI. CONCLUSION
+In this work, we introduced the InteR-VLA framework,
+which leverages diverse demonstrations to reduce the dis-
+tribution mismatch induced by safety filters. Our approach
+separates the roles of training and deployment: safety filters
+enforce safety at test time, while diverse demonstrations
+broaden task-relevant coverage to preserve competence under
+intervention. Across two tabletop manipulation tasks and ID
+and OOD scenarios, InteR-VLA improves the Safe Success
+Rate from 0% up to 90%. Under a fixed data budget,
+increasing behavioral modes improves SS-Rate, showing
+that diversity broadens coverage rather than merely adding
+data, while removing the filter confirms that demonstrations
+alone cannot ensure safety. These results support the use of
+diverse demonstrations and test-time filtering as complemen-
+tary components for robust, safe deployment. Future work
+will explore more effective strategies for generating diverse
+demonstrations and extend to broader robotic tasks.
+ACKNOWLEDGEMENTS
+The authors gratefully acknowledge financial support in
+part by the German Academic Exchange Service (DAAD)
+program Konrad Zuse Schools of Excellence in Artificial
+Intelligence, sponsored by the Federal Ministry of Edu-
+cation and Research; in part by the European Union’s
+Horizon Europe research and innovation programme under
+Grant Agreement 101310328, “EXCEED-AIR”; in part by
+the German Federal Ministry of Research, Technology and
+Space (BMFTR) under the Robotics Institute Germany (RIG)
+funded by BMFTR grant 16ME0997K; in part by the German
+Research Foundation (DFG) within the RTG project ConVeY
+funded by grant GRK 2428; and in part by the European
+Union’s Horizon Europe innovation action program under
+Grant Agreement 101093822, “SeaClear2.0.”.
+REFERENCES
+[1] A. Brohan, N. Brown, J. Carbajal, Y. Chebotar, X. Chen, K. Choro-
+manski, T. Ding, D. Driess, A. Dubey, C. Finn et al., “Rt-2: Vision-
+language-action models transfer web knowledge to robotic control,”
+arXiv preprint arXiv:2307.15818, 2023.
+[2] J. Bjorck, F. Casta˜neda, N. Cherniadev, X. Da, R. Ding, L. Fan,
+Y. Fang, D. Fox, F. Hu, S. Huang et al., “Gr00t n1: An open
+foundation model for generalist humanoid robots,” arXiv preprint
+arXiv:2503.14734, 2025.
+[3] P. Intelligence, K. Black, N. Brown, J. Darpinian, K. Dhabalia,
+D. Driess, A. Esmail, M. Equi, C. Finn, N. Fusai et al., “π0.5: a
+vision-language-action model with open-world generalization,” arXiv
+preprint arXiv:2504.16054, 2025.
+[4] Z. Fu, T. Z. Zhao, and C. Finn, “Mobile aloha: Learning bimanual
+mobile manipulation with low-cost whole-body teleoperation,” arXiv
+preprint arXiv:2401.02117, 2024.
+[5] C. Chi, Z. Xu, C. Pan, E. Cousineau, B. Burchfiel, S. Feng, R. Tedrake,
+and S. Song, “Universal manipulation interface: In-the-wild robot
+teaching without in-the-wild robots,” in Proceedings of Robotics:
+Science and Systems (RSS), 2024.
+[6] Z. Liu, Z. Yang, Z. Zhang, and H. Tang, “Evovla: Self-evolving vision-
+language-action model,” in European Conference on Computer Vision.
+Springer, 2026, pp. 241–260.
+[7] H. Honari, M. G. Tamizi, and H. Najjaran, “Safety optimized rein-
+forcement learning via multi-objective policy optimization,” in 2024
+IEEE International Conference on Robotics and Automation (ICRA).
+IEEE, 2024, pp. 2873–2879.
+[8] B. Zhang, Y. Zhang, J. Ji, Y. Lei, J. Dai, Y. Chen, and Y. Yang,
+“Safevla: Towards safety alignment of vision-language-action model
+via constrained learning,” Advances in Neural Information Processing
+Systems, 2026.
+[9] F. Bai, Y. Li, R. Wu, P. Wang, Y. Wang, B. H. Zhu, Y. Wang, T. Chou,
+J. Gao, R. Zhu et al., “Safelab: An interactive high-fidelity benchmark
+for embodied safety in scientific robotics,” in International Conference
+on Machine Learning, 2026.
+[10] K. P. Wabersich, A. J. Taylor, J. J. Choi, K. Sreenath, C. J. Tom-
+lin, A. D. Ames, and M. N. Zeilinger, “Data-driven safety filters:
+Hamilton-jacobi reachability, control barrier functions, and predictive
+methods for uncertain systems,” IEEE Control Systems Magazine,
+vol. 43, no. 5, pp. 137–177, 2023.
+[11] K.-C. Hsu, H. Hu, and J. F. Fisac, “The safety filter: A unified view
+of safety-critical control in autonomous systems,” Annual Review of
+Control, Robotics, and Autonomous Systems, vol. 7, 2024.
+[12] A. D. Ames, X. Xu, J. W. Grizzle, and P. Tabuada, “Control barrier
+function based quadratic programs for safety critical systems,” IEEE
+Transactions on Automatic Control, vol. 62, no. 8, pp. 3861–3876,
+2017.
+[13] T.-Y. Huang, S. Zhang, X. Dai, A. Capone, V. Todorovski, S. Sos-
+nowski, and S. Hirche, “Learning-based prescribed-time safety for
+control of unknown systems with control barrier functions,” IEEE
+Control Systems Letters, vol. 8, pp. 1817–1822, 2024.
+[14] W. Xiao, J. Wang, C. Gan, R. Hasani, M. Lechner, and D. Rus,
+“Safediffuser: Safe planning with diffusion probabilistic models,” in
+International Conference on Learning Representations, 2025.
+[15] T.-Y. Huang, A. Lederer, D.-J. Wu, X. Dai, S. Zhang, H.-C. Lin, S.-
+H. Sun, S. Sosnowski, and S. Hirche, “Sad-flower: Flow matching
+for safe, admissible, and dynamically consistent planning,” in Inter-
+national Conference on Machine Learning, 2026.
+[16] S. Hu, Z. Liu, S. Liu, J. Cen, Z. Meng, S. Wang, X. Li, and X. He,
+“Vlsa: Vision-language-action models with plug-and-play safety con-
+straint layer,” arXiv preprint arXiv:2512.11891, 2025.
+[17] R. R¨omer, J. Balletshofer, J. Thumm, M. Pavone, A. P. Schoel-
+lig, and M. Althoff, “From demonstrations to safe deployment:
+Path-consistent safety filtering for diffusion policies,” arXiv preprint
+arXiv:2511.06385, 2025.
+[18] A. O’Neill, A. Rehman, A. Maddukuri, A. Gupta, A. Padalkar,
+A. Lee, A. Pooley, A. Gupta, A. Mandlekar, A. Jain et al., “Open
+x-embodiment: Robotic learning datasets and rt-x models: Open x-
+embodiment collaboration 0,” in 2024 IEEE International Conference
+on Robotics and Automation (ICRA).
+IEEE, 2024, pp. 6892–6903.
+[19] A. Khazatsky, K. Pertsch, S. Nair, A. Balakrishna, S. Dasari, S. Karam-
+cheti, S. Nasiriany, M. K. Srirama, L. Y. Chen, K. Ellis et al., “Droid:
+A large-scale in-the-wild robot manipulation dataset,” arXiv preprint
+arXiv:2403.12945, 2024.
+[20] C. Chi, Z. Xu, S. Feng, E. Cousineau, Y. Du, B. Burchfiel, R. Tedrake,
+and S. Song, “Diffusion policy: Visuomotor policy learning via action
+diffusion,” The International Journal of Robotics Research, vol. 44,
+no. 10-11, pp. 1684–1704, 2025.
+[21] T.-Y. Huang, A. Lederer, N. Hoischen, J. Br¨udigam, X. Xiao, S. Sos-
+nowski, and S. Hirche, “Toward near-globally optimal nonlinear model
+predictive control via diffusion models,” Conference on Learning for
+Dynamics & Control, 2025.
+[22] H. Gupta, X. Guo, H. Ha, C. Pan, M. Cao, D. Lee, S. Scherer,
+S.
+Song,
+and
+G.
+Shi,
+“Umi-on-air:
+Embodiment-aware
+guid-
+
+
+ance for embodiment-agnostic visuomotor policies,” arXiv preprint
+arXiv:2510.02614, 2025.
+[23] Y. Zhong, X. Huang, R. Li, C. Zhang, Z. Chen, T. Guan, F. Zeng, K. N.
+Lui, Y. Ye, Y. Liang et al., “Dexgraspvla: A vision-language-action
+framework towards general dexterous grasping,” in Proceedings of the
+AAAI Conference on Artificial Intelligence, vol. 40, no. 22, 2026, pp.
+18 836–18 844.
+[24] E. Altman, Constrained Markov decision processes. Routledge, 2021.
+[25] B. Tearle, K. P. Wabersich, A. Carron, and M. N. Zeilinger, “A pre-
+dictive safety filter for learning-based racing control,” IEEE Robotics
+and Automation Letters, vol. 6, no. 4, pp. 7635–7642, 2021.
+[26] A. Singletary, S. Kolathaya, and A. D. Ames, “Safety-critical kine-
+matic control of robotic systems,” in 2021 American Control Confer-
+ence (ACC), 2021, pp. 14–19.
+[27] B. Dai, R. Khorrambakht, P. Krishnamurthy, V. Gonc¸alves, A. Tzes,
+and F. Khorrami, “Safe navigation and obstacle avoidance using differ-
+entiable optimization based control barrier functions,” IEEE Robotics
+and Automation Letters, vol. 8, no. 9, pp. 5376–5383, 2023.
+[28] K. Nakamura, A. L. Bishop, S. Man, A. M. Johnson, Z. Manch-
+ester, and A. Bajcsy, “How to train your latent control barrier func-
+tion: Smooth safety filtering under hard-to-model constraints,” arXiv
+preprint arXiv:2511.18606, 2025.
+[29] D. S. J. Pro, O. Hausd¨orfer, R. R¨omer, M. D¨osch, M. Schuck,
+and A. P. Schoellig, “Crisp-compliant ros2 controllers for learning-
+based manipulation policies and teleoperation,” IEEE Robotics and
+Automation Practice, vol. 1, pp. 103–107, 2026.
+[30] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang, Q. Jiang, C. Li,
+J. Yang, H. Su et al., “Grounding dino: Marrying dino with grounded
+pre-training for open-set object detection,” in European conference on
+computer vision.
+Springer, 2024, pp. 38–55.

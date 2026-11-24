@@ -1,0 +1,1802 @@
+VTLA-RL: Learning Visuotactile Policies
+for Load-Adaptive Grasping
+Qiwei Wu1,†
+Qixuan Li1,†
+Xin Xiang1,†
+Xiangyu Chen1
+Xiang Xiao2,∗
+Daochen Shi2
+Ruihua Zhang2
+Renjing Xu1,∗
+1The Hong Kong University of Science and Technology (Guangzhou)
+2NVIDIA
+†Equal contribution.
+∗Corresponding authors.
+Abstract
+Vision–language–action foundation models learn gen-
+eral manipulation priors, but object mass and local
+slip are difficult to infer from vision alone. Chang-
+ing loads require contact-driven grasp adjustments
+that demonstrations collected under fixed conditions
+may not adequately cover. We present VTLA-RL
+to study visuotactile grasping policies and their rein-
+forcement learning (RL) post-training under varying
+loads. Our main approach shares a visual encoder
+between tactile-image histories and RGB inputs to
+jointly generate and execute motion and bilateral
+force targets in a unified action space. Mixed real
+and simulated demonstrations first establish motion
+and contact priors. Two-stage multi-task RL then
+uses only simulated interaction to optimize the policy
+through task-success returns without continued real-
+demonstration supervision, and the trained policy
+deploys directly to real robots.
+We compare tac-
+tile representations and RL post-training routes in
+simulation and separately evaluate load variation
+and placement perturbations on hardware. The full
+method achieves higher grasping success than the su-
+pervised initialization, while RL post-training gains
+differ across approaches, providing empirical evidence
+for choosing representations and training approaches
+for this task.
+1
+Introduction
+Moving a beverage carton from a table to a target
+area requires semantic understanding, geometric lo-
+calization, and contact control. Vision can identify
+the target and plan motion, but has difficulty distin-
+guishing visually identical containers with different
+internal masses before contact. Load changes alter
+the contact conditions required for stable grasping,
+and an initial grasp may slip during lifting or trans-
+port. To complete transport under varying loads, the
+policy must adjust its grasp pose, motion, and grip
+force based on the current contact state.
+Vision–language–action (VLA) models provide
+transferable action priors; touch reveals contact de-
+formation, slip tendencies, and force changes. Adding
+touch does not directly ensure that a policy can use
+this information to adjust grasps under changing
+loads.
+Imitation learning mainly inherits demon-
+strated motion and force habits, while demonstra-
+tions collected under fixed conditions may not cover
+new contact states. Simulated interaction offers a
+resettable training environment for expanding this
+experience and reduces the risks of drops, collisions,
+and material damage during hardware exploration.
+We present VTLA-RL (Fig. 1) to study visuotactile
+grasp adaptation under varying loads and the effects
+of tactile representations and reinforcement learning
+(RL) post-training routes. Without additional tactile
+pretraining, our main approach shares a pretrained
+visual encoder between tactile-image histories and
+RGB inputs, and uses one action expert to jointly
+generate motion and bilateral force targets. Super-
+vised fine-tuning (SFT) on mixed real and simulated
+demonstrations establishes motion and contact priors.
+Two-stage multi-task RL in simulation then intro-
+duces placement and mass randomization in sequence
+to optimize the unified motion–force policy through
+task-success returns. The policy deploys directly to
+real robots through a hybrid force–position controller.
+Starting from real and simulated demonstrations at
+fixed placements and masses, simulation RL expands
+interaction experience through placement and mass
+randomization. We evaluate grasping on hardware
+under placement perturbations and varying loads.
+Comparisons and ablations show higher success than
+the supervised initialization, with improved position
+generalization and load adaptation. Hardware results
+also show that the current tactile-array approach
+performs better at SFT initialization, whereas the
+image-based approach achieves larger post-training
+gains.
+Our contributions are twofold:
+• A visuotactile policy for load-adaptive
+grasping. We combine tactile history, a shared
+visual encoder, and a unified motion–force action
+interface with mixed-demonstration initialization
+and simulation RL to improve grasping without
+test-object mass labels. Post-training requires no
+1
+arXiv:2611.28752v1  [cs.RO]  21 Nov 2026
+
+
+Figure 1. VTLA-RL overview. After training on aligned real and simulated demonstrations, the vision–language–
+action (VLA) model produces relatively consistent actions across the two domains. During reinforcement learning (RL),
+we randomize object position and weight (friction) and train with task-success rewards. The trained policy responds
+appropriately to situations beyond the training set and performs well across a broader range of conditions. The right
+side shows one grasp-adjustment sequence following slip.
+continued real-demonstration supervision, and
+the policy deploys directly to real robots.
+• Comparison of tactile representations and
+RL routes with real-robot evaluation. We
+compare two tactile representations and three RL
+post-training routes in simulation under matched
+observation access, rewards, and interaction bud-
+gets, then separately evaluate load variation
+and placement perturbations on hardware. The
+experiments reveal differences in post-training
+gains and verify improved grasping performance
+of the full method over supervised initialization.
+2
+Related work
+2.1
+Tactile
+representations
+and
+contact-aware foundation policies
+Sparsh learns tactile features across sensors through
+self-supervision [10]; AnyTouch and AnyTouch 2 learn
+general representations of static/dynamic and force-
+related observations, respectively [7, 8]. TaF-VLA
+grounds tactile features in physical forces through
+tactile–force alignment [12]. These approaches im-
+prove data coverage, sensor adaptation, and physical
+representation, but representation quality alone does
+not determine how much grip force a policy chooses
+in successful manipulation.
+VTLA, Tactile-VLA, and VLA-Touch extend vi-
+sual policies through preference learning, physical
+knowledge, and dual-level feedback [2, 11, 36]. Om-
+niVTLA handles heterogeneous tactile inputs [5];
+ForceVLA and ForceVLA2 emphasize force feedback,
+action generation, and closed-loop control [18, 34];
+AT-VLA studies the timing and location of tactile
+injection [16]. DreamTacVLA and OmniVTA con-
+nect tactile prediction to contact actions [32, 42].
+FTP-1 advances multi-source sensor pretraining [35];
+N0-VTLA further uses large-scale tactile data and
+ALTER advantage-conditioned offline policy improve-
+ment [20]. ViTaL combines local visuotactile skills
+with residual reinforcement learning [41]; TouchGuide
+uses touch to guide actions at inference [38]; ViTaR
+selects and scales bounded residuals over a frozen
+VLA [29]; TouchWorld combines predicted tactile
+goals with high-frequency residual correction [43].
+HapticVLA uses safety-aware reward-weighted flow
+matching to penalize excessive grip force and distills
+tactile knowledge for deployment without tactile sen-
+sors [9]. VTLA-RL uses a Tabero-style hybrid force–
+position interface [30], jointly generates motion and
+bilateral force targets, and optimizes them through
+simulation RL. With tactile feedback retained at de-
+ployment, it focuses on adapting motion and force to
+changing loads without object-mass labels.
+2.2
+Tactile simulation and evaluation
+TACTO, Taxim, and FOTS generate optical tactile
+observations [24, 28, 40]; TacSL incorporates tac-
+tile images and contact-force distributions into GPU
+learning [1]; TacEx integrates soft-body contact and
+optical models through a modular framework [21].
+DiffTactile supports differentiable contact and pa-
+rameter calibration [25], Taccel targets high-fidelity
+contact with GPU parallelism [17], TaCauchy pro-
+vides continuum stress-based tactile simulation [39],
+and TactileGenesis studies multiple tactile abstrac-
+tions and their effects on policy learning [6]. Rich con-
+tact models reduce data cost, but introduce material
+parameters, numerical solving, and sensor-statistics
+matching.
+UniVTAC unifies multisensor simulation, tactile
+representation, and manipulation benchmarks [3];
+Tacmap reduces the domain gap through geomet-
+ric contact representations [26]. SoftVTBench sepa-
+rates task completion from object deformation and
+2
+
+
+uses evaluator-only finite-element states to construct
+deformation-aware success, showing that contact qual-
+ity requires independent evaluation [14]. VTLA-RL
+aligns optical tactile observations and motion–force
+control interfaces across simulation and hardware,
+then evaluates adaptation and transfer through grasp-
+ing success under varying loads and placement per-
+turbations.
+2.3
+Reinforcement learning for VLA
+policies
+PiRL (πRL) [4] uses proximal policy optimization
+(PPO) to fine-tune the action expert of flow-based
+VLA policies. RL Token (RLT) [31] learns a com-
+pact readout representation, then freezes the VLA
+and representation while training a lightweight actor–
+critic. SimpleVLA-RL [15] optimizes action-token
+VLA policies through RL, combining parallel trajec-
+tory sampling and exploration strategies to improve
+task performance. DSRL freezes the generative policy,
+treats the initial noise as a learnable action, and op-
+timizes the noise input through RL [27]. VTLA-RL’s
+RL framework builds on PiRL and RLinf [33] and fol-
+lows Hebero [37] for success-rate-weighted multi-task
+joint optimization.
+TacCoRL [19] injects normal-taxel histories into
+the VLA context and action expert through a dedi-
+cated encoder and contact gating, combining mixed-
+demonstration initialization with simulation PPO to
+improve recovery and completion in contact-rich tasks.
+Its main RL approach retains real-demonstration
+supervision. VTLA-RL focuses on grasping under
+changing loads, primarily uses tactile-image histo-
+ries with the shared RGB encoder, and executes
+jointly generated motion and bilateral force targets
+through a Tabero-style hybrid force–position inter-
+face [30]. After mixed-demonstration initialization,
+RL post-training uses only simulated interaction
+and task-success returns, without continued real-
+demonstration supervision.
+We evaluate grasping
+adaptation under varying loads and placement per-
+turbations.
+3
+Method
+3.1
+VTLA
+We use a π0.5 backbone [13] with two 224 × 224 RGB
+views. TacImage concatenates eight tactile frames per
+finger, including the current frame, crops and down-
+samples to the RGB resolution, and shares the pre-
+trained RGB vision transformer (ViT) without a sep-
+arate tactile encoder. TacField shares TacCoRL’s [19]
+idea of encoding tactile-array histories as tokens; our
+causal temporal convolutional network (TCN) maps a
+reference frame and eight history frames of 2D marker
+arrays to one prefix token.
+Each effective action has 13 dimensions:
+end-
+effector position (3), rotation vector (3), gripper (1),
+and contact-force targets (3 per finger: one normal
+and two tangential components, in newtons in its
+sensor frame). One flow action expert jointly gen-
+erates motion and force targets, unnormalized for
+execution by a Tabero-style hybrid force–position
+controller [30]. Force targets receive demonstration
+supervision during initialization and remain action
+variables optimized by subsequent simulation RL.
+SFT initialization follows π0.5’s flow-matching
+training [13], jointly supervising motion and bilateral
+force targets in a unified action space to establish
+motion and contact priors. Normalized force coordi-
+nates receive separate loss weights to balance training
+scales; the appendix specifies the loss, weights, and
+trainable parameters. Figure 2 shows the architec-
+ture.
+3.2
+Sim-Real alignment
+Real and simulated scenes use corresponding geom-
+etry, cameras, and robots. Teleoperation supplies
+real demonstrations, and Tabero-style replay supplies
+simulated data. Three-dimensional Gaussian splat-
+ting (3DGS) reconstruction reduces visual differences.
+Figure 3 shows visual and tactile alignment during
+grasping.
+We combine Taxim [24] and FOTS [40] in one
+sensor interface, with simulation assets built and ad-
+justed for Xense sensors. Both use a shared contact
+representation from depth beneath the tactile pad.
+Taxim maps local surface geometry to tactile RGB im-
+ages; FOTS combines contact deformation, centroid
+changes, and relative sensor–object yaw to produce
+image-coordinate marker displacements. These com-
+plementary observations of the same contact state
+consistently support tactile-image and array-history
+inputs.
+Cross-domain calibration covers tactile observa-
+tions and force control. We use real tactile calibra-
+tion data to adjust the force-observation mapping.
+Across domains, we align image resolution, channel
+order, preprocessing, update timing, marker index-
+ing, reference state, coordinates, history windows,
+and displacement scale. End-effector poses, gripper
+commands, and bilateral force targets share coordi-
+nate frames, units, and corresponding hybrid force–
+position execution interfaces, giving the actions in
+Sec. 3.1 consistent physical meanings across domains.
+We mix simulated and real demonstrations at a
+fixed 1:1 ratio using the SFT setup in Sec. 3.1 to
+initialize motion–contact priors. Both subsequent
+RL stages use only simulation rollouts and task-
+success returns, without real-demonstration super-
+vision (Sec. 3.3).
+The policy deploys directly to
+real robots through the same observation/control
+interfaces, without additional fine-tuning, online real-
+robot RL, or test-object mass/friction labels.
+3
+
+
+Figure 2. Policy architecture and RL loop. Temporally concatenated tactile images and camera views share a
+vision transformer (ViT) encoder within the vision–language model (VLM). The flow-matching action expert jointly
+generates motion and force targets. Simulation rollouts provide data; RL updates action-expert low-rank adaptation
+(LoRA) parameters and the shared value head, while the visual encoder and remaining backbone remain frozen.
+Frame 1
+Frame 3
+Real
+Sim
+Real
+Sim
+Scene
+Wrist
+Touch
+L | R
+Figure 3.
+Sim–real correspondence. Paired real
+and simulated external, wrist, and bilateral tactile views
+show milk-carton manipulation. Shared history windows,
+coordinates, and force units complete the policy interface
+alignment.
+3.3
+Multi-stage multi-task joint train-
+ing
+Building on RLinf and PiRL [4, 33], we start from
+the mixed-data SFT checkpoint and use PPO [23]
+with generalized advantage estimation (GAE) [22]
+to update action-expert low-rank adaptation (LoRA)
+parameters θ and value-head parameters ϕ.
+The
+remaining backbone and tactile encoder stay frozen.
+Multi-stage training.
+Stage 1 optimizes grasping
+and placement under randomized positions. Stage 2
+resumes from this checkpoint and further randomizes
+object mass and friction, expanding interaction expe-
+rience under varying loads and optimizing grasping
+behavior through task-success returns. Both stages
+share the policy, value head, and action interface,
+using sparse task-success reward: 1 on success and 0
+otherwise.
+Joint multi-task optimization.
+Tasks and their
+language instructions share one policy and value head.
+Following Hebero [37], we adjust update contributions
+using task success. Let si be the exponential moving
+average (EMA) of task i’s completed-episode success
+rate, with decay 0.9, and ¯s its equally weighted mean
+across tasks. The raw task weight is
+ωi = ωmin + (ωmax −ωmin)σ(κ(¯s −si)) .
+(1)
+Here σ(x) = 1/(1 + e−x), ωmin = 0.5, ωmax = 2.0,
+and κ = 10; lower-success tasks receive larger weights.
+Raw weights are updated after each rollout and fixed
+during that round’s optimization.
+Tasks with no
+completed episodes in the current round retain their
+previous success-rate EMA; all task weights remain
+one until every task is initialized. Let B contain a
+global optimizer batch’s valid action-chunk samples.
+Each sample receives its task’s raw weight, and these
+weights are normalized within the batch so that the
+sample weights ˆωk have mean one.
+Model optimization workflow.
+Each round syn-
+chronizes training and inference parameters and col-
+lects up to 300 primitive steps per environment (30
+fixed-length chunks). After aggregating success rates
+and updating task weights, we compute and fix GAE
+advantages and value targets from chunk rewards
+and old value estimates, then traverse valid samples
+in batches for one PPO epoch. Resets for the next
+round are prefetched during updating.
+The policy predicts H = 50 steps and executes
+only the first Ktrain = 10 during training. Of ten
+flow-denoising steps, one randomly selected step uses
+a stochastic differential equation (SDE) transition
+with noise level 0.5; the others use deterministic in-
+tegration. For chunk k, we evaluate the recorded
+stochastic transition’s log density over valid executed
+steps and the 13 effective coordinates, grouped as
+ℓk(θ) = ℓmotion
+k
+(θ) + ℓforce
+k
+(θ).
+(2)
+The terms sum the first seven motion/gripper and
+final six bilateral-force coordinates from one action
+expert. With rollout parameters θold, evaluating both
+policies on the same recorded transition with the same
+4
+
+
+valid-step mask gives rk(θ) = exp[ℓk(θ) −ℓk(θold)].
+This ratio concerns the selected stochastic transition.
+Averaging over the valid batch, the weighted PPO
+policy loss is
+LPPO = −Ek∈B
+h
+ˆωk min
+
+rk(θ) ˆAk,
+clip
+ rk(θ), 1 −ϵclip, 1 + ϵclip
+ ˆAk
+i
+.
+(3)
+Here ˆAk is the precomputed chunk-level GAE ad-
+vantage and ϵclip = 0.2. The total loss is LRL =
+LPPO+LV , where LV uses the same ˆωk and a clipped
+Huber loss to fit GAE value targets. Weights affect
+losses only, leaving rewards, advantages, and value
+targets unchanged. Motion and force share one ratio
+and task advantage, and both learn through task
+returns. SFT dimension weights do not enter RL;
+the main experiments add no real-demonstration or
+force-prediction supervision. Hyperparameters are in
+the appendix.
+3.4
+Policy deployment
+Our custom hybrid force–position gripper reaches ar-
+bitrary openings at 20 Hz. A low-level controller fol-
+lowing Tabero and Tactile-VLA tracks active targets
+using measured tactile force between policy updates.
+Synchronous and asynchronous execution both use
+the first 10 actions of each prediction at a 20-Hz
+base rate. Four interpolation points between targets
+yield 100-Hz commands. Model inference and arm
+execution run asynchronously, with tactile feedback
+correction at 20 Hz.
+New chunks blend with existing fused targets us-
+ing weights increasing linearly from 0.2 to 0.8 over
+three base steps; old chunks receive complementary
+weights. Rotations interpolate in local rotation-vector
+coordinates; other coordinates, including the grip-
+per target, interpolate linearly. Recomputing fusion
+from original overlapping chunks after each admission
+avoids weight accumulation. We call this continuous-
+inference system with 20-Hz tactile feedback FAST
+and enable it by default.
+4
+Experiments
+The experiments evaluate stable, load-adaptive grasp-
+ing after VTLA-RL post-training and compare the
+effects of tactile representations and RL post-training
+routes. Real-robot experiments separately evaluate
+placement perturbations and varying loads.
+Test tasks.
+The evaluation covers two tasks: a
+cylinder (Task A, a Coca-Cola can) and a cuboid
+(Task B, a milk carton). These are representative
+geometries. Data are collected with fixed object posi-
+tions; XY perturbations are introduced during train-
+ing, and the randomization range is further expanded
+at evaluation. In addition, we place a cookie box
+Simulation objects
+Real objects
+Cola weight
+Vitasoy weight
+Cola
+Vitasoy
+Cookie
+Cola
+Vitasoy
+Cookie
+150 g
+T1
+550 g
+T2
+700 g
+T3
+100 g
+T1
+500 g
+T2
+650 g
+T3
+Figure 4. Test objects and mass conditions. Top
+row: simulated Cola, Vitasoy, and Cookie, followed by
+their real counterparts.
+Bottom row: internal weight
+configurations for Cola at 150/550/700 g and Vitasoy at
+100/500/650 g. Labels indicate total object mass.
+in the scene as a distractor object. During training,
+object mass is randomized over 150–250 g for Cola
+and 100–600 g for Vitasoy. At evaluation, we em-
+ulate unknown loads using three fixed task-specific
+tiers by changing the target object’s mass: Task A
+(Coca-Cola) 150/200/250 g and Task B (Vitasoy)
+100/300/600 g; the tiers are denoted T1/T2/T3, and
+friction is randomized within a bounded range. For
+the real-robot tests, to emphasize weight-induced slip-
+ping, we adjust the tiers to Task A 150/550/700 g and
+Task B 100/500/650 g; other settings follow those in
+simulation. Figure 4 shows the test objects.
+Hardware and data sources.
+Training uses eight
+RTX PRO 6000D GPUs. Stage 0 performs SFT; the
+supervision data combine teleoperated real demon-
+strations with simulator replays of the same demon-
+strations, with 30 real trajectories and 30 simulated
+replay trajectories per task. RL post-training uses
+128 parallel simulated environments, evenly split be-
+tween the two tasks. Each of the two training stages
+runs for 200 epochs. Real evaluation uses an xArm
+with a tactile hybrid force–position gripper. Both real
+and simulated evaluation use the same RTX 4090.
+Success criterion.
+Simulation success requires the
+object to remain inside the target container’s goal
+region for eight consecutive control steps, subject to
+planar and height error requirements; the specific
+parameters are provided in the appendix. Episodes
+terminate after 300 control steps. Contact force does
+not participate in success. The real-robot criterion is
+essentially the same as in simulation.
+Statistics.
+Each task is tested 10 times per random
+seed in simulation over five seeds, giving 50 trials per
+task; we report the mean and standard deviation of
+the success rate (SR). Success rates are reported in
+percent with the percent sign omitted. Each task is
+tested 10 times on real hardware, and we report the
+average success rate across all tasks. We also measure
+5
+
+
+Table 1. Task A results at 150/200/250 g; Gentle out-
+performs Firm at T3. Success rate (SR) is in percent
+without the percent sign; entries are mean (integer) ±
+standard deviation (one decimal) over five random seeds.
+Adaptive denotes our VTLA-RL method.
+Method
+Tier 1
+Tier 2
+Tier 3
+Gentle (Tabero)
+98±4.5 48±8.4
+32±8.4
+Firm (Tabero)
+98±4.5 94±8.9 18±16.4
+Adaptive (Ours) 98±4.5 98±4.5
+96±5.5
+Table 2. Task B results at 100/300/600 g; Gentle and
+Firm have equal success rates at T2.
+Protocol as in
+Table 1.
+Method
+Tier 1
+Tier 2
+Tier 3
+Gentle (Tabero)
+74±24.1 66±16.7
+64±5.5
+Firm (Tabero)
+90±7.1
+66±13.4 76±11.4
+Adaptive (Ours)
+96±5.5
+94±5.5
+98±4.5
+average grip force in newtons following Tabero [30].
+Hybrid force–position gripper.
+We use a hy-
+brid force–position gripper and Xense tactile sensors.
+Unlike conventional open/close-command grippers, it
+responds at 20 Hz or higher at any opening degree
+and outputs grip force at the fingertips, with the
+hybrid controller realizing force adjustment. Details
+are given in the appendix.
+4.1
+Weight-adaptive grasping under
+varying loads
+We use Tabero’s field-style model as the benchmark,
+initialized with the same π0.5 pretrained parameters.
+Gentle and Firm undergo SFT following Tabero using
+demonstrations with different force commands, where
+the gentle force is about 50% of the firm force. Adap-
+tive undergoes SFT using data without force adverbs,
+followed by VTLA-RL’s multi-stage training with the
+image representation of Sec. 3.1. Tables 1 and 2 re-
+port simulation results for the two tasks at three mass
+tiers within their respective training ranges. Gentle
+matches or exceeds Firm in some tiers, showing that
+stronger force commands do not always yield higher
+task success.
+T1/T2/T3 denote task-specific mass tiers. Gentle
+and Firm perform differently across tiers: Gentle
+outperforms Firm on Cola at T3, while the two are
+comparable on Vitasoy at T2. Adaptive achieves high
+success across all tiers of both tasks.
+4.1.1
+Average grip force analysis
+To examine whether RL post-training changes aver-
+age grip force (AG), we measure AG in successful
+trajectories before and after RL for both tasks and
+both tactile representations, Img and Field. AG is
+Table 3. Average grip force (AG, N) of different objects
+before and after RL. A and B denote Tasks A and B;
+Img and Field denote TacImage and TacField. Change is
+relative to Before RL.
+Task
+AG Before RL
+AG After RL
+Change
+A(Img)
+9.30
+9.56
++2.8%
+A(Field)
+8.74
+8.98
++2.7%
+B(Img)
+30.62
+30.59
+−0.1%
+B(Field)
+31.14
+30.54
+−1.9%
+the sum of the left- and right-sensor force measure-
+ments, averaged over valid samples throughout each
+trajectory. Table 3 shows small AG changes in the
+recorded successful trajectories, indicating that the
+observed success-rate gains are not accompanied by
+a large increase in this statistic. We hypothesize that
+the gains may reflect using force appropriately for
+specific geometries, rather than force increases alone.
+4.2
+Method comparison
+We compare three RL post-training routes under
+the adaptive setting. VTLA-RL is the full method.
+VTLA-RL(Img) uses TacImage and matches Adap-
+tive in Sec. 4.1. VTLA-RL(Field) uses tactile-array
+signals; its marker inputs and prefix-only TCN are
+specified in Sec. 3.1. VTLA-RLT corresponds to the
+RL Token route [31]: it freezes the VLA backbone and
+encoder, compresses prefix features into RL tokens,
+and trains a lightweight actor and value networks.
+VTLA-DSRL freezes the generator, treats the initial
+noise as a learnable action, and optimizes the noise
+input through RL [27]. All methods use the same
+observation access, initialization data, two-stage RL
+configuration, reward, task weighting, execution rate,
+and primitive interaction budget; Table 4 reports suc-
+cess rates in simulation for each method on the two
+tasks and three load tiers. Real-robot comparison
+results are reported in Sec. 4.4.
+Equally averaging the six task–tier conditions in Ta-
+ble 4, VTLA-RL, VTLA-RLT, and VTLA-DSRL with
+Img achieve approximately 96.7%, 94.0%, and 93.3%
+success, respectively. VTLA-RL(Img) has the highest
+overall mean and balanced performance across tasks.
+VTLA-RLT(Img) performs more consistently than
+VTLA-RL(Img) on Task A but trails it on Task B.
+Differences are larger with Field: VTLA-RLT(Field)
+performs well on Task A but poorly on Task B, while
+VTLA-RL(Field) and VTLA-DSRL(Field) also de-
+cline markedly at Task A’s T3 tier. These results
+indicate that representation and post-training choices
+should be evaluated in relation to the task and load
+conditions in this setting. Section 4.3 further com-
+pares RL post-training and execution, and Sec. 4.4
+reports hardware results.
+6
+
+
+Table 4. Success rates of three RL routes and two tactile representations on two tasks and three load tiers.
+Method
+A T1
+A T2
+A T3
+B T1
+B T2
+B T3
+VTLA-RL(Img)
+98±4.5
+98±4.5
+96±5.5
+96±5.5
+94±5.5
+98±4.5
+VTLA-RLT(Img)
+100±0.0
+100±0.0
+100±0.0
+78±16.4
+94±5.5
+92±8.4
+VTLA-DSRL(Img)
+98±4.5
+100±0.0
+98±4.5
+96±8.9
+82±16.4
+86±8.9
+VTLA-RL(Field)
+96±5.5
+94±5.5
+20±12.2
+86±5.5
+82±13.0
+80±10.0
+VTLA-RLT(Field)
+100±0.0
+92±4.5
+94±8.9
+4±5.5
+12±13.0
+6±5.5
+VTLA-DSRL(Field)
+94±8.9
+86±11.4
+0±0.0
+72±35.6
+60±7.1
+66±23.0
+First lift attempt
+t = 5.3 s
+Downward slip
+t = 6.2 s
+Regrasp
+t = 8.6 s
+Successful lift
+t = 9.4 s
+Placement
+t = 18.0 s
+Scene
+Wrist
+0
+4
+8
+12
+Grip force (N)
+Open gripper
+& adjust pose
+Before: 8.41 N
+After: 9.53 N
+Predicted
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+Time from video start (s)
+Figure 5. Real-robot grasp adjustment under slipping. Synchronized scene and wrist views show initial grasp,
+downward slipping, grasp adjustment, and placement. The time axis preserves the recorded intervals between the
+selected keyframes. The blue curve represents the grip-force output predicted by the model.
+4.3
+Ablation analysis
+Table 5 compares RL post-training and FAST for
+TacImage and TacField, reporting success rates at
+three load tiers and their average. The training-stage
+control compares the SFT checkpoint with the policy
+obtained by two-stage RL post-training from that
+checkpoint. The execution control compares asyn-
+chronous rolling inference with synchronous execution
+of 10-action prefixes on the same checkpoint. We also
+adapt PiRL to the same hybrid force–position action
+space, use the same joint, staged training setup, and
+remove tactile input to form the PiRL† control. Ta-
+ble 5 evaluates these controls in simulation; related
+real-robot comparisons appear in Sec. 4.4. For each
+tier, we first average the two tasks within each seed,
+then compute the mean and sample standard devia-
+tion across the five seeds. Avg. first aggregates the
+three tiers within each seed.
+Table 5 shows that RL post-training improves over-
+all mean success from 83% to 97% for Img and from
+58% to 76% for Field, benefiting both representa-
+tions. Enabling FAST improves Img at T3 from 92%
+to 97%, with a small change in its overall mean across
+tiers, whereas Field’s overall mean rises from 63%
+to 76%. Thus, execution has different effects across
+tactile approaches.
+Without tactile input, PiRL†
+achieves an overall mean of 74%, below Img Full and
+close to Field Full, showing that the effects of tactile
+approaches differ.
+Table 5.
+Module ablation: success rates (%).
+Full
+uses FAST and RL; w/o removes the named component.
+†Our force–position PiRL adaptation uses FAST and RL
+without tactile input.
+Variant
+T1
+T2
+T3
+Avg.
+Img
+Full
+97±2.7
+96±2.2
+97±4.5
+97±2.4
+w/o FAST
+99±2.2
+98±2.7
+92±9.1
+96±2.5
+w/o RL
+90±7.9
+90±5.0
+70±6.1
+83±3.7
+Field
+Full
+91±5.5
+88±6.7
+50±7.9
+76±4.8
+w/o FAST
+86±12.4
+66±4.2
+36±9.6
+63±2.8
+w/o RL
+82±7.6
+63±9.1
+29±2.2
+58±4.3
+PiRL†
+80±9.4
+81±5.5
+62±13.5
+74±7.5
+4.4
+Real-robot tests and method com-
+parison
+All models are deployed directly after simulation
+training, without additional real-world fine-tuning
+or online RL. Real demonstrations are used for SFT
+initialization, with no continued real-data supervision
+during simulation RL.
+We first compare real-robot performance under
+fixed and randomized positions to assess transfer
+of simulation RL. Training details are given in the
+appendix. Img uses tactile images; Field uses array-
+style tactile force fields. Rows marked w/o RL use
+7
+
+
+Table 6. Real-robot success rates (SR, %) under fixed
+and randomized positions.
+Method
+Fixed SR Random SR
+Img
+100
+65
+Img w/o RL
+65
+35
+Field
+95
+55
+Field w/o RL
+95
+45
+the mixed real–sim SFT initialization; the others un-
+dergo VTLA-RL training with a maximum position-
+randomization range of ±2 cm. Fixed positions use
+the same placement as the data, and randomized
+positions apply a ±6 cm planar perturbation to both
+objects in each test.
+Table 6 reports the average
+real-robot success rate over all tested tasks, with 20
+trials per entry.
+Table 6 shows different hardware post-training
+gains for the two current representations. At SFT
+initialization, Field outperforms Img under both fixed
+and randomized positions. RL post-training improves
+Img from 65% and 35% to 100% and 65%, respectively,
+while Field changes from 95% and 45% to 95% and
+55%. Thus, the representation ranking at supervised
+initialization does not persist after post-training un-
+der these conditions, and Img achieves larger success-
+rate gains. This may be because RL training helps
+the model better understand joint visual–tactile in-
+formation represented as images.
+We then test the models at the three object-mass
+tiers, keeping object positions fixed to control for
+placement. To reduce friction, we apply a film to
+the tactile sensors; otherwise, the high friction of the
+tactile sensors makes slipping rare, which hinders eval-
+uating the policy’s slipping and grasp-adjustment be-
+havior. Table 7 reports the performance of the tactile-
+image VTLA-RL variants in the real-robot mass-tier
+tests, since the image-based variant already showed
+strong capability in Table 6. VTLA-RL is the full
+method; VTLA-RLT and VTLA-DSRL correspond to
+the RL Token and DSRL post-training routes; VTLA-
+RL w/o FAST removes the asynchronous rolling in-
+ference speed optimization of Sec. 3.4 and uses syn-
+chronous execution of 10-action prefixes; VTLA-RL
+w/o RL is the mixed-data SFT initialization without
+simulation RL. PiRL† follows the setting in Sec. 4.3.
+The table reports the average real-robot success rate
+over all tested objects, with 20 trials in total across
+all tasks per entry.
+In Table 7, the full method outperforms the RLT
+and DSRL routes at all three real-robot mass tiers
+and improves on SFT initialization by 35, 30, and
+35 percentage points, respectively. At T3, the full
+method achieves 70% success versus 25% for PiRL†
+without tactile input, supporting the role of touch in
+the current high-load setting; removing FAST yields
+60%. Figure 5 qualitatively shows one grasping se-
+quence for an object of unknown mass: after slipping,
+the policy opens the gripper, adjusts its pose, and re-
+Table 7. Real-robot method comparison across mass
+tiers. All tactile variants use TacImage (Img); the Img
+suffix is omitted. SR denotes success rate (%).
+Method
+T1 SR
+T2 SR
+T3 SR
+VTLA-RL
+100
+95
+70
+VTLA-RLT
+45
+45
+30
+VTLA-DSRL
+80
+80
+60
+VTLA-RL w/o FAST
+85
+75
+60
+VTLA-RL w/o RL
+65
+65
+35
+PiRL†
+90
+50
+25
+grasps before completing lifting and placement. The
+model’s predicted grip-force targets also change dur-
+ing the sequence.
+5
+Conclusion
+We presented VTLA-RL to study visuotactile grasp-
+ing policies and their post-training under varying
+loads. The method combines mixed-demonstration
+initialization, a shared visual encoder, and a unified
+motion–force policy, followed by RL post-training
+through simulated interaction and direct real-robot
+deployment.
+Comparisons across tactile represen-
+tations and RL methods in simulation and on real
+hardware, together with component ablations, demon-
+strate effective grasping under randomized place-
+ments and varying object masses.
+Limitations
+The current method is evaluated only on small-scale
+data and tests, and the hardware experiments provide
+limited evidence for distinguishing small performance
+differences. Future work will expand task diversity
+and evaluation scale, reduce dependence on initializa-
+tion, and improve feedback timeliness.
+8
+
+
+References
+[1] Iretiayo Akinola, Jie Xu, Jan Carius, Dieter Fox, and
+Yashraj Narang. TacSL: A Library for Visuotactile
+Sensor Simulation and Learning. arXiv:2408.06506,
+2024.
+[2] Jianxin Bi, Kevin Yuchen Ma, Ce Hao, Mike Zheng
+Shou, and Harold Soh.
+VLA-Touch: Enhancing
+vision-language-action models with dual-level tactile
+feedback. arXiv:2507.17294, 2025.
+[3] Baijun Chen, Weijie Wan, Tianxing Chen, Xianda
+Guo, Congsheng Xu, Yuanyang Qi, Haojie Zhang,
+Longyan Wu, Tianling Xu, Zixuan Li, Yizhe Wu, Rui
+Li, Xiaokang Yang, Ping Luo, Wei Sui, and Yao Mu.
+UniVTAC: A Unified Simulation Platform for Visuo-
+Tactile Manipulation Data Generation, Learning,
+and Benchmarking. arXiv:2602.10093, 2026.
+[4] Kang Chen, Zhihao Liu, Tonghe Zhang, Zhen Guo,
+Si Xu, Hao Lin, Hongzhi Zang, Xiang Li, Quanlu
+Zhang, Zhaofei Yu, Guoliang Fan, Tiejun Huang,
+Yu Wang, and Chao Yu.
+πRL: Online RL Fine-
+tuning for Flow-based Vision-Language-Action Mod-
+els. arXiv:2510.25889, 2025.
+[5] Zhengxue Cheng, Yiqian Zhang, Anni Tang, Keyu
+Wang, Wenkang Zhang, Haoyu Li, Hengdi Zhang,
+and Li Song. OmniVTLA: Vision-Tactile-Language-
+Action Models with Semantic-Aligned Tactile Sens-
+ing. arXiv:2508.08706, 2025.
+[6] Trinity Chung, Kashu Yamazaki, Dhruv Patel, Alexis
+Duburcq, Yiling Qiao, Katerina Fragkiadaki, and
+Aran Nayebi.
+Tactile Genesis:
+Exploring Tac-
+tile Sensors at Scale for Learning Dexterous Tasks.
+arXiv:2606.22332, 2026.
+[7] Ruoxuan Feng, Jiangyu Hu, Wenke Xia, Tianci
+Gao, Ao Shen, Yuhao Sun, Bin Fang, and Di Hu.
+AnyTouch: Learning Unified Static-Dynamic Rep-
+resentation across Multiple Visuo-tactile Sensors.
+arXiv:2502.12191, 2025.
+[8] Ruoxuan Feng, Yuxuan Zhou, Siyu Mei, Dongzhan
+Zhou, Pengwei Wang, Shaowei Cui, Bin Fang, Guocai
+Yao, and Di Hu.
+AnyTouch 2: General Optical
+Tactile Representation Learning For Dynamic Tactile
+Perception. arXiv:2602.09617, 2026.
+[9] Konstantin Gubernatorov, Mikhail Sannikov, Ilya
+Mikhalchuk,
+Egor Kuznetsov,
+Makar Artemov,
+Ogunwoye Faith Oluwatobi, Marcelino Fernando,
+Artem Asanov, Ziang Guo, and Dzmitry Tsetserukou.
+HapticVLA: Contact-Rich Manipulation via Vision-
+Language-Action Model without Inference-Time Tac-
+tile Sensing. arXiv:2603.15257, 2026.
+[10] Carolina Higuera, Akash Sharma, Chaithanya Kr-
+ishna Bodduluri, Taosha Fan, Patrick Lancaster,
+Mrinal Kalakrishnan, Michael Kaess, Byron Boots,
+Mike Lambeta, Tingfan Wu, and Mustafa Mukadam.
+Sparsh: Self-supervised touch representations for
+vision-based tactile sensing. arXiv:2410.24090, 2024.
+[11] Jialei Huang, Shuo Wang, Fanqi Lin, Yihang Hu,
+Chuan Wen, and Yang Gao. Tactile-VLA: Unlocking
+vision-language-action model’s physical knowledge
+for tactile generalization. arXiv:2507.09160, 2025.
+[12] Yuzhe Huang, Pei Lin, Wanlin Li, Daohan Li, Ji-
+ajun Li, Jiaming Jiang, Chenxi Xiao, and Ziyuan
+Jiao. TaF-VLA: Tactile-Force Alignment in Vision-
+Language-Action Models for Force-aware Manipula-
+tion. arXiv:2601.20321, 2026.
+[13] Physical Intelligence, Kevin Black, Noah Brown,
+James Darpinian, Karan Dhabalia, Danny Driess,
+Adnan Esmail, Michael Equi, Chelsea Finn, Nic-
+colo Fusai, Manuel Y. Galliker, Dibya Ghosh, Lachy
+Groom, Karol Hausman, Brian Ichter, Szymon
+Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc,
+Sergey Levine, Adrian Li-Bell, Mohith Mothukuri,
+Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xi-
+aoyang Shi, Laura Smith, Jost Tobias Springenberg,
+Kyle Stachowicz, James Tanner, Quan Vuong, Homer
+Walke, Anna Walling, Haohuan Wang, Lili Yu, and
+Ury Zhilinsky. π0.5: a vision-language-action model
+with open-world generalization. arXiv:2504.16054,
+2025.
+[14] Bowen Jing, Mingxin Wang, Ruiyang Hao, Chenchen
+Ge, Hanwen Shen, Junjie He, Yang Cui, Yiming
+Hou, Weitao Zhou, Jiawei Wang, Minglei Li, Dan-
+dan Zhang, Ding Zhao, Houde Liu, Xiaofan Li,
+Si Liu, Ping Luo, and Haibao Yu. SoftVTBench:
+A Deformation-Aware Visuo-Tactile Dataset and
+Benchmark for Deformable-Object Manipulation.
+arXiv:2608.18701, 2026.
+[15] Haozhan Li, Yuxin Zuo, Jiale Yu, Yuhao Zhang,
+Zhaohui Yang, Kaiyan Zhang, Xuekai Zhu, Yuchen
+Zhang, Tianxing Chen, Ganqu Cui, Dehui Wang,
+Dingxiang Luo, Yuchen Fan, Youbang Sun, Jia Zeng,
+Jiangmiao Pang, Shanghang Zhang, Yu Wang, Yao
+Mu, Bowen Zhou, and Ning Ding. SimpleVLA-RL:
+Scaling VLA Training via Reinforcement Learning.
+arXiv:2509.09674, 2025.
+[16] Xiaoqi Li, Muhe Cai, Jiadong Xu, Juan Zhu, Hong-
+wei Fan, Yan Shen, Guangrui Ren, and Hao Dong.
+AT-VLA: Adaptive Tactile Injection for Enhanced
+Feedback Reaction in Vision-Language-Action Mod-
+els. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages
+28764–28774, 2026.
+[17] Yuyang Li, Wenxin Du, Chang Yu, Puhao Li, Zihang
+Zhao, Tengyu Liu, Chenfanfu Jiang, Yixin Zhu, and
+Siyuan Huang. Taccel: Scaling Up Vision-based Tac-
+tile Robotics via High-performance GPU Simulation.
+arXiv:2504.12908, 2025.
+[18] Yang Li, Zhaxizhuoma, Hongru Jiang, Junjie Xia,
+Hongquan Zhang, Jinda Du, Yunsong Zhou, Jia
+Zeng, Ce Hao, Jieji Ren, Qiaojun Yu, Cewu Lu, Yu
+Qiao, and Jiangmiao Pang. ForceVLA2: Unleashing
+Hybrid Force-Position Control with Force Awareness
+for Contact-Rich Manipulation. arXiv:2603.15169,
+2026.
+[19] Siyu Ma, Yuqi Liang, Chang Yu, Yunuo Chen, Hao
+Su, Yixin Zhu, Yin Yang, and Chenfanfu Jiang. Tac-
+CoRL: Integrating Tactile Feedback into VLA via
+Simulation. arXiv:2606.11743, 2026.
+[20] NeoteAI Team and Fudan TEAI Team. N0-VTLA:
+Scaling Vision-Tactile-Language-Action Model with
+Latent Tactile Tokens. arXiv:2607.23782, 2026.
+[21] Duc Huy Nguyen, Tim Schneider, Guillaume Duret,
+Alap Kshirsagar, Boris Belousov, and Jan Peters.
+TacEx: GelSight Tactile Simulation in Isaac Sim –
+Combining Soft-Body and Visuotactile Simulators.
+arXiv:2411.04776, 2024.
+[22] John Schulman, Philipp Moritz, Sergey Levine,
+Michael
+Jordan,
+and
+Pieter
+Abbeel.
+High-
+dimensional continuous control using generalized ad-
+9
+
+
+vantage estimation. In International Conference on
+Learning Representations, 2016.
+[23] John Schulman,
+Filip Wolski,
+Prafulla Dhari-
+wal, Alec Radford, and Oleg Klimov.
+Proximal
+policy optimization algorithms.
+arXiv preprint
+arXiv:1707.06347, 2017.
+[24] Zilin Si and Wenzhen Yuan. Taxim: An example-
+based simulation model for GelSight tactile sensors.
+arXiv:2109.04027, 2021.
+[25] Zilin Si, Gu Zhang, Qingwei Ben, Branden Romero,
+Zhou Xian, Chao Liu, and Chuang Gan.
+DIFF-
+TACTILE: A Physics-based Differentiable Tactile
+Simulator for Contact-rich Robotic Manipulation.
+arXiv:2403.08716, 2024.
+[26] Lei Su, Zhijie Peng, Renyuan Ren, Shengping
+Mao, Juan Du, Kaifeng Zhang, and Xuezhou Zhu.
+Tacmap:
+Bridging the Tactile Sim-to-Real Gap
+via Geometry-Consistent Penetration Depth Map.
+arXiv:2602.21625, 2026.
+[27] Andrew Wagenmaker, Mitsuhiko Nakamoto, Yunchu
+Zhang, Seohong Park, Waleed Yagoub, Anusha Naga-
+bandi, Abhishek Gupta, and Sergey Levine. Steering
+your diffusion policy with latent space reinforcement
+learning. arXiv:2506.15799, 2025.
+[28] Shaoxiong Wang, Mike Lambeta, Po-Wei Chou, and
+Roberto Calandra. TACTO: A Fast, Flexible, and
+Open-source Simulator for High-Resolution Vision-
+based Tactile Sensors. arXiv:2012.08456, 2020.
+[29] Yi Wang, Renjun Wu, Jinyan Liu, and Xuesong
+Li. ViTaR: Visuo-Tactile Residual Adaptation for
+Foundation VLA Manipulation. arXiv:2608.15816,
+2026.
+[30] Qiwei Wu, Rui Zhang, Xin Xiang, Tao Li, Weihua
+Zhang, Junjie Lai, and Renjing Xu. Tabero: Learn-
+ing Gentle Manipulation with Closed-Loop Force
+Feedback from Vision, Touch, and Language. In In-
+ternational Conference on Machine Learning, 2026.
+[31] Charles Xu, Jost Tobias Springenberg, Michael Equi,
+Ali Amin, Adnan Esmail, Sergey Levine, and Liyim-
+ing Ke. RL Token: Bootstrapping Online RL with
+Vision-Language-Action Models. arXiv:2604.23073,
+2026.
+[32] Guo Ye, Zexi Zhang, Xu Zhao, Shang Wu, Haoran
+Lu, Shihan Lu, and Han Liu. Learning to Feel the Fu-
+ture: DreamTacVLA for Contact-Rich Manipulation.
+arXiv:2512.23864, 2025.
+[33] Chao Yu, Yuanqing Wang, Zhen Guo, Hao Lin, Si
+Xu, Hongzhi Zang, Quanlu Zhang, Yongji Wu, Chun-
+yang Zhu, Junhao Hu, Zixiao Huang, Mingjie Wei,
+Yuqing Xie, Ke Yang, Bo Dai, Zhexuan Xu, Jiakun
+Du, Xiangyuan Wang, Xu Fu, Letong Shi, Zhihao
+Liu, Kang Chen, Weilin Liu, Gang Liu, Boxun Li,
+Jianlei Yang, Zhi Yang, Guohao Dai, and Yu Wang.
+RLinf: Flexible and Efficient Large-scale Reinforce-
+ment Learning via Macro-to-Micro Flow Transfor-
+mation. arXiv:2509.15965, 2025.
+[34] Jiawen Yu, Hairuo Liu, Qiaojun Yu, Jieji Ren, Ce
+Hao, Haitong Ding, Guangyu Huang, Guofan Huang,
+Yan Song, Panpan Cai, Cewu Lu, and Wenqiang
+Zhang.
+ForceVLA: Enhancing VLA Models with
+a Force-aware MoE for Contact-rich Manipulation.
+arXiv:2505.22159, 2025.
+[35] Chengbo Yuan, Zicheng Zhang, Mingjie Zhou, Wendi
+Chen, Yi Wang, Zhuoyang Liu, Dantong Niu, Shuo
+Wang, Hui Zhang, Wenkang Zhang, Yingdong Hu,
+Yuanqing Gong, Wanli Xing, Chuan Wen, Cewu Lu,
+Kaifeng Zhang, and Yang Gao. FTP-1: A Generalist
+Foundation Tactile Policy Across Tactile Sensors for
+Contact-Rich Manipulation. arXiv:2606.13102, 2026.
+[36] Chaofan Zhang, Peng Hao, Xiaoge Cao, Xiaoshuai
+Hao, Shaowei Cui, and Shuo Wang. VTLA: Vision-
+tactile-language-action model with preference learn-
+ing for insertion manipulation. arXiv:2505.09577,
+2025.
+[37] Rui Zhang, Qiwei Wu, Zhengyu Zhang, Tao Li,
+Hongyu Zhou, Xiang Li, Yunrong Guo, Junjie Lai,
+Renjing Xu, and Weihua Zhang. A GPU-Parallel
+Framework for Heterogeneous Multi-Task Reinforce-
+ment Learning. arXiv:2606.03335, 2026.
+[38] Zhemeng Zhang, Jiahua Ma, Xincheng Yang, Xin
+Wen, Yuzhi Zhang, Boyan Li, Yiran Qin, Jin Liu,
+Can Zhao, Li Kang, Haoqin Hong, Zhenfei Yin,
+Philip Torr, Hao Su, Ruimao Zhang, and Daolin Ma.
+TouchGuide: Inference-Time Steering of Visuomo-
+tor Policies via Touch Guidance. arXiv:2601.20239,
+2026.
+[39] Hengfei Zhao, Yifan Xie, Junhao Gong, Yue Sun, Kai
+Zhu, Weihua He, Shoujie Li, Haohuan Fu, and Wenbo
+Ding. TaCauchy: An Extensible FEM Framework for
+Vision-Based Tactile Simulation. arXiv:2606.20426,
+2026.
+[40] Yongqiang Zhao, Kun Qian, Boyi Duan, and Shan
+Luo.
+FOTS: A fast optical tactile simulator for
+Sim2Real learning of tactile-motor robot manipula-
+tion skills. arXiv:2404.19217, 2024.
+[41] Zifan Zhao, Siddhant Haldar, Jinda Cui, Lerrel Pinto,
+and Raunaq Bhirangi. Touch begins where vision
+ends: Generalizable policies for contact-rich manipu-
+lation. arXiv:2506.13762, 2025.
+[42] Yuhang Zheng, Songen Gu, Yupeng Zheng, Weize
+Li, Yujie Zang, Shuai Tian, Xiang Li, Ce Hao, Chen
+Gao, Si Liu, Haoran Li, Yilun Chen, Shuicheng Yan,
+and Wenchao Ding. OmniVTA: Visuo-Tactile World
+Modeling for Contact-Rich Robotic Manipulation.
+arXiv:2603.19201, 2026.
+[43] Jianyi Zhou, Feiyang Hong, Yunhao Li, Yicheng
+Zhao, Yongjue Cen, Zirui Liu, Jiakang Huang, Zirui
+Chen, Ruiyang Zhang, Weizhuo Zhu, Xuhua Song,
+and Shuo Yang.
+TouchWorld: A Predictive and
+Reactive Tactile Foundation Model for Dexterous
+Manipulation. arXiv:2607.07287, 2026.
+10
+
+
+Appendix
+A
+SFT Initialization and Loss
+Data and initialization.
+We initialize from the
+PyTorch conversion of pretrained π0.5. Each of the
+three SFT tasks, Vitasoy, Coca-Cola, and Cookie,
+contributes 30 real teleoperated demonstrations. Re-
+playing the same actions in simulation yields 29, 30,
+and 30 usable trajectories, respectively, giving 179
+trajectories and 26,741 frames in total. Real data
+recorded at 5 Hz are temporally aligned to 20 Hz.
+All usable trajectories are used for SFT. RL targets
+only Vitasoy and Coca-Cola and uses the simulated
+Cookie asset as a distractor. Paired replays provide
+observations of the same demonstrated actions in
+both domains.
+Demonstrations use fixed placements and masses:
+354 g for Coca-Cola and 57 g for Vitasoy. The main
+policy uses instructions without force adverbs, such
+as “Pick up the Coca-Cola and put it into the basket.”
+Gentle/Firm use instructions with the corresponding
+adverb.
+Normalization and objective.
+Each label con-
+tains H = 50 actions with 13 effective coordinates:
+six pose coordinates, one gripper command, and six
+bilateral force targets. Before normalization, the pose
+coordinates are expressed relative to the current state;
+gripper and force coordinates remain absolute. For
+each coordinate d,
+ead = 2
+xd −q01,d
+q99,d −q01,d + 10−6 −1.
+(4)
+The training action sequences are flattened across
+time to estimate the 1st and 99th percentiles, using
+5,000 histogram bins per coordinate.
+Normalized
+actions are zero-padded to 32 dimensions. Let La,
+Lf, and Lp denote mean flow-matching squared errors
+over motion/gripper, force, and padding coordinates,
+respectively. The loss is
+LSFT = 7La + 6(0.05)Lf + 19Lp
+32
+.
+(5)
+SFT updates rank-16 vision–language LoRA, rank-
+32 action-expert LoRA, the visual encoder, action
+input/output projections, and time MLP. TacField
+additionally trains its randomly initialized temporal
+encoder.
+B
+Training Configuration and
+Workflow
+Table S1 summarizes the training stages.
+SFT
+uses AdamW with β = (0.9, 0.95), weight decay
+10−10, gradient-norm clipping at 1, and parameter
+EMA decay 0.99.
+The learning-rate schedule has
+peak/minimum values 2.5 × 10−5/2.5 × 10−6, 10,000
+warmup steps, and a cosine decay horizon of 1,000,000
+steps.
+The 128 parallel simulated environments are evenly
+split between the two RL tasks. Each round collects
+up to 300 control steps per environment, executing
+10 steps per action chunk. Updates exclude invalid
+steps after episode termination. Training stops at
+fixed round counts, and RL policies are evaluated at
+round 400.
+Task weighting uses success-rate EMA decay 0.9,
+weights in [0.5, 2.0], and sigmoid scale 10.
+C
+Success Criteria and Evalua-
+tion Protocols
+Success and termination.
+Simulation uses a
+world frame with z pointing upward. Relative to
+the basket center (0.050, −0.258, 0.761) m, the target
+must satisfy
+|∆x| < 0.16 m,
+|∆y| < 0.07 m,
+|∆z| < 0.06 m.
+(6)
+Other objects must remain within 0.02 m and 15◦
+of their initial poses. These conditions must hold
+for eight consecutive control steps, or 0.4 s at 20 Hz.
+Force does not enter the success criterion. Figure S1
+shows the goal region.
+Success terminates the episode. A triggered slip
+proxy or the 300-step (15 s) timeout counts as failure;
+simultaneous success and failure is counted as failure.
+Autonomous regrasping within an episode is allowed,
+with one outcome counted per episode. On hardware,
+placing the target in the basket with at most light
+contact with other objects counts as success. After
+a slip, the policy can still recover by adjusting and
+regrasping. In failed grasps of heavy objects, the
+gripper applied too little force to hold the object and
+the policy did not adjust its grasp. A timeout also
+counts as failure.
+Sampling and statistics.
+Simulation uses seeds
+160000–160004, with ten trials per task and seed,
+giving 50 trials per condition. The two graspable
+objects independently sample x, y within ±1 cm of
+their centers; orientations and the basket remain
+fixed.
+The gripper friction coefficient is 0.5, and
+other friction coefficients are randomized between 0.2
+and 0.6. Success rates are summarized by their mean
+and sample standard deviation across seeds.
+For
+main-paper Table 5, tasks are averaged within each
+seed before computing statistics; its Avg. column also
+averages the three tiers within each seed. Hardware
+entries aggregate ten trials per task, or 20 in total.
+Main-paper table settings.
+Tables 1–2 evalu-
+ate Coca-Cola at 150/200/250 g and Vitasoy at
+100/300/600 g. Gentle/Firm use adverb-conditioned
+SFT; Adaptive uses TacImage PiRL at round 400.
+Table 3 compares successful trajectories from SFT
+11
+
+
+Table S1. Stage configurations. RL rounds are outer rollout-and-update iterations.
+Setting
+SFT
+RL stage 1
+RL stage 2
+Initialization
+Pretrained π0.5
+SFT step 30,000
+RL round 200
+Length
+30,000 updates
+200 rounds
+Continue to round 400
+Objective/reward
+Weighted flow matching
+1 on success, 0 otherwise
+1 on success, 0 otherwise
+Placement
+Fixed
+Planar ±1 cm
+Planar ±1 cm
+Static friction
+—
+0.5
+Gripper: 0.5; others:
+0.2–0.6
+Global batch / seed 32 / 42
+384 / 42
+384 / 42
+−0.2
+−0.1
+0.0
+0.1
+0.2
+0.3
+world x (m)
+−0.5
+−0.4
+−0.3
+−0.2
+−0.1
+0.0
+0.1
+0.2
+world y (m)
+goal region (success box)
+|Δx| < 0.16 m, |Δy| < 0.07 m, |Δz| < 0.06 m
+held for 8 consecutive control steps
+basket centre (0.050, -0.258)
+Vitasoy initial region
+x ∈ [-0.063, -0.043]
+y ∈ [+0.158, +0.178]
+Coca-Cola initial region
+x ∈ [+0.0035, +0.0235]
+y ∈ [-0.090, -0.070]
+cookie (distractor) initial region
+x ∈ [+0.082, +0.102]
+y ∈ [+0.025, +0.045]
++x
++y
+(a) Top-down render, robot hidden (z up, table ≈ 0.76 m)
+(b) Third-person camera view at reset (policy input)
+Squares: ±1 cm uniform initial regions, sampled independently per object; white dots: spawned positions in this render (seed 0). Task 6, stage-1 scene.
+Figure S1. Goal region and camera view. The green rectangle marks the horizontal success region. Colored
+squares indicate independently sampled ±1 cm initial placement regions; the right panel shows the policy’s third-person
+camera view.
+step 30,000 and PiRL round 400 for both representa-
+tions. Table 4 crosses the two tasks, three tiers, two
+representations, and three RL routes. Table 5 uses
+the same PiRL checkpoint for Full and w/o FAST,
+SFT for w/o RL, and a policy without tactile input
+for PiRL†.
+Table 6 compares fixed placements with target-
+only planar offsets bounded by ±6 cm, using SFT
+and PiRL for both representations. Table 7 uses fixed
+placements and film-covered tactile sensors: Coca-
+Cola at 150/550/700 g and Vitasoy at 100/500/650
+g. Its tactile variants use TacImage. Evaluation is
+asynchronous except for w/o FAST.
+D
+Gripper and Force Interface
+The platform combines an xArm 7, a custom single-
+actuator parallel gripper driven by a DM4310 motor,
+two Xense optical tactile sensors, and external/wrist
+RGB-D cameras. Gripper travel is 0–0.045 m, with
+a tool-center-point (TCP) offset of 0.232 m along
+link7’s z axis. Each pad measures 17.5 × 29.3 × 2
+mm and provides a 400 × 700 tactile image with an
+11 × 20 marker grid.
+Force targets and measurements use aligned local
+contact coordinates: x points up, y forward, and z
+along the closing axis, with the two fingers’ z axes
+pointing in the same direction. Real forces are esti-
+mated by Xense from pad deformation. Simulated
+forces come from contact sensors and are transformed
+from world to fingertip coordinates; Taxim/FOTS
+supply tactile observations.
+After unnormalization, the first six action coordi-
+nates add back the inference-time state to recover
+absolute TCP position and rotation vector. Simu-
+lation uses differential inverse kinematics; hardware
+converts TCP targets to flange poses before sending
+them through the robot SDK. The gripper coordi-
+nate sets opening, and the final six coordinates specify
+bilateral force targets.
+The
+Tabero-style
+hybrid
+controller
+separates
+squeeze s = |fL,z| + |fR,z| from net external load.
+A proportional force-error correction, with a dead-
+band and travel limits, adjusts the predicted opening;
+end-effector translation regulates net load. Correc-
+tions are relative to each current prediction and do
+not accumulate across steps. The six force targets
+are realized through coupled arm/gripper motion,
+not six independent actuators; differences between
+12
+
+
+the fingers’ tangential forces have no independent
+force-driven rotation channel. Force feedback runs
+at 60 Hz in simulation and 20 Hz on hardware, with
+hardware commands sent at 100 Hz.
+E
+Tactile Input Specifications
+TacImage.
+Eight frames per finger, including the
+current frame, are collected at 20 Hz. Each image
+is resized to 224 × 224 and then to a 56 × 56 tile,
+without cropping or background subtraction. A 4 × 4
+grid places left-finger frames in the left half and right-
+finger frames in the right half, ordered from oldest
+to newest in row-major order within each half. The
+resulting 224×224 RGB image is normalized to [−1, 1]
+and shares the camera SigLIP encoder. With patch
+size 14, it contributes 256 visual tokens.
+TacField.
+The input contains one fixed reference
+frame and eight recent frames of absolute marker
+coordinates, shaped 9 × 440 × 2. The first 220 mark-
+ers belong to the left finger and the remainder to
+the right, following fixed grid indices. Coordinates
+remain in pixels, without reference subtraction or
+additional normalization. Both representations re-
+peat the earliest frame when fewer than eight history
+frames are available.
+TacField uses two residual causal convolution
+blocks with kernel size 3, dilation 1, hidden dimension
+4096, and SiLU activation, followed by a projection
+to 2048 dimensions.
+It has approximately 73.2M
+parameters and emits one token appended to the
+image/language prefix. Only the final time-step out-
+put is retained: its five-frame receptive field uses the
+five most recent frames, so the reference and earliest
+three history frames do not affect the output. The
+encoder is trained during SFT and frozen during RL.
+TacField shares TacCoRL’s history-to-token idea, but
+uses marker coordinates and one prefix token, rather
+than taxel readings with tokens injected into both
+prefix and suffix.
+F
+Sim–Real
+Alignment
+and
+Mixed Data
+Real and simulated data pair the same action trajec-
+tories with their respective observations. Real force
+preprocessing confirms jumps over four consecutive
+samples, with per-axis single-step thresholds [4, 10, 4]
+N and an absolute cap of 60 N. Simulation uses re-
+constructed object assets and an xArm 7 asset with
+the same TCP offset, pose units, and rotation-vector
+convention.
+The external camera is located at (0.6993, 0, 1.5702)
+m in the world frame. The wrist camera is offset by
+(0.11, 0, 0.05) m from link7 and rotated −35◦about
+its local x axis. Hardware uses the stored RealSense
+intrinsics; simulated cameras update at 20 Hz.
+Taxim and FOTS share a tactile-pad height map
+from an internal depth camera.
+Taxim generates
+RGB images; FOTS combines the height map and
+relative sensor–object motion to produce 220 marker
+coordinates per finger. Both use sensor calibration
+with a 2 mm pad and a scale of 19.58 pixels/mm.
+FOTS normal-expansion, shear, and torsion coeffi-
+cients are (3.0, 1.8, 3.8) × 10−4.
+Grid parameters
+(x0, y0, ∆x, ∆y) are (29.8, 50.0, 32.8, 31.75) for the left
+finger and (31.95, 56.0, 33.7, 31.45) for the right, in
+pixels. Gripper-pad static and dynamic friction coef-
+ficients are both 0.5.
+G
+RL
+Routes
+and
+Training
+Budgets
+Table S2 summarizes PiRL, DSRL, and RL Token
+(RLT). The routes share environment count, outer
+rounds, control rate, and a ten-action training pre-
+fix. Nominal environment interaction budgets are
+matched. The routes differ in gradient updates, re-
+play reuse, and the cost of learning the RLT repre-
+sentation. Proprioceptive state is available to critics
+only.
+PiRL uses policy/value clipping of 0.2, Huber
+threshold 10, no advantage normalization, and no
+entropy bonus. DSRL averages its Q ensemble; RLT
+uses the minimum target Q. Both use target-network
+soft updates with coefficient 0.005. RLT addition-
+ally learns its 2048-dimensional token representation
+for 20,000 offline steps before RL, then freezes that
+encoder.
+The DSRL actor uses two camera views plus the
+tactile image for TacImage, or two views plus an
+880-dimensional tactile input for TacField. TacImage
+uses an 80,000-transition ring buffer; TacField uses
+trajectory replay with cache and sampling-window
+sizes of eight. RLT uses a 100,000-transition buffer
+and begins 2,000 warmup updates after collecting at
+least 256 transitions.
+Figure S3 shows rollout success over rounds 1–400
+in six archived runs conducted under a separate train-
+ing configuration.
+(a)
+(b)
+Figure S2. Tactile sensor surface before and after
+applying the film. (a) Bare tactile pad. (b) Tactile pad
+with the film used for slip evaluation.
+13
+
+
+Table S2. RL implementation settings. Learning rates are listed as policy / value or critic. All routes freeze the VLA
+parameters outside their stated trainable modules.
+Setting
+VTLA-RL (PiRL)
+VTLA-DSRL
+VTLA-RLT
+Algorithm
+PPO with GAE
+SAC in initial-noise space
+Off-policy actor–critic
+with BC regularization
+Trainable modules
+Action-expert LoRA (rank
+32), value head
+Noise actor, observation
+encoders, ten Q heads,
+entropy temperature
+Residual MLP and twin Q
+networks, each 256 × 3
+Action space
+10 × 13 executed
+coordinates
+32-dimensional initial
+noise, repeated across 50
+steps
+10 × 13 normalized
+residual, bounded by ±4
+State access
+No policy proprioception.
+The value head uses prefix
+features and proprioceptive
+state
+No actor proprioception.
+The critic uses 7D
+proprioceptive state
+The actor uses a 2048D
+RL token and reference
+actions. The critic uses
+the same token and 7D
+proprioceptive state
+Exploration
+One stochastic step among
+ten denoising steps; noise
+0.5
+Gaussian noise policy;
+learned temperature,
+target entropy −16
+Fixed Gaussian standard
+deviation 0.05
+Learning rates
+10−6/10−4
+10−4/(3 × 10−4)
+10−4/(3 × 10−4)
+Discount
+0.99; GAE λ = 0.95
+0.999
+0.995
+Update schedule
+One pass per rollout
+Eight updates per ready
+rollout
+One critic update per 32
+new transitions;
+critic:actor ratio 4:1
+H
+FAST Timing and Ablation
+Definition
+FAST runs observation collection, inference, and ex-
+ecution concurrently. Tactile history updates at 20
+Hz.
+Predictions align to observation timestamps,
+and elapsed actions are skipped. Four interpolation
+points between base targets yield 100 Hz hardware
+commands. The force correction is applied after inter-
+polation and removed from the action written back
+to the buffer, preventing accumulation.
+Overlapping chunks are fused from oldest to newest.
+A new chunk’s weight increases linearly from 0.2 to
+0.8 over three base steps, with complementary weight
+on the previous result.
+Translation, gripper, and
+force interpolate linearly; rotation interpolates in lo-
+cal rotation-vector coordinates. Fusion is recomputed
+from original chunks after each admission.
+Asynchronous simulation retains all 50 predicted
+actions (2.5 s) and requires admitted observation
+timestamps to be at least 0.2 s apart.
+Hardware
+retains the first 10 actions (0.5 s), admits returned
+predictions immediately, and permits one inference
+in flight. Its first chunk starts at arrival time. When
+waiting for a target, simulation pauses, with a 30 s
+timeout; hardware holds its last command, suspends
+force correction and history updates, and stops after
+2 s. Fully expired hardware targets cause immediate
+stopping and are not replayed.
+For TacImage PiRL at round 400, 40,594 simulation
+inference events give median/P95 wall-clock round-
+trip times of 0.353/0.953 s.
+The mean admitted-
+observation interval is 0.213 s in simulation time,
+approximately 4.7 Hz.
+These shared-service mea-
+surements distinguish wall-clock inference time from
+simulation-time refresh rate.
+The w/o FAST control uses synchronous inference
+followed by ten open-loop actions. Simulation pauses
+during inference and refreshes the policy every 0.5 s;
+both execution modes retain the same 60 Hz force-
+feedback controller. Hardware w/o FAST also uses
+synchronous ten-action prefixes.
+I
+Tactile Sensor Surface for Slip
+Evaluation
+Figure S2 shows the tactile pad before and after
+applying the film used in the real-robot mass-tier
+tests (main paper, Table 7).
+The film covers the
+surface that contacts the object. Reducing friction
+at this interface makes slip events easier to observe
+during grasping and transport, allowing us to evaluate
+the policy’s grasp adjustments.
+14
+
+
+Cumulative RL round
+0
+20
+40
+60
+80
+100
+Training success rate (%)
+Stage 1
+Stage 2
+PiRL | TacImage
+Cumulative RL round
+Stage 1
+Stage 2
+DSRL | TacImage
+Cumulative RL round
+Stage 1
+Stage 2
+RLT | TacImage
+0
+100
+200
+300
+400
+Cumulative RL round
+0
+20
+40
+60
+80
+100
+Training success rate (%)
+Stage 1
+Stage 2
+PiRL | TacField
+0
+100
+200
+300
+400
+Cumulative RL round
+Stage 1
+Stage 2
+DSRL | TacField
+0
+100
+200
+300
+400
+Cumulative RL round
+Stage 1
+Stage 2
+RLT | TacField
+Faint: raw task rates  |  Solid: stage-wise 10-round trailing means  |  Single training seed (42)
+Coca-Cola
+Vitasoy
+Two-task mean
+Figure S3. Training success rates in archived runs. Each panel shows Coca-Cola, Vitasoy, and their equally
+weighted mean for seed 42. Faint lines show per-round task success rates, and solid lines show ten-round trailing
+means computed separately within each stage. Stage 2 starts after round 200. For RLT–TacField, rounds 211–212 use
+measurements recorded before a process restart.
+15

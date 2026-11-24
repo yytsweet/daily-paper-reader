@@ -1,0 +1,1971 @@
+Defending Vision-Language-Action Models against Transferable Attacks via
+Visual-Proprioceptive Consistency
+Jiahao Wang
+University of Arizona
+jiahaow@arizona.edu
+Ming F. Li
+University of Arizona
+lim@arizona.edu
+Han Xu
+University of Arizona
+xuhan2@arizona.edu
+Abstract
+Vision-Language-Action (VLA) models have demon-
+strated strong capabilities in a wide range of robotic tasks.
+However, adversarial attacks in VLA models have shown
+strong transferability across robotic tasks, posing signifi-
+cant threats to robotic systems. Despite their different attack
+strategies, we observe that these transferable attacks share
+a common consequence: they disrupt the VLA model’s per-
+ception towards the robot itself.
+Motivated by this ob-
+servation, we propose a proprioception-grounded defense
+framework that leverages trusted proprioceptive informa-
+tion to detect and mitigate transferable adversarial attacks.
+Specifically, we utilize the robot’s proprioceptive states to
+establish a trusted spatial reference, and compare it with
+the robot’s perceived location inferred from visual features.
+Discrepancies between these two sources provide a reliable
+signal for detecting adversarial attacks. Extensive exper-
+iments demonstrate effective detection of transferable ad-
+versarial patches and improved closed-loop performance.
+Real-robot experiments further demonstrate the effective-
+ness of our defense on real-world robotic tasks.
+1. Introduction
+Vision-Language-Action (VLA) models [1, 9, 11] leverage
+pretrained vision-language models to learn general-purpose
+robot policies, and have demonstrated strong capabilities in
+a wide range of robotic tasks. These models rely on cam-
+era observations to perceive their surroundings and extract
+visual features to guide action generation. However, prior
+studies have shown that vision models are usually vulnera-
+ble to adversarial perturbations [2, 8, 34]. Such vulnerabil-
+ities pose significant safety risks to VLA models, as adver-
+sarial perturbations can corrupt visual representations and
+consequently lead to incorrect robot actions.
+More dangerously, recent studies have demonstrated that
+many adversarial attacks against VLA models can trans-
+This manuscript is a preprint.
+fer across different robotic tasks [7, 16, 26, 28]. As illus-
+trated in Figure 1 (a), an adversarial patch can simultane-
+ously cause failures in different tasks, even when these tasks
+are unknown to the attacker. In practice, attackers can de-
+velop such transferable patches using publicly available pre-
+trained VLA checkpoints and datasets. If a VLA model is
+fine-tuned from one of these checkpoints, it is also likely to
+be vulnerable to the same attack, even if the attacker has
+no access to its fine-tuned parameters or private training
+data. Thus, this transferability could pose significant safety
+threats to real-world VLA deployment, as attackers can tar-
+get a wide range of downstream tasks without developing
+task-specific attacks.
+To better understand why adversarial attacks can trans-
+fer across different robotic tasks, we first conduct a visual-
+ization analysis to examine the VLA model’s visual rep-
+resentations under attacks. Specifically, we analyze rep-
+resentative transferable attacks in Section 2.2 and identify
+two common mechanisms. (1) Some attacks broadly dis-
+rupt visual features, including the object and robot-related
+features to mislead the model’s perception across different
+scenes and tasks [7]. This mechanism is similar to uni-
+versal adversarial attacks observed in general vision mod-
+els [10, 32, 33].
+(2) Other attacks target the perception
+towards the robot itself [16, 26, 28]. Through explicitly
+or implicitly mimicking visual features associated with the
+robot, these attacks mislead the model’s perception of the
+robot. Since accurate perception of the robot is important
+across different tasks, such attacks can also achieve cross-
+task transferability.
+Despite their different mechanisms, we found that both
+types of attacks share a common consequence: they dis-
+tort the visual representation of the robot itself. This
+observation reveals an important opportunity for defense:
+While adversarial patches can mislead a VLA model’s vi-
+sual perception of the robot, they cannot alter the robot’s
+actual physical state. In fact, robots continuously measure
+their own states through proprioceptive sensors, which pro-
+vide information such as joint positions and orientations in-
+dependently of camera observations. We can leverage this
+arXiv:2611.28346v1  [cs.RO]  20 Nov 2026
+
+
+Clean
+Attack
+Clean
+Attack
+Adversarial patch
+Same patch, different unseen tasks
+Optimized on a
+public model and
+public dataset
+no access to the
+deployed models
+or their data
+intended
+hijacked
+Task A
+“pick up the black bowl
+on the cookie box and
+place it on the plate”
+hijacked
+Task B
+“put the yellow and
+white mug in the
+microwave and close it”
+hijacked
+OpenVLA
+π0
+(a)
+(b)
+Robot location from visual features
+Robot location from proprioception
+Figure 1. Transferable adversarial attacks against VLA models. (a) A single adversarial patch optimized using a public VLA model and
+source-task data can compromise fine-tuned VLA models on unseen downstream tasks. (b) Adversarial patches distort robot-related visual
+representations, causing the visually inferred robot location to deviate from its proprioception-based location.
+proprioception information to verify whether a VLA’s vi-
+sual perception of the robot is reliable.
+Therefore, we propose a proprioception-grounded de-
+fense framework that detects adversarial attacks by check-
+ing the consistency between proprioceptive information and
+visual representations. First, we use the robot’s proprio-
+ceptive state, together with its kinematic model and cam-
+era calibration, to determine where the robot should appear
+in the camera scene. We then analyze the VLA model’s
+visual features to estimate where the model perceives the
+robot. As shown in Figure 1 (b), these two estimates are
+consistent under benign conditions but diverge when attacks
+distort the robot’s visual representation. By measuring this
+discrepancy, our framework can detect adversarial attacks
+without requiring any additional training or expensive in-
+ference. Upon detection, our framework also leverages this
+discrepancy to locate and resist the adversarial attacks.
+We conduct extensive experiments on OpenVLA [11]
+and π0 [1] across LIBERO [13] task suites and various ad-
+versarial attacks. Results demonstrate that our framework
+can accurately detect various transferable attacks, outper-
+forming existing detection baselines. Beyond detection, our
+framework effectively mitigates adversarial patches and sig-
+nificantly improves task success under attack. To further
+examine the robustness of our detection, we conduct two
+adaptive attacks by preserving robot-related visual features
+and minimizing the visual-proprio inconsistency score. We
+find that both strategies reduce attack effectiveness, sup-
+porting the reliability of the defense design. Real-robot ex-
+periments further demonstrate the effectiveness of our de-
+fense on real-world robotic tasks.
+Our contributions are summarized as follows:
+• We identify a shared mechanism of transferable adver-
+sarial attacks in VLA: these attacks compromise robot-
+related visual representations. This observation motivates
+leveraging trusted robot proprioception to verify the reli-
+ability of visual perception.
+• We develop a principled, lightweight, and attack-agnostic
+defense framework that leverages visual-proprioceptive
+consistency checking to detect, localize, and mitigate ad-
+versarial attacks. Our approach requires no adversarial
+examples or additional model training and can be inte-
+grated into existing VLA models without modifying their
+parameters. To the best of our knowledge, it is the first
+work to leverage robot proprioceptive information for
+adversarial defense in VLA models.
+• Extensive experiments across two VLA models and a
+broad range of attacks validate the effectiveness and gen-
+eralizability of our defense. Evaluations under benign vi-
+sual variations and adaptive attacks, together with real-
+robot experiments, further validate its reliability.
+2. Preliminary
+In this section, we first introduce the basic notations and the
+threat model considered in this work. Then, we review rep-
+resentative adversarial attacks in VLA models and conduct
+initial analysis on their attack mechanisms.
+2.1. Definitions and notations
+Vision-Language-Action (VLA) models learn policies that
+map visual observations and language instructions to exe-
+cutable robot actions. We define a given VLA model as
+πθ, which takes inputs ot =
+
+I1
+t, · · · , In
+t , lt, qt
+
+at time
+step t, where Ii
+t is the image of the i-th camera view, lt
+is the language instruction, and qt is the proprioceptive
+state. The model predicts an action or action chunk: At =
+[at, · · · , at+h−1] to control the robot’s motion. VLA mod-
+els are typically trained on robot demonstrations collected
+
+
+VLA-Hijack
+UPA-RFAS
+UADA
+Phantom robot
+0
+1
+2
+0.0
+0.5
+1.0
+Figure 2. Visualization of representative attacks.
+across different tasks. VLA models employ Visual Trans-
+former (ViT)-based visual encoders such as DINOv2 [21]
+and SigLIP [31] to extract visual representations from the
+input image.
+We denote the extracted visual features as
+zt ∈RK×d, where K denotes the number of visual tokens
+and d is the feature dimension. The feature of the k-th token
+is denoted by zt,k.
+2.2. Threat model and attack mechanism analysis
+Threat Model. We focus on adversarial patch attacks [7,
+16, 26, 28] that can transfer across robotic tasks. As illus-
+trated in Figure 1 (a), a single adversarial patch can compro-
+mise multiple robotic tasks, even when these tasks are un-
+known to the attacker. Such attacks do not require access to
+target-task data or the victim model’s fine-tuned parameters.
+Instead, the attacker optimizes an adversarial patch using a
+publicly accessible VLA model and source-task data D col-
+lected from diverse robotic tasks. The same patch can then
+be directly transferred to victim models fine-tuned from the
+public VLA checkpoint on unseen downstream tasks. Such
+transferability poses a significant threat to real-world VLA
+deployment, as a single adversarial patch can compromise
+a wide range of robotic applications.
+There are several strategies to generate these patches. As
+a representative example, the work [26] introduces the Un-
+targeted Action Discrepancy Attack (UADA), which aims
+to mislead the VLA model into generating incorrect robot
+actions. Specifically, UADA optimizes an adversarial patch
+to maximize the deviation between the predicted action
+aadv and the correct action a:
+LUADA = ED∥a −aadv∥2
+2,
+(1)
+where D denotes the attacker’s source data collected from
+diverse robotic tasks.
+To better understand this attack, we extract visual fea-
+tures from the VLA model’s vision encoder before and af-
+ter applying the adversarial patch. We then measure the
+change in each visual token’s representation zk.1 As shown
+in Figure 2 (middle), these changes are primarily concen-
+trated around the patch location, while other regions remain
+largely unchanged. In Figure 2 (bottom), we further ex-
+amine the robot-likeness of visual features by measuring
+their similarity to robot-related features (see Section 3.2).
+We find that the adversarial patch introduces strong robot-
+like features at its location. This suggests that the attack
+can mislead the VLA model’s perception of the robot itself,
+even though its optimization objective directly targets the
+predicted actions. Interestingly, this effect resembles intro-
+ducing an additional robot into the observation to mislead
+the VLA model, which we refer to as a “phantom robot” in
+Figure 2. Some other attacks, such as UPA-RFAS [16], also
+exhibit similar effects.
+In contrast, VLA-Hijack [7] aims to suppress the VLA
+model’s visual perception of the original robot. Specifically,
+it adopts a weighted visual feature disruption objective:
+Lsupp =
+P Wrobot ⊙sim(z, zadv)
+P Wrobot
+,
+(2)
+where Wrobot is a weighting matrix that assigns higher
+weights to robot-related regions. By minimizing this ob-
+jective, the attack encourages greater feature disruption in
+these regions.
+Figure 2 (bottom) shows that the robot-
+related features at the original robot location are substan-
+tially suppressed.
+Meanwhile, Figure 2 (middle) reveals
+widespread changes in visual representations across the im-
+age. One possible explanation is that precisely suppressing
+robot-related features can be challenging, leading to broader
+feature disruption beyond the original robot region.
+3. Methodology
+Analysis in Section 2.2 reveals that transferable adversar-
+ial patches disrupt or spoof robot-related visual representa-
+tions. This inspires us to introduce Visual-Proprio Con-
+sistency (VPC) Detection to identify adversarial attacks by
+measuring the discrepancy between the robot’s visual per-
+ception and its proprioceptive state. Upon detection, we
+further propose a gradient-based localization and mitigation
+strategy to identify and suppress suspicious visual regions.
+3.1. Proprioception-Guided Mask Generation
+To establish a trusted reference for the robot, we use its
+proprioceptive state to determine where it should appear in
+the camera image. As illustrated in Figure 3, we first ob-
+tain the 3D shapes and dimensions of the robot’s compo-
+nents, which are typically provided by the robot manufac-
+turer, and uniformly sample points on their surfaces. At
+1The representation change for each visual token k is measured as 1 −
+cos(zk, zadv
+k
+), where zk and zadv
+k
+denote its features under clean and
+adversarial observations, respectively.
+
+
+timestep t, the robot’s proprioceptive state qt provides its
+current joint states, allowing us to calculate the 3D locations
+of these sampled points using forward kinematics. Since
+the camera’s position, orientation, and imaging parameters
+are known from prior calibration, we can project these 3D
+points onto the camera image. Finally, we use the projected
+points to construct a robot mask mt, where mt,k indicates
+whether the k-th token belongs to the expected robot region:
+mt,k =
+(
+1,
+if token k belongs to the robot region,
+0,
+otherwise.
+(3)
+Here, k = 1, . . . , K, where K denotes the number of visual
+tokens. The resulting mask provides an independent spa-
+tial reference derived from the proprioception. More details
+could be found in Appendix A.
+Figure 3. Left: Uniformly sample 3D points from the surfaces of
+the robot’s components using their shapes and dimensions. Mid-
+dle: Project these points onto the camera image using calibrated
+camera parameters and proprioceptive state. Right: Generate a
+binary robot mask from the projected points.
+3.2. Visual-Proprioceptive Consistency Detection
+We next aim to determine where the VLA model perceives
+the robot in the image. To this end, we examine the visual
+features extracted by the VLA’s vision encoder to determine
+which image tokens exhibit robot-related features
+Robot Feature Distribution. To determine whether a
+visual token represents the robot, a straightforward way is to
+measure its similarity to a reference robot feature. However,
+the robot’s visual features can vary across different config-
+urations, camera viewpoints, and visual conditions. A sin-
+gle reference feature may not adequately represent the robot
+across different observations. Therefore, we model robot-
+related visual features using a Gaussian distribution. Specif-
+ically, given a set of clean observations from the training
+data, we extract visual features using the VLA model’s vi-
+sion encoder. For each observation, we collect robot-related
+features from tokens with mt,k = 1, according to Eq. 3.
+We then compute their mean µR and covariance ΣR, which
+characterize the typical robot features and their variations.
+We refer to the resulting Gaussian distribution N(µR, ΣR)
+as the robot feature distribution (R-distribution).
+During model inference, we need to locate the robot
+from visual features. To achieve our goal, we aim to deter-
+mine whether a visual token is associated with the robot by
+measuring its compatibility with the R-distribution. Specif-
+ically, we use the squared Mahalanobis distance to measure
+how well each token’s visual feature fits the R-distribution:
+DR(zt,k) = (zt,k −µR)⊤Σ−1
+R (zt,k −µR).
+(4)
+A smaller distance indicates that the visual token is more
+consistent with the distribution of robot-related features.
+We therefore use this distance to assess how strongly each
+visual token matches the robot’s visual representation.
+Distinguishing Robot from Background. However, the
+semantic information captured by visual features can differ
+substantially across vision encoders and feature layers. For
+example, features from deeper layers may become increas-
+ingly similar across various locations, making it difficult to
+distinguish robot tokens using Eq. 4 alone. To reduce the
+dependence on specific encoders and layers, we introduce
+a background feature distribution (B-distribution) as an ad-
+ditional reference. By contrasting each token’s distance to
+the two distributions, we adopt a discriminative matching
+strategy that evaluates its relative compatibility with robot
+and background features.
+We construct the background
+feature distribution (B-distribution) N(µB, ΣB) using the
+same procedure as the R-distribution, but collecting vi-
+sual features from tokens with mt = 0. We then com-
+pute the squared Mahalanobis distance DB(zt,k) to the B-
+distribution and define the robot-likeness score as the dif-
+ference between the two distances:
+Rt,k = DB(zt,k) −DR(zt,k).
+(5)
+A higher score indicates that the token’s visual feature is
+more consistent with the robot distribution than with the
+background distribution.
+Finally, we apply spatial softmax to the scores Rt,k
+to obtain a normalized visual localization distribution πt,
+where πt,k = softmaxk(Rt,k/T) and T is the temperature
+parameter. This distribution indicates where the VLA’s vi-
+sual features suggest the robot is located (we use this as the
+robot-likeness scores in Figure 2 (bottom)).
+Attack Detection. If the robot is correctly perceived, vi-
+sual tokens with high robot-likeness should be concentrated
+within the region predicted by proprioception. To quantify
+deviations from this expectation, we compute the distance
+from each visual token to the nearest token with mt,k = 1.
+We then aggregate these distances weighted by the visual
+localization distribution πt:
+DPV(xt, qt) =
+v
+u
+u
+t
+K
+X
+k=1
+πt,k
+min
+j:mt,j=1 ∥pk −pj∥2
+2,
+(6)
+where pk denotes the spatial center of visual token k. A
+larger discrepancy indicates that the robot-related visual
+evidence deviates further from its expected location. We
+therefore detect an attack using DPV as an indicator of the
+visual-proprioceptive inconsistency.
+
+
+3.3. Consistency-Guided Patch Localization and
+Mitigation
+Once an adversarial attack is detected, our goal is to sup-
+press the patch’s influence while preserving task-relevant
+visual information. To achieve this, we first identify sus-
+picious image regions and then selectively suppress their
+influence through attention masking. Specifically, we lever-
+age the differentiability of DPV and use gradient-based at-
+tribution to identify regions that contribute most to the in-
+consistency. To reduce the noise from the gradients and
+obtain a more accurate estimation, we adopt a Smooth-
+Grad [22] based method, which averages gradients over
+multiple noisy perturbations of the input. Given an input
+image It, we compute the attribution map as
+A(u, v) =
+
+1
+L
+L
+X
+l=1
+∂DP V (It + η(l), qt)
+∂It(u, v, :)
+
+1
+,
+(7)
+where η(l) ∼N(0, σ2I), L is the number of noisy samples,
+and (u, v) denotes the pixel coordinates. Notably, high at-
+tribution values appear in both the adversarial patch and the
+actual robot region, as both can strongly influence the con-
+sistency score. To distinguish the patch from the robot itself,
+we leverage the proprioception-guided mask to exclude the
+expected robot region from the attribution map.
+Based on the attribution map obtained during localiza-
+tion, we rank the visual tokens according to their con-
+tribution to the detected inconsistency. We progressively
+mask the highest-ranked tokens and recompute DPV after
+each step. If the inconsistency remains above the detection
+threshold δ, we continue expanding the masked token set
+until the score falls below δ or a predefined masking bud-
+get is reached. This progressive strategy limits the extent
+of visual information suppression while reducing the de-
+tected inconsistency. To implement token suppression with-
+out modifying the input image, we mask the corresponding
+Key positions by adding a negative bias to the pre-softmax
+attention logits:
+eA = Softmax
+QK⊤
+√
+d
++ B
+
+, Bij =
+(
+−∞,
+j ∈Ht,
+0,
+otherwise,
+where Ht denotes the currently masked tokens. This mask-
+ing is applied across all attention layers of the visual en-
+coders, preventing the selected tokens from contributing to
+attention aggregation.
+4. Experiments
+We evaluate our defense across different VLA architectures,
+manipulation tasks, and adversarial attacks. We first com-
+pare VPC with existing vision-only defenses to highlight
+the benefits of incorporating robot proprioception. We then
+assess its ability to restore task performance through closed-
+loop evaluations in simulation and the real world. Finally,
+we evaluate robustness under natural visual variations and
+adaptive attacks.
+Models and benchmarks.
+We evaluate our method
+on two representative open-source VLA models, Open-
+VLA [11] and π0 [1], primarily in the LIBERO [13] sim-
+ulation environment across four task suites: Spatial, Object,
+Goal, and Long. We further validate our defense on a real-
+world robotic platform equipped with a WidowX AI robotic
+arm and an Intel RealSense D455f camera (in Section 4.3).
+Considered Attacks. We evaluate three adversarial patch
+attacks, VLA-Hijack [7], UPA-RFAS [16], and EDPA [28],
+on both models. We additionally evaluate four patch vari-
+ants: UADA, UMA, UPA, TMA from the work [26] on
+OpenVLA. These attacks are designed for OpenVLA’s dis-
+cretized action predictions and cannot be directly applied
+to π0, which generates continuous action chunks through
+flow matching. In our study, we optimize these attacks only
+in LIBERO-Spatial task suite. As shown in Table 1, they
+could also transfer to other task suites to cause task success
+rate drop.2 Beyond these adversarial patches, we introduce
+a phantom-robot attack that adds an additional robotic arm
+(the same as in Figure 2).
+Table 1. Task success rate under various attacks on LIBERO for
+OpenVLA (top) and π0 (bottom).
+Attack
+Spatial
+Goal
+Object
+Long
+VLA-Hijack
+0.00
+0.01
+0.00
+0.07
+UPA-RFAS
+0.00
+0.00
+0.00
+0.00
+UMA
+0.00
+0.01
+0.00
+0.00
+UADA
+0.00
+0.00
+0.00
+0.00
+UPA
+0.06
+0.10
+0.02
+0.01
+TMA
+0.00
+0.00
+0.00
+0.00
+EDPA
+0.00
+0.00
+0.00
+0.01
+Phantom
+0.06
+0.02
+0.07
+0.01
+Clean
+0.78
+0.68
+0.73
+0.53
+VLA-Hijack
+0.12
+0.40
+0.25
+0.08
+UPA-RFAS∗
+0.53
+0.85
+0.97
+0.70
+EDPA∗
+0.72
+0.94
+0.95
+0.65
+Phantom
+0.59
+0.36
+0.61
+0.25
+Clean
+0.95
+0.93
+0.95
+0.85
+4.1. Frame-Level Adversarial Detection
+We first aim to answer the core question: Given a fixed
+scene, can our VPC defense effectively detect adversar-
+2We observe UPA-RFAS and EDPA have limited transferability on π0.
+However, VLA-Hijack and Phantom remain effective, indicating that π0 is
+still vulnerable to transferable adversarial attacks.
+
+
+Table 2. Adversarial attacks detection comparison (AUROC) on OpenVLA (top) and π0 (bottom).
+Attack
+Deep kNN
+Feature Squeezing
+ARMOR
+Jedi
+LGS
+Ours
+Avg.
+Worst
+Avg.
+Worst
+Avg.
+Worst
+Avg.
+Worst
+Avg.
+Worst
+Avg.
+Worst
+VLA-Hijack
+0.990
+0.961
+0.932
+0.915
+0.954
+0.833
+0.953
+0.849
+0.931
+0.813
+0.992
+0.968
+UPA-RFAS
+0.979
+0.921
+0.923
+0.913
+0.853
+0.556
+0.929
+0.841
+0.699
+0.289
+0.999
+0.995
+UMA
+0.958
+0.834
+0.910
+0.895
+0.941
+0.889
+0.984
+0.944
+0.458
+0.082
+0.999
+0.997
+UADA
+0.952
+0.824
+0.921
+0.911
+0.829
+0.696
+0.951
+0.830
+0.752
+0.429
+0.998
+0.995
+UPA
+0.972
+0.890
+0.903
+0.868
+0.857
+0.696
+0.929
+0.841
+0.699
+0.289
+0.990
+0.976
+TMA
+0.942
+0.789
+0.922
+0.910
+0.959
+0.950
+0.983
+0.941
+0.379
+0.132
+0.998
+0.995
+EDPA
+0.994
+0.978
+0.921
+0.899
+0.851
+0.635
+0.979
+0.936
+0.445
+0.131
+0.995
+0.979
+Phantom
+0.781
+0.694
+0.533
+0.520
+0.509
+0.434
+0.501
+0.465
+0.502
+0.436
+0.974
+0.911
+VLA-Hijack
+1.000
+1.000
+0.995
+0.992
+0.921
+0.893
+0.931
+0.754
+1.000
+1.000
+0.998
+0.995
+UPA-RFAS
+0.998
+0.996
+0.566
+0.540
+0.439
+0.365
+0.971
+0.890
+0.765
+0.412
+0.986
+0.963
+EDPA
+1.000
+1.000
+0.711
+0.693
+0.513
+0.427
+0.985
+0.941
+0.765
+0.415
+0.998
+0.994
+Phantom
+0.713
+0.663
+0.621
+0.564
+0.477
+0.377
+0.497
+0.408
+0.543
+0.417
+0.950
+0.920
+ial attacks, and how does it compare with existing de-
+fenses? To this end, we evaluate OpenVLA and π0 across
+all four LIBERO suites under diverse attacks, comparing
+our method with existing detection baselines. We focus on
+frame-level detection here, leaving the evaluation of closed-
+loop defense performance to Section 4.2.
+Baseline Defenses. We select five representative vision-
+only defenses that rely solely on visual information, al-
+lowing us to evaluate the benefits of incorporating robot
+proprioception. Deep kNN [23] detects out-of-distribution
+inputs using feature-space distances, while Feature Squeez-
+ing [29] identifies adversarial examples through prediction
+inconsistencies under input transformations. ARMOR [14]
+exploits anomalous attention patterns in ViTs to locate and
+mask adversarial patches. Jedi [24] and LGS [19] iden-
+tify suspicious regions using image entropy and local gradi-
+ents, respectively, and mitigate their influence through im-
+age restoration or smoothing.
+Results.
+For each LIBERO task suite, we evaluate 280
+clean observations and 280 adversarial observations for
+each attack (40 episodes in each suite and 7 frames in each
+episode). We use AUROC to assess the ability to distinguish
+clean from attacked observations. Table 2 reports the mean
+and minimum AUROC across the four task suites for each
+attack, reflecting overall detection performance and per-
+formance in the most challenging suite, respectively. Our
+method achieves the highest mean and minimum AUROC
+on OpenVLA, while remaining highly effective on π0.
+For the baselines, Deep kNN achieves high AUROC
+on π0 under adversarial patch attacks, but its performance
+drops substantially on OpenVLA. As shown in Figure 4,
+patches optimized for π0 often exhibit visually irregular pat-
+terns, potentially producing distinctive out-of-distribution
+features that Deep kNN can readily detect.
+In contrast,
+patches targeting OpenVLA appear smoother and more vi-
+sually natural, making them potentially harder to distin-
+guish from benign features. This limitation becomes more
+evident under the phantom-robot attack, which introduces
+an additional robotic arm with a natural appearance into
+the observation. Similarly, Jedi, LGS, and ARMOR rely
+on specific visual cues, such as anomalous local entropy,
+gradients, or attention concentration, which may not consis-
+tently appear across different attacks. Unlike these vision-
+only defenses, VPC detects inconsistencies between visual
+representations and trusted robot proprioception, making it
+less dependent on attack-specific visual characteristics.
+VLA-Hijack UPA-RFAS
+EDPA
+VLA-Hijack UPA-RFAS
+EDPA
+OpenVLA
+
+Figure 4. Visualization of adversarial patches.
+4.2. Closed-Loop Defense Performance
+We next evaluate whether detection-guided intervention im-
+proves closed-loop task execution under attack. Using the
+LIBERO benchmark, we evaluate 100 episodes per suite
+with adversarial attacks detected by our VPC detector. Ta-
+ble 3 shows the closed-loop task success rate under vari-
+ous attacks with and without our defense method to show
+the defense’s effectiveness. We also report the performance
+for clean observations to validate that our method does
+not undermine the performance for benign observations.
+Results show that our method substantially improves task
+success rates under adversarial attacks, while preserving
+clean task performance. These results demonstrate that our
+attack-agnostic defense can effectively mitigate adversar-
+ial patches and restore closed-loop task performance across
+different VLA architectures and manipulation tasks.
+
+
+Table 3. Closed-loop task success rate (%) on OpenVLA (top) and
+π0 (bottom), with and without defense.
+Attack
+Spatial
+Object
+Goal
+Long
+w/
+w/o
+w/
+w/o
+w/
+w/o
+w/
+w/o
+VLA-Hijack
+64
+0
+73
+0
+70
+1
+42
+7
+UPA-RFAS
+67
+0
+70
+0
+69
+0
+46
+0
+UMA
+58
+0
+67
+0
+66
+1
+51
+0
+UADA
+69
+0
+75
+0
+68
+0
+45
+0
+UPA
+67
+6
+64
+2
+68
+10
+47
+1
+TMA
+68
+0
+71
+0
+71
+0
+48
+0
+EDPA
+68
+0
+67
+0
+68
+0
+45
+1
+Phantom
+67
+6
+64
+7
+70
+2
+40
+1
+Clean
+79
+78
+73
+73
+65
+68
+55
+53
+VLA-Hijack
+84
+12
+97
+25
+94
+40
+82
+8
+UPA-RFAS
+92
+53
+98
+97
+92
+85
+84
+70
+EDPA
+94
+72
+98
+95
+94
+94
+83
+65
+Phantom
+83
+59
+95
+61
+81
+36
+73
+25
+Clean
+94
+95
+94
+95
+94
+93
+85
+85
+Instruction: “Pick up the yellow duck and place it in the blue bowl.”
+Figure 5. Real-World Evaluation. Top: The VLA model fails to
+complete the task without defense due to the patch. Bottom: The
+VLA model successfully completes the task with defense.
+4.3. Real-World Experiments
+To further validate the practical effectiveness of our defense,
+we deploy our framework with OpenVLA on a real-world
+robotic platform consisting of a WidowX AI robotic arm
+and an Intel RealSense D455f camera.
+The robot is in-
+structed to “pick up the yellow duck and place it in the blue
+bowl”. Under clean conditions, the robot succeeds in 19 out
+of 20 trials. We then introduce a representative UPA [26] at-
+tack, as illustrated in Figure 5. Under this attack, the robot
+succeeds in only 5 out of 20 trials without defense. With
+our defense enabled, all 20 attacked trials are successfully
+detected, and our defense enables the robot to successfully
+complete 16 of them. These results demonstrate the effec-
+tiveness of our defense in mitigating adversarial patches and
+restoring task performance in real-world scenarios.
+4.4. Robustness to Natural Visual Variations
+In practical deployments, changes in lighting and back-
+ground are common and may substantially alter visual rep-
+resentations. To evaluate whether our method remains ef-
+fective under such changes, we conduct experiments us-
+ing the lighting and background variations provided by
+LIBERO-Plus [6]. Under this setting, we retain the detec-
+tor parameters learned from the original LIBERO dataset
+without retraining or adaptation to the shifted environments.
+Figure 6 visualizes the Mahalanobis-distance-based robot
+localization scores under natural visual variations and ad-
+versarial attacks. Despite the changes in visual appearance,
+our method continues to accurately localize the robot under
+benign conditions, while adversarial patches cause substan-
+tial localization deviations. Results in Table 4 show that our
+method remains robust under benign visual variations, and
+can still reliably detect adversarial attacks.
+Table 4. Detection performance (AUROC) under natural visual
+variation on OpenVLA (top) and π0 (bottom).
+Attack
+Spatial
+Goal
+Object
+Long
+VLA-Hijack
+1.000
+0.999
+0.998
+0.905
+UPA-RFAS
+0.996
+0.999
+0.999
+0.992
+UMA
+1.000
+0.998
+0.998
+0.993
+UADA
+1.000
+0.997
+0.999
+0.990
+UPA
+1.000
+0.985
+0.991
+0.945
+TMA
+1.000
+0.998
+0.999
+0.990
+EDPA
+1.000
+1.000
+0.999
+0.976
+Phantom
+0.980
+0.973
+0.990
+0.983
+VLA-Hijack
+1.000
+0.992
+1.000
+0.994
+UPA-RFAS
+0.985
+0.977
+1.000
+0.962
+EDPA
+0.997
+0.995
+1.000
+0.996
+Phantom
+0.979
+0.988
+0.942
+0.910
+Original
+Lighting
+Background
+Patch attack
+Figure 6. Detection under natural visual variants.
+4.5. Adaptive Attacks
+We further investigate whether an adaptive attacker can
+evade our defense while maintaining attack effectiveness.
+To this end, we consider two variants of UADA [26] with
+additional constraints on robot-related visual features and
+our detection criterion, respectively. We optimize and test
+these patches against OpenVLA on LIBERO-Spatial with
+different constraint weights λ.
+Feature-Preserving Attack. We first examine whether an
+attacker can effectively manipulate a VLA policy while pre-
+serving robot features. Specifically, we measure the nor-
+
+
+0
+10
+20
+30
+50
+Robot-feature
+preservation weight
+0%
+25%
+50%
+75%
+100%
+0 0.5 1
+3
+5
+10
+DPV regularization
+weight
+Robot feature change
+Task success
+Detection AUROC
+Task success
+Noise patch
+Clean task success
+Figure 7. Adaptive attacks. Left:Robot feature preserving attack.
+Right: Detection-aware attack.
+malized squared L2 distance between the visual features of
+robot tokens in clean and attacked images, averaged over
+all training samples. The attack performance is shown in
+Figure 7 (left), the dash lines show results under a random
+noise patch. When λ is set small, the attack distorts more
+robot visual features and achieves a high attack success rate.
+While when we increase λ, though more robot visual fea-
+tures are preserved, the attack success rate becomes much
+lower to be around a noise patch baseline. These results
+suggest that robot-feature disruption is an important con-
+tributor to attack effectiveness: constraining such disruption
+substantially weakens the attack. These findings support us
+to leverage the visual-proprio consistency to defend against
+these transferable attacks.
+Detection-Aware Attack. We further consider a stronger
+adaptive setting in which the attacker has full knowledge of
+our detection mechanism. Specifically, we directly incor-
+porate the proposed discrepancy score DPV into the UADA
+optimization objective, encouraging the patch to evade de-
+tection. As shown in Figure 7 (right), we observe a similar
+trade-off as above: weak regularization preserves attack ef-
+fectiveness but fails to evade detection, whereas stronger
+regularization reduces detectability at the cost of attack ef-
+fectiveness, eventually approaching the random-noise base-
+line. These results demonstrate the difficulty of circumvent-
+ing our defense under the evaluated adaptive attacks.
+5. Related Work
+Adversarial Attacks and Defenses on VLA models.
+Re-
+cent studies have demonstrated the vulnerability of VLA
+models to adversarial attacks. RobotAttack [26] introduces
+adversarial patches that manipulate predicted actions and
+disrupt robotic trajectories. Moving beyond action-space
+attacks, EDPA [28] and UPA-RFAS [16] disrupt visual rep-
+resentations and cross-modal alignment to achieve effective
+and transferable attacks. VLA-Hijack [7] further exploits
+the visual self-representation of robots to improve transfer-
+ability. Beyond 2D patches, Tex3D [3] optimizes adversar-
+ial textures on 3D object surfaces to disrupt a robot across
+varying viewpoints, Universal Adversarial Object [30] in-
+troduces a textured physical object to disrupt robotic con-
+trol, and Phantom Menace [18] investigates physical sensor
+attacks, including light projection and laser interference.
+Compared with adversarial attacks, defenses for VLA
+models remain relatively underexplored. SARF [35] im-
+proves robustness by fine-tuning the visual encoder to rec-
+tify adversarially disrupted attention.
+However, its re-
+liance on robust fine-tuning with adversarial inputs and
+model-specific attention mechanisms may limit its adapt-
+ability to unseen attacks and different VLA architectures.
+CertVLA [15] provides certified robustness through re-
+peated masking and action consistency verification, but in-
+curs substantial computational overhead due to multiple
+VLA inference passes. In contrast, our method is based
+on visual-proprio consistency, which provides a lightweight
+model-agnostic defense framework.
+This enables our
+framework to generalize well without additional training.
+Proprioception in VLA Models.
+Recent studies have ex-
+plored proprioception as a source of physical priors to en-
+hance visual understanding in VLA models. One line of re-
+search focuses on grounding visual representations in robot
+states. ROSA [27] leverages robot state estimation to im-
+prove vision-action alignment and data efficiency, while
+GeoProp [36] and GeoAlign [4] incorporate proprioceptive
+information to enhance spatial grounding. Another line of
+research focuses on improving inference efficiency by lever-
+aging proprioception to guide visual information process-
+ing. ThinkProprio [25] uses robot states to select action-
+relevant visual tokens, whereas SQAP-VLA [5] preserves
+robot-related tokens during model compression.
+Mean-
+while, ReViP [12] and GAP [17] investigate modality im-
+balance between vision and proprioception to improve pol-
+icy learning and generalization.
+These studies primarily
+leverage proprioception to improve policy performance or
+computational efficiency, while our work is the first one to
+explore its potential for adversarial defense.
+6. Conclusion and Limitation
+In this paper, we investigate the mechanisms of transferable
+adversarial attacks for VLAs. Based on this analysis, we
+build an attack-agnostic defense framework that leverages
+proprioception as a trusted reference to detect inconsisten-
+cies in visual robot localization.
+Our framework primarily targets transferable adversar-
+ial patches that disrupt robot-related visual representations
+and cannot defend against all possible attacks.
+For ex-
+ample, task-specific attacks may manipulate object percep-
+tion without affecting the robot’s visual representation. De-
+
+
+fending against such attacks remains challenging even in
+conventional computer vision [20, 37].
+However, task-
+specific attacks may require detailed knowledge of target
+tasks and objects, potentially limiting their transferabil-
+ity across different tasks. We hence focus on transferable
+attacks as an initial step toward more robust VLA mod-
+els.
+References
+[1] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 1, 2, 5
+[2] Tom B Brown, Dandelion Man´e, Aurko Roy, Mart´ın Abadi,
+and Justin Gilmer.
+Adversarial patch.
+arXiv preprint
+arXiv:1712.09665, 2017. 1
+[3] Jiawei Chen, Simin Huang, Jiawei Du, Shuaihang Chen, Yu
+Tian, Mingjie Wei, Chao Yu, and Zhaoxia Yin. Tex3d: Ob-
+jects as attack surfaces via adversarial 3d textures for vision-
+language-action models. arXiv preprint arXiv:2604.01618,
+2026. 8
+[4] Yizhi Chen, Zhanxiang Cao, Xinyi Peng, Yixiao Zheng, Xi-
+axi Si, Yiheng Li, Liyun Yan, Keqi Zhu, Xueyun Chen,
+Shengcheng Fu, et al.
+Geoalign: Beyond semantics with
+state-guided spatial alignment in vla models. arXiv preprint
+arXiv:2606.03240, 2026. 8
+[5] Hengyu Fang, Yijiang Liu, Yuan Du, Li Du, and Huanrui
+Yang.
+Sqap-vla: A synergistic quantization-aware prun-
+ing framework for high-performance vision-language-action
+models. arXiv preprint arXiv:2509.09090, 2025. 8
+[6] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai,
+Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye
+Fei, Jinlan Fu, Jingjing Gong, and Xipeng Qiu. Libero-plus:
+A progressive robustness benchmark for visual-language-
+action models. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+38574–38583, 2026. 7
+[7] Jiyuan Fu,
+Kaixun Jiang,
+Jingkai Jia,
+Zhaoyu Chen,
+Xueyao Chen, Lingyi Hong, Shuyong Gao, Chenzhi Tan,
+Dingkang Yang, and Wenqiang Zhang. Vla-hijack: A trans-
+ferable patch attack against vision-language-action mod-
+els via visual proprioception hijacking.
+arXiv preprint
+arXiv:2605.28083, 2026. 1, 3, 5, 8
+[8] Ian J Goodfellow, Jonathon Shlens, and Christian Szegedy.
+Explaining and harnessing adversarial examples.
+arXiv
+preprint arXiv:1412.6572, 2014. 1
+[9] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 1
+[10] Hee-Seon Kim, Minbeom Kim, and Changick Kim. Doubly-
+universal adversarial perturbations:
+Deceiving vision-
+language models across both images and text with a single
+perturbation. arXiv preprint arXiv:2412.08108, 2024. 1
+[11] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P
+Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn. Openvla: An open-
+source vision-language-action model.
+In Proceedings of
+The 8th Conference on Robot Learning, pages 2679–2713.
+PMLR, 2025. 1, 2, 5
+[12] Zhuohao Li, Yinghao Li, Jian-Jian Jiang, Lang Zhou, Tianyu
+Zhang, Jiadong Yin, Mu Lin, Yi-Lin Wei, and Wei-Shi
+Zheng.
+Revip:
+Mitigating false completion in vision-
+language-action models with vision-proprioception rebal-
+ance. arXiv preprint arXiv:2601.16667, 2026. 8
+[13] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. Libero: Benchmarking knowl-
+edge transfer for lifelong robot learning. Advances in Neural
+Information Processing Systems, 36:44776–44791, 2023. 2,
+5
+[14] Liang Liu, Yanan Guo, Youtao Zhang, and Jun Yang. Un-
+derstanding and defending patched-based adversarial attacks
+for vision transformer.
+In Proceedings of the 40th Inter-
+national Conference on Machine Learning, pages 21631–
+21657. PMLR, 2023. 6
+[15] Hui Lu, Zhijie Peng, Yuqi Lin, Zaijia Yang, Jiaming He,
+Shuhan Ye, Yi Yu, Hanwei Zhu, Bingquan Shen, Alex Kot,
+et al.
+Certvla: Certified defense against physical visual
+attacks for vision-language-action models.
+arXiv preprint
+arXiv:2608.20791, 2026. 8
+[16] Hui Lu, Yi Yu, Yiming Yang, Chenyu Yi, Qixin Zhang,
+Bingquan Shen, Alex C Kot, and Xudong Jiang.
+When
+robots obey the patch:
+Universal transferable patch at-
+tacks on vision-language-action models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 22867–22878, 2026. 1, 3, 5, 8
+[17] Jingxian Lu, Wenke Xia, Yuxuan Wu, Zhiwu Lu, and Di Hu.
+When would vision-proprioception policies fail in robotic
+manipulation? In The Fourteenth International Conference
+on Learning Representations, 2026. 8
+[18] Xuancun Lu, Jiaxiang Chen, Shilin Xiao, Zizhi Jin, Zhangrui
+Chen, Hanwen Yu, Bohan Qian, Ruochen Zhou, Xiaoyu Ji,
+and Wenyuan Xu. Phantom menace: Exploring and enhanc-
+ing the robustness of vla models against physical sensor at-
+tacks. In Proceedings of the AAAI Conference on Artificial
+Intelligence, pages 35689–35697, 2026. 8
+[19] Muzammal Naseer, Salman Khan, and Fatih Porikli. Local
+gradients smoothing: Defense against localized adversarial
+attacks. In 2019 IEEE winter conference on applications of
+computer vision (WACV), pages 1300–1307. IEEE, 2019. 6
+[20] Khoi Nguyen Tiet Nguyen, Wenyu Zhang, Kangkang Lu,
+Yu-Huan Wu, Xingjian Zheng, Hui Li Tan, and Liangli Zhen.
+A survey and evaluation of adversarial attacks in object de-
+tection. IEEE Transactions on Neural Networks and Learn-
+ing Systems, 36(9):15706–15722, 2025. 9
+[21] Maxime Oquab, Timoth´ee Darcet, Th´eo Moutakanni, Huy
+Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez,
+Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al.
+Dinov2: Learning robust visual features without supervision.
+arXiv preprint arXiv:2304.07193, 2023. 3
+
+
+[22] Daniel Smilkov, Nikhil Thorat, Been Kim, Fernanda Vi´egas,
+and Martin Wattenberg.
+Smoothgrad: removing noise by
+adding noise. arXiv preprint arXiv:1706.03825, 2017. 5
+[23] Yiyou Sun, Yifei Ming, Xiaojin Zhu, and Yixuan Li. Out-
+of-distribution detection with deep nearest neighbors. In In-
+ternational conference on machine learning, pages 20827–
+20840. PMLR, 2022. 6
+[24] Bilel Tarchoun,
+Anouar Ben Khalifa,
+Mohamed Ali
+Mahjoub, Nael Abu-Ghazaleh, and Ihsen Alouani.
+Jedi:
+Entropy-based localization and removal of adversarial
+patches.
+In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 4087–4095,
+2023. 6
+[25] Fangyuan Wang, Peng Zhou, Jiaming Qi, Shipeng Lyu,
+David Navarro-Alarcon, and Guodong Guo. Think propri-
+oceptively: Embodied visual reasoning for vla manipulation.
+arXiv preprint arXiv:2602.06575, 2026. 8
+[26] Taowen Wang, Cheng Han, James Liang, Wenhao Yang,
+Dongfang Liu, Luna Xinyu Zhang, Qifan Wang, Jiebo Luo,
+and Ruixiang Tang. Exploring the adversarial vulnerabili-
+ties of vision-language-action models in robotics. In 2025
+IEEE/CVF International Conference on Computer Vision
+(ICCV), pages 6948–6958. IEEE, 2025. 1, 3, 5, 7, 8
+[27] Yuqing Wen, Kefan Gu, Haoxuan Liu, Yucheng Zhao, Tian-
+cai Wang, Haoqiang Fan, and Xiaoyan Sun. Rosa: Harness-
+ing robot states for vision-language and action alignment.
+arXiv preprint arXiv:2506.13679, 2025. 8
+[28] Haochuan Xu, Yun Sing Koh, Shuhuai Huang, Zirun Zhou,
+Di Wang, Jun Sakuma, and Jingfeng Zhang. Model-agnostic
+adversarial attack and defense for vision-language-action
+models. arXiv preprint arXiv:2510.13237, 2025. 1, 3, 5,
+8
+[29] Weilin Xu, David Evans, and Yanjun Qi. Feature squeez-
+ing: Detecting adversarial examples in deep neural networks.
+arXiv preprint arXiv:1704.01155, 2017. 6
+[30] Songhua Yang, Ziyu Liu, Yuanwei Liu, Xuetao Li, Xu-
+anye Fei, He Huang, Zheng Wang, and Miao Li. Exploit-
+ing vulnerabilities: Universal adversarial attacks on vision-
+language-action models in robotics.
+In 2026 IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pages 9146–9153. IEEE, 2026. 8
+[31] Xiaohua Zhai, Basil Mustafa, Alexander Kolesnikov, and
+Lucas Beyer. Sigmoid loss for language image pre-training.
+In 2023 IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 11941–11952. IEEE, 2023. 3
+[32] Chaoning Zhang, Philipp Benz, Tooba Imtiaz, and In So
+Kweon.
+Understanding adversarial examples from the
+mutual influence of images and perturbations.
+In 2020
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 14509–14518. IEEE, 2020. 1
+[33] Chaoning Zhang, Philipp Benz, Adil Karjauv, and In So
+Kweon.
+Data-free universal adversarial perturbation and
+black-box attack. In 2021 IEEE/CVF International Confer-
+ence on Computer Vision (ICCV), pages 7848–7857. IEEE,
+2021. 1
+[34] Chiyu Zhang, Lu Zhou, Xiaogang Xu, Jiafei Wu, and Zhe
+Liu. Adversarial attacks of vision tasks in the past 10 years:
+A survey. ACM Comput. Surv., 58(2), 2025. 1
+[35] Jinquan Zhang, Dongfu Yin, Run Yang, Yufeng Yan, Zhen
+Tian, and F Richard Yu. Structure-aware robust fine-tuning:
+Defending vision-language-action robots against physical at-
+tention hijacking. arXiv preprint arXiv:2608.03231, 2026. 8
+[36] Guoyang Zhao, Quanhao Qian, Gongjie Zhang, Wenhao Li,
+Jiuniu Wang, Xiaowei Lu, Deli Zhao, and Ran Xu. Geoprop:
+Grounding robot state in vision for generalist manipulation.
+arXiv preprint arXiv:2607.07101, 2026. 8
+[37] Junhao Zheng, Jiahao Sun, Chenhao Lin, Zhengyu Zhao,
+Chen Ma, Chong Zhang, Cong Wang, Qian Wang, and Chao
+Shen. Revisiting adversarial patch defenses on object de-
+tectors: Unified evaluation, large-scale dataset, and new in-
+sights. In Proceedings of the IEEE/CVF International Con-
+ference on Computer Vision, pages 23476–23486, 2025. 9
+
+
+Defending Vision-Language-Action Models against Transferable Attacks via
+Visual-Proprioceptive Consistency
+Supplementary Material
+A. Proprioception-Guided Mask Generation
+We use the 3D shapes and dimensions of the robot’s com-
+ponents typically provided by the robot manufacturer. We
+select the components corresponding to the wrist, palm, and
+gripper, and uniformly sample surface points from them,
+P = {pn ∈R3}N
+n=1,
+(8)
+where N is the number of sampled surface points. Each
+point is represented in the local coordinate frame L. These
+points are sampled once in the local coordinate frame and
+provide a compact representation of the robot surface. As
+shown in Figure 3 (left) at Section 3.1.
+At timestep t, given the proprioceptive state qt, using the
+robot forward kinematics, we could obtain the current trans-
+formation BTL,t of the sampled points, where B denotes
+the robot base frame. Each sampled point is then trans-
+formed into the camera coordinate frame C as
+¯pC
+n,t = CTB
+BTL,t¯pn,
+(9)
+where CTB denotes the calibrated camera extrinsic trans-
+formation from the robot base frame to the camera frame,
+and ¯
+pn =
+
+pT
+n, 1
+
+denotes the homogeneous representation
+of a 3D point.
+We then project each transformed 3D point onto the im-
+age plane using the camera intrinsic matrix K,
+un,t = Π(K, pC
+n,t),
+(10)
+where Π(·) denotes the standard perspective projection and
+un,t = (un,t, vn,t)T is the corresponding image coordinate.
+The projected points form
+Qt = {un,t}n,
+(11)
+which represents the expected location in the camera image
+of the robot components, as shown in Figure 3 (middle).
+Based on the projected point set Qt, we construct a bi-
+nary mask over the ViT grid cells:
+mt,k = I [Qt ∩Gk̸ = ∅] ,
+k = 1, . . . , K,
+(12)
+where Gk denotes the image region corresponding to the k-
+th grid cell, K is the total number of grid cells, and I[·] is
+the indicator function. Specifically, mt,k = 1 if at least one
+projected point falls within the k-th grid cell, and mt,k =
+0 otherwise. The complete mask generation procedure is
+summarized in Alg. 1.
+Algorithm 1 Proprioception-Guided Mask Generation
+Require: Proprioceptive state qt; Sampled points P from
+the robot’s surface; camera intrinsic matrix K; camera
+extrinsic transformation CTB;
+1: Qt ←∅
+▷Projected robot surface points
+2: Obtain BTL,t from qt using the forward kinematics
+3: for each pn ∈P do
+4:
+¯pn ←[p⊤
+n , 1]⊤
+▷Homogeneous coordinate
+5:
+¯pC
+n,t ←CTBBTL,t¯pn ▷Transform the point into
+the camera frame
+6:
+pC
+n,t ←¯pC
+n,t[1:3]
+▷pC
+n,t = (X, Y, Z)⊤
+7:
+un,t ←Π(K, pC
+n,t)
+▷Perspective projection
+8:
+Qt ←Qt ∪{un,t}
+9: end for
+10: Initialize mt ←0 ∈{0, 1}K
+11: for each projected point u ∈Qt do
+12:
+k ←GridIndex(u)
+▷Find the grid containing u
+13:
+mt,k ←1
+14: end for
+15: return mt = [mt,1, . . . , mt,K]
+B. Defense Framework Summarization
+We summarize our defense pipeline in Alg. 2.
+C. Implementation details
+We sample 1,000 frames for each LIBERO task suite from
+the training demonstrations, balanced across the ten tasks.
+We set the temperature parameter be 0.1κ, where κ is the
+mean of the robot-likeness score Rt,k across the training
+data. And for the SmoothGrad-based attribution, we set
+σ = 0.15 and 16 noise samples. And for the robot feature
+preserving attack, the objective is
+Lrobot = LUADA + λ
+X
+It∈D
+1
+|D||Mt|
+X
+k∈Mt
+∥z′
+t,k −zt,k∥2
+2
+∥zt,k∥2
+2
+,
+where Mt is the mask that indicates the indices of robot-
+related visual tokens. And for the detection-aware attack,
+the objective is
+Ldetect = LUADA + λDP V ,
+where DP V is our proposed visual-proprio consistency
+score for attack detection.
+
+
+Algorithm 2 Visual-Proprioceptive Consistency Defense
+Require: Observation (It, ℓt, qt), VLA policy πθ, detec-
+tion threshold δ, maximum masking budget B
+Detection
+1: mt ←GENERATEMASK(qt)
+▷Alg. 1
+2: Zt ←fvis(It)
+▷Extract visual features
+3: dt ←DPV(Zt, mt)
+4: if dt ≤δ then
+5:
+return πθ(It, ℓt, qt)
+▷No attack detected
+6: end if
+Patch Localization
+7: st ←SMOOTHGRAD(DPV, It)
+▷Pixel-level
+attribution
+8: (k1, . . . , kR) ←RANKTOKENS(st, mt)
+▷Aggregate
+attribution per grid, exclude tokens with mt,k = 1, and
+rank the remaining tokens in descending order
+Patch Mitigation
+9: Ht ←∅
+10: for r = 1, . . . , B do
+11:
+Ht ←Ht ∪{kr}
+12:
+eZt ←fvis(It; Ht)
+▷Attention masking Ht
+13:
+edt ←DPV(eZt, mt)
+14:
+if edt ≤δ then
+15:
+break
+16:
+end if
+17: end for
+18: At ←πHt
+θ (It, ℓt, qt)
+19: return At
+D. Supplementary experiment results
+D.1. Threshold Calibration
+For practical deployment, a detection threshold is required
+to determine whether an observation is under attack. To
+maintain the attack-agnostic nature of our method, we se-
+lect this threshold without using any adversarial attack
+data. Moreover, to improve system robustness, we aim to
+minimize false alarms caused by benign visual perturba-
+tions. Specifically, we augment clean training images with
+randomly generated noise patches and select a threshold
+that keeps the false-positive rate on these non-adversarial
+patches below 5%. Using this fixed threshold, we report the
+true-positive rate (TPR) on adversarial observations and the
+false-positive rate (FPR) on clean observations. As shown
+in Table 5, our attack-agnostic thresholds achieve average
+TPRs of 97.8% and 93.8% for OpenVLA and π0, respec-
+tively, while maintaining average FPRs of only 1.7% and
+0.9%, with no FPR exceeding 3.0% across all four suites.
+D.2. Patch Placement Experiment
+Since the proposed detection score DPV measures how far
+the robot-like tokens lie from the trusted support. Whether a
+Table 5. TPR and FPR with selected threshold.
+OpenVLA
+π0
+Suite
+TPR
+FPR
+TPR
+FPR
+Spatial
+0.998
+0.028
+0.958
+0.000
+Goal
+0.995
+0.015
+0.917
+0.007
+Object
+1.000
+0.000
+0.959
+0.000
+Long
+0.918
+0.023
+0.916
+0.030
+patch is detected may depend on where it is placed relative
+to the robot. To measure this dependence, we move each
+patch over 50 different positions. For each placement we
+record the detector’s score, and we report the detection ca-
+pability of the patch’s distance to the robot. The results are
+shown in Table 6, our detection method remains effective
+even when the patch is placed close to the robot.
+D.3. Visualization of Patch Localization
+Figure 8 and Figure 9 show the patch localization of the
+SmoothGrad-based attribution method. We show the attri-
+bution scores of each visual token for OpenVLA and π0
+across different patch attacks. Results show that the attri-
+bution method can accurately localize the patches based on
+our visual-proprioceptive consistency score.
+D.4. Camera Shift Detection
+Beyond adversarial defense, our visual-proprio consistency
+principle can be extended to detect other anomalies in
+robotic systems, such as unexpected camera displacement,
+temporal misalignment caused by camera latency. For VLA
+deployment, it is very common for the camera viewpoint
+to be changed due to accidents such as collisions, and this
+anomaly may affect the performance of VLA models. This
+camera shifts cause input image shifts while the calibra-
+tion used for mask generation remains unchanged. There-
+fore, there will be an inconsistency between the visual loca-
+tion and proprioceptive state, which can be detected by our
+method. In order to test the camera calibration detection
+capability, we leverage LIBERO-Plus benchmark, and syn-
+thesis viewpoint rotations from LIBERO-Spatial suite. As
+shown in Figure 10, we could see that after camera view-
+point shift, there is a gap between the visual location and
+mask rendered from staled camera calibration. Table 7 fur-
+ther shows the detection capability under different degrees
+of camera viewpoint change.
+
+
+VLA-Hijack
+UPA-RFAS
+EDPA
+UADA
+TMA
+UMA
+UPA
+Spatial
+Object
+Goal
+LIBERO-10
+Figure 8. Patch localization for OpenVLA.
+VLA-Hijack
+UPA-RFAS
+EDPA
+Spatial
+Object
+Goal
+LIBERO-10
+Figure 9. Patch localization for π0.
+0°
+3°
+5°
+7°
+9°
+Figure 10. Camera calibration shift detection. Red box: Masks
+rendered from staled camera parameters. Green box: Masks ren-
+dered from correct camera parameters.
+
+
+Table 6. Detection AUROC by the patch’s distance to the robot
+region in tokens.
+Suite
+Attack
+[1, 3)
+[3, 5)
+[5, 7)
+≥7
+OpenVLA
+Spatial
+VLA-Hijack
+0.999
+1.000
+1.000
+1.000
+UPA-RFAS
+1.000
+1.000
+1.000
+1.000
+EDPA
+1.000
+1.000
+1.000
+1.000
+UADA
+1.000
+1.000
+1.000
+1.000
+TMA
+0.999
+1.000
+1.000
+1.000
+UMA
+1.000
+1.000
+1.000
+1.000
+UPA
+0.993
+0.999
+1.000
+1.000
+Object
+VLA-Hijack
+1.000
+1.000
+1.000
+1.000
+UPA-RFAS
+1.000
+1.000
+1.000
+1.000
+EDPA
+1.000
+1.000
+1.000
+1.000
+UADA
+1.000
+1.000
+1.000
+1.000
+TMA
+1.000
+1.000
+1.000
+1.000
+UMA
+1.000
+1.000
+1.000
+1.000
+UPA
+1.000
+1.000
+1.000
+1.000
+Goal
+VLA-Hijack
+0.998
+0.999
+1.000
+1.000
+UPA-RFAS
+1.000
+1.000
+1.000
+1.000
+EDPA
+1.000
+1.000
+1.000
+1.000
+UADA
+0.999
+1.000
+1.000
+1.000
+TMA
+0.999
+1.000
+1.000
+1.000
+UMA
+0.999
+1.000
+1.000
+1.000
+UPA
+0.994
+0.999
+1.000
+1.000
+LIBERO-10
+VLA-Hijack
+0.923
+0.936
+0.946
+0.969
+UPA-RFAS
+0.981
+0.985
+0.988
+0.991
+EDPA
+0.970
+0.980
+0.985
+0.989
+UADA
+0.982
+0.986
+0.988
+0.992
+TMA
+0.974
+0.983
+0.986
+0.989
+UMA
+0.980
+0.985
+0.987
+0.991
+UPA
+0.956
+0.977
+0.983
+0.987
+π0
+Spatial
+VLA-Hijack
+0.946
+0.960
+0.981
+0.984
+UPA-RFAS
+0.985
+0.996
+0.991
+0.990
+EDPA
+0.980
+0.989
+0.985
+0.987
+Object
+VLA-Hijack
+0.939
+0.947
+0.988
+0.989
+UPA-RFAS
+0.981
+0.999
+0.999
+0.997
+EDPA
+0.979
+0.999
+1.000
+0.999
+Goal
+VLA-Hijack
+0.937
+0.955
+0.957
+0.989
+UPA-RFAS
+0.975
+0.984
+0.984
+0.997
+EDPA
+0.982
+0.988
+0.986
+0.997
+LIBERO-10
+VLA-Hijack
+0.902
+0.917
+0.937
+0.952
+UPA-RFAS
+0.918
+0.927
+0.934
+0.967
+EDPA
+0.935
+0.922
+0.939
+0.972
+Table 7. Detection capability (AUROC) under different degrees of
+camera viewpoint change.
+View Shift
+3◦
+5◦
+7◦
+9◦
+OpenVLA
+0.849
+0.948
+0.981
+0.954
+π0
+0.875
+0.949
+0.954
+0.937

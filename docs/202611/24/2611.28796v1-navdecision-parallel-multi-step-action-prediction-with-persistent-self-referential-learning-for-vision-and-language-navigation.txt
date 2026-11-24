@@ -1,0 +1,1608 @@
+NavDecision: Parallel Multi-Step Action Prediction with Persistent
+Self-Referential Learning for Vision-and-Language Navigation
+Kai Wu1
+Yufan Hu2
+Quan Fang3
+Boning Zhang1
+Junyu Gao1*
+1Institute of Automation, Chinese Academy of Sciences
+2School of Intelligence Science and Technology, University of Science and Technology Beijing
+3School of Artificial Intelligence, Beijing University of Posts and Telecommunications
+wukai2025@ia.ac.cn
+huyufanqaixuan@gmail.com
+qfang@bupt.edu.cn
+zhangboning2025@ia.ac.cn
+junyu.gao@nlpr.ia.ac.cn
+Abstract
+Vision-and-language navigation (VLN) requires timely de-
+cisions based on instructions and visual observations.
+However, autoregressive VLN models generate action de-
+scriptions token by token, introducing substantial infer-
+ence overhead. Decision models offer an efficient alterna-
+tive but face challenges in maintaining short-horizon ac-
+tion coherence and long-horizon goal alignment. To ad-
+dress these challenges, we propose NavDecision, an effi-
+cient multi-step VLN decision model. We introduce parallel
+multi-step action prediction (PMAP) to predict multiple ac-
+tion distributions from a shared vision-language state, and
+memory-augmented self-referential policy optimization (M-
+SRPO) to learn from unsuccessful trajectories using suc-
+cessful trajectories as references. A cross-iteration success
+memory further accumulates historical successful trajecto-
+ries to provide informative training feedback. NavDecision
+achieves success rates of 64.60% on R2R-CE and 64.57%
+on RxR-CE with a 4B backbone. Compared with existing
+autoregressive VLN methods, it delivers significant infer-
+ence speedups of up to 22.28× and 18.96× while main-
+taining comparable navigation performance.
+1. Introduction
+Vision-and-language navigation (VLN) requires agents to
+reach goals using natural language instructions and visual
+observations [4, 24]. Autoregressive vision-language mod-
+els (VLMs) use pretrained cross-modal representations to
+ground instructions in visual scenes, improving navigation
+in unseen environments and sim-to-real transfer [10, 46].
+However, as shown in Figure 1(a), autoregressive VLN
+models decode action descriptions such as “move forward
+*Corresponding author.
+(b) NavDecision (our) 
+(a) Autoregressive VLN (our) 
+Instruction: Pass 
+the  sofa and stop 
+at the bedroom. 
+Instruction: Pass 
+the  sofa and stop 
+at the bedroom. 
+During training 
+Response latency 
+Serial decoding / reasoning  
+forward 
+cm 
+At deployment 
+Sparse terminal feedback 
+Useful progress is hard to reuse 
+Retain past successes 
+Learn from current failures 
+Direct multi steps 
+No text decoding 
+At deployment 
+Experience  
+in the policy 
+Train only 
+Long-term experience 
+Fast local decisions 
+g 
+g 
+g 
+During training 
+Action chunk 
+One forward pass 
+Figure 1. Autoregressive VLN vs. NavDecision. (a) Autoregres-
+sive VLN generates action text sequentially, while terminal binary
+rewards provide identical feedback for unsuccessful trajectories.
+(b) NavDecision predicts multiple action distributions in parallel
+and learns from historical successes across training iterations.
+75 cm” token by token before converting them into exe-
+cutable actions [10]. Action latency thus depends on output
+length, while navigation requires timely responses to obser-
+vations [35]. In contrast, decision models directly predict
+distributions over candidate options [1, 27], enabling low-
+latency execution in time-sensitive interactive tasks [49].
+We explore direct action prediction for VLN to reduce gen-
+eration overhead while preserving vision-language under-
+standing. However, directly applying decision models to
+VLN requires addressing both the temporal coherence of
+consecutive actions and long-horizon goal alignment.
+Although decision models reduce the overhead of au-
+toregressive generation, designing an effective decision
+model for VLN remains challenging.
+First, single-step
+primitive-action selection avoids token-by-token decoding
+1
+arXiv:2611.28796v1  [cs.CV]  21 Nov 2026
+
+
+but requires one model call per action and does not explic-
+itly model temporal dependencies across actions, making
+it difficult to maintain action coherence.
+Autoregressive
+multi-step policies generate several actions sequentially in
+one decoding run, conditioning on preceding outputs to
+capture temporal dependencies [19, 51]. Alternatively, de-
+cision models can treat predefined fixed action chunks as
+candidate options, but this restricts action combinations to
+a fixed library, whose expansion increases the candidate
+space and decision complexity. Waypoint-based decision
+methods, in turn, depend on the quality and coverage of
+externally predicted candidates [35]. We therefore seek to
+predict multi-step action distributions from a shared vision-
+language state, capturing short-horizon temporal dependen-
+cies for coherent execution at low inference cost.
+Second, agents must track task progress under changing
+observations to keep local actions aligned with long-horizon
+goals. Autoregressive policies can scale test-time computa-
+tion through explicit reasoning or search to improve navi-
+gation success [14, 28]. To retain low inference overhead,
+long-horizon exploration experience needs to be internal-
+ized in the local policy during training. Online reinforce-
+ment learning optimizes policies using task-level rewards
+from complete navigation trajectories, including terminal
+binary success rewards [19, 51]. However, decision models
+lack explicit test-time computation scaling, making it dif-
+ficult to consistently discover successful trajectories during
+long-horizon exploration. Consequently, successful trajec-
+tories may be scarce, and terminal binary success rewards
+provide identical feedback for unsuccessful trajectories de-
+spite differences in their progress toward the goal. This lim-
+itation highlights the need for more informative trajectory-
+level feedback to learn from unsuccessful trajectories and
+improve local action policies.
+We propose NavDecision, an efficient multi-step VLN
+decision model trained with cross-iteration self-referential
+reinforcement learning.
+As shown in Figure 1(b), we
+predict multiple action distributions in parallel from a
+shared vision-language state.
+Temporally causal interac-
+tions among prediction features and joint multi-step super-
+vision capture short-horizon temporal dependencies.
+In-
+spired by self-referential policy optimization (SRPO) [13],
+we encode complete navigation trajectories with a frozen
+world model. Using environment-verified successful trajec-
+tories as references, we combine bounded similarity-based
+rewards for unsuccessful trajectories with terminal binary
+success rewards for online reinforcement learning. A cross-
+iteration success memory combines current-batch and his-
+torical successful trajectories, providing references when
+the current batch contains no successful trajectories and in-
+corporating new successful trajectories as training proceeds.
+This internalizes long-horizon exploration experience dur-
+ing training while retaining fast action prediction at deploy-
+ment. Our main contributions are summarized as follows:
+• We extend single-step option selection to parallel multi-
+step action prediction. Using a shared vision-language
+state representation, we learn short-horizon temporal de-
+pendencies through temporally causal interactions among
+prediction features and joint multi-step supervision. A
+single forward pass outputs action distributions for multi-
+ple steps, supporting coherent navigation actions and ef-
+ficient decision-making.
+• We design a reinforcement learning reward for decision
+models that uses current-batch and historical successful
+trajectories to provide more informative training feed-
+back for unsuccessful trajectories. This internalizes long-
+horizon exploration experience in the decision policy.
+The world model and cross-iteration success memory are
+used only during training and do not participate in action
+inference at deployment.
+• NavDecision achieves 64.60% and 64.57% SR on R2R-
+CE and RxR-CE with a 4B backbone.
+It features
+adjustable inference efficiency, enabling up to 22.28×
+and 18.96× speedups over autoregressive VLN baselines
+while maintaining competitive navigation performance.
+2. Related Work
+Vision-and-Language Navigation.
+Vision-and-language
+navigation has progressed from R2R and RxR bench-
+marks to low-level action execution in continuous envi-
+ronments [4, 24, 26]. Prior work improves generalization
+through instruction synthesis, environment perturbations,
+and large-scale data augmentation [14, 36, 37].
+Cross-
+modal pretraining and history encoding strengthen state
+representations [8, 18, 20]; topological planning supports
+global path reasoning [9], and waypoint prediction connects
+planning with local continuous control [2, 21]. Navigation
+methods based on large models explore explicit reasoning
+and map-based planning [7, 28, 53, 54], as well as video-to-
+action modeling and hierarchical control [10, 39, 45, 46].
+Recent methods use action chunking to predict actions
+across multiple time steps [19, 55], while dataset aggrega-
+tion [32], reinforcement fine-tuning with expert-action su-
+pervision [31], and multi-turn online reinforcement learn-
+ing [19, 51] improve policies. Sequential autoregressive de-
+coding introduces additional action latency. Although Nav-
+Jev directly selects candidate waypoints to avoid autore-
+gressive action generation, it relies on an external waypoint
+predictor [35]. In contrast, we introduce parallel multi-step
+action prediction over discrete primitive actions, eliminat-
+ing sequential decoding and reducing model calls.
+Decision Models. Decision models predict probability dis-
+tributions over candidate options, enabling structured de-
+cisions without autoregressive generation of action descrip-
+tions [1]. Recent studies explore candidate probability read-
+out, decision-distribution distillation, and batched decisions
+2
+
+
+Pass the sofa, turn left, 
+and stop by the table.
+TRAINING ONLY
+Cross-generation success memory
+Learn even when current attempts fail
+DEPLOYMENT
+One call, multiple actions
+Efficient
+Diverse
+FWD
+Policy optimization 
+Execute prefix
+Goal
+Goal
+Start
+Start
+Observe and replan
+LEFT
+LEFT
+FWD
+Predicted only
+Policy improvement
+Memory-guided rewards
+Higher 
+similarity
+Lower 
+similarity
+MEMORY BANK
+Successful experience is encoded into the policy
+Figure 2. Overview of NavDecision. During training, M-SRPO
+constructs trajectory-level rewards using current and historical
+successful trajectories encoded by a frozen world model. At de-
+ployment, PMAP predicts multiple action distributions in parallel,
+enabling multi-step execution with periodic replanning.
+to leverage the decision-making capabilities of pretrained
+models [12, 16, 27, 43]. Such models have also been ap-
+plied to GUI automation and navigation, where agents se-
+lect or verify candidate actions or waypoints, or represent
+predefined mid-level actions as single tokens [29, 35, 38,
+49]. However, applying decision models to VLN requires
+more than single-step option selection: agents need to pre-
+dict consecutive actions while maintaining short-horizon
+temporal dependencies. Existing robotic policies explore
+autoregressive action tokens and compressed action repre-
+sentations [22, 30], as well as action chunking and parallel
+action prediction [23, 52]. Diffusion and flow models fur-
+ther generate continuous action chunks, but their original
+implementations require iterative sampling [6, 11]. In con-
+trast, we predict multiple primitive-action distributions in
+parallel from a shared vision-language state representation,
+using temporally causal interactions among prediction fea-
+tures to capture short-horizon dependencies.
+3. Our Approach
+As shown in Figure 2, we propose a multi-step deci-
+sion model for vision-and-language navigation and a cross-
+iteration self-referential policy optimization framework.
+From a shared vision-language state representation, the
+model predicts action distributions in parallel through tem-
+porally causal interactions among prediction features. Dur-
+ing reinforcement learning, current and historical success-
+ful trajectories jointly define a trajectory-level reward for
+training the model, allowing long-horizon navigation expe-
+rience to improve the local action policy. The two compo-
+nents support consecutive action execution over short hori-
+zons and alignment with long-horizon goals, respectively.
+Section 3.1 defines the navigation task and the decision
+model. Section 3.2 presents parallel multi-step action pre-
+diction and its supervised training, and Section 3.3 intro-
+duces cross-iteration self-referential policy optimization.
+3.1. Task Formulation
+Vision-and-language navigation.
+Given a natural-
+language instruction I, an agent repeatedly selects actions
+from visual observations to reach the specified goal and
+stop [24]. At decision step t, let Ot denote the available
+current and historical visual observations, and let Ht de-
+note the history of executed primitive actions. The decision
+context is xt = (I, Ot, Ht), and the primitive action space
+is A = {STOP, FORWARD, LEFT, RIGHT}. Here, t
+indexes model decisions, each of which may execute multi-
+ple primitive actions. A VLM with an autoregressive action
+interface formulates navigation action output as conditional
+text generation: given xt, it generates an action response
+token by token and parses the response into one or more ex-
+ecutable actions [10, 40]. Let yt = (yt,1, . . . , yt,Nt) denote
+a response with Nt tokens. Its probability factorizes as
+pAR(yt | xt) =
+Nt
+Y
+n=1
+pAR(yt,n | xt, yt,<n),
+(1)
+Here, n indexes tokens within the response, and yt,<n is
+the generated token prefix. An action description may con-
+tain multiple tokens, each conditioned on the preceding pre-
+fix. Producing a parsable action therefore requires sequen-
+tial token-by-token decoding.
+Single-step decision model. A decision interface predicts
+probabilities over candidate options from an input state, a
+decision question, and the options [1, 27]. For VLN, the
+input is xt, the question is “Which action should be exe-
+cuted now to follow the navigation instruction?”, and the
+candidate options are the primitive actions in A. The model
+outputs their conditional probabilities. We instantiate this
+interface as an action classification model built on a VLM:
+the VLM encodes xt, and an action head produces a score
+vector zθ(xt) ∈R|A|, yielding the navigation policy
+πθ(· | xt) = softmax(zθ(xt)) ,
+(2)
+Here, θ denotes the trainable policy parameters, and soft-
+max normalizes over the candidate action set. Under the
+same navigation context and action space, this interface di-
+rectly predicts probabilities over executable actions.
+3.2. Parallel Multi-Step Action Prediction
+Although single-step decision models remove token-by-
+token decoding, each model call outputs only the current
+primitive-action distribution. They do not explicitly model
+short-horizon action sequences, and consecutive action ex-
+ecution requires repeated model calls. We extend the model
+to parallel multi-step action prediction with a prediction
+horizon of K. Each position predicts over A, and the action
+3
+
+
+combination is generated from the current context. Multiple
+actions share a single backbone computation, while tempo-
+rally causal interactions among prediction features capture
+short-horizon temporal dependencies.
+Temporally causal action head. As shown in Figure 3,
+at decision step t, we use the hidden representation of the
+last prompt token from the VLM backbone as the shared
+vision-language state representation ht. For prediction po-
+sition k ∈{0, . . . , K −1}, we project this representation
+into the action feature space and add a learnable temporal
+embedding ek. A causal Transformer allows the features
+to interact across positions, and a shared classification layer
+produces the action distributions:
+u(0)
+t,k = Proj(ht) + ek,
+Ut = CausalTr(U(0)
+t ),
+πθ(· | xt, k) = softmax(Head(ut,k)) ,
+(3)
+Here, Proj is a shared affine projection, U(0)
+t
+concate-
+nates the input features along the temporal dimension, and
+ut,k is the feature at position k in the output matrix Ut.
+Head applies layer normalization followed by an affine
+classification layer shared across positions to obtain action
+scores. Softmax normalizes along the action-class dimen-
+sion. Causal self-attention allows position k to read only
+prediction features at positions j ≤k, modeling tempo-
+ral dependencies among prediction positions.
+All action
+distributions are obtained in a single forward pass, and
+actions are sampled independently across positions condi-
+tioned on xt. Temporal interactions occur among predic-
+tion features; sampled actions are not inputs to subsequent
+positions within the window.
+Multi-step supervised training.
+For supervised fine-
+tuning (SFT), we construct action supervision windows
+from expert trajectories. Let xb denote the context of sam-
+ple b, and let a⋆
+b,k denote its expert action at position k. We
+train the action head by minimizing the mean cross-entropy
+over all valid action positions in the constructed supervision
+windows, denoted by Ω:
+LSFT(θ) = −1
+|Ω|
+X
+(b,k)∈Ω
+log πθ(a⋆
+b,k | xb, k),
+(4)
+The set Ωincludes valid actions up to and including the first
+STOP, excluding subsequent positions and those beyond the
+trajectory boundary. Multi-step prediction primarily models
+short-horizon temporal dependencies. To further align lo-
+cal decisions with long-horizon navigation goals, we intro-
+duce cross-iteration self-referential policy optimization. It
+improves the decision policy using trajectory-level rewards
+derived from historical successful trajectories, while retain-
+ing parallel multi-step action prediction at inference.
+Broadcast + 𝒆𝒌
+Time 
+embeddings
+𝒆𝟏𝒆𝟐𝒆𝟑𝒆𝟒
+Projector
+𝒛𝟏
+𝒛𝟐
+𝒛𝟑
+𝒛𝟒
+State 𝒉𝒕
+Causal Transformer
+Shared Action Head
+t + 1
+Fwd
+t + 2
+Fwd
+t + 4
+Stop
+t + 3
+Left
+Observations
+VLM
+Figure 3. Temporally causal action head for PMAP. The shared
+vision-language state is combined with learnable temporal embed-
+dings. A causal Transformer and shared action head predict all ac-
+tion distributions in parallel.
+3.3. Memory-Augmented SRPO
+With only terminal binary rewards, unsuccessful trajectories
+with different levels of progress receive identical feedback.
+Following the self-referential reward design of SRPO [13],
+we evaluate unsuccessful trajectories against successful tra-
+jectories in the world-model representation space. We ex-
+tend this design with cross-iteration success memory to con-
+tinually reuse available references and provide trajectory-
+level training signals for the multi-step decision model.
+Cross-iteration success memory.
+Success references
+drawn only from the current iteration are unavailable when
+that iteration contains no successful trajectories. This can
+occur in long-horizon navigation even when earlier explo-
+ration has already produced successful trajectories.
+We
+therefore maintain a cross-iteration success memory for
+each navigation task instance, using both current and his-
+torical successful trajectories as references. At training it-
+eration g, the rollout policy generates G trajectories for
+the same navigation task instance ξ. Let τi, si ∈{0, 1},
+and Li denote trajectory i, its environment-provided suc-
+cess indicator, and its total number of executed primitive
+actions, respectively. A frozen world-model encoder pro-
+vides an L2-normalized trajectory embedding vi for reward
+computation during training. We cluster valid embeddings
+of successful trajectories from the current iteration and de-
+note the normalized current-iteration success centroids by
+Ccur
+g
+.
+Let Mg−1 be the success memory from the pre-
+ceding iteration, initialized as M0 = ∅. Each record m
+stores (vm, Lm, SPLm), where SPLm measures the path
+efficiency of the successful trajectory [3]. The combined
+success reference set for the current iteration is
+Cg = Ccur
+g
+∪{vm : m ∈Mg−1},
+(5)
+Current successful embeddings form centroids through
+clustering. Historical records contribute embeddings and
+are not reclustered. To reuse experience from successful
+trajectories while controlling memory size, let S+
+g denote
+4
+
+
+the valid successful records from the current iteration. We
+combine them with the historical memory into the candi-
+date pool Pg = Mg−1 ∪S+
+g and retain at most two records
+according to path efficiency and representational diversity:
+m⋆= arg max
+m∈Pg
+SPLm,
+m† =
+arg max
+m∈Pg\{m⋆}
+Lm≤γLm⋆
+∥vm −vm⋆∥2,
+(6)
+Here, γ ≥1 is the trajectory-length tolerance factor shared
+by memory selection and reward computation. The second
+record is retained only if a candidate exists and its embed-
+ding distance from the first record is at least δm > 0. Ties
+for m⋆are resolved in favor of fewer primitive actions. Ties
+for m† are resolved first by higher SPL and then by fewer
+primitive actions. The updated memory Mg is used from
+the next iteration onward and remains unchanged if no new
+valid successful records are obtained.
+Rewards from combined success references. We com-
+bine trajectory length and the distance distribution to com-
+pute bounded similarity-based rewards. When Cg̸ = ∅, we
+use L+
+med, the median trajectory length in primitive actions
+across current-iteration and historical successful trajecto-
+ries, as the length reference. Let F contain the indices i
+for which si = 0, vi is valid, and Li ≤γL+
+med, where
+γ ≥1 is the trajectory-length tolerance factor. For i ∈F,
+we compute the distance to the nearest success reference:
+di = min
+v∈Cg ∥vi −v∥2,
+(7)
+When F̸ = ∅, let dmin and dmax be the minimum and max-
+imum distances within this set, and let ∆d = dmax −dmin.
+For i ∈F with ∆d ≥δd > 0, define the normalized dis-
+tance as edi = (di −dmin)/∆d. The trajectory reward is
+Ri =
+
+
+
+
+
+
+
+
+
+
+
+
+
+1,
+si = 1,
+α sigmoid
+h
+λ
+
+1
+2 −edi
+i
+,
+i ∈F, ∆d ≥δd,
+α/2,
+i ∈F, ∆d < δd,
+0,
+otherwise,
+(8)
+Here, 0 < α < 1 controls the reward scale for unsuccessful
+trajectories, λ > 0 controls the steepness of the sigmoid,
+and δd is the distance-range threshold. This reward distin-
+guishes eligible unsuccessful trajectories by their embed-
+ding distance to successful trajectory references and assigns
+every successful trajectory a higher reward. When the dis-
+tance range is below δd, assigning α/2 avoids amplifying
+minor distance differences. When Cg = ∅, we set F = ∅.
+When F = ∅, no unsuccessful trajectory is available for
+self-referential evaluation, and we use the terminal binary
+success reward Ri = si.
+Policy optimization. We optimize the multi-step decision
+policy using the clipped policy objective in SRPO [13], fol-
+lowing GRPO [34]. At each decision step t of trajectory
+i, the policy predicts K actions in parallel and randomly
+samples an execution cap Ei,t ∈{1, . . . , K}. Actions are
+executed sequentially until the cap is reached, STOP is ex-
+ecuted, or the environment terminates. Let ℓi,t denote the
+number of executed actions, forming the valid action pre-
+fix. The same execution-cap sampling mechanism is used
+during training and rollout.
+We normalize trajectory-level rewards within each task
+group to obtain a shared advantage bAi for all decisions in
+trajectory i. Policy updates are performed over the executed
+action prefixes using a joint importance ratio:
+ρi,t =
+ℓi,t−1
+Y
+k=0
+πθ(ai,t,k | xi,t, k)
+πold(ai,t,k | xi,t, k).
+(9)
+We apply PPO-style clipping [33] and KL regularization
+against the initial multi-step SFT policy, following the op-
+timization objective of SRPO. The objective averages valid
+decision positions within each trajectory before averaging
+across trajectories, assigning equal weight to each trajec-
+tory. The RL objective is
+LRL(θ) = 1
+|B|
+X
+τi∈B
+1
+|Ji|
+X
+t∈Ji
+h
+−min
+
+ρi,t bAi, ρclip
+i,t bAi
+	
++ βDi,t
+i
+,
+(10)
+Here, B is the trajectory minibatch, and Ji denotes the
+valid decision positions in trajectory i. ρclip
+i,t is the clipped
+joint importance ratio, and Di,t denotes the KL divergence
+summed over executed action positions, with β controlling
+its regularization strength.
+4. Experiments
+4.1. Experimental Setup
+Datasets and metrics.
+We evaluate our method on the
+R2R-CE [24] and RxR-CE [26] val unseen splits.
+The
+policy is first pre-trained via SFT on R2R [4], RxR [26],
+ScaleVLN [37] and EnvDrop [36], followed by online rein-
+forcement learning on the R2R and RxR training tasks. We
+adopt SR and SPL as primary metrics, while also reporting
+NE, OSR, and nDTW [3]. Further details are provided in
+the supplementary material.
+Model and training. Our policy, built on OmniJev with
+a Qwen3.5-4B backbone, takes instructions, current s.RGB
+images, and the 8 most recent observations and actions as
+input. SFT trains only the LoRA adapters and the action
+head. Online training samples 8 complete trajectories per
+group. A frozen V-JEPA 2 [5] ViT-g encodes these trajecto-
+ries, with at most two successful records retained per task.
+5
+
+
+Table 1. Navigation results on R2R-CE and RxR-CE val unseen. Bold indicates the best result for each metric within each method
+group.
+Method
+Backbone
+size
+Direct
+action
+Observation
+R2R-CE
+RxR-CE
+Pano. Odo. Depth S.RGB NE↓OSR↑
+SR↑SPL↑
+NE↓
+SR↑SPL↑nDTW↑
+Conventional navigation methods
+HPN+DN [25]
+—
+—
+✓
+✓
+✓
+6.31
+40.00 36.00 34.00
+—
+—
+—
+—
+CMA [15]
+—
+—
+✓
+✓
+✓
+6.20
+52.00 41.00 36.00
+8.76 26.60 22.20
+47.10
+ETPNav [2]
+—
+—
+✓
+✓
+✓
+4.71
+65.00 57.00 49.00
+5.64 54.80 44.90
+61.90
+NavMorph [41]
+—
+—
+✓
+✓
+5.75
+56.90 47.90 33.20
+8.85 30.80 22.80
+44.20
+SC2-WM [42]
+—
+—
+✓
+✓
+✓
+4.25
+70.00 66.00 54.00
+5.72 60.00 50.00
+67.00
+VLM-based navigation methods
+NaVid [46]
+7B
+×
+✓
+5.47
+49.10 37.40 35.90
+—
+—
+—
+—
+Uni-NaVid [45]
+7B
+×
+✓
+5.58
+53.30 47.00 42.70
+6.24 48.70 40.90
+—
+NaVILA [10]
+8B
+×
+✓
+5.22
+62.50 54.00 49.00
+6.77 49.30 44.00
+58.80
+ActiveVLN [51]
+3B
+×
+✓
+5.31
+58.30 50.10 43.70
+5.84 50.70 41.20
+58.10
+StreamVLN [40]
+7B
+×
+✓
+4.98
+64.20 56.90 51.90
+6.22 52.90 46.00
+61.90
+NaVIDA [55]
+3B
+×
+✓
+4.32
+69.50 61.40 54.70
+5.23 57.40 49.60
+67.00
+InternVLA-N1 (S2) [39]
+7B
+×
+✓
+4.89
+60.60 55.40 52.10
+6.41 49.50 41.80
+62.60
+InternVLA-N1 (S1+S2) [39]
+7B
+×
+✓
+✓
+4.83
+63.30 58.20 54.00
+5.91 53.50 46.10
+65.30
+NavFoM [47]
+7B
+×
+✓
+5.01
+64.90 56.20 51.20
+5.51 57.40 49.40
+60.20
+JanusVLN [44]
+7B
+×
+✓
+4.78
+65.20 60.50 56.80
+6.06 56.20 47.50
+62.10
+DualVLN [39]
+7B
+×
+✓
+4.05
+70.70 64.30 58.50
+4.58 61.40 51.80
+70.00
+AwareVLN [17]
+8B
+×
+✓
+4.02
+73.50 65.40 55.10
+3.95 67.60 56.10
+65.70
+FutureNav-4B [50]
+4B
+×
+✓
+4.24
+70.20 65.40 61.30
+4.60 60.90 52.80
+68.00
+FutureNav-8B [50]
+8B
+×
+✓
+4.29
+69.20 64.30 60.30
+4.26 63.90 54.80
+69.10
+Qwen-RobotNav-4B [48]
+4B
+×
+✓
+4.22
+73.60 66.90 60.50
+4.15 71.30 61.50
+68.60
+Qwen-RobotNav-8B [48]
+8B
+×
+✓
+4.36
+72.70 65.70 59.60
+4.16 73.40 63.50
+69.90
+Decision-based navigation methods
+OmniJev [1]
+4B
+✓
+✓
+9.47
+3.75
+1.47
+1.30 11.95
+8.07
+6.97
+26.59
+NavDecision (E = 1)
+4B
+✓
+✓
+4.12
+76.89 64.33 55.31
+4.00 65.03 54.38
+68.35
+NavDecision (E = 2)
+4B
+✓
+✓
+3.99
+77.98 64.60 54.31
+4.05 64.57 52.84
+67.59
+NavDecision (E = 4)
+4B
+✓
+✓
+4.34
+76.35 60.79 48.72
+4.50 60.81 48.11
+63.30
+Pano.: panoramic RGB; Odo.: odometry; Depth: depth input; S.RGB: single-view forward-facing RGB. Observation inputs are marked with
+✓and left blank otherwise. Direct action indicates discrete action prediction through an action head (✓/×).
+Both the trajectory encoder and success memory are utilized
+exclusively during the training phase.
+Execution settings. The primitive actions are STOP, mov-
+ing forward by 0.25 m, and turning left or right by 15◦. Let
+K be the number of actions predicted per model call and E
+the execution cap before acquiring a new observation. Exe-
+cution ends early at STOP or environment termination. We
+fix K = 4, compare E ∈{1, 2, 4} in the main results, and
+use E = 2 by default for ablations. Evaluation selects the
+highest-probability action at each prediction position.
+4.2. Main Results
+Navigation performance.
+Our direct multi-step policy
+achieves competitive navigation success on both bench-
+marks (Table 1). With the default execution cap E = 2, our
+method obtains 64.60% SR and 54.31% SPL on R2R-CE,
+and 64.57% SR and 52.84% SPL on RxR-CE. NavDecision
+achieves performance comparable to the strong autoregres-
+sive baseline FutureNav-4B [50], with only a 0.80% lower
+SR on R2R-CE and a 3.67% higher SR on the more chal-
+lenging RxR-CE benchmark. These results underscore that
+our parallel decision framework preserves robust navigation
+capabilities without the prohibitive computational overhead
+of token-by-token decoding.
+Inference efficiency. The model achieves these competi-
+tive success rates while significantly reducing inference la-
+tency (Table 2). With E = 2, the amortized model in-
+ference time per executed primitive action is 55.10 ms on
+R2R-CE and 62.17 ms on RxR-CE. This yields approxi-
+mately 3.3× speedups even over the fastest timed baseline
+on each benchmark. Compared with FutureNav-4B [50],
+the corresponding speedups are 11.06× and 9.50×, respec-
+6
+
+
+tively, while retaining the competitive success rates dis-
+cussed above.
+These significant speedups are primarily
+attributed to PMAP, which eliminates token-by-token de-
+coding latency and maximizes computational efficiency by
+sharing a single backbone pass across multiple actions.
+Performance–efficiency trade-off.
+With the prediction
+horizon fixed at K = 4, the execution cap E controls
+how frequently the policy acquires observations and re-
+plans. Moving from E = 1 to E = 2 approximately halves
+the amortized inference time, while changing SR by less
+than 0.5 percentage points on either benchmark. Setting
+E = 4 further reduces the amortized inference time to ap-
+proximately 30 ms per primitive action, achieving around
+10× speedup over the median inference time of the eval-
+uated autoregressive baselines. This comes at the cost of
+approximately 3.8 percentage points in SR compared with
+E = 2 on both benchmarks, offering a substantially faster
+execution mode with a moderate performance trade-off.
+4.3. Ablation Studies
+We evaluate the contributions of parallel multi-step action
+prediction (PMAP) and memory-augmented self-referential
+policy optimization (M-SRPO).
+Overall ablation. Table 3 compares the single-step SFT
+Baseline, PMAP, PMAP+SRPO, and the full PMAP+M-
+SRPO, isolating the effects of multi-step prediction and
+trajectory-level policy optimization.
+PMAP improves the success rate on both benchmarks,
+with gains of 1.41 and 2.29 percentage points on R2R and
+RxR, respectively.
+More importantly, adding trajectory-
+level policy optimization substantially boosts navigation
+performance. The full PMAP+M-SRPO achieves 64.60%
+SR and 54.31% SPL on R2R, and 64.57% SR and 52.84%
+SPL on RxR. Compared with PMAP, it improves SR by
+16.64 points on R2R and 10.88 points on RxR. Overall,
+the full method outperforms the SFT Baseline by 18.05 and
+13.17 SR points on R2R and RxR, respectively, highlighting
+the effectiveness of trajectory-level reinforcement learning
+for long-horizon navigation.
+4.3.1. PMAP
+Shared-state representation. OmniJev encodes each ac-
+tion candidate separately by appending its text to a shared
+prefix containing observations, instructions, and action his-
+tory. Although the branches share backbone parameters and
+prefix computation, their candidate representations remain
+independent. We instead adopt a shared-state representa-
+tion, using the hidden state of the last prefix token to score
+all primitive actions through a unified action head.
+Causal multi-step prediction.
+We introduce learnable
+temporal embeddings and a causal Transformer to model
+dependencies among prediction features. As shown in Fig-
+ure 4(a,c) and Table 4, PMAP (S4) achieves the highest SFT
+Table 2. Navigation performance and inference efficiency. All
+methods with publicly available weights are timed on an H20 un-
+der the same settings. Tact denotes amortized model inference
+time per executed primitive action (ms). Bold indicates the lowest
+Tact on each benchmark.
+Method
+Backbone
+size
+R2R-CE
+RxR-CE
+SR↑
+Tact ↓
+SR↑
+Tact ↓
+NaVid [46]
+7B
+37.40
+343.47
+—
+407.49
+Uni-NaVid [45]
+7B
+47.00
+229.07 48.70
+234.93
+NaVILA [10]
+8B
+54.00
+858.18 49.30
+838.81
+ActiveVLN [51]
+3B
+50.10
+181.31 50.70
+221.14
+StreamVLN [40]
+7B
+56.90
+208.30 52.90
+206.25
+NaVIDA [55]
+3B
+61.40
+277.60 57.40
+290.91
+InternVLA-N1 (S2) [39]
+7B
+55.40
+299.29 49.50
+298.54
+InternVLA-N1 (S1+S2) [39] 7B
+58.20
+306.07 53.50
+306.08
+JanusVLN [44]
+7B
+60.50 2445.85 56.20 2455.48
+DualVLN [39]
+7B
+64.30
+302.09 61.40
+301.18
+AwareVLN [17]
+8B
+65.40
+833.40 67.60
+926.96
+FutureNav-4B [50]
+4B
+65.40
+609.49 60.90
+590.92
+NavDecision (E = 1)
+4B
+64.33
+109.49 65.03
+124.96
+NavDecision (E = 2)
+4B
+64.60
+55.10 64.57
+62.17
+NavDecision (E = 4)
+4B
+60.79
+27.37 60.81
+31.17
+Table 3. Overall ablation. Baseline uses single-step SFT (K =
+E = 1). PMAP uses multi-step SFT, followed by SRPO [13] or
+M-SRPO (K = 4, E = 2).
+Configuration
+R2R-CE
+RxR-CE
+SR↑
+SPL↑
+SR↑
+SPL↑
+Baseline
+46.55
+41.95
+51.40
+40.92
+PMAP
+47.96
+39.79
+53.69
+43.28
+PMAP+SRPO
+62.26
+52.70
+61.92
+50.82
+PMAP+M-SRPO
+64.60
+54.31
+64.57
+52.84
+SFT uses the same four data sources. PMAP+M-SRPO corresponds to
+E = 2 in Table 1.
+success rate of 47.96% on R2R-CE. Compared with shared-
+state single-step prediction (S3), it improves SR and SPL by
+5.11 and 3.69 percentage points, respectively. It also outper-
+forms candidate-specific multi-step prediction (S2) by 5.44
+points in SR and 5.98 points in SPL. Replacing causal with
+bidirectional interaction (S5) reduces SR and SPL by 5.11
+and 4.75 points, respectively, confirming the importance of
+causal temporal modeling.
+Inference efficiency. Figure 4(b) shows that shared-state
+prediction reduces model inference time per action from
+174.71 to 109.72 ms, a 37.20% reduction. With E = 2,
+PMAP further reduces amortized inference time to 55.10 ms
+per executed primitive action, compared with 84.27 ms
+for candidate-specific multi-step prediction (S2).
+Over-
+all, PMAP achieves a 3.17× speedup over the single-step
+candidate-specific baseline (S1).
+7
+
+
+25
+31
+40
+48
+55
+64
+72
+Aligned step (k)
+30
+35
+40
+45
+50
+SR (%)
+(a) Action-head design
+S1
+S2
+S3
+S4
+Architecture
+0
+50
+100
+150
+200
+250
+Tact (ms)
+174.7
+84.3
+109.7
+55.1
+(b) Inference efficiency
+25
+31
+40
+48
+55
+64
+72
+Aligned step (k)
+30
+35
+40
+45
+50
+SR (%)
+(c) Temporal interaction
+S4: Causal (PMAP)
+S5: Bidirectional
+S1: Candidate-specific, single-step
+S3: Shared-state, single-step
+S2: Candidate-specific, multi-step
+S4 (PMAP): Shared-state, multi-step
+Figure 4. PMAP ablation and inference efficiency. (a) SFT curves of S1–S4 on R2R-CE val unseen; (b) inference time per action; (c)
+causal versus bidirectional temporal attention (S4 vs. S5). S1–S4 compare candidate-specific/shared-state and single-/multi-step designs.
+Table 4. Ablation of action-head design on R2R-CE. All models
+are evaluated after SFT, without SRPO.
+ID
+Representation
+K
+E
+Temporal
+interaction
+R2R-CE
+SR↑
+SPL↑
+S1
+Candidate-specific
+1
+1
+—
+46.55
+41.95
+S2
+Candidate-specific
+4
+2
+Causal
+42.52
+33.81
+S3
+Shared-state
+1
+1
+—
+42.85
+36.10
+S4
+Shared-state
+4
+2
+Causal
+47.96
+39.79
+S5
+Shared-state
+4
+2
+Bidirectional
+42.85
+35.04
+Candidate-specific models retain candidate action branches; shared-state
+models use a common context representation. Single-step models have no
+temporal interaction across positions (—). S4 is PMAP.
+Table 5. M-SRPO and GRPO Ablation on R2R-CE.
+Policy
+Optimization
+R2R-CE
+NE↓
+SR↑
+SPL↑
+Single-step
+SRPO [13]
+4.62
+58.95
+51.64
+Single-step
+M-SRPO
+4.31
+61.45
+54.25
+PMAP
+GRPO [34]
+4.86
+56.23
+47.69
+PMAP
+SRPO [13]
+4.29
+62.26
+52.70
+PMAP
+M-SRPO
+3.99
+64.60
+54.31
+Single-step uses S1; PMAP uses S4. PMAP+M-SRPO is the full method.
+4.3.2. M-SRPO
+M-SRPO extends SRPO with cross-iteration success mem-
+ory, allowing historical successful trajectories to provide re-
+ward references across training iterations. Table 5 evalu-
+ates its effectiveness with single-step and multi-step poli-
+cies, alongside a GRPO [34] baseline.
+Adding cross-iteration memory to SRPO improves the
+single-step policy’s SR by 2.50 percentage points and SPL
+by 2.61 points. For PMAP, the corresponding gains are 2.34
+Instruction：“Turn right from the elevator area, then turn right again to enter the hallway.
+Walk straight to the first intersection and locate the coffee area ahead. Enter the coffee area,
+follow the tables on your left, pass the coffee counter, and proceed to the red fire extinguisher
+cabinet. Stop beneath the coffee menu.”
+Instruction：“Start from the coffee area and walk through the open space beside the tables
+toward the doorway near the elevator. Enter the hallway and walk straight, passing the doors,
+glass partitions, and framed pictures. Continue past the red floor mat and through the doorway
+ahead into the connecting corridor lined with green potted plants on both sides. Walk straight to
+the end of the corridor, move toward the right side, and stop near the right edge.”
+Figure 5. Real-world deployment on a Unitree GO2 robot.
+and 1.61 points, respectively. Compared with GRPO [34],
+multi-step SRPO improves SR by 6.03 points and SPL
+by 5.01 points, while the full PMAP+M-SRPO further in-
+creases these gains to 8.37 and 6.62 points. Finally, com-
+bining M-SRPO with multi-step prediction yields a 3.15-
+point SR improvement over its single-step counterpart, with
+nearly identical SPL (54.31% versus 54.25%). These re-
+sults demonstrate the complementary benefits of cross-
+iteration success memory and multi-step action prediction.
+4.4. Real-World Navigation
+We deploy the full policy (K = 4, E = 2) on a Unitree GO2
+quadruped robot equipped with an Intel RealSense D435i
+RGB-D camera. The policy uses language instructions, cur-
+rent and historical forward-facing RGB images, and past ac-
+tions; depth is used only for low-level collision avoidance.
+Figure 5 shows two successful multi-stage indoor naviga-
+tion examples, demonstrating the real-world applicability of
+our parallel multi-step decision policy.
+8
+
+
+5. Conclusion
+We presented NavDecision, an efficient multi-step deci-
+sion model for VLN that combines parallel action pre-
+diction with cross-iteration self-referential reinforcement
+learning. PMAP captures short-horizon action dependen-
+cies, while M-SRPO leverages a frozen world model and
+cross-iteration success memory to internalize long-horizon
+exploration experience during training without additional
+deployment-time inference modules. Experiments on R2R-
+CE and RxR-CE demonstrate competitive navigation per-
+formance with a 4B backbone, achieving 64.60% and
+64.57% success rates, respectively, with up to 22.28× and
+18.96× inference speedups.
+LLM Usage Statement
+OpenAI ChatGPT (GPT-6 Astra Pro), accessed through
+the ChatGPT web application, was used to assist with En-
+glish translation and language editing, terminology refine-
+ment, LaTeX formatting and troubleshooting, and litera-
+ture search and citation organization. The tool was used
+solely as an auxiliary writing and editing assistant. All re-
+search ideas, methodological designs, experimental proce-
+dures, experimental results, and scientific conclusions were
+determined by the authors. The authors reviewed and veri-
+fied all AI-assisted suggestions and take full responsibility
+for the final manuscript.
+References
+[1] Diogo Almeida.
+Introducing system one models & Jev.
+TypeSafe AI Blog, 2026. 1, 2, 3, 6
+[2] Dong An, Hanqing Wang, Wenguan Wang, Zun Wang, Yan
+Huang, Keji He, and Liang Wang. Etpnav: Evolving topo-
+logical planning for vision-language navigation in continu-
+ous environments. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 47(7):5130–5145, 2024. 2, 6
+[3] Peter Anderson, Angel Chang, Devendra Singh Chaplot,
+Alexey Dosovitskiy, Saurabh Gupta, Vladlen Koltun, Jana
+Kosecka, Jitendra Malik, Roozbeh Mottaghi, Manolis Savva,
+et al. On evaluation of embodied navigation agents. arXiv
+preprint arXiv:1807.06757, 2018. 4, 5
+[4] Peter Anderson, Qi Wu, Damien Teney, Jake Bruce, Mark
+Johnson, Niko S¨underhauf, Ian Reid, Stephen Gould, and
+Anton Van Den Hengel.
+Vision-and-language navigation:
+Interpreting visually-grounded navigation instructions in real
+environments. In 2018 IEEE/CVF conference on computer
+vision and pattern recognition, pages 3674–3683. IEEE,
+2018. 1, 2, 5
+[5] Mido Assran, Adrien Bardes, David Fan, Quentin Garrido,
+Russell Howes, Matthew Muckley, Ammar Rizvi, Claire
+Roberts, Koustuv Sinha, Artem Zholus, et al. V-jepa 2: Self-
+supervised video models enable understanding, prediction
+and planning. arXiv preprint arXiv:2506.09985, 2025. 5
+[6] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 3
+[7] Jiaqi Chen, Bingqian Lin, Ran Xu, Zhenhua Chai, Xiaodan
+Liang, and Kwan-Yee Wong. Mapgpt: Map-guided prompt-
+ing with adaptive path planning for vision-and-language nav-
+igation. In Proceedings of the 62nd Annual Meeting of the
+Association for Computational Linguistics (Volume 1: Long
+Papers), pages 9796–9810, 2024. 2
+[8] Shizhe Chen, Pierre-Louis Guhur, Cordelia Schmid, and
+Ivan Laptev.
+History aware multimodal transformer for
+vision-and-language navigation. Advances in neural infor-
+mation processing systems, 34:5834–5847, 2021. 2
+[9] Shizhe Chen,
+Pierre-Louis Guhur,
+Makarand Tapaswi,
+Cordelia Schmid, and Ivan Laptev.
+Think global, act lo-
+cal: Dual-scale graph transformer for vision-and-language
+navigation. In 2022 IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), pages 16516–16526.
+IEEE, 2022. 2
+[10] An-Chieh Cheng, Yandong Ji, Zhaojing Yang, Zaitian
+Gongye, Xueyan Zou, Jan Kautz, Erdem Bıyık, Hongxu
+Yin, Sifei Liu, and Xiaolong Wang. Navila: Legged robot
+vision-language-action model for navigation. arXiv preprint
+arXiv:2412.04453, 2024. 1, 2, 3, 6, 7
+[11] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun
+Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song.
+Diffusion policy: Visuomotor policy learning via action dif-
+fusion. The International Journal of Robotics Research, 44
+(10-11):1684–1704, 2025. 3
+[12] Feiyu Duan, Jiayu Lin, Jia Wang, Jun Xiang, Jialiang Wu,
+Xinnong Zhang, Hanqi Yan, Siyuan Wang, and Zhongyu
+Wei. General decision models: Benchmarking and insights
+beyond jev. arXiv preprint arXiv:2610.03935, 2026. 3
+[13] Senyu Fei, Siyin Wang, Li Ji, Ao Li, Shiduo Zhang, Lim-
+ing Liu, Jinlong Hou, Jingjing Gong, Xianzhong Zhao,
+and Xipeng Qiu.
+Srpo: Self-referential policy optimiza-
+tion for vision-language-action models. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6718–6728, 2026. 2, 4, 5, 7, 8
+[14] Daniel Fried, Ronghang Hu, Volkan Cirik, Anna Rohrbach,
+Jacob Andreas,
+Louis-Philippe Morency,
+Taylor Berg-
+Kirkpatrick, Kate Saenko, Dan Klein, and Trevor Darrell.
+Speaker-follower models for vision-and-language naviga-
+tion.
+Advances in neural information processing systems,
+31, 2018. 2
+[15] Georgios Georgakis, Karl Schmeckpeper, Karan Wanchoo,
+Soham Dan, Eleni Miltsakaki, Dan Roth, and Kostas Dani-
+ilidis. Cross-modal map learning for vision and language
+navigation. In 2022 IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), pages 15439–15449.
+IEEE, 2022. 6
+[16] Jonathan Geuter, Andrew Cheng, and David Alvarez-Melis.
+Releasing the inner jev: A simple recipe for open decision
+models. arXiv preprint arXiv:2610.17205, 2026. 3
+[17] Wenxuan Guo, Xiuwei Xu, Yichen Liu, Xiangyu Li, Hang
+Yin, Huangxing Chen, Wenzhao Zheng, Jianjiang Feng,
+Jie Zhou, and Jiwen Lu. Awarevln: Reasoning with self-
+9
+
+
+awareness for vision-language navigation.
+arXiv preprint
+arXiv:2605.22816, 2026. 6, 7
+[18] Weituo Hao, Chunyuan Li, Xiujun Li, Lawrence Carin, and
+Jianfeng Gao. Towards learning a generic agent for vision-
+and-language navigation via pre-training. In 2020 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 13134–13143. IEEE, 2020. 2
+[19] Lingyi Hong, Weiren Cai, Jiayu Chen, Xinyu Zhou, Bailin
+He, Yunfei Guo, Qiao Sun, Boyu Ma, Jianfei Yang, and Wen-
+qiang Zhang. Simplevln: Towards simple and frontier vision-
+language navigation.
+arXiv preprint arXiv:2610.23203,
+2026. 2
+[20] Yicong Hong, Qi Wu, Yuankai Qi, Cristian Rodriguez-
+Opazo, and Stephen Gould. Vln bert: A recurrent vision-
+and-language bert for navigation.
+In Proceedings of the
+IEEE/CVF conference on Computer Vision and Pattern
+Recognition, pages 1643–1653, 2021. 2
+[21] Yicong Hong, Zun Wang, Qi Wu, and Stephen Gould.
+Bridging the gap between learning in discrete and contin-
+uous environments for vision-and-language navigation. In
+2022 IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 15418–15428. IEEE, 2022.
+2
+[22] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan
+Foster, Grace Lam, Pannag Sanketi, et al.
+Openvla: An
+open-source vision-language-action model. arXiv preprint
+arXiv:2406.09246, 2024. 3
+[23] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. arXiv preprint arXiv:2502.19645, 2025. 3
+[24] Jacob Krantz, Erik Wijmans, Arjun Majumdar, Dhruv Batra,
+and Stefan Lee. Beyond the nav-graph: Vision-and-language
+navigation in continuous environments. In European Confer-
+ence on Computer Vision, pages 104–120. Springer, 2020. 1,
+2, 3, 5
+[25] Jacob Krantz, Aaron Gokaslan, Dhruv Batra, Stefan Lee, and
+Oleksandr Maksymets.
+Waypoint models for instruction-
+guided navigation in continuous environments.
+In 2021
+IEEE/CVF International Conference on Computer Vision
+(ICCV), pages 15142–15151. IEEE, 2021. 6
+[26] Alexander Ku, Peter Anderson, Roma Patel, Eugene Ie, and
+Jason Baldridge. Room-across-room: Multilingual vision-
+and-language navigation with dense spatiotemporal ground-
+ing. In Proceedings of the 2020 Conference on Empirical
+Methods in Natural Language Processing (EMNLP), pages
+4392–4412, 2020. 2, 5
+[27] Yinheng Li and Justin Wagle. Llm-as-jev: Llms are already
+jev-style decision models–when and how to fine-tune them,
+2026. URL https://arxiv. org/abs/2610.02076. 1, 3
+[28] Bingqian Lin, Yunshuang Nie, Ziming Wei, Jiaqi Chen,
+Shikui Ma, Jianhua Han, Hang Xu, Xiaojun Chang, and
+Xiaodan Liang.
+Navcot: Boosting llm-based vision-and-
+language navigation via learning disentangled reasoning.
+IEEE Transactions on Pattern Analysis and Machine Intel-
+ligence, 47(7):5945–5957, 2025. 2
+[29] Yuqi Liu, Shengju Qian, Tianyuan Qu, Mingxian Lin, Zix-
+uan Wang, Xin Wang, Bei Yu, and Jiaya Jia.
+Memvln:
+Episodic and procedural memory for vision-and-language
+navigation. arXiv preprint arXiv:2607.23504, 2026. 3
+[30] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess,
+Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and
+Sergey Levine. Fast: Efficient action tokenization for vision-
+language-action models. arXiv preprint arXiv:2501.09747,
+2025. 3
+[31] Zhangyang Qi, Zhixiong Zhang, Yizhou Yu, Jiaqi Wang, and
+Hengshuang Zhao. Vln-r1: Vision-language navigation via
+reinforcement fine-tuning. arXiv preprint arXiv:2506.17221,
+2025. 2
+[32] St´ephane Ross, Geoffrey Gordon, and Drew Bagnell. A re-
+duction of imitation learning and structured prediction to no-
+regret online learning. In Proceedings of the fourteenth inter-
+national conference on artificial intelligence and statistics,
+pages 627–635. JMLR Workshop and Conference Proceed-
+ings, 2011. 2
+[33] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Rad-
+ford, and Oleg Klimov. Proximal policy optimization algo-
+rithms. arXiv preprint arXiv:1707.06347, 2017. 5
+[34] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao
+Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li,
+Yang Wu, et al. Deepseekmath: Pushing the limits of math-
+ematical reasoning in open language models. arXiv preprint
+arXiv:2402.03300, 2024. 5, 8
+[35] Kai Sheng, Liuyi Wang, Jinlong Li, Haojie Dai, Chengju
+Liu, and Qijun Chen.
+Navjev: Efficient vision-language
+navigation via action-centric visual compression and dis-
+criminative action-semantic memory.
+arXiv preprint
+arXiv:2609.34969, 2026. 1, 2, 3
+[36] Hao Tan, Licheng Yu, and Mohit Bansal. Learning to nav-
+igate unseen environments: Back translation with environ-
+mental dropout. In Proceedings of the 2019 Conference of
+the North American Chapter of the Association for Computa-
+tional Linguistics: Human Language Technologies, Volume
+1 (Long and Short Papers), pages 2610–2621, 2019. 2, 5
+[37] Zun Wang, Jialu Li, Yicong Hong, Yi Wang, Qi Wu, Mo-
+hit Bansal, Stephen Gould, Hao Tan, and Yu Qiao. Scal-
+ing data generation in vision-and-language navigation.
+In
+2023 IEEE/CVF International Conference on Computer Vi-
+sion (ICCV), pages 11975–11986. IEEE, 2023. 2, 5
+[38] Zhixin Wang, Chengzheyi Yao, Leyuan Liu, Xiaosong
+Zhang, and Yongzhao Zhang.
+Vernav: Verifier-first low-
+latency vision-and-language navigation.
+arXiv preprint
+arXiv:2609.00920, 2026. 3
+[39] Meng Wei, Chenyang Wan, Peng Peng, Xiqian Yu, Yuqiang
+Yang, Delin Feng, Wenzhe Cai, Chenming Zhu, Tai Wang,
+Jiangmiao Pang, et al.
+Ground slow, move fast: A dual-
+system foundation model for generalizable vision-language
+navigation. In International Conference on Learning Repre-
+sentations, pages 12380–12396, 2026. 2, 6, 7
+[40] Meng Wei, Chenyang Wan, Xiqian Yu, Tai Wang, Xiaohan
+Mao, Chenming Zhu, Wenzhe Cai, Hanqing Wang, Yilun
+Chen, Xihui Liu, et al. Streamvln: Streaming vision-and-
+language navigation via slowfast context modeling. In 2026
+IEEE International Conference on Robotics and Automation
+(ICRA), pages 22174–22181. IEEE, 2026. 3, 6, 7
+10
+
+
+[41] Xuan Yao, Junyu Gao, and Changsheng Xu. Navmorph: A
+self-evolving world model for vision-and-language naviga-
+tion in continuous environments.
+In 2025 IEEE/CVF In-
+ternational Conference on Computer Vision (ICCV), pages
+5536–5546. IEEE, 2025. 6
+[42] Xuan Yao, Yuze Zhu, Junyu Gao, Zongmeng Wang, and
+Changsheng Xu. SC2-WM: A self-correcting world model
+with closed-loop feedback for vision-and-language naviga-
+tion in continuous environments. In Proceedings of the 43rd
+International Conference on Machine Learning (ICML),
+2026. 6
+[43] Guanxu Yu and Yuhang Yao. Visual jev: Accurate and ef-
+ficient decisions from shared visual context. arXiv preprint
+arXiv:2609.25845, 2026. 3
+[44] Shuang Zeng, Dekang Qi, Xinyuan Chang, Feng Xiong,
+Shichao Xie, Xiaolong Wu, Shiyi Liang, Mu Xu, and Xing
+Wei.
+Janusvln: Decoupling semantics and spatiality with
+dual implicit memory for vision-language navigation. In In-
+ternational Conference on Learning Representations, pages
+33001–33026, 2026. 6, 7
+[45] Jiazhao Zhang, Kunyu Wang, Shaoan Wang, Minghan Li,
+Haoran Liu, Songlin Wei, Zhongyuan Wang, Zhizheng
+Zhang, and He Wang.
+Uni-navid: A video-based vision-
+language-action model for unifying embodied navigation
+tasks. arXiv preprint arXiv:2412.06224, 2024. 2, 6, 7
+[46] Jiazhao Zhang, Kunyu Wang, Rongtao Xu, Gengze Zhou,
+Yicong Hong, Xiaomeng Fang, Qi Wu, Zhizheng Zhang,
+and He Wang.
+Navid: Video-based vlm plans the next
+step for vision-and-language navigation.
+arXiv preprint
+arXiv:2402.15852, 2024. 1, 2, 6, 7
+[47] Jiazhao Zhang, Anqi Li, Yunpeng Qi, Minghan Li, Jiahang
+Liu, Shaoan Wang, Haoran Liu, Gengze Zhou, Yuze Wu,
+Xingxing Li, et al. Embodied navigation foundation model.
+In International Conference on Learning Representations,
+pages 127293–127322, 2026. 6
+[48] Jiazhao Zhang, Gengze Zhou, Hale Yin, Yiyang Huang, Zix-
+ing Lei, Qihang Peng, Haoqi Yuan, Jie Zhang, Xudong Guo,
+Xiaoyue Chen, et al.
+Qwen-robotnav technical report: A
+scalable navigation model designed for an agentic navigation
+system. arXiv preprint arXiv:2606.18112, 2026. 6
+[49] Linghua Zhang. Jev-mobile: Jev as an executor for mobile
+gui agents. arXiv preprint arXiv:2609.30186, 2026. 1, 3
+[50] Lingfeng Zhang, Zeying Gong, Xiaoshuai Hao, Haoxiang
+Fu, Qiang Zhang, Mingliang Zhou, Hangjun Ye, Xiaojun
+Liang, Junwei Liang, and Wenbo Ding. Futurenav: Unified
+world-action modeling for vision-and-language navigation.
+arXiv preprint arXiv:2606.30367, 2026. 6, 7
+[51] Zekai Zhang, Weiye Zhu, Hewei Pan, Xiangchen Wang,
+Rongtao Xu, Xing Sun, and Feng Zheng. Activevln: To-
+wards active exploration via multi-turn rl in vision-and-
+language navigation. In 2026 IEEE International Conference
+on Robotics and Automation (ICRA), pages 12611–12618.
+IEEE, 2026. 2, 6, 7
+[52] Tony Z Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. arXiv preprint arXiv:2304.13705, 2023.
+3
+[53] Gengze Zhou, Yicong Hong, Zun Wang, Xin Eric Wang, and
+Qi Wu. Navgpt-2: Unleashing navigational reasoning capa-
+bility for large vision-language models. In European Con-
+ference on Computer Vision, pages 260–278. Springer, 2024.
+2
+[54] Gengze Zhou, Yicong Hong, and Qi Wu. Navgpt: Explicit
+reasoning in vision-and-language navigation with large lan-
+guage models. In Proceedings of the AAAI Conference on
+Artificial Intelligence, pages 7641–7649, 2024. 2
+[55] Weiye Zhu, Zekai Zhang, Xiangchen Wang, Hewei Pan,
+Teng Wang, Tiantian Geng, Rongtao Xu, and Feng Zheng.
+NAVIDA: Vision-language navigation with inverse dynam-
+ics augmentation. arXiv preprint arXiv:2601.18188, 2026.
+2, 6, 7
+11

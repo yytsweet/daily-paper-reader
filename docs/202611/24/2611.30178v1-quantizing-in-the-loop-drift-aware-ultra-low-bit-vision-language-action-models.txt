@@ -1,0 +1,552 @@
+Title: Quantizing in the Loop: Drift-Aware Ultra-Low-Bit Vision-Language-Action Models
+
+URL Source: https://arxiv.org/pdf/2611.30178v1
+
+Published Time: Tue, 24 Nov 2026 04:42:58 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Quantizing in the Loop: Drift-Aware Ultra-Low-Bit Vision-Language-Action Models 
+
+# Yanlong Chen Thongthornpatch Chamadol Yichen Guo Yunfei Gao Mohan Liu Addison Lin Wang Yawei Li †
+
+# Nanyang Technological University 
+
+> †Corresponding author
+
+§ github.com/ForeverBlue816/LoopQ 
+
+# Abstract 
+
+Deploying large vision-language-action (VLA) models on resource-constrained robots demands extreme compression, yet existing post-training quantization (PTQ) methods fre-quently collapse at ultra-low bit-widths ( ≤ 2 bits). We trace this failure to two mismatches in standard pipelines. First, calibrating on static offline demonstrations induces distri-bution shift : minor quantization perturbations drive the policy into unseen states where uncalibrated errors com-pound. Second, minimizing the layer-wise weight recon-struction error is a flawed proxy , as action generation de-pends only on the representations consumed by the action head. We present LoopQ , an on-policy ultra-low-bit quan-tization framework. LoopQ closes the loop by calibrat-ing on states from the quantized policy’s own rollouts. It then adds readout-aligned fine-tuning , which freezes the trellis codes and optimizes only lightweight lookup tables and scaling factors to align the backbone readout with the full-precision teacher. With all linear layers at 2 bits, LoopQ achieves a 60.4% success rate on LIBERO-Plus with GR00T N1.7, close to the 61.8% of full precision. Even at 1 bit per weight, π0.5 still completes 80.0% of LIBERO tasks. With 8-bit activations, the 2-bit π0.5 runs on integer kernels on an embedded NVIDIA Jetson AGX Thor , with 
+
+4.1 × smaller weights and 44% less memory. On a real Ag-ileX Piper arm, it stays within one success of full precision on each of three tasks. Code and checkpoints are available at § github.com/ForeverBlue816/LoopQ .
+
+# 1. Introduction 
+
+Vision-language-action (VLA) models [3–5, 17, 27] have become the standard recipe for generalist robot policies: a pretrained vision-language backbone, a flow-matching or diffusion transformer action head [9, 20], and several bil-lion parameters evaluated many times per second on on-board hardware. While language models of this scale are routinely compressed to 2 bits per weight with modest loss [10, 30, 31], VLAs resist such extreme compression. Existing VLA quantizers stop at 4 bits or keep the action head in higher precision [1, 36, 37]; applying the strongest 2-bit quantizers across an entire VLA drops perturbed suc-cess by 4 to 62 points. Figure 1a illustrates this failure: from the same initial state and noise, the full-precision pol-icy opens the drawer, whereas its 2-bit counterpart reaches for the upper drawer and stalls. Why does a recipe that works for language models break a policy? Because a policy acts in closed loop : its outputs determine its next inputs. This single fact invalidates two core assumptions behind standard post-training quantizers, explaining both why they fail and how to fix them. 
+
+Quantization drift. Layer-wise quantizers minimize output error on static calibration data (human demonstra-tion frames), pushing the unavoidable ultra-low-bit error into input directions that those frames never excite. While a language model rarely encounters this hidden error be-cause its test and calibration distributions align, a closed-loop robot inevitably does: a 2-bit policy acts slightly differ-ently from full precision, enters an unseen state, triggers the error hidden there, and deviates further. We term this self-reinforcing divergence quantization drift . Figure 1b traces it in a real episode, where the 2-bit end-effector leaves the ref-erence path and never recovers. Across every VLA module, policy-induced states dominate the input distribution shift at deployment, accounting for 45% in the language model and up to 83% in the action head. 
+
+Readout corruption. Because the action head inter-acts with the backbone solely through attention readouts over backbone tokens, action generation depends not on raw weights, but on what the head reads. Ultra-low-bit quantization systematically displaces this interface, shifting the readout by a nearly constant offset at every step of an 1arXiv:2611.30178v1 [cs.RO] 23 Nov 2026 50 60 70 80 Full precision QTIP (2-bit base) LoopQ (ours) 
+
+> 61.8 55.9 60.4
+> GR00T N1.7
+> 50 60 70 80
+> 76.5 72.6 74.9
+
+π0.5      
+
+> 02468Inference memory Weights on disk 6.65
+> 3.72 −44%
+> 6.47
+> 1.58 4.1× smaller
+
+(a) Task: open the middle drawer     
+
+> call 0 510 14 end
+> Full precision
+> drawer open after 19 calls
+> 2-bit base
+> drawer closed after 38 calls
+> LoopQ (ours)
+> drawer open after 22 calls
+
+(b) Cause 1: quantization drift 
+
+> End-e ff ector paths in the camera view
+
+(c) Cause 2: readout corruption    
+
+> Readout distance to full precision: 219 →111
+
+(d) LIBERO-Plus success (%) 
+
+> Linear layers at 2 bits per weight
+
+(e) On Jetson AGX Thor  
+
+> π0.5 memory (GB)
+
+Figure 1. Closed-loop failure of a 2-bit VLA and its correction by LoopQ. (a) GR00T N1.7 on a LIBERO-Plus instance (Goal suite, perturbed initial state) with identical noise, at matched policy calls. Full precision and LoopQ succeed, whereas the 2-bit post-training baseline fails. (b) Cause 1: quantization drift. End-effector trajectories on the initial frame. The 2-bit baseline departs from the full-precision trajectory and halts, while LoopQ tracks it to completion. (c) Cause 2: readout corruption. Readouts of the π0.5 action expert along the rollout, in their first three principal components. LoopQ halves the distance to full precision. (d) LIBERO-Plus success with linear layers at 2 bits per weight. (e) Storage and memory of π0.5 with 8-bit activations on Jetson AGX Thor. 
+
+episode (Fig. 1c). The head is not reading a noisier copy of the same content; it is reading something else. LoopQ translates both diagnoses into two steps atop a trellis-coded format [25, 31]. Closed-loop calibration quan-tizes every layer on the states the quantized policy itself visits, so the quantizer can no longer hide error where the policy will go; it requires a few hundred rollouts and no training. Readout-aligned fine-tuning then updates only a 512-entry lookup table and a scale vector per layer around the frozen codes, aligning the action head’s readouts with the full-precision model. Neither step alters the storage for-mat, bit budget, or decoder. The result is a VLA quan-tized end to end, across both backbone and action head, that behaves like the original (Fig. 1d). Without any train-ing, closed-loop calibration alone outperforms the strongest post-training quantizer on LIBERO-Plus, reaching 73.4% vs. 72.6% on π0.5 and 57.5% vs. 55.9% on GR00T N1.7. Adding readout alignment brings the 2-bit policies to 74.9% and 60.4%, within 1.6 and 1.4 points of full precision, re-covering three quarters of the degradation incurred by the best existing 2-bit quantizer on GR00T. Nor does our ap-proach stop at 2 bits: at 1 bit per weight, π0.5 still com-pletes 80.0% of LIBERO, far surpassing the 48.0% reported for 2-bit backbone-only quantization [1]. Finally, the com-pressed policy is directly deployable: with 8-bit activations, the 2-bit π0.5 executes on integer kernels on an embedded NVIDIA Jetson AGX Thor with 4.1× smaller weights and 44% less memory (Fig. 1e). On a real AgileX Piper arm, the 2-bit policy succeeds in 58 of 75 trials, against 59 for full precision. Our contributions are: • A closed-loop diagnosis. We show that ultra-low-bit VLAs fail due to two phenomena rooted in closed-loop execution: quantization drift , caused by calibration statis-tics that miss policy-induced states, and readout corrup-tion , a systematic displacement of the representations consumed by the action head under layer-wise objectives. • LoopQ. We propose closed-loop calibration to align cal-ibration statistics with the policy’s own state distribu-tion, outperforming the strongest post-training quantiz-ers on two VLAs without any training, followed by 2readout-aligned fine-tuning , which optimizes only per-layer lookup tables and scales while keeping all stored codes and the decoder untouched. • End-to-end VLAs at 2 bits and below. We present the first VLAs with both backbone and action head quan-tized entirely to 2 bits that stay within two points of full precision under perturbation, while remaining functional policies even at 1 bit. Furthermore, we deploy the 2-bit policy on a physical AgileX Piper arm, demonstrat-ing reliable closed-loop execution across three real-world manipulation tasks: precision stacking, two-stage lidded-bin lemon placement, and multi-object grasping in clutter, each within one success of full precision. 
+
+# 2. Related Work 
+
+Vision-language-action models. RT-2 [5] and Open-VLA [17] cast actions as tokens of a vision-language model; 
+
+π0 and π0.5 [4, 27] and the GR00T family [3] attach a flow-matching action head that reads the backbone through atten-tion and denoises an action chunk in a few steps. We study the latter family, where the interface between backbone and head is an attention readout. 
+
+Low-bit quantization of large models. GPTQ [12] and AWQ [19] quantize layer by layer using second-order statis-tics of the layer inputs, following the optimal-brain line of work [15]. At two bits, scalar quantizers collapse and vec-tor formats take over: QuIP and QuIP# [6, 30] combine in-coherence processing with lattice codebooks, AQLM [10] and VPTQ [22] learn additive and vector codebooks, and QTIP [31] uses trellis-coded quantization [25] to approach the rate–distortion limit with a decoder that needs only a small lookup table. Rotations reshape weight and acti-vation statistics before quantization [2, 7, 23], and fine-tuning or distillation repairs the continuous parameters af-terwards [8, 10, 24, 30]. We adopt the trellis-coded format and contribute what is specific to policies: the calibration statistics and the fine-tuning objective. 
+
+Quantizing VLAs. QVLA [36], QuantVLA [37], Ac-tQuant [1], and DA-PTQ [35] adapt bit allocation, scaling, or calibration to action sensitivity, mostly at four bits or with parts of the action pathway kept in higher precision. BitVLA [32] instead train the policy with quantization in the loop. VLAQuantBench [34] shows that a single action-interface layer can dominate the loss. These works calibrate on demonstrations; we quantize every linear layer to two bits and identify the closed loop as the root cause of failure. 
+
+Calibration data and distribution shift. Post-training quantization is sensitive to its calibration set [33]. In imita-tion learning, DAgger [29] corrects the mismatch between demonstrations and learner-induced states by querying an expert and retraining. Closed-loop calibration needs nei-ther labels nor training: it re-estimates layer statistics on the states the quantized policy itself visits. 
+
+# 3. Failure Analysis of Low Bits VLAs 
+
+3.1. Preliminaries 
+
+A flow-matching VLA [4, 27] consists of a prefix network (vision encoder and language model), evaluated once per inference, and an action head , evaluated at each of T de-noising steps [20]. At layer ℓ, step t and attention head h,the action head forms the readout 
+
+oℓ,t,h = softmax  qℓ,t,h K⊤ 
+
+> ℓ
+
+/√d Vℓ, (1) where the queries q come from the action tokens and 
+
+(Kℓ, V ℓ) from the prefix: the cached keys and values in π0.5,the backbone tokens read by the cross-attention of the diffu-sion transformer in GR00T [26]. The readouts are the only path from perception to action. Post-training quantizers replace each weight matrix Wℓ
+
+by ˆWℓ that minimizes the layer-wise objective [12] 
+
+min 
+
+> ˆWℓ
+
+tr  ( ˆWℓ − Wℓ) Hℓ ( ˆWℓ − Wℓ)⊤,Hℓ = Ex∼D 
+
+xx ⊤,
+
+(2) with the second moment Hℓ of the layer input estimated on a calibration set D of demonstration frames. 
+
+3.2. Quantization drift under closed-loop execution 
+
+Equation (2) weights the reconstruction error by Hessian calibration Hℓ. Because errors along low-energy directions of Hℓ incur negligible penalty, an ultra-low-bit quantizer in-evitably hides its unavoidable distortion in those subspaces. For y = w1x1 +w2x2, the output error is ∆w1x1 +∆ w2x2:if x2 ≈ 0 on the demonstration set D, ∆w2 is unconstrained and w2 is quantized coarsely. This is harmless only when 
+
+x2 is near zero. Because a policy’s actions alter the future scene, small quantization perturbations steer a 2-bit policy into states where x2̸ = 0 , exposing the hidden error ∆w2x2,amplifying the deviation, and closing a self-reinforcing loop [28]. To quantify this effect, we decompose the second layer-wise moment of the deployment input shift relative to calibration frames across three sources: photometric vari-ations, geometric variations, and states visited by the 2-bit policy itself. Across the entire VLA, policy-induced states dominate the distribution shift, accounting for 45% in the language model, 51% in the vision encoder, 48–57% in the action head’s attention layers, and up to 83% in its remain-ing layers (Fig. 2a). To isolate this mismatch, we change only the calibra-tion statistics so that they include on-policy states (Sec. 4) and keep everything else fixed (Fig. 2b). The output er-ror on on-policy states then falls in 427 of the 432 layers, most strongly in the action head (median 14%, up to 50%) and least in the backbone (median 3%). The improvement comes at a nearly linear cost on demonstrations: in the ac-tion head, each 1% of additional error on demonstrations 30 50 100  
+
+> Action head: other layers Action head: cross-attention Action head: self-attention Vision encoder Language model
+
+45 51 48 57 83          
+
+> VL 816 24 31
+> action-head block index
+> qkvout
+> ff -up
+> ff -down
+> 0+5 +10
+> on demonstrations
+> 0
+> −25
+> −50
+> on on-policy states
+> slope −4.6
+> backbone action head
+> 0100 200
+> direction 1
+> 0100
+> direction 2
+> 0100 200
+> distance  mean 219 mean 111
+
+(a) Sources of input shift    
+
+> Demo Lighting Crop On-policy
+> Share of input shift (%)
+
+(b) Closed-loop calibration  
+
+> On-policy error change (%) −50 0
+> Error change per layer (%)
+
+(c) Readout displacement     
+
+> Two leading error directions
+> full precision
+> 2-bit base LoopQ
+> Distance to full precision (std. units)
+> 0510 14 18
+> policy call
+
+Figure 2. The two failure causes of 2-bit VLAs and their correction. (a) Decomposition of the deployment input shift across modules, indicating that on-policy states outweigh visual perturbations. (b) Layer-wise effect of closed-loop calibration relative to demonstration calibration. On-policy error decreases across the action head (top) and in 427 of 432 layers. Each 1% added on demonstrations removes 4.6% on on-policy states in the head (bottom). (c) Action-expert readout error on identical inputs from the pictured rollout, in the two leading directions of both models’ errors (top) and over policy calls (bottom). LoopQ halves the mean distance to full precision. 
+
+corresponds to a 4.6% reduction on on-policy states. The gain does not appear along individual principal directions of the layer inputs: on-policy calibration does not reduce the per-direction error, but aligns the errors so that they cancel on the inputs seen at deployment. This indicates that fidelity on demonstrations and fidelity under closed-loop deploy-ment are distinct objectives, and the calibration data decide which one the quantizer optimizes. 
+
+3.3. Readout corruption in the action head 
+
+Calibration statistics determine where weight error is placed, and the second failure cause lies in the layer-wise objective itself, which leaves the readout of the action head unconstrained [13, 16]. To measure the effect, we feed the same episode, with identical inputs, to the full-precision 
+
+π0.5 and to its 2-bit versions and record the attention readout of the action expert at each of the 19 policy calls (Fig. 2c). Quantization to 2 bits displaces the readout by a nearly con-stant offset at every policy call. The plot axes are the two leading directions of both models’ errors: the base error lies along the first, and LoopQ removes it, leaving a residual half as large along the second. LoopQ is closer to full precision at all 19 calls (0.51 of the base distance on average). The trellis format and closed-loop calibration bring it to 0.63, and readout alignment accounts for the rest. 
+
+# 4. Method 
+
+LoopQ keeps the quantization format fixed and changes two things around it: the statistics that guide the quantizer and the objective that repairs its output (Fig. 3). 
+
+4.1. Base format: trellis-coded quantization 
+
+We quantize every linear layer of the prefix and the ac-tion head with trellis-coded quantization [25] in the bitshift formulation of QTIP [31]. Each weight matrix undergoes a two-sided randomized Hadamard transform and is parti-tioned into 256-weight tiles. Each tile is encoded as a 512-bit path through a 216 state trellis: the decoder slides a 16-bit window over the bitstream in 4-bit strides, hashes the window to index a 512-entry lookup table Tℓ, and outputs a weight pair scaled by a per-row factor sℓ. Viterbi search with block-wise error feedback selects the path minimiz-ing Eq. (2). Because adjacent windows overlap, all weights within a tile are optimized jointly, allowing a compact 512-pair table to approach the 2-bit rate–distortion limit [14]. 4Format: trellis-coded weights Step 1: closed-loop calibration Step 2: readout-aligned fine-tuning   
+
+> 16-bit window 1 0 1 1 0 0 1 0 1 0 0 1 1 0 1 0 …
+> index lookup advance 4 bits
+
+× =           
+
+> lookup table Trow scale s
+> trainable trainable decoded
+> demo lighting crop on-policy 1⅓⅓⅓
+
++ + +
+
+> unseen directions trace-normalized
+
+=
+
+> in the loop
+> teacher (full precision) student (2-bit LoopQ)
+> vision + language prefix vision + language prefix
+
+Σ
+
+> q
+
+Σ     
+
+> q
+> query image language
+> action head action head
+> align readout match velocity
+> T,s, norm T,s, norm
+
+Figure 3. Overview of LoopQ. Format. A 16-bit window slides over the frozen trellis code stream and indexes a 512-entry table T . A row scale s multiplies each output. Step 1. Closed-loop calibration adds trace-normalized lighting, crop and on-policy statistics to Hdemo .
+
+Step 2. Readout-aligned fine-tuning trains only T , s and the normalization weights to match the teacher’s readout o and velocity v.
+
+4.2. Closed-loop calibration 
+
+To eliminate the distribution mismatch between static demonstrations D and closed-loop execution, the calibra-tion second moment should be estimated under the state distribution dˆπ induced by the quantized policy ˆπ(H) that it produces, which defines a fixed point: 
+
+H⋆ℓ = Ex∼dˆπ(H⋆)
+
+xx ⊤. (3) Standard demonstration statistics Hdemo  
+
+> ℓ
+
+correspond to the zeroth iterate of this fixed-point problem. We perform one fixed-point iteration and incorporate visual invariance by constructing the closed-loop Hessian: 
+
+Hcl  
+
+> ℓ
+
+= Hdemo  
+
+> ℓ
+
++ X
+
+> s∈S
+
+wℓ,s H(s) 
+
+> ℓ
+
+, (4) 
+
+wℓ,s = tr Hdemo 
+
+> ℓ
+
+|S| tr H(s)
+
+> ℓ
+
+, (5) where S comprises three sources: lighting augmentations and random crops of the calibration frames, and on-policy states , one from each of 256 rollouts of the 2-bit policy calibrated on demonstrations in the unperturbed environ-ment. Trace normalization gives every source the same to-tal energy. We start these rollouts from the benchmark’s full distribution of initial states, which covers more states than a single start pose and preserves initial-state robust-ness (Sec. 5.3). The perturbations used for evaluation never appear in the calibration data. 
+
+Spectral robustness view. Let H′ 
+
+> ℓ
+
+denote the true sec-ond moment at deployment. The deployment reconstruction error satisfies 
+
+tr  ∆W H ′
+
+> ℓ
+
+∆W ⊤ ≤ tr  ∆W H ℓ∆W ⊤
+
++ H′ 
+
+> ℓ
+
+− Hℓ 2 ∥∆W ∥2 
+
+> F
+
+, (6) where ∆W = ˆWℓ − Wℓ. When the shift H′ 
+
+> ℓ
+
+− Hℓ is un-known, the second term is controlled by diagonal damp-ing ( Hℓ + λI ), which penalizes weight error equally in every direction, including those that deployment never ex-cites. Closed-loop calibration measures the shift instead: 
+
+Hcl  
+
+> ℓ
+
+− Hdemo  
+
+> ℓ
+
+concentrates its energy in the subspaces ex-cited by visual variations and on-policy states. The step costs 256 simulated rollouts and a second quantization pass that reuses the quantizer, rotation, storage format and bit budget of the first. 
+
+4.3. Readout-aligned fine-tuning 
+
+Readout-aligned fine-tuning then repairs the representations consumed by the action head. Freezing all trellis codes and rotations, we optimize only the per-layer lookup tables 
+
+Tℓ, row scales sℓ, and normalization weights. Let oq and 
+
+oFP denote the attention readouts (1) of the quantized and full-precision policies along the quantized policy’s denois-ing trajectory under identical observations and noise. We minimize 
+
+L = X
+
+> ℓ,t,h
+
+WO,ℓ,h 
+
+ oqℓ,t,h − oFP 
+
+> ℓ,t,h
+
+ 2 + β vq − vFP 2
+
++ μ X
+
+> ℓ
+
+∥ ˆWℓ − Wℓ∥2
+
+> F
+
+∥Wℓ∥2
+
+> F
+
+,
+
+(7) where WO is the attention output projection, v the predicted velocity over the executed chunk, and the Frobenius anchor 5By perturbation By suite Method bpw All vs. FP Camera Init. state Spatial Object Goal Long                                                                                                                                  
+
+> GR00T N1.7: all 432 linear layers of backbone and action head at 2 bits
+> Full precision 16 61.8 –65.2 58.4 74.7 50.2 69.5 52.8 AQLM [10] 2.02 40.1 −21.7 40.2 40.0 58.4 39.0 40.6 22.6 VPTQ [22] 2.00 49.5 −12.3 51.6 47.4 65.7 44.2 55.9 32.3 QuIP# [30] 2.03 53.1 −8.7 54.4 51.8 67.3 45.0 59.0 41.1 QTIP [31] 2.02 55.9 −5.9 54.4 57.4 71.4 48.6 60.2 43.5 Closed-loop calibration only (ours) 2.02 57.5 −4.3 57.8 57.2 71.0 50.6 65.2 43.1
+> LoopQ (ours) 2.02 60.4 −1.4 62.2 58.6 75.1 49.0 68.4 49.2
+> π0.5: all 414 linear layers of backbone and action expert at 2 bits
+> Full precision 16 76.5 –74.4 78.6 82.0 81.7 76.6 65.7 AQLM [10] 2.02 63.9 −12.6 60.8 67.0 73.1 71.7 60.5 50.4 QuIP# [30] 2.03 66.2 −10.3 64.6 67.8 73.5 70.9 68.8 51.6 VPTQ [22] 2.00 68.5 −8.0 65.8 71.2 78.8 74.9 68.0 52.4 QTIP [31] 2.02 72.6 −3.9 71.0 74.2 79.2 77.3 71.1 62.9 Closed-loop calibration only (ours) 2.02 73.4 −3.1 70.2 76.6 81.2 79.7 74.2 58.5
+> LoopQ (ours) 2.02 74.9 −1.6 72.8 77.0 82.9 77.7 75.8 63.3
+> Table 1. LIBERO-Plus against vector quantizers, every linear layer at 2 bits : success (%) on 1,000 paired instances per model, by perturbation type (500 each) and suite. bpw: bits per weight over the quantized layers, all stored tensors included; bold: best 2-bit result.
+
+keeps decoded weights near full precision ( μ sets it to 10% of the initial loss). 
+
+Readout-level alignment : constraining the projected at-tention outputs WO o instead of raw prefix keys and values focuses the limited trainable capacity on the subspace ex-tracted by the action queries. Student-side queries : oq is computed with the quantized action head’s own queries, so that gradients flow through the head’s lookup tables; this is essential for GR00T, whose 1.1B-parameter head holds half of the quantized weights, whereas freezing the compact head of π0.5 is a special case, and β is set once to balance prefix and head gradient norms. Table-scale stability : each table entry is shared by thousands of weights, so standard codebook learning rates destabilize entire layers. We pair a small cosine-decayed learning rate with a root-mean-square re-normalization of each table after every step, absorbing the factor into sℓ. Fine-tuning sees only the 256 demonstra-tion observations used for calibration: 768 updates on 216 of them, with the checkpoint selected on the other 40. 
+
+4.4. Deployed format and inference 
+
+The stored model is a packed stream of 2-bit codes with one 512-entry table and one scale vector per layer, 2.02 bits per weight over all linear layers, unchanged by both steps. Each weight pair is decoded from a fixed 16-bit window of the stream, so all pairs decode independently, with one shift and one table lookup, inside the GPU kernel that uses them. With 8-bit tables and 8-bit activations taken in the rotated space, a layer becomes an integer matrix product followed by one scale per row. One file runs in two modes: decoding once at load gives the highest speed, and decoding on the fly keeps only the 2-bit stream in GPU memory. Both modes reproduce the reference arithmetic bit for bit (Sec. 5.4). 
+
+# 5. Experiments 
+
+5.1. Setup 
+
+Models and benchmarks. We quantize every linear layer of GR00T N1.7 [3] (216 in the vision-language backbone, 216 in the 1.1B-parameter diffusion-transformer head) and of π0.5 [27] (288 in the backbone, 126 in the 0.3B action ex-pert). We evaluate on LIBERO [21], on a fixed set of 1,000 perturbed LIBERO-Plus instances [11], 500 with changed camera viewpoints and 500 with changed robot initial states across the four suites, and on a real AgileX Piper arm. All methods run on identical instances, and we report the mean over three noise seeds. Results on the SimplerEnv Bridge tasks [18] are in the supplementary material. 
+
+Baselines. AQLM [10], VPTQ [22], QuIP# [30], QTIP [31] and the scalar quantizers GPTQ [12] and AWQ [19], run layer-wise from their official toolkits, with-out end-to-end fine-tuning, on the same 256 calibration ob-servations as LoopQ, so our calibration-only rows are the training-free comparison; bits per weight count every stored tensor. On π0.5 we also list the results reported by Ac-tQuant [1] and QVLA [36]. Hyperparameters and compute cost are in the supplementary material. 6Bits per weight LIBERO success (%) LIBERO-Plus Method quantized layers whole model Spatial Object Goal Long Avg. success (%)                                                                                                                                                                          
+
+> Reported in [1]: vision encoder and language model quantized; projector and action expert kept in higher precision
+> Full precision 16 16 98.4 98.4 97.6 93.6 97.0 –QVLA [36] 2.5 5.3 93.0 97.6 71.0 55.0 79.2 –QVLA [36] 2.0 4.7 0.0 0.0 0.0 0.0 0.0 –ActQuant [1] 3.0 5.6 98.2 98.8 95.0 87.2 94.8 –ActQuant [1] 2.5 5.2 96.6 98.4 74.0 73.6 85.7 –ActQuant [1] 2.0 4.8 61.2 80.0 25.0 25.0 48.0 –
+> Our evaluation, 2 bits: all 414 linear layers of backbone and action expert quantized
+> Full precision 16 16 98.2 98.8 96.8 91.8 96.4 76.5 AWQ [19] 2.15 3.02 80.2 68.0 44.4 13.6 51.5 15.4 GPTQ [12] 2.14 3.02 89.6 97.2 47.6 45.6 70.0 39.3 AQLM [10] 2.02 2.92 98.2 99.0 95.4 90.4 95.8 63.9 QuIP# [30] 2.03 2.93 98.0 98.0 97.4 91.6 96.3 66.2 VPTQ [22] 2.00 2.91 98.4 98.6 98.0 93.0 97.0 68.5 QTIP [31] 2.02 2.93 98.6 99.6 97.8 94.2 97.6 72.6 Closed-loop calibration only (ours) 2.02 2.92 98.6 99.6 98.2 96.0 98.1 73.4
+> LoopQ (ours) 2.02 2.92 98.4 99.2 97.8 94.8 97.6 74.9
+> Our evaluation, 1 bit: the same 414 layers
+> VPTQ [22] 1.00 2.10 fails 0.0 QuIP# [30] 1.02 2.11 55.6 25.2 18.4 0.0 24.8 13.8 AQLM [10] 1.01 2.11 70.0 29.6 20.6 1.0 30.3 18.1 QTIP [31] 1.02 2.12 92.0 92.2 50.0 28.2 65.6 39.9 Closed-loop calibration only (ours) 1.02 2.11 95.0 98.6 58.2 43.6 73.9 45.0
+> LoopQ (ours) 1.02 2.11 95.2 99.0 69.4 56.4 80.0 49.8
+> Table 2. π0.5on LIBERO and LIBERO-Plus at 2 bits and 1 bit. Top: results reported by ActQuant [1], whose bit budget covers the vision encoder and language model only (different protocol, shown for reference). Middle and bottom: our evaluation with every linear layer of backbone and action expert quantized (2,000 LIBERO episodes; 1,000 paired LIBERO-Plus instances).
+
+5.2. Simulation results 
+
+GR00T N1.7 (Tab. 1, top). The strongest baseline, QTIP, loses 5.9 points and the other vector quantizers 9 to 22. In QTIP’s storage format, closed-loop calibration adds 1.6 points without any training, exactly where the analysis pre-dicts: +3.4 under viewpoint changes with the initial-state half preserved, and +5.0 on LIBERO-Goal, whose tasks share scenes and differ only in the instructed goal. Readout-aligned fine-tuning adds a further 2.9. LoopQ reaches 60.4%, 4.5 points above the best baseline and within 1.4 of full precision, recovering three quarters of what 2-bit quan-tization costs at the same bit budget and decoder; under initial-state perturbations and on the Spatial suite it is on par with full precision. 
+
+π0.5 (Tab. 2; Tab. 1, bottom). ActQuant [1], the strongest published VLA quantizer below four bits, keeps the action expert and projector in higher precision, so its nominal 2.0 bits correspond to 4.8 bits over the whole policy; our rows quantize the action expert as well and reach 2.9 bits. At this harder operating point, where ActQuant retains 48.0% on LIBERO, the vector quantizers stay at the level of full precision and our two rows reach 98.1% and 97.6% against 96.4%. Since unperturbed LIBERO is saturated at 2 bits, the methods separate on LIBERO-Plus, where the baselines lose 4 to 13 points, closed-loop calibration alone surpasses all of them, and LoopQ narrows the gap to 1.6 points. It leads under both perturbation types (72.8% vs. 71.0% for QTIP under viewpoint changes, 77.0% vs. 74.2% under initial-state perturbations) and on three of the four suites, exceeding full precision on Spatial. 
+
+One bit per weight (Tab. 2, bottom). The trellis coder changes rate by changing the bits consumed per step, so the same pipeline runs at 1 bit unchanged. Existing quantiz-ers do not survive this rate: VPTQ fails, QuIP# and AQLM fall to 25% and 30% on LIBERO, and QTIP retains 65.6%. LoopQ remains a working policy at 80.0%, within three points of full precision on the Spatial and Object suites and 14.4 points above the best baseline (9.9 on LIBERO-Plus), and closed-loop calibration alone exceeds every baseline. 7LoopQ (2-bit π0.5 ) on an AgileX Piper arm Gripper status: open closed                      
+
+> 0.0 s 1.0 s GRASP 2.0 s 2.8 s 3.5 s RELEASE 4.2 s 5.1 s 5.9 s 0.0 s 0.2 s GRASP 0.5 s 1.8 s RELEASE 3.0 s GRASP 5.7 s RELEASE 7.3 s 9.1 s 0.0 s 1.4 s GRASP 3.1 s 3.7 s RELEASE 4.4 s GRASP 7.2 s RELEASE 8.9 s 10.7 s
+> (a) Cup onto tape roll (b) Lemon into bin (c) Cube, apple into box
+
+Figure 4. LoopQ (2-bit π0.5) on an AgileX Piper arm. One successful episode of each task: (a) stacking a cup onto a tape roll, (b) placing a lemon into a lidded bin, and (c) moving a cube and an apple into a box in clutter. The ribbon under the frames gives their time stamps and the gripper state. Videos are in the supplementary material. 
+
+Readout alignment matters more the less precision is left: it lifts GR00T on LIBERO-Plus from 8.1% to 29.2%. 
+
+5.3. Ablations 
+
+Calibration Hessian. Without fine-tuning on GR00T, adding on-policy states collected from a single start pose to Hdemo changes LIBERO-Plus success from 55.9% to 55.3%: robustness to viewpoint rises by 3.6 points, but ro-bustness to the initial state falls by 4.8, because one pose covers fewer states than demonstrations. Starting rollouts from the benchmark’s initial-state distribution, as in Hcl ,keeps the gain and removes the loss (57.5%). What the cal-ibration statistics cover is what the 2-bit model is robust to. 
+
+Complementarity. On held-out observations, the action error of the 2-bit policy relative to full precision falls from 
+
+5.70 × 10 −3 for the base to 5.15 × 10 −3 with closed-loop calibration and to 4.59 × 10 −3 with fine-tuning on top, 20% in total, and the readout error falls by 13%: the two steps address different causes, and their effects add. The supple-mentary material ablates the sources and the weighting of 
+
+Hcl , a second fixed-point iteration, and the design choices of the fine-tuning objective. 
+
+5.4. Real-world deployment 
+
+Real robot (Fig. 4, Tab. 3). We deploy π0.5 on an AgileX Piper arm and compare the 2-bit LoopQ policy with its full-precision counterpart on three tasks, 25 trials each: stacking a cup onto a tape roll, which demands precise placement; putting a lemon into a lidded bin, a two-stage task; and mov-
+
+Successes / 25 trials RTX 6000 Ada (a) (b) (c) Avg. Disk Mem. Prefill Chunk 
+
+π0.5 policy (%) (GB) (GB) (ms) (ms) Full precision 25 21 13 78.7 6.47 6.65 51.8 81.6 
+
+LoopQ (2-bit) 25 21 12 77.3 1.58 3.72 38.2 74.6 
+
+Table 3. Real-world deployment of π0.5 on an AgileX Piper arm (tasks as in Fig. 4) and inference on the RTX 6000 Ada that drives it, with integer kernels and 8-bit activations. 
+
+ing a cube and an apple into a box in clutter. Its on-policy states are collected by rolling out the 2-bit policy on the real arm. The 2-bit policy succeeds in 58 of 75 trials against 59, matching full precision on the first two tasks and staying within one trial on the third. On the RTX 6000 Ada that drives the arm it is also the faster policy: an action chunk takes 74.6 ms against 81.6 ms and the prefill 38.2 ms against 51.8 ms, while the weights shrink from 6.47 to 1.58 GB and peak GPU memory from 6.65 to 3.72 GB. The speed comes from custom CUDA kernels that decode the weights once at load and run each layer as an 8-bit integer product, with one shared rotation and quantization per input tensor. 
+
+Embedded platform. On an NVIDIA Jetson AGX Thor, an embedded computer built for robots, the policy with 2-bit weights and 8-bit activations stores 1.58 GB on disk instead of the 6.47 GB of full precision ( 4.1× smaller) and holds 3.72 GB of memory instead of 6.65 GB at infer-ence (44% less). Kernel design and all operating points are 8in the supplementary material. 
+
+# 6. Conclusion 
+
+A quantizer treats a policy as weights to approximate, but a policy is a closed loop: it chooses its own inputs and acts on what its action head reads. LoopQ lets calibration follow the quantized policy and the objective follow the readout, and two bits per weight then keep an entire VLA within two points of full precision under perturbation and within one success of it on a real arm, while one bit still yields a working policy. The lesson reaches beyond quantization: an embodied model should be compressed on the distribution it induces and for the signals it consumes. 
+
+# References 
+
+[1] Arash Akbari, Arman Akbari, Masih Eskandar, Qitao Tan, Yixiao Chen, Jingwu Luo, Bertha Pangaribuan, Liyun Zhang, Jennifer Dy, Geng Yuan, et al. ActQuant: Sub-4-bit action-guided quantization for vision-language-action mod-els. arXiv preprint arXiv:2605.24011 , 2026. 1, 2, 3, 6, 7 [2] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alis-tarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. Advances in Neural Information Processing Systems , 37:100213–100240, 2024. 3[3] Johan Bjorck, Fernando Casta˜ neda, Nikita Cherniadev, Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Dieter Fox, Fengyuan Hu, Spencer Huang, et al. GR00T N1: An open foundation model for generalist humanoid robots. arXiv preprint arXiv:2503.14734 , 2025. 1, 3, 6 [4] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, et al. π0: A vision-language-action flow model for general robot control. arXiv preprint arXiv:2410.24164 , 2024. 3 [5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding, Danny Driess, Avinava Dubey, Chelsea Finn, et al. RT-2: Vision-language-action models transfer web knowledge to robotic control. arXiv preprint arXiv:2307.15818 , 2023. 1, 3[6] Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christo-pher M De Sa. QuIP: 2-bit quantization of large language models with guarantees. Advances in Neural Information Processing Systems , 36:4396–4429, 2023. 3 [7] Yanlong Chen, Yining Chen, Song Zhang, Amirhossein Habibian, and Yawei Li. PrismQuant: Optimal null-space rotations for grouped quantizers. arXiv preprint arXiv:2609.32429 , 2026. 3 [8] Yanlong Chen, Amirhossein Habibian, Luca Benini, and Yawei Li. Gated relational alignment via confidence-based distillation for efficient VLMs. arXiv preprint arXiv:2601.22709 , 2026. 3 [9] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song. Diffusion policy: Visuomotor policy learning via action dif-fusion. The International Journal of Robotics Research , 44 (10-11):1684–1704, 2025. 1 [10] Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. Extreme com-pression of large language models via additive quantization. 
+
+arXiv preprint arXiv:2401.06118 , 2024. 1, 3, 6, 7 [11] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye Fei, et al. LIBERO-Plus: In-depth robustness analysis of vision-language-action models. arXiv preprint arXiv:2510.13626 ,2025. 6 [12] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. 3, 6, 7 [13] Ruihao Gong, Xianglong Liu, Yuhang Li, Yunqiang Fan, Xiuying Wei, and Jinyang Guo. Pushing the limit of post-training quantization. IEEE Transactions on Pattern Analy-sis and Machine Intelligence , 2025. 4 [14] Robert M. Gray and David L. Neuhoff. Quantization. 
+
+IEEE Transactions on Information Theory , 44(6):2325– 2383, 1998. 4 [15] Babak Hassibi and David Stork. Second order derivatives for network pruning: Optimal Brain Surgeon. Advances in Neural Information Processing Systems , 5, 1992. 3 [16] Jinuk Kim, Marwa El Halabi, Wonpyo Park, Clemens JS Schaefer, Deokjae Lee, Yeonhong Park, Jae W Lee, and Hyun Oh Song. GuidedQuant: Large language model quan-tization via exploiting end loss guidance. arXiv preprint arXiv:2505.07004 , 2025. 4 [17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-ter, Grace Lam, Pannag Sanketi, et al. OpenVLA: An open-source vision-language-action model. arXiv preprint arXiv:2406.09246 , 2024. 1, 3 [18] Xuanlin Li, Kyle Hsu, Jiayuan Gu, Karl Pertsch, Oier Mees, Homer Rich Walke, Chuyuan Fu, Ishikaa Lunawat, Isabel Sieh, Sean Kirmani, et al. Evaluating real-world robot manipulation policies in simulation. arXiv preprint arXiv:2405.05941 , 2024. 6 [19] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for on-device LLM compression and accelera-tion. Proceedings of Machine Learning and Systems , 6:87– 100, 2024. 3, 6, 7 [20] Yaron Lipman, Ricky TQ Chen, Heli Ben-Hamu, Maximil-ian Nickel, and Matt Le. Flow matching for generative mod-eling. arXiv preprint arXiv:2210.02747 , 2022. 1, 3 [21] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-edge transfer for lifelong robot learning. Advances in Neural Information Processing Systems , 36:44776–44791, 2023. 6 [22] Yifei Liu, Jicheng Wen, Yang Wang, Shengyu Ye, Li Lyna Zhang, Ting Cao, Cheng Li, and Mao Yang. VPTQ: Extreme 
+
+9low-bit vector post-training quantization for large language models. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 8181–8196, 2024. 3, 6, 7 [23] Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge So-ran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spin-Quant: LLM quantization with learned rotations. In In-ternational Conference on Learning Representations , pages 92009–92032, 2025. 3 [24] Vladimir Malinovskii, Denis Mazur, Ivan Ilin, Denis Kuznedelev, Konstantin Burlachenko, Kai Yi, Dan Alistarh, and Peter Richtarik. PV-Tuning: Beyond straight-through es-timation for extreme LLM compression. Advances in Neural Information Processing Systems , 37:5074–5121, 2024. 3 [25] Michael W Marcellin and Thomas R Fischer. Trellis coded quantization of memoryless and Gauss-Markov sources. 
+
+IEEE Transactions on Communications , 38(1):82–93, 1990. 2, 3, 4 [26] William Peebles and Saining Xie. Scalable diffusion models with transformers. In 2023 IEEE/CVF International Confer-ence on Computer Vision (ICCV) , pages 4172–4182. IEEE, 2023. 3 [27] Physical Intelligence, Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: A vision-language-action model with open-world generaliza-tion. arXiv preprint arXiv:2504.16054 , 2025. 1, 3, 6 [28] St´ ephane Ross and Drew Bagnell. Efficient reductions for imitation learning. In Proceedings of the Thirteenth Inter-national Conference on Artificial Intelligence and Statistics ,pages 661–668. JMLR Workshop and Conference Proceed-ings, 2010. 3 [29] St´ ephane Ross, Geoffrey Gordon, and Drew Bagnell. A re-duction of imitation learning and structured prediction to no-regret online learning. In Proceedings of the Fourteenth In-ternational Conference on Artificial Intelligence and Statis-tics , pages 627–635. JMLR Workshop and Conference Pro-ceedings, 2011. 3 [30] Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#: Even better LLM quantization with Hadamard incoherence and lattice code-books. Proceedings of Machine Learning Research , 235: 48630, 2024. 1, 3, 6, 7 [31] Albert Tseng, Qingyao Sun, David Hou, and Christopher De. Qtip: Quantization with trellises and incoherence process-ing. Advances in Neural Information Processing Systems ,37:59597–59620, 2024. 1, 2, 3, 4, 6, 7 [32] Hongyu Wang, Chuyan Xiong, Ruiping Wang, and Xilin Chen. BitVLA: 1-bit vision-language-action models for robotics manipulation. arXiv preprint arXiv:2506.07530 ,2025. 3 [33] Miles Williams and Nikolaos Aletras. On the impact of cal-ibration data in post-training quantization and pruning. In 
+
+Proceedings of the 62nd Annual Meeting of the Associa-tion for Computational Linguistics (Volume 1: Long Papers) ,pages 10100–10118, 2024. 3 [34] Jiuyi Xu, Qing Jin, Meida Chen, Song Wang, Yang Sui, and Yangming Shi. VLAQuantBench: Closed-loop evaluation of post-training quantization for vision-language-action mod-els. arXiv preprint arXiv:2609.25376 , 2026. 3 [35] Siyuan Xu, Tianshi Wang, Fengling Li, Lei Zhu, and Heng Tao Shen. DA-PTQ: Drift-aware post-training quan-tization for efficient vision-language-action models. arXiv preprint arXiv:2604.11572 , 2026. 3 [36] Yuhao Xu, Yantai Yang, Zhenyang Fan, Yufan Liu, Yuming Li, Bing Li, and Zhipeng Zhang. QVLA: Not all channels are equal in vision-language-action model’s quantization. arXiv preprint arXiv:2602.03782 , 2026. 1, 3, 6, 7 [37] Jingxuan Zhang, Yunta Hsieh, Zhongwei Wan, Haokun Lin, Xin Wang, Ziqi Wang, Yingtie Lei, and Mi Zhang. QuantVLA: Scale-calibrated post-training quanti-zation for vision-language-action models. arXiv preprint arXiv:2602.20309 , 2026. 1, 3 
+
+10 Quantizing in the Loop: Drift-Aware Ultra-Low-Bit Vision-Language-Action Models 
+
+# Supplementary Material 
+
+By perturbation By suite Variant All Camera Init. state Spatial Object Goal Long 
+
+Calibration sources added to Hdemo (no fine-tuning) 
+
+None (demonstrations only) 55.9 54.4 57.4 71.4 48.6 60.2 43.5 On-policy states 54.8 56.4 53.2 66.9 47.0 61.3 44.0 Lighting and crop 55.4 56.6 54.2 66.5 49.8 58.6 46.8 
+
+Lighting, crop and on-policy states ( Hcl ) 57.5 57.8 57.2 71.0 50.6 65.2 43.1 
+
+Weighting of the three sources (no fine-tuning) 
+
+Plain sum, no trace normalization 54.4 54.0 54.8 67.8 46.2 62.1 41.5 Trace-normalized, total weight ×0.5 55.9 56.6 55.2 66.5 46.2 64.5 46.4 
+
+Trace-normalized, total weight ×2 55.8 58.6 53.0 67.8 48.6 63.7 43.1 Trace-normalized, total weight 1 ( Hcl ) 57.5 57.8 57.2 71.0 50.6 65.2 43.1 
+
+Fixed-point iterations (no fine-tuning) 
+
+One ( Hcl ) 57.5 57.8 57.2 71.0 50.6 65.2 43.1 Two 56.7 59.4 54.0 70.2 49.4 62.1 45.2 
+
+Fine-tuning objective, starting from the closed-loop-calibrated model 
+
+Readout term only ( β = 0 ) 58.6 61.0 56.2 71.8 50.6 63.7 48.4 Velocity term only 57.9 61.0 54.8 70.6 47.4 67.6 46.0 Teacher-side queries 57.9 59.8 56.0 74.7 47.0 65.2 44.8 Without table re-normalization 59.2 62.0 56.4 72.7 49.4 65.2 49.6 LoopQ (Tab. 1) 60.4 62.2 58.6 75.1 49.0 68.4 49.2 Table S1. Ablations of LoopQ on GR00T N1.7 at 2 bits : LIBERO-Plus success (%) on the 1,000 instances of Tab. 1. Green rows are the default Hcl and the blue row is LoopQ; bold: best of each group. 
+
+This supplement provides comprehensive ablations of LoopQ (Sec. A), additional simulation and real robot re-sults (Sec. B), full implementation details (Sec. C), and the design and benchmarking of our inference kernels (Sec. D). Accompanying videos document the real robot evaluation episodes. 
+
+# A. Ablations of LoopQ 
+
+All ablations evaluate GR00T N1.7 with every linear layer quantized to 2 bits across the 1,000 LIBERO-Plus instances of Tab. 1. Each group in Tab. S1 isolates a single design choice while keeping the remaining pipeline at its default configuration. 
+
+Calibration sources. Combining all three closed-loop sources in Hcl delivers the highest overall success rate (57.5%, +1 .6 points over demonstration calibration alone) and exhibits strong synergy across perturbation types. Adding on-policy states or visual augmentations in isolation improves camera robustness by roughly two points (56.4% and 56.6% vs. 54.4%) but reduces initial state generaliza-tion (53.2% and 54.2% vs. 57.4%). Integrating all three sources resolves this tension cleanly: camera robustness jumps by 3.4 points to 57.8%, Object and Goal success rise sharply to 50.6% ( +2 .0) and 65.2% ( +5 .0), and initial state robustness is preserved at 57.2%. All three sources are therefore mutually complementary and jointly necessary to unlock the full calibration gain. 
+
+Source weighting. Equal trace normalization with a total weight of 1 decisively outperforms all alternative schemes, achieving 57.5% overall while leading on initial state robustness (57.2%) as well as the Spatial, Object, and Goal suites. Because the raw second moments of each added source carry roughly the same energy as the demon-strations, a plain unnormalized sum overweights the auxil-iary sources threefold and degrades accuracy by 3.1 points to 54.4%. Trace normalization eliminates this scale imbal-ance, and unit total weight strikes the optimal balance be-tween demonstration fidelity and closed-loop coverage, out-performing both halved (55.9%, −1.6) and doubled (55.8%, 
+
+−1.7) weights. 1All Camera Init. state Spatial Object Goal Long 020 40       
+
+> LIBERO-Plus success (%)
+> 8.1 7.0 9.2 18.0 9.6 5.1 0.0 29.2 29.6 28.8 40.4 33.1 31.3 12.1
+
+Stack cup Lemon in bin Cube and apple 010 20  
+
+> Successes of 25  25 21 13 15 13 322 18 925 21 12
+
+a GR00T N1.7 at 1 bit 
+
+Closed-loop calibration only LoopQ 
+
+b Real robot, 2 bits 
+
+Full precision QuIP# QTIP LoopQ Figure S1. Additional results. (a) GR00T N1.7 at 1 bit per weight on the 1,000 LIBERO-Plus instances of Tab. 1. (b) π0.5 at 2 bits on the AgileX Piper arm: successes in 25 trials on the three tasks of Fig. 4. 
+
+Setting GR00T N1.7 π0.5
+
+Format 
+
+Trellis code bitshift, 16-bit window, 2 weights per step, 4 bits per step (2 bits per step at 1 bit per weight) Lookup table and scale 512 entries of 2 values and one scale per output row, 16-bit floats (8-bit tables at inference) Search Viterbi with block-wise error feedback, one pass; damping 0.01 of the mean diagonal of Hℓ
+
+Bits per weight, linear layers 2.018 (2 bits), 1.018 (1 bit) 2.016 (2 bits), 1.016 (1 bit) 
+
+Closed-loop calibration 
+
+Lighting 2 copies per observation: brightness and contrast in [0 .8, 1.2] , hue ±5◦, Gaussian blur with σ ∈ [0 .5, 1.0] 
+
+Crop 1 copy per observation: square crop of 90–95% of the area, resized to the input resolution On-policy states 256 rollouts from the official initial states of each task; one state from the first 40% of the policy calls 
+
+Readout-aligned fine-tuning 
+
+Trainable parameters tables and row scales of all 432 layers, normalization weights tables and row scales of the 288 backbone layers, nor-malization weights; action expert frozen Velocity weight β matches the gradient norms of the two terms at the first update 0.1 Frobenius anchor μ sets the anchor to 10% of the initial loss Schedule 768 updates of 8 samples; Adam; 5% linear warm-up, cosine decay; gradient clipping at 1.0 Learning rates 2 × 10 −5 for tables and normalization weights, 10 −4 for the logarithm of the row scales Table re-normalization each table rescaled to its initial root mean square after every update, factor absorbed into sℓ
+
+Exported weights exponential moving average (0.99); checkpoint with the lowest held-out readout loss, evaluated every 64 updates Data 216 calibration observations for training, 40 held out 
+
+Table S2. Hyperparameters of LoopQ. Entries spanning both columns are shared by the two models. 
+
+Fixed-point iterations. A single closed-loop iteration already converges closely to the fixed point while achiev-ing higher overall accuracy (57.5% vs. 56.7% for two itera-tions) at half the rollout cost. Recollecting 256 rollouts from the Hcl calibrated policy shifts the trace normalized sec-ond moments by a mean relative Frobenius distance of only 0.014 in the vision encoder, 0.010 in the language model, and 0.054 in the action head, an order of magnitude smaller than the first iteration’s shift away from the demonstrations (0.140, 0.083, and 0.268). One iteration thus captures virtu-ally the entire distribution shift without incurring additional rollout overhead. 
+
+Fine-tuning objective. Starting from the closed-loop calibrated model (57.5%), the full LoopQ objective lifts overall success by 2.9 points to 60.4% (Tab. 1), deci-sively outperforming every ablated variant on both cam-era (62.2%) and initial state (58.6%) perturbations as well as the Spatial (75.1%) and Goal (68.4%) suites. Each component contributes directly to this gain. The readout term alone reaches 58.6% and cuts the held-out readout loss from 7,998 to 6,464, whereas the velocity term alone yields only 57.9% and leaves the readout loss nearly un-changed (7,757), confirming that explicit readout alignment is what repairs the quantized cross attention interface. Cou-pling both terms adds a further +1 .8 points over readout training alone. Evaluating the readout with student queries rather than teacher queries is likewise crucial ( +2 .5 points, 60.4% vs. 57.9%) because it aligns the representation un-2Method Successes (%) Full precision 507 60.4 AWQ [19] 0∗ 0.0 QuIP# [30] 533 63.5 Trellis, demonstration calibration 514 61.2 Closed-loop calibration only (ours) 512 61.0      
+
+> LoopQ (ours) 536 63.8
+> Table S3. SimplerEnv Bridge with GR00T N1.7 at 2 bits : suc-cesses out of 840 episodes (seven WidowX tasks, 120 seeded episodes each), all rows on one RTX 6000 Ada. ∗Stopped after 509 episodes.
+
+der the student’s actual inference distribution, and table re-normalization contributes another +1 .2 points (60.4% vs. 59.2%) by keeping codebook scales properly conditioned. Finally, aligning raw prefix keys and values in place of WO o
+
+starts from a 30 × larger loss and diverges with non-finite gradients after 245 of 768 updates under identical optimizer settings, underscoring the superior conditioning and stabil-ity of our readout formulation. 
+
+# B. Additional results 
+
+GR00T N1.7 at 1 bit. Figure S1a breaks down the extreme 1-bit result from the main text. Readout-aligned fine-tuning more than triples the success rate of the calibrated 1-bit pol-icy, jumping by 21.1 points from 8.1% to 29.2%, with con-sistent and substantial gains under both perturbation types and across all four suites. 
+
+Real robot against 2-bit baselines. Figure S1b com-pares LoopQ against two strong 2-bit baselines on the phys-ical AgileX Piper arm (Tab. 3). LoopQ achieves 58 of 75 successes, virtually matching full precision (59/75), while outperforming QTIP (49/75) by 9 trials and QuIP# (31/75) by 27 trials. This advantage widens markedly on the hardest cluttered two-object task, where LoopQ succeeds 12 times (vs. 13 for full precision) while QTIP and QuIP# fall to 9 and 3 successes, respectively. The accompanying videos show the 2-bit LoopQ policy executing all three tasks of Fig. 4. 
+
+SimplerEnv Bridge. We apply the same 2-bit quantiza-tion pipeline to the GR00T N1.7 Bridge checkpoint, cali-brating on 256 Bridge demonstration observations and, for the closed-loop rows, 256 SimplerEnv rollouts. Each pol-icy is evaluated across all seven WidowX tasks for 120 seeded episodes (Tab. S3). While AWQ collapses com-pletely (0.0%), LoopQ achieves the highest overall success rate at 63.8% (536/840), outperforming full precision by 3.4 points (60.4%), trellis quantization with demonstration cali-bration by 2.6 points (61.2%), closed-loop calibration alone by 2.8 points (61.0%), and QuIP# (63.5%). Because Bridge evaluates standard layouts without external perturbations, all 2-bit trellis variants remain at or above full precision, and readout-aligned fine-tuning still delivers a clear gain on top of calibration. These results confirm that LoopQ transfers cleanly across robot embodiments and benchmarks without sacrificing nominal accuracy. 
+
+# C. Implementation details 
+
+Hyperparameters. Table S2 summarizes the complete set-tings for both models. The 1-bit models share the same con-figuration while consuming 2 bits per trellis step. 
+
+Baselines. All baselines follow their official implemen-tations and use the same 256 demonstration observations as LoopQ. AQLM [10] uses 2 codebooks of 8 bits over groups of 8 weights. VPTQ [22] uses vectors of length 4 with 256 centroids. QuIP# [30] uses the E8P12 codebook with its de-fault 10 tuning sweeps. QTIP [31] uses the bitshift trellis of Tab. S2. GPTQ [12] and AWQ [19] quantize to 2 bits with group size 128. 
+
+Compute cost. Every stage runs on a single GPU (RTX 6000 Ada or RTX A6000). For GR00T N1.7, collecting the 256 on-policy states takes 32 minutes and accumulating the second moments of the four sources takes about 15 minutes. Quantization takes 2.2 hours for the GR00T N1.7 backbone, 1.9 to 2.8 hours per suite for the action head, and 3.9 hours for all of π0.5. Readout-aligned fine-tuning takes 18.7 hours for GR00T N1.7 and 3.3 hours for π0.5.
+
+# D. Inference kernels and operating points 
+
+Kernel design. Each quantized layer computes y =
+
+Sv H diag( sℓ) Q HS ux, where Q holds the decoded table values, H is the Hadamard transform, and Su, S v are the stored sign vectors. Our CUDA kernels execute this in four steps: rotating and quantizing the input to 8 bits per token, decoding all weight pairs in parallel from their 16-bit win-dows, computing an 8-bit integer product with 32-bit accu-mulation, and applying the token and row scales together with the output rotation. Projections reading the same in-put tensor (query, key, and value; the two MLP input pro-jections) share a single input rotation, eliminating 162 of the 414 input rotations exactly. The 8-bit tables are de-rived from the stored tables at load with a maximum relative weight error of only 5.9 × 10 −5.
+
+Deployment on the RTX 6000 Ada (Fig. S2). The pol-icy runs in PyTorch 2.7 with CUDA 12.6 on a single RTX 6000 Ada. Our CUDA C++ kernels are compiled at load via NVRTC and launched on PyTorch’s native stream, enabling a single CUDA graph to capture the entire inference call. The prefill stage (about 1,000 tokens) executes its integer GEMMs on cuBLASLt, while the 10-token action expert uses a custom kernel built on 8-bit dot-product instructions. The speedup over full precision is driven by prefill, where matrix products drop by 3.1× from 34 ms in 16-bit floating 3At load  
+
+> stored fi le, 1.58 GB 2-bit codes, tables, scales decoded once 8-bit weights on the GPU 3.72 GB kernels: CUDA C++, compiled at load with NVRTC
+
+One inference call, captured as one CUDA graph  
+
+> vision encoder 3 cameras language-model pre fi ll
+> ≈1,000 tokens, cuBLASLt action expert 10 steps, 10 tokens action chunk pre fi ll 38.2 ms, full chunk 74.6 ms (full precision: 51.8 and 81.6 ms)
+
+In every layer x rotate the input, 8 bits per token 8-bit product, 32-bit sums scale, rotate yFigure S2. Deployment of the 2-bit π0.5 with 8-bit activations on an RTX 6000 Ada. The stored file is decoded once at load into 8-bit weights. One CUDA graph then runs each inference call, and every quantized layer executes the three steps at the bottom. Disk Mem. Prefill Chunk Operating point (GB) (GB) (ms) (ms) Full precision 6.47 6.65 51.8 81.6 
+
+2-bit weights, floating-point activations 
+
+Decoded at load 1.58 6.16 52.4 82.1 Decoded on the fly 1.58 1.99 86.5 133.1 
+
+2-bit weights, 8-bit activations, integer kernels 
+
+Decoded at load 1.58 3.72 38.2 74.6 
+
+Decoded on the fly 1.58 1.92 40.6 79.8 Table S4. Operating points of the 2-bit π0.5 on an RTX 6000 Ada: median of 200 runs at batch size 1 with 10 denoising steps. Memory is the peak GPU allocation after load. 
+
+point to 11 ms. 
+
+Operating points. Table S4 benchmarks all operating points of the stored 2-bit checkpoint. Both integer kernel modes beat full precision in latency while dramatically re-ducing GPU memory. Decoding at load (reported in Tab. 3) cuts chunk latency from 81.6 ms to 74.6 ms and memory by 44% to 3.72 GB. Decoding on the fly retains only the 2-bit stream on the GPU, slashing peak memory by 71% to 1.92 GB (29% of full precision) while still running faster than full precision (79.8 ms vs. 81.6 ms). Both modes match a PyTorch reference implementation bit for bit across all 414 layers and in the final actions of all 40 held-out obser-vations. 4

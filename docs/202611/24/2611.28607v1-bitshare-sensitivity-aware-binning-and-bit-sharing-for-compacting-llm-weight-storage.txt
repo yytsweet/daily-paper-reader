@@ -1,0 +1,807 @@
+Title: BitShare: Sensitivity-Aware Binning and Bit Sharing for Compacting LLM Weight Storage
+
+URL Source: https://arxiv.org/pdf/2611.28607v1
+
+Published Time: Tue, 24 Nov 2026 01:52:54 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+> 1
+
+# BitShare: Sensitivity-Aware Binning and Bit Sharing for Compacting LLM Weight Storage 
+
+Qiuyu Ren, Sudipta Paria, Aritra Dasgupta, Swarup Bhunia Department of Electrical and Computer Engineering (ECE), University of Florida, Gainesville, FL 32611, USA 
+
+{qiuyuren,sudiptaparia,aritradasgupta }@ufl.edu, swarup@ece.ufl.edu 
+
+Abstract —Decoding with large language models at small batch sizes is limited by memory bandwidth, so the bits stored per weight largely set its cost. Group-wise integer quantization stores every weight of a group at the same precision, although the input channels of a group differ in sensitivity. We present B IT SHARE ,a codebook-free weight format that keeps the integer grid and the dequantizer of group-wise quantization but varies precision within each group. Sensitivity-aware binning places the channels of each group into three bins at fixed positions, and static bit sharing with optimal bit-value allocation lets the less sensitive weights share their lower bits, each stored once per group or once per pair of weights. A sharing-aware version of GPTQ chooses every stored value, with no fine-tuning and no codebook. BIT SHARE has two modes. B IT SHARE -U gives every group the same layout, so its decoder routes bits by fixed wiring, while BIT SHARE -N chooses a layout per group within the same bit budget. With calibration on the Pile and at the same storage, both modes have lower perplexity than GPTQ at 3 and 2 bits on WikiText-2 and C4. At 2 bits across Llama-2 and Llama-3 models, B IT SHARE -N lowers WikiText-2 perplexity by up to 70% against SliM-LLM and up to 35% against GPTAQ. At the 2-bit perplexity of SliM-LLM, BIT SHARE -U stores 13.6-19.4% fewer bits per weight, cutting DRAM weight traffic by the same fraction. A verified hardware decoder implementation synthesized in SkyWater 130 nm reconstructs B IT SHARE weights at the throughput of INT-n and SliM-LLM decoders. 
+
+Index Terms —Large language models, weight quantization, mixed precision, bit sharing, binning, hardware decoder; 
+
+I. I NTRODUCTION 
+
+Serving large language models is limited by their weights. At small batch sizes, every weight is read from memory for each generated token, and weight traffic far exceeds arith-metic [1], so fewer bits per weight mean faster decoding and larger models per device. Post-training quantization usually stores weights in group-wise integer formats, which split each row into groups of 128 input channels with a scale, a zero point and one integer code per weight. These formats are close to lossless at 4 bits but degrade at 3 and especially at 2 bits. At 2 bits, GPTQ with a tuned clipping range raises the WikiText-2 perplexity of Llama-3-8B and Qwen2.5-0.5B by factors of 6.4 and 9.9. Most low-bit methods keep this format and improve the encoder [2]–[5], so every weight of a group maintains the same precision, although the input channels of a group affect the layer output very unequally. Outlier methods [6]–[8] keep a few weights in higher precision but must store their posi-tions. SliM-LLM [9] varies precision between groups, which requires a width per group and lowers decoding throughput, while still treating all weights of a group alike. Codebook and trellis formats [10]–[12] achieve lower 2-bit perplexity but decode through lookups or a trellis and often need fine-tuning. Varying precision within a group is harder, as a per-weight width costs at least one bit per weight, half the budget of a 2-bit format. Work on bit-level structure suggests another route. Ac-celerators prune the low-order bits of a group to a shared constant [13], RRAM designs store identical bit columns once [14], and texture formats, test compression and bus coding tie several values to one stored bit chosen by the encoder (Section II). The low bits of a weight carry little of its value, and even less in the less sensitive channels of a group, so these weights can read their low bits from shared stored bits. Sharing constrains a weight rather than discarding a bit. A weight that shares its lowest bit can still take any code of that parity, a grid with twice the step whose offset is chosen per group-row. On the INT3 grid, this step is still 14% finer than that of INT2. We present B IT SHARE , a format that keeps the integer grid and the dequantizer of group-wise quantization but varies precision within every group (Figure 1). It works on a grid one bit finer than its rate: INT4 at 3 bits and INT3 at 2 bits, and it places the input channels of each group into three bins at fixed positions determined by the Hessian diagonal that GPTQ already computes. The high, middle and low bins store n, n−1
+
+and n − 2 bits of each code. One stored flag per group-row supplies the lowest bit of every middle- and low-bin code, and one stored bit per pair of low-bin weights supplies their second bit. This wiring is the same for every layer and model, and a sharing-aware GPTQ chooses the shared values. The decoder needs no per-weight metadata or codebook. It routes bits into codes and runs the unchanged INT-n dequantizer. B IT SHARE -U gives every group the same layout, so the routing is fixed wiring. B IT SHARE -N picks a layout per group within each layer’s bit budget, incurring a 6-bit index per group and a larger decoder. Both store 3.164 and 2.156 bits per weight, 0.016 more than INT3 and INT2. 
+
+a) Contributions: We introduce static bit sharing for LLM weights, in which the low bits of less sensitive weights are read from stored bits through wiring fixed for every layer and model, and sensitivity-aware binning, which varies precision within every group without per-weight metadata (Sections III-B and III-C). To our knowledge, this is the first integer weight format for LLMs whose sharing structure is fixed in advance and whose shared values are chosen by arXiv:2611.28607v1 [cs.LG] 21 Nov 2026 2                                                         
+
+> (a) INT-n
+> GPTQ, GPTAQ, AWQ one grid; same precision for every weight stores s, z per group-row FP16
+> (b) Outliers
+> OWQ, SpQR, PB-LLM few weights kept in higher precision stores their indices and a sparse path 3 bits 2 bits 1 bit 2 bits
+> (c) Mixed precision
+> SliM-LLM precision varies between groups only stores a 2-bit width per group
+> (d) B IT SHARE -U
+> one layout, U8 D16 precision varies within every group stores s, z , flag fand pair bits c;bins at fixed positions: fixed wiring U32 D0, δ= +32 U8 D16, δ= 0 U0 D64, δ=−32 U4 D8, δ= 0
+> (e) B IT SHARE -N
+> a layout per group bits move between groups, Pδ≤0
+> adds a 6-bit layout index per group code bits stored per weight FP16 outlier 2 bits per weight high bin: nbits middle: n−1low: n−2shared flag f(b0)shared pair bit c(b1)
+> Notation. n: bits of a full code ( n=3here). s, z : scale and zero point of a group-row. b0, b 1: two lowest bits of a code. f: flag, one stored bit per group-row, gives b0of every middle- and low-bin code. c: pair bit, one stored bit per two low-bin weights, gives their b1.U, D : sizes of the high and low bins. δ=U−D/ 2: offset of a layout in bits per group-row.
+
+Fig. 1. Overview of weight-only quantization for LLMs: How different formats store one row of a layer at 2 bits per weight with four groups of 128 positions. Bar height is the code bits per weight. (a)-(c) store every code bit with its weight. In (d)-(e), B IT SHARE uses a grid of n = 3 bits: the high, middle and low bins store n, n − 1 and n − 2 bits of each code, and the hatched bits are shared (Figure 3). B IT SHARE -U uses U8 D16 in every group; B IT SHARE -N picks a layout per group with P δ ≤ 0 per layer. 
+
+the encoder. We define two modes, B IT SHARE -U with fixed wiring and B IT SHARE -N with per-group layouts allocated ex-actly by dynamic programming (Section III-D), and a sharing-aware GPTQ that chooses every stored value, including the shared bits, with no fine-tuning or codebook (Section III-F). We evaluate both modes on eight LLMs against SliM-LLM, GPTAQ and GPTQ at equal storage, at equal perplexity and down to collapse, with ablations of each part of the format (Section IV), and synthesize the decoder (Section V). At 2 bits, B IT SHARE -N lowers perplexity by 19-70% against SliM-LLM and by 12.5-35.3% against GPTAQ, and at SliM-LLM’s perplexity B IT SHARE -U stores 13.6-19.4% fewer bits per weight. Figure 2 compares the perplexity of SliM-LLM, GPTAQ, GPTQ + clip and both modes of B IT SHARE on WikiText-2 relative to FP16 at 3 and 2 bits, showing the efficacy of our proposed approach. II. B ACKGROUND 
+
+A. Weight-only quantization of LLMs a) Encoders on a fixed grid: Group-wise integer formats store a scale and a zero point per group of 128 input channels and one code per weight (Section III-A), so all weights of a group share one precision. GPTQ [2], derived from OBS [15] and OBQ [16], rounds one column at a time and compensates the error in the remaining columns through the inverse Hes-sian. GPTAQ [3] also matches each layer’s output to the full-precision model, OmniQuant [4] and AffineQuant [5] learn quantizer parameters by gradient descent and QuaRot [17] removes outliers with rotations. All of them keep the INT-n
+
+storage format. 
+
+b) Codebook and trellis formats: QuIP# [10], AQLM [11] and QTIP [12] reach lower 2-bit perplexity with lattice or additive codebooks or a trellis code, usually with Hadamard transforms and fine-tuning, and decode by lookup or from trellis states. In QTIP, neighboring weights share stored bits through overlapping trellis windows. 
+
+B. Salience and mixed precision 
+
+The error of weight wij reaches the output scaled by the activation energy of input channel j, the diagonal of 
+
+H = 2 XX ⊤. AWQ [1] found that keeping 1% of the channels in FP16, selected by activation magnitude, lowers the round-to-nearest INT3 perplexity of OPT-6.7B from 23.54 to 11.39, but rescales salient channels instead to keep one precision. OWQ [6], SpQR [7], SqueezeLLM [18] and PB-LLM [8] keep outliers in higher precision at the cost of stored positions and a sparse decode path. HAWQ [19] assigns bit widths per layer. SliM-LLM [9] assigns N −1, N or N +1 bits per group, stores a 2-bit width per group and reports 20-27% lower decode throughput than GPTQ at 2 bits (Section IV-G). Precision is uniform within each group. 
+
+C. Bit-level techniques and shared bits 
+
+Bit-serial accelerators such as Stripes [20], Pragmatic [21], Bitlet [22] and BitL [23] skip or reorder zero bits to speed up arithmetic on stored values. BBS [13] also prunes the low-order bits of a weight group to a shared constant. Yang et al. [14] reorder RRAM crossbar rows so that pairs of bit columns become identical and store one column per pair, which is lossless but depends on the weight values and needs 3Llama-2-7B Llama-2-13B Llama-2-70B Llama-3-8B Llama-3-70B 1× 1.1× 1.2× 1.3× 1.5× 1.7×         
+
+> perplexity / FP16
+> 3 bits (3.148 / 3.164 b/w)
+> Llama-2-7B Llama-2-13B Llama-2-70B Llama-3-8B Llama-3-70B 1× 1.5× 2× 3× 5× 10× 15×
+> 2 bits (2.141 / 2.156 b/w)
+> GPTQ + clip GPTAQ SliM-LLM BitShare-U BitShare-N
+> Fig. 2. WikiText-2 perplexity relative to FP16 (log scale) at 3 and 2 bits: SliM-LLM and GPTAQ, GPTQ + clip and the two modes of B IT SHARE (Llama-3-8B with 4096-token windows, the other models with 2048).
+
+stored indices. Shannonic [24] entropy-codes quantized tensors but cannot go below the entropy of the codes, and microscaling formats [25] share an exponent per block, as the scale already does in group-wise formats. Outside machine learning, a fixed sharing structure with encoder-chosen values is common. BC7 texture compression [26] stores a P-bit shared as the least significant bit of several color components, Illinois Scan [27] and EDT [28] expand a few tester bits into many scan cells, bus-invert coding [29] sets one invert bit per group of bus lines and HIPR [30] shares configuration bits between neighboring LUTs. A bit shared by two values is the simplest case of trellis-coded quantization [31].                                                          
+
+> TABLE I COMPARING WEIGHT -ONLY QUANTIZATION FORMATS FOR LLM S.
+> Method Codebook-free? Index-free? Single dequantizer? Sensitivity-aware binning? Intra-group precision? Per-group layout? Shared bits? GPTQ, GPTAQ, AWQ ✓✓✓✗✗✗✗
+> OmniQuant, AffineQuant ✓✓✓✗✗✗✗
+> OWQ, SpQR, PB-LLM ✓✗✗✓✓✗✗
+> SliM-LLM ✓✓✗✓✗✓✗
+> QuIP#, AQLM ✗✓✓✗✗✗✗
+> QTIP ✗✓✓✗✗✗✓
+> BIT SHARE -U (ours) ✓✓✓✓✓✗✓
+> BIT SHARE -N (ours) ✓✓✓✓✓✓✓
+
+D. Motivation for BIT SHARE 
+
+Table I summarizes prior formats. Integer formats decode cheaply but give every weight in a group the same precision. Formats that vary precision pay with stored positions and a sparse path, or with a per-group width map that still leaves each group on one grid. Codebook and trellis formats give up the integer dequantizer, and bit-level techniques share only bits that happen to be equal after quantization. To our knowledge, no integer weight format for LLMs fixes a sharing structure in advance and lets a second-order encoder choose the shared values. B IT SHARE fills this gap. It varies precision within every group at fixed positions, without per-weight metadata, and pays for it with shared bits chosen by GPTQ, while keeping the INT-n dequantizer. Our scope is post-training scalar integer formats without gradient-based training, the setting of SliM-LLM’s comparison (Section IV-A). III. M ETHODOLOGY 
+
+BIT SHARE stores every linear layer on the integer grid of standard group-wise quantization, but gives the weights of a group different numbers of stored bits. Sensitivity-aware binning places the input channels of each group into three bins. A weight in a less sensitive bin stores fewer bits of its code, and every bit it does not store is shared : it is tied by fixed wiring to one stored bit that several weights read. The sizes of a group’s bins form its layout . B IT SHARE has two modes, which differ only in how the groups get their layouts: B IT SHARE -U (uniform) gives every group of every layer the same layout, and B IT SHARE -N (non-uniform) gives each group a layout from a fixed menu, so that groups that need more bits take them from groups that need fewer at the same total. In both modes a sharing-aware version of GPTQ chooses every stored value. 
+
+A. Group-wise integer quantization 
+
+A linear layer computes y = Wx with W ∈ RR×C . Group-wise quantization splits each row into groups of G = 128 
+
+consecutive input channels and gives every group-row (i, g )
+
+a scale sig and a zero point zig ∈ { 0, . . . , 2n − 1} on an 
+
+n-bit grid. Weight wij is stored as an n-bit code qij and reconstructed as 
+
+ˆwij = sig 
+
+ qij − zig 
+
+. (1) With the asymmetric min-max convention and a clipping factor p ≤ 1, sig = p (max j wij − min j wij )/(2 n − 1) and 
+
+zig = round( −p min j wij /s ig ), clamped to the grid, with the extremes taken over the group. INT-n stores nG code bits, a 16-bit scale and an n-bit zero point per group-row, 
+
+n + (16 + n)/G bits per weight: 3.148 for INT3 and 2.141 for INT2 at G = 128 .BIT SHARE keeps the reconstruction of Equation 1 as it is and works on a grid one bit finer than its rate: the 3-bit format uses the INT4 grid ( n = 4 ) and the 2-bit format the INT3 grid 4
+
+(n = 3 ). Writing a code by its bits, q = Pn−1 
+
+> k=0
+
+bk2k, each weight stores the high bits of its code and takes some of its low bits from shared bits. 
+
+B. Sensitivity-aware binning 
+
+The error of weight wij reaches the layer output, scaled by the activation of input channel j, so the channels of a group matter unequally. We measure the sensitivity of channel 
+
+j by the diagonal of the Hessian of the layer’s output error, 
+
+hj = [ H]jj with H = 2 
+
+> N
+
+XX ⊤ over N calibration tokens, the matrix GPTQ already computes [2]. Group g has a layout (Ug , D g ): its Ug most sensitive channels form the high bin Hg , its Dg least sensitive form the low bin Lg and the remaining Mg = G − Ug − Dg
+
+form the middle bin Mg . The bins occupy fixed positions within the group: positions 0, . . . , U g − 1 hold the high bin, 
+
+Ug , . . . , G − Dg − 1 the middle bin and G − Dg , . . . , G − 1 the low bin, each bin keeping the original order of its channels. A position’s bin, and with it which of its bits are stored and which are shared, thus depends only on the position and on the two numbers Ug and Dg . Binning is a permutation π of the input channels within each group, one per layer and shared by all R rows. The permutation is applied to the columns of W offline. At inference the activations are read through it, or equivalently the decoded rows are written through its inverse. It costs one 7-bit index per input channel and layer, shared by all rows. In B IT SHARE -N every linear layer has its own, since its layouts are its own, while in B IT SHARE -U the layers that read the same input share one. Counting one per linear layer, the permutations add 0.0012 bits per weight for Llama-2-7B. 
+
+C. Static bit sharing 
+
+The high, middle and low bins store n, n − 1 and n − 2 bits of each code, always the most significant ones. The missing low bits come from two kinds of shared bits (Figure 3):  
+
+> •
+
+the pair bit cigk : the low-bin positions are paired as (G−
+
+Dg + 2 k, G − Dg + 2 k + 1) , 0 ≤ k < D g /2, and both weights of a pair read their bit b1 from one stored bit;  
+
+> •
+
+the flag fig : bit b0 of every middle- and low-bin weight of group-row (i, g ) is one stored bit. The code of the weight at position t of group-row (i, g ) is thus 
+
+q =
+
+
+
+v t < U g ,
+
+2v + fig Ug ≤ t < G − Dg ,
+
+4v + 2 cigk (t) + fig t ≥ G − Dg ,
+
+(2) where v is the weight’s stored field of n, n − 1 or n − 2 bits and k(t) = ⌊(t − G + Dg )/2⌋ is its pair. Sharing constrains the codes rather than discarding bits. A middle-bin weight can take any code of parity fig : an (n − 1) -bit grid with twice the fine step. A low-bin weight can take any code congruent to fig +2 cigk modulo 4: a grid with four times the fine step whose offset is chosen per pair. All shared bits are programmable. The encoder sets each pair bit, for every row, to the value that minimizes the pair’s error as weighted in                                       
+
+> b3b2b1b0
+> high bin, t < U g
+> middle bin f
+> low bin: t=G−Dg+2 kt=G−Dg+2 k+1
+> ckfckf
+> pair k
+> stored per weight flag fpair bit ck
+> Fig. 3. The 3-bit format: the bits of the INT4 code q=b3b2b1b0of a weight in each bin of group g. Solid bits are stored with the weight, in the color of its bin. Patterned bits are read from shared stored bits: every fis the one flag fig of the group-row, and the two ckof a low-bin pair are its one pair bit cigk . A group-row also stores its scale sig and zero point zig . The 2-bit format drops b3in every bin (INT3 grid).
+
+the layer output, so that when the two weights need different values the bit goes to the one whose error counts more. It also sets the flag of each group-row. A bit dropped from the code, in contrast, is the same for every weight that lacks it. The flag lets the encoder choose, for one bit per group-row, which end of the group’s range the narrower grids of the middle and low bins leave uncovered, rather than tying it to the parity of the zero point (Appendix B). A group-row with layout (U, D ) holds nU + ( n − 1) M +(n − 2) D + D/ 2 code and pair bits, that is 
+
+(n − 1) G + δ(U, D ), δ(U, D ) = U − D 
+
+> 2
+
+, (3) so the extra bits of the high bin are paid by the low bin at two positions per bit. The reference layout U = 8 , D = 16 
+
+(M = 104 ) has δ = 0 : exactly the payload of INT-(n − 1) .BIT SHARE -U uses it in every group. Layouts with δ < 0 store fewer bits. Sharing b1 among B > 2 low-bin positions, or dropping it, lowers the rate further (Appendix B). Both modes use pairs ( B = 2 ), and Sections IV-D and IV-E use the other variants only to extend the rate-quality curve of B IT SHARE -U. 
+
+D. A layout per group ( BIT SHARE -N )
+
+The one layout of B IT SHARE -U fits the average group, but groups differ in how their sensitivity is spread over their channels, in its overall level and in their range, so the same bits buy more accuracy in some groups than in others. B IT SHARE -N therefore lets each group take its layout from a menu Λ of 44 layouts, the same for every layer and model. The menu contains every combination of U ∈ { 0, 4, 8, 12 , 16 , 24 , 32 }
+
+and D ∈ { 0, 16 , 32 , 48 , 64 , 96 } as well as the layouts with 
+
+δ(U, D ) = 0 (U = D/ 2, from U0 D0 to U32 D64), all with pairs in the low bin. Their offsets δ range from −48 to +32 
+
+bits per group-row (Figure 1). B IT SHARE -U is the special case of a menu with one layout, Λ = {U8 D16 } unless a lower rate is wanted. For every group g and layout ℓ ∈ Λ, the encoder measures the selection error 
+
+Eg (ℓ) = 
+
+> R
+
+X
+
+> i=1
+
+X
+
+> j∈g
+
+hj
+
+ wij − ˆw(ℓ)
+
+> ij
+
+2, (4) where ˆw(ℓ) rounds each weight to the nearest code that its bin allows under layout ℓ, with the scale, zero point and flag of 5                    
+
+> TABLE II BITS PER GROUP -ROW (G= 128 ,PAIRS )FOR A GROUP WITH LAYOUT
+> (U, D )AND FOR THE REFERENCE LAYOUT U8 D16 ( M= 104 ), WHICH
+> BIT SHARE -U USES IN EVERY GROUP ,AND BITS PER WEIGHT . I N
+> BIT SHARE -N, A LAYER ’S OFFSETS δSUM TO AT MOST 0, SO ITS TOTAL IS AT MOST THE REFERENCE ’S. T HE LAST ROW GIVES THE BITS PER WEIGHT OF INT3 AND INT2 WITH THE SAME GROUP SIZE ,SCALE AND ZERO POINT .
+
+Field layout (U, D ) U8 D16 
+
+n = 4 n = 3 
+
+High-bin codes nU 32 24 Middle-bin fields (n − 1) M 312 208 Low-bin fields (n − 2) D 32 16 Pair bits D/ 2 8 8Scale (FP16) 16 16 16 Zero point n 4 3Flag 1 1 1Total bits (n−1) G+δ+n+17 405 276 Bits per weight 3.164 2.156 INT3 / INT2 3.148 2.141 
+
+each group-row found by the same range search that sets the group parameters (Section III-F), and each pair bit taking the value with the smaller error. The layouts of a layer then solve 
+
+min 
+
+> ℓ1,...,ℓ C/G ∈Λ
+
+X
+
+> g
+
+Eg (ℓg ) subject to X
+
+> g
+
+δ(ℓg ) ≤ 0, (5) so the layer stores at most the reference payload, (n − 1) bits per weight, and a group can take bits from another only where they lower the layer’s error. Equation 5 is a multiple-choice knapsack problem over the layer’s groups. Since all offsets are multiples of 4, dynamic programming over the running sum of the offsets solves it exactly with at most 20 C/G + 1 states. Each layer solves Equation 5 with its own sensitivities, so the layouts differ between layers as well as between the groups of a layer. The layout is stored as one 6-bit index per group, shared by all R rows of the layer, which is 6/(GR ) ≈ 10 −5
+
+bits per weight for R ≥ 4096 . B IT SHARE -U stores no index. 
+
+E. Storage format and decoder 
+
+Table II lists the fields of a group-row. In B IT SHARE -U with U8 D16, and in B IT SHARE -N when the offsets of a layer sum to zero, the code and pair bits of a layer equal those of INT-
+
+(n − 1) . On top of these, the format stores the flag and one more zero-point bit, since zig is a code of the finer grid. This is 2/128 = 0 .016 bits per weight over INT-(n − 1) , for totals of 3.164 and 2.156 bits per weight in both modes. The layout indices of B IT SHARE -N add about 10 −5.A group-row decodes from its own fields and its group’s layout (Ug , D g ), which in B IT SHARE -U is the same for every group and in B IT SHARE -N is looked up from the group’s 6-bit index in the menu, a table of 44 entries shared by every layer and model. The decoder reads sig , zig and fig , then the Ug n-bit, Mg (n−1) -bit and Dg (n−2) -bit fields and the Dg /2 pair bits, forms the codes by Equation 2 and dequantizes them with Equation 1, exactly as INT-n does. Forming the codes needs no arithmetic: a position’s bin follows from two comparisons with its group’s boundaries, which in B IT SHARE -U are the same in every group, so that the routing is fixed wiring. In B IT SHARE -N, group-rows of different layouts have different sizes, but every row of a layer has the same sequence of layouts, so a group’s offset within a row is a prefix sum over the layer’s layout indices, computed once per layer. The format has no per-weight or per-block metadata and no codebook or look-up table of weight values. 
+
+F. Sharing-aware GPTQ 
+
+The encoder chooses every stored value. Like GPTQ [2], it quantizes the transformer blocks in order on calibration data and, within a block, the linear layers in execution order, each on the inputs produced by the layers already quantized. For a layer with inputs X, GPTQ minimizes ∥(W − ˆW)X∥2
+
+> F
+
+column by column: after a column is quantized, its error is compensated in the columns not yet quantized through the inverse Hessian. B IT SHARE -N first chooses the layouts of the layer, while B IT SHARE -U gives every group its one layout. Both modes then change three steps of GPTQ, as listed in Algorithm 1 (Appendix A). 
+
+a) Group parameters with the format in the loop: Before the column loop, the scale, zero point and flag of every group-row are fixed, as in GPTQ with static groups. For each clipping factor p ∈ { 1.00 , 0.98 , . . . , 0.80 } and each flag value f ∈{0, 1}, every weight of the group-row is rounded to the nearest code that its bin allows, each low-bin pair taking the pair bit with the smaller error. The candidate with the smallest sensitivity-weighted error P 
+
+> j
+
+hj (wij − ˆwij )2 is kept. The flag is thus chosen jointly with the range, which doubles the 11-point range search. The selection error (Equation 4) of a layout is this search’s error, summed over the rows. 
+
+b) Units in order of sensitivity: GPTQ quantizes units :a single column in the high and middle bins and a pair of columns in the low bin (a block of B columns for a bit shared by B, single columns for a dropped bit). The units are quantized in decreasing order of sensitivity over the whole layer (act-order), and a pair or block ranks by its most sensitive column. The most sensitive channels are therefore quantized first, while the most columns remain to compensate their error. 
+
+c) Shared bits chosen by the GPTQ objective: A single column is rounded, row by row, to the nearest code its bin allows given the flag. For a pair, both values c of the pair bit are tried in every row. The first column is rounded to the nearest code with b1 = c, and its error is propagated to the second column, as GPTQ propagates it to any later column, before the second column is rounded. The value with the smaller objective P
+
+> j∈unit
+
+(wij − ˆwij )2/d 2 
+
+> j
+
+is kept, where 
+
+dj is the diagonal of the Cholesky factor of H−1 that GPTQ uses to weigh errors. The unit’s errors are then propagated to the remaining columns. IV. R ESULTS 
+
+A. Evaluation Setup 
+
+Models. Llama-2 (7B, 13B and 70B) [32], Llama-3 (8B and 70B) [33] and Qwen2.5 (0.5B, 1.5B and 3B) [34]. All linear layers of the transformer blocks are quantized. The embeddings and the output layer stay in FP16. 6                                                                                                                                                                                               
+
+> TABLE III WIKI TEXT -2 PERPLEXITY UNDER SLI M-LLM’ S PROTOCOL (CALIBRATION ON WIKI TEXT -2), AT 3AND 2BITS . L LAMA -3-8B IS EVALUATED WITH
+> 4096-TOKEN WINDOWS ,AS IN SLI M-LLM’ S PAPER ,AND THE OTHER MODELS WITH 2048-TOKEN WINDOWS . L OWEST PERPLEXITY VALUES ARE IN
+> BOLD .3 bits 2 bits Llama-2 Llama-3 Llama-2 Llama-3 Method b/w 7B 13B 70B 8B 70B b/w 7B 13B 70B 8B 70B FP16 16 5.47 4.88 3.32 5.75 2.85 16 5.47 4.88 3.32 5.75 2.85 RTN 3.148 6.66 5.51 3.97 27.91 †11.84 2.141 4.2e3 122.1 27.27 1.9e3 †4.6e5 AWQ 3.148 6.24 5.32 –8.22 †4.81 2.141 2.2e5 1.2e5 –1.7e6 †1.7e6 QuIP –––––––39.73 13.48 6.64 84.97 †13.03 PB-LLM –––––––25.37 49.81 NaN 44.12 †11.68 OmniQuant 3.148 6.03 5.28 3.78 ––2.141 11.06 8.26 6.55 ––AffineQuant 3.148 6.08 5.28 –––2.141 10.87 7.64 –––SliM-LLM+ 3.148 5.94 5.11 3.35 ––2.141 10.87 7.59 6.44 ––SliM-LLM ⋆3.148 6.33 5.26 3.69 7.16 4.53 2.141 17.31 9.47 5.85 44.35 12.98 GPTAQ ⋆3.148 5.93 5.19 3.67 7.11 4.91 2.141 11.76 7.84 5.39 18.76 14.62 GPTQ + clip ⋆3.148 5.96 5.33 3.66 6.88 4.58 2.141 10.37 7.41 5.15 21.22 45.13 BIT SHARE -U 3.164 5.94 5.22 3.65 6.94 4.67 2.156 10.53 6.88 4.76 13.87 10.34 BIT SHARE -N 3.164 5.92 5.21 3.63 6.85 4.58 2.156 10.11 6.70 4.71 13.29 9.45
+> †The Llama-3-8B baselines that SliM-LLM reports match 2048-token windows. b/w: bits per weight. –: not reported.
+> ⋆Our runs using released code for SliM-LLM [36], GPTAQ [37] and GPTQ [35].
+
+Methods. Every method quantizes groups of G = 128 input channels with an FP16 scale and an integer zero point per group-row.  
+
+> •
+
+GPTQ [2]: INT3 or INT2 with the min-max range, act-order with static groups, damping 0.01 h and sequential layers (Algorithm 1). On test layers our implementation produces the same codes as the released GPTQ [35].  
+
+> •
+
+GPTQ + clip : GPTQ with the range search of B IT SHARE ,
+
+p ∈ { 1.00 , 0.98 , . . . , 0.80 }; at 2 bits also with G = 64 ,which stores 0.125 bits per weight more than B IT SHARE . 
+
+> •
+
+SliM-LLM [9]: 2, 3 or 4 bits per group by salience, 3 on average per layer (1-3 bits, 2 on average, at 2 bits), with its own GPTQ. We run its released code [36] with the released group widths on Llama-2-7B/13B and Llama-3-8B and its own width search on the 70B models, for which none are released (Appendix C-A). We report our runs.  
+
+> •
+
+GPTAQ [3] adds to GPTQ’s update a term that matches each layer’s output to the full-precision model’s, com-pensating the error of earlier layers. We run its released code [37] on the INT3 or INT2 grid with act-order and its own range search (Appendix C-A).  
+
+> •
+
+Reported only : under SliM-LLM’s protocol we also list the perplexities SliM-LLM reports for RTN, AWQ [1], QuIP [38] and PB-LLM [8], which need no gradient training, and for OmniQuant [4], AffineQuant [5] and SliM-LLM+, which learn their quantizer parameters by gradient descent.  
+
+> •
+
+BIT SHARE : the 3-bit format on the INT4 grid and the 2-bit format on the INT3 grid, in its two modes: BIT SHARE -U, with U8 D16 in every group unless stated otherwise, and B IT SHARE -N, with a layout per group chosen by Equation 5. Bits per weight count every field of a group-row: 3.148 for INT3, 3-bit SliM-LLM and GPTAQ, and 2.141 for INT2, 2-bit SliM-LLM and GPTAQ. Both modes of BIT SHARE 
+
+store 3.164 and 2.156 (Table II). The permutation and, in BIT SHARE -N, the layout indices add 0.0006-0.0013 bits per weight on the Llama models and 0.002-0.005 on the Qwen models. The group index that GPTAQ stores for each column when it forms groups in act-order adds about 0.001. None of these bits is counted. 
+
+Calibration and evaluation. The comparison with SliM-LLM and GPTAQ and every run on the 70B models follow SliM-LLM’s protocol: 128 windows of 2048 tokens drawn from the WikiText-2 training split with GPTQ’s loader and SliM-LLM’s seed. Across model families we also calibrate on 128 sequences of 2048 tokens from the validation split of the Pile [39], built as in AWQ [1]. We report perplexity on the WikiText-2 test split [40] in windows of 2048 tokens and on the first 256 windows of 2048 tokens of GPTQ’s C4 validation text [41]. Appendix C adds WikiText-2 in windows of 4096 tokens. All runs use NVIDIA RTX A6000 GPUs. 
+
+B. SliM-LLM and GPTAQ 
+
+Table III compares with SliM-LLM and GPTAQ under SliM-LLM’s protocol, including the 70B models. Figure 2 and Table VIII (Appendix C) show these runs relative to FP16 and on three test sets. At 2 bits, B IT SHARE -N is below every other method we run on all five models: 19-70% below SliM-LLM, 12.5-35.3% below GPTAQ and 2.5-79.1% below GPTQ + clip. B IT SHARE -U is also below SliM-LLM and GPTAQ on all five models. Both modes are below every method whose perplexity SliM-LLM reports, including the three that learn their quantizer parameters by gradient descent: on Llama-2-13B and Llama-2-70B these reach 7.59 and 6.44 at best, against 6.70 and 4.71 for B IT SHARE -N and 6.88 and 4.76 for B IT SHARE -U. At 3 bits B IT SHARE -N is 1.0-6.4% below SliM-LLM on Llama-2 7B, 13B and 70B and Llama-3-8B, and 1.1% above it on Llama-3-70B, where it is level with GPTQ + clip at 4.58. Of the methods SliM-LLM reports, only SliM-LLM+ is below B IT SHARE -N at 3 bits, on Llama-2-13B and 7
+
+TABLE IV PERPLEXITY (↓) AT EQUAL STORAGE , CALIBRATION ON THE PILE . B/W: BITS PER WEIGHT . L OWEST PERPLEXITY VALUES ARE IN BOLD .WikiText-2 C4 Llama-2 Llama-3 Qwen2.5 Llama-2 Llama-3 Qwen2.5 Method b/w 7B 13B 8B 0.5B 1.5B 3B 7B 13B 8B 0.5B 1.5B 3B FP16 16 5.47 4.88 6.14 13.07 9.27 8.03 7.26 6.73 9.44 20.38 15.12 13.36                                                                                                          
+
+> 3 bits
+> GPTQ 3.148 6.26 5.41 7.96 19.70 12.13 10.01 8.38 7.41 12.82 29.21 18.67 15.78 GPTQ + clip 3.148 6.06 5.45 7.82 19.11 11.23 9.45 8.07 7.52 12.09 28.51 17.71 15.15 BIT SHARE -U 3.164 6.01 5.34 7.43 17.60 10.91 9.29 8.02 7.30 11.72 26.43 17.39 14.94 BIT SHARE -N 3.164 6.02 5.29 7.41 17.25 10.94 9.26 8.02 7.28 11.68 26.11 17.32 14.91
+> 2 bits
+> GPTQ + clip 2.141 10.49 8.31 39.51 129.9 32.87 21.74 13.46 11.10 75.00 158.5 47.32 29.75 GPTQ + clip, G=64 2.281 9.32 7.66 33.80 56.43 24.81 17.20 12.02 10.30 68.22 78.43 35.07 24.33 BIT SHARE -U 2.156 9.25 7.43 16.35 63.63 20.61 15.44 12.06 10.26 22.86 83.66 31.74 22.96 BIT SHARE -N 2.156 8.95 7.31 15.19 58.02 20.60 15.29 12.07 10.11 21.83 77.45 31.14 22.58
+
+Llama-2-70B (5.11 and 3.35 against 5.21 and 3.63). GPTAQ is level with B IT SHARE -N on Llama-2-7B (5.93 against 5.92) and below it on Llama-2-13B (5.19 against 5.21). On the other three models, B IT SHARE -N is 1.0-6.8% below it. GPTQ + clip is itself below SliM-LLM in 7 of the 10 cells. BIT SHARE -N is below B IT SHARE -U in all 10 cells of Table III. On Llama-3-70B at 2 bits, its per-group layouts lower perplexity from 10.34 to 9.45. At 2 bits a run also depends on floating-point rounding: over repeated runs on Llama-2-7B and Llama-3-8B (Appendix C-B), the variation is as large as the difference between the two modes, while BIT SHARE -N stays below GPTQ + clip and both modes stay far below SliM-LLM in every run. 
+
+C. Calibration on the Pile 
+
+Table IV compares both modes of B IT SHARE with GPTQ at equal storage with calibration on the Pile, on Llama-2, Llama-3 and Qwen2.5. Both modes are below GPTQ + clip on every model, at both widths and on both test sets. At 3 bits, B IT SHARE -N is below it by 0.7-9.7% on WikiText-2 and 0.7-8.4% on C4. The gain is largest on Qwen2.5-0.5B and Llama-3-8B, the two models that GPTQ + clip degrades most. At 2 bits, where GPTQ + clip raises the perplexity of FP16 by 70-92% on Llama-2 and by factors of 6.4 and 9.9 on Llama-3-8B and Qwen2.5-0.5B, B IT SHARE -N is 12-62% below it on WikiText-2 and 9-71% on C4. GPTQ + clip with groups of 64 stores 0.125 bits per weight more and is still above B IT SHARE -N in 10 of the 12 cells. In every cell, most of the gain over GPTQ + clip comes with BIT SHARE -U already. The per-group layouts of B IT SHARE -N add to it at 2 bits: B IT SHARE -N is below B IT SHARE -U on every model on WikiText-2, by 3.6% on average and by up to 8.8% on Qwen2.5-0.5B. On C4 it is below on five of the six models, by 2.8% on average, and level on Llama-2-7B (12.07 against 12.06). At 3 bits the average change is −0.5% .
+
+D. Equal perplexity 
+
+Layouts with δ < 0 trade bits for perplexity. Under SliM-LLM’s protocol we evaluate B IT SHARE -U with one layout in every group at U8 with D ∈ { 16 , 48 , 96 , 120 } on the INT4 grid and D ∈ { 16 , 48 , 80 , 120 } on the INT3 grid, and at 
+
+D = 120 with bit b1 shared by four low-bin weights instead of two. The totals run from 3.164 down to 2.523 and from 2.156 down to 1.516 bits per weight. Table V gives the storage at which this curve, interpolated log-linearly in perplexity, reaches the perplexity of SliM-LLM’s code, and Figure 6 in Appendix C-C shows the curves. At 2 bits, B IT SHARE -U needs 17.9-19.4% fewer bits per weight on WikiText-2, 1.726-1.758 instead of 2.141, and 21.6% or more on C4. At 3 bits the saving is 2.1-14.7%. On the 70B models, where SliM-LLM’s code searches its own widths, the saving at 2 bits is 18.2% on Llama-2-70B and 13.6% on Llama-3-70B, and at 3 bits 1.9% on Llama-2-70B. On Llama-3-70B, B IT SHARE -U with U8 D16 (3.164 bits per weight) is above SliM-LLM’s 3-bit perplexity. The curve continues upward with U8 D0 and U32 D0 (3.227 and 3.414) and reaches it at 3.200, 1.7% more than SliM-LLM. These savings are those of B IT SHARE -U. On WikiText-2, B IT SHARE -N is lower still at 3.164 and 2.156 bits per weight. 
+
+TABLE V STORAGE SAVED AT EQUAL PERPLEXITY : THE REDUCTION IN BITS PER WEIGHT AGAINST SLI M-LLM (3.148 AND 2.141) AT WHICH THE RATE -QUALITY CURVE OF BIT SHARE -U, WITH ONE LAYOUT IN EVERY GROUP , REACHES THE PERPLEXITY OF SLI M-LLM’ S CODE , BOTH UNDER 
+
+SLI M-LLM’ S PROTOCOL . O N THE 70B MODELS , S LI M-LLM’ S CODE SEARCHES ITS OWN WIDTHS , AND ONLY WIKI TEXT -2 IS EVALUATED . ≥:SLI M-LLM’ S PERPLEXITY IS ABOVE THIS CURVE , WHICH ENDS AT 1.516 
+
+> BITS PER WEIGHT
+
+; NEGATIVE : MORE BITS THAN SLI M-LLM. 3 bits 2 bits Model WikiText-2 C4 WikiText-2 C4 Llama-2-7B 14.7% 5.7% 19.4% 28.5% Llama-2-13B 2.1% 3.2% 18.5% 21.6% Llama-3-8B 5.2% 10.7% 17.9% ≥29.2% Llama-2-70B 1.9% – 18.2% –Llama-3-70B −1.7% – 13.6% –
+
+E. Down to collapse 
+
+We extend B IT SHARE -U below 1.516 bits per weight on the INT3 grid under SliM-LLM’s protocol using U0 D128 with b1
+
+shared by 4/8/16 weights or dropped (1.406/1.281/1.219/1.156 8                      
+
+> (a) Layer Decoder. (b) Code reconstruction. (c) One group-row. Fig. 4. BIT SHARE decoder hardware implementation. (a) Each group’s layout index selects (Ug, D g)and the group-row size Bg; the bit aligner extracts each group-row from the packed layer, and the group decoder rebuilds and dequantizes its codes. Activations are read through π. (b) Code reconstruction: f
+> supplies b0of middle- and low-bin codes, and cksupplies b1of both codes of a low-bin pair. (c) Outputs may span bins, so every layout takes G/L outputs of Lweights per group-row.
+
+bits per weight), U8 D120 with eight-way sharing or dropping (1.398/1.281) and U0 D256 with 256-weight groups and b1
+
+dropped (1.078). Table X in Appendix C-C gives the rate at which WikiText-2 perplexity, with the best of these formats at each rate, reaches two and ten times that of FP16. In Llama-2 a larger model holds out longer: perplexity doubles at 2.02, 1.72 and 1.61 bits per weight and reaches ten times FP16 at 1.36, 1.22 and 1.17 from 7B to 70B. Llama-3-70B doubles it already at 2.91 bits per weight, against 2.30 for Llama-3-8B, but then degrades more slowly and reaches ten times FP16 at 1.41, against 1.68. Sharing b1 keeps a model usable longer than dropping it: at 1.281 bits per weight, perplexity with b1 shared by eight weights is 2.1, 2.7 and 1.7 times lower than without 
+
+b1 on Llama-2 7B, 13B and 70B, and 32 and 1.2 times lower on Llama-3 8B and 70B. Up to three times FP16 each curve follows ln d = am + βmb, with d = ln(ppl /ppl FP16 ). With the slope taken from the other models, a single run of a model predicts the rest of its curve with a median error of 5.2% in perplexity (Appendix C-C). 
+
+F. Ablations 
+
+Table XI in Appendix C-D starts from GPTQ + clip on the INT2 grid and isolates the parts of the 2-bit format one at a time. Without the bins (U0 D0), perplexity is within 0.6% of BIT SHARE -U on Llama-2 but 8-65% higher on Llama-3-8B and the Qwen models, where a few channels per group need the full INT3 grid of the high bin. Taking bit b0 from the parity of the zero point instead of the flag saves 1/128 bit per weight but raises perplexity by 5-30%. A layout per group with equal bits in every group lowers perplexity against B IT SHARE -U by 2.6% on average, though not on every model, and moving bits between groups by Equation 5, as B IT SHARE -N does, lowers it on every model, by 3.6% on average. The appendix also gives the details and shows the layouts that B IT SHARE -N chooses (Figure 7). 
+
+G. Encoding and decoding cost a) Encoding: BIT SHARE -N chooses the layouts from the weights and the diagonal of the Hessian that GPTQ accumulates anyway, and both modes find the codes in one GPTQ pass. On one 48 GB GPU, quantizing Llama-2-70B or Llama-3-70B takes 1.8-1.9 hours with GPTQ + clip, 2.2-2.3 hours with B IT SHARE -U and 3.1 hours with B IT SHARE -N, at either width. SliM-LLM scores every candidate allocation of a linear layer by the KL divergence of its outputs on the calibration set. Its code spends 32-38 minutes per decoder layer on this search alone, or 43-51 hours per model and width, also on one GPU. 
+
+b) Decoding: Assuming weights are streamed once per token at batch size one, bits per weight constrain bandwidth-limited decoding throughput. Both modes use 3.164/2.156 bits per weight in group records, approximately 0.016 above INT3/INT2 and SliM-LLM. At SliM-LLM’s 2-bit perplex-ity on WikiText-2, however, B IT SHARE -U reads 13.6-19.4% fewer bits (Table V), and Appendix D-E turns these savings into a bound on the speedup. Neither mode has per-weight metadata or a codebook. In B IT SHARE -U every group has the same layout, so each field sits at a fixed offset and no layout table is needed. B IT SHARE -N reads a 6-bit layout index per group and selects each field at a layout-dependent offset. Section V implements its decoder in hardware. SliM-LLM, whose groups also differ in size, reports 20-27% lower GPU throughput than GPTQ at 2 bits with its own kernels, on three models and an A800 GPU (Table 4 of [9]). V. H ARDWARE IMPLEMENTATION 
+
+We implemented the decoder of B IT SHARE in synthesizable SystemVerilog code, verified it and compared its resource overhead with INT-n and SliM-LLM under similar constraints. Figure 4 shows the data path from the compressed stream to FP16 weights (Figure 4(a)) and the reconstruction from stored and shared bits (Figure 4(b)) along with the layout-independent output schedule of G/L outputs per group-row (Figure 4(c)). 
+
+A. Microarchitecture 
+
+In the decoder implementation, group-rows are stored back to back without padding, and one 6-bit layout index per group, shared by all rows of a layer, gives each group-row its layout 
+
+(Ug , D g ) and size Bg . A bit aligner cuts each group-row from the packed stream, and the group decoder rebuilds the n-bit codes by Equation 2 and dequantizes them to binary16 by Equation 1, exactly as for INT-n. It emits L weights per cycle and takes G/L cycles per group-row for every layout, so for 
+
+G/L ≥ 2 it sustains min( L, W G/ ¯B) weights per cycle from a 
+
+W -bit memory interface, where ¯B is the mean group-row size; at G = 128 and L = 16 , a 64-bit interface keeps up with every layout. Appendix D-A includes the detailed implementation. 9
+
+B. Hardware cost 1) Baselines: We compare three decoders with identical interfaces, input buffering, three-stage pipelines and binary16 dequantizers, each delivering 16 weights per cycle at a group size of 128: INT-n (GPTQ storage), with fixed n-bit fields and lane offsets; SliM-LLM, with n−1, n or n+1 bits per weight selected per group by a 2-bit code shared across rows, densely packed records and affine reconstruction; and BIT SHARE 
+
+with per-group layouts and two-way sharing. SliM-LLM and BIT SHARE require bit alignment for variable-size records. We also equip INT-n with the same aligner, although its fixed-size records permit a simpler design. Area is the sum of the mapped cell areas, without placement, routing or clock tree. Logic delay is the critical combinational path reported by ABC. 
+
+2) Setup: We flatten and synthesize each design using open-source Yosys and ABC [42], [43] tools with the SkyWater 130 nm (sky130 fd sc hd) [44] library at the typical corner (25°C, 1.80 V). Area sums mapped standard-cell areas, exclud-ing placement, routing and clock-tree overhead. The reports include critical combinational delay, excluding register, setup and interconnect delays. 
+
+TABLE VI DECODER AREA AT EQUAL THROUGHPUT (16 WEIGHTS /CYCLE ,
+
+G = 128 ), S KY WATER 130 NM . Decoder : THE GROUP DECODER PLUS THE BIT ALIGNER AND , FOR BIT SHARE , THE LAYOUT ROM. F LIP -FLOPS AND LOGIC DELAY ARE CALCULATED FOR THE GROUP DECODER .                                       
+
+> Area ( μm2)Logic Rate Format Group dec. Decoder vs. INT-nFlip-flops delay (ns) 3 bits INT3 100,693 183,286 1.00 ×1,795 6.39 SliM-LLM 129,728 237,218 1.29 ×2,169 7.36 BIT SHARE 210,243 318,134 1.74 ×2,327 7.88 2 bits INT2 80,106 139,928 1.00 ×1,425 6.15 SliM-LLM 105,057 188,672 1.35 ×1,799 6.13 BIT SHARE 175,384 258,311 1.85 ×1,957 7.63
+
+3) Results: Table VI presents the hardware overhead for the B IT SHARE decoder implementation. At equal throughput, the B IT SHARE decoder takes 1.34 × the area of the SliM-LLM decoder at 3 bits and 1.37 × at 2 bits, and 1.74 × and 1.85 × that of INT-n. Its logic delay is 1.23 × and 1.24 × that of INT-n, and 1.07 × and 1.24 × that of SliM-LLM. At 3 bits, the three group decoders incur 53.8 (INT3), 65.0 (SliM-LLM) and 69.8 k μm2 (B IT SHARE ) of flip-flop area, but 46.9, 64.7 and 140.5 k μm2 of logic area. An INT-n lane reads a fixed bit slice and a SliM-LLM lane chooses among three fixed strides. A B IT SHARE lane selects its field at a layout-dependent offset, and the active group advances by a layout-dependent number of bits per beat. All three share the same binary16 dequantizer, while SliM-LLM and B IT SHARE have nearly identical bit-aligner area. This overhead supports a different quality-storage trade-off. At comparable storage, B IT SHARE adds approximately 0.016 bits per weight and achieves lower perplexity in most evaluated settings. At matched perplexity, the configurations reduce storage (Table V) and weight traffic (Appendix D-E) in most cases. The decoding circuitry can be reused across groups and layers, so its area scales with the number of instantiated decoding engines rather than the number of stored weights. Consequently, the decoder-only area ratios do not represent whole-accelerator overhead: the latter also depends on the area of the compute array, memories and interconnect, together with the required decoder replication. 
+
+4) Energy savings: We consider batch-1 decoding in which quantized weights are streamed from DRAM once per gener-ated token. At equal perplexity, fewer bits per weight reduce storage and, consequently, the weight traffic. Under a constant energy-per-transferred-bit model, this yields proportional sav-ings in weight-transfer energy (Appendix D-F). VI. C ONCLUSION 
+
+We have presented B IT SHARE , a group-wise weight for-mat that combines sensitivity-aware binning and static bit sharing with optimal bit-value allocation to improve the quality-storage trade-off of LLM weight quantization without codebooks or fine-tuning. With calibration on the Pile and at the same storage, both modes of B IT SHARE have lower perplexity than GPTQ with the same range search, and at 2 bits B IT SHARE -N lowers WikiText-2 perplexity by up to 70% against SliM-LLM and up to 35% against GPTAQ. At SliM-LLM’s 2-bit perplexity, B IT SHARE -U stores up to 19.4% fewer bits per weight. The hardware implementation of the decoder verifies correct operation and practical feasi-bility while characterizing its modest overhead. Future work will include measuring end-to-end decoding speed on GPUs, power analysis and combining bit sharing with gradient-based calibration. REFERENCES [1] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen, W.-C. Wang, G. Xiao, X. Dang, C. Gan, and S. Han, “AWQ: Activation-aware weight quantiza-tion for on-device LLM compression and acceleration,” in Proceedings of Machine Learning and Systems (MLSys) , 2024. [2] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “GPTQ: Accurate post-training quantization for generative pre-trained transformers,” in 
+
+International Conference on Learning Representations (ICLR) , 2023. [3] Y. Li, R. Yin, D. Lee, S. Xiao, and P. Panda, “GPTAQ: Efficient finetuning-free quantization for asymmetric calibration,” in Proceedings of the 42nd International Conference on Machine Learning (ICML) , ser. PMLR, vol. 267, 2025, pp. 36 690–36 706. [4] W. Shao, M. Chen, Z. Zhang, P. Xu, L. Zhao, Z. Li, K. Zhang, P. Gao, Y. Qiao, and P. Luo, “OmniQuant: Omnidirectionally calibrated quantization for large language models,” in International Conference on Learning Representations (ICLR) , 2024. [5] Y. Ma, H. Li, X. Zheng, F. Ling, X. Xiao, R. Wang, S. Wen, F. Chao, and R. Ji, “AffineQuant: Affine transformation quantization for large language models,” in International Conference on Learning Represen-tations (ICLR) , 2024. [6] C. Lee, J. Jin, T. Kim, H. Kim, and E. Park, “OWQ: Outlier-aware weight quantization for efficient fine-tuning and inference of large language models,” in Proceedings of the AAAI Conference on Artificial Intelligence (AAAI) , 2024. [7] T. Dettmers, R. Svirschevski, V. Egiazarian, D. Kuznedelev, E. Frantar, S. Ashkboos, A. Borzunov, T. Hoefler, and D. Alistarh, “SpQR: A sparse-quantized representation for near-lossless LLM weight compres-sion,” in International Conference on Learning Representations (ICLR) ,2024. [8] Z. Yuan, Y. Shang, and Z. Dong, “PB-LLM: Partially binarized large language models,” in International Conference on Learning Represen-tations (ICLR) , 2024. [9] W. Huang, H. Qin, Y. Liu, Y. Li, Q. Liu, X. Liu, L. Benini, M. Magno, S. Zhang, and X. Qi, “SliM-LLM: Salience-driven mixed-precision quantization for large language models,” in Proceedings of the 42nd International Conference on Machine Learning (ICML) , ser. PMLR, vol. 267, 2025, pp. 25 672–25 692. 10 
+
+[10] A. Tseng, J. Chee, Q. Sun, V. Kuleshov, and C. De Sa, “QuIP#: Even better LLM quantization with Hadamard incoherence and lattice codebooks,” in Proceedings of the 41st International Conference on Machine Learning (ICML) , 2024. [11] V. Egiazarian, A. Panferov, D. Kuznedelev, E. Frantar, A. Babenko, and D. Alistarh, “Extreme compression of large language models via additive quantization,” in Proceedings of the 41st International Conference on Machine Learning (ICML) , 2024. [12] A. Tseng, Q. Sun, D. Hou, and C. De Sa, “QTIP: Quantization with trellises and incoherence processing,” in Advances in Neural Information Processing Systems (NeurIPS) , 2024. [13] Y. Chen, J. Meng, J.-s. Seo, and M. S. Abdelfattah, “BBS: Bi-directional bit-level sparsity for deep learning acceleration,” in 57th IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2024, pp. 551– 564. [14] W. Yang, S. Zhou, Y. Nie, Q. Zhou, H. Xu, Z. Li, and C. Chen, “A bit level weight reordering strategy based on column similarity to explore weight sparsity in RRAM-based NN accelerator,” in IEEE 31st International Conference on Parallel and Distributed Systems (ICPADS) ,2025. [15] B. Hassibi, D. G. Stork, and G. J. Wolff, “Optimal brain surgeon and general network pruning,” in IEEE International Conference on Neural Networks , 1993. [16] E. Frantar, S. P. Singh, and D. Alistarh, “Optimal brain compression: A framework for accurate post-training quantization and pruning,” in 
+
+Advances in Neural Information Processing Systems (NeurIPS) , vol. 35, 2022, pp. 4475–4488. [17] S. Ashkboos, A. Mohtashami, M. L. Croci, B. Li, P. Cameron, M. Jaggi, D. Alistarh, T. Hoefler, and J. Hensman, “QuaRot: Outlier-free 4-bit inference in rotated LLMs,” in Advances in Neural Information Processing Systems (NeurIPS) , vol. 37, 2024, pp. 100 213–100 240. [18] S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer, “SqueezeLLM: Dense-and-sparse quantiza-tion,” in Proceedings of the 41st International Conference on Machine Learning (ICML) , 2024. [19] Z. Dong, Z. Yao, A. Gholami, M. W. Mahoney, and K. Keutzer, “HAWQ: Hessian aware quantization of neural networks with mixed-precision,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2019, pp. 293–302. [20] P. Judd, J. Albericio, T. Hetherington, T. M. Aamodt, and A. Moshovos, “Stripes: Bit-serial deep neural network computing,” in 49th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) ,2016, pp. 1–12. [21] J. Albericio, A. Delm´ as, P. Judd, S. Sharify, G. O’Leary, R. Genov, and A. Moshovos, “Bit-pragmatic deep neural network computing,” in 
+
+Proceedings of the 50th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2017, pp. 382–394. [22] H. Lu, L. Chang, C. Li, Z. Zhu, S. Lu, Y. Liu, and M. Zhang, “Dis-tilling bit-level sparsity parallelism for general purpose deep learning acceleration,” in 54th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2021, pp. 963–976. [23] S. Lee, D. Ha, S. Kim, S. Kim, H. Lee, and W. W. Ro, “BitL: A hybrid bit-serial and parallel deep learning accelerator for critical path reduc-tion,” in 58th IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2025, pp. 1565–1578. [24] K. Ibrahim, M. Maheronnaghsh, and A. Moshovos, “Shannonic: Effi-cient entropy-optimal compression for ML workloads,” in Proceedings of Machine Learning and Systems (MLSys) , 2026. [25] B. D. Rouhani, R. Zhao, A. More, M. Hall, A. Khodamoradi, S. Deng 
+
+et al. , “Microscaling data formats for deep learning,” arXiv preprint arXiv:2310.10537 , 2023. [26] Microsoft, “BC7 format,” Direct3D 11 documentation, https://learn. microsoft.com/en-us/windows/win32/direct3d11/bc7-format, 2024, ac-cessed: 2026-10-29. [27] S. Banerjee, J. Mathew, D. K. Pradhan, and S. P. Mohanty, “Layout-aware Illinois Scan design for high fault coverage,” in 2010 11th International Symposium on Quality Electronic Design (ISQED) , 2010, pp. 683–688. [28] J. Rajski, J. Tyszer, M. Kassab, and N. Mukherjee, “Embedded determin-istic test,” IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems , vol. 23, no. 5, pp. 776–792, 2004. [29] M. R. Stan and W. P. Burleson, “Bus-invert coding for low-power I/O,” 
+
+IEEE Transactions on Very Large Scale Integration (VLSI) Systems ,vol. 3, no. 1, pp. 49–58, 1995. [30] A. Dasgupta, S. Paria, and S. Bhunia, “HIPR: Hardware IP protection through low-overhead fine-grain redaction,” IACR Transactions on Cryp-tographic Hardware and Embedded Systems (TCHES) , vol. 2025, no. 3, pp. 781–805, 2025. [31] M. Marcellin and T. Fischer, “Trellis coded quantization of memoryless and Gauss-Markov sources,” IEEE Transactions on Communications ,vol. 38, no. 1, pp. 82–93, 1990. [32] H. Touvron, L. Martin, K. Stone, P. Albert, A. Almahairi et al. ,“Llama 2: Open foundation and fine-tuned chat models,” arXiv preprint arXiv:2307.09288 , 2023. [33] A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian et al. , “The Llama 3 herd of models,” arXiv preprint arXiv:2407.21783 , 2024. [34] A. Yang, B. Yang, B. Zhang, B. Hui, B. Zheng et al. , “Qwen2.5 technical report,” arXiv preprint arXiv:2412.15115 , 2024. [35] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “GPTQ: Code for accurate post-training quantization of generative pretrained transform-ers,” https://github.com/IST-DASLab/gptq, 2022, accessed: 2026-08-15. [36] W. Huang, H. Qin, Y. Liu, Y. Li, Q. Liu, X. Liu, L. Benini, M. Magno, S. Zhang, and X. Qi, “SliM-LLM: Salience-driven mixed-precision quantization for large language models (code),” https://github.com/ Aaronhuang-778/SliM-LLM, 2024, accessed: 2026-08-15. [37] Y. Li, R. Yin, D. Lee, S. Xiao, and P. Panda, “GPTAQ: Efficient finetuning-free quantization for asymmetric calibration,” https://github. com/Intelligent-Computing-Lab-Yale/GPTAQ, 2025, accessed: 2026-08-15. [38] J. Chee, Y. Cai, V. Kuleshov, and C. De Sa, “QuIP: 2-bit quantization of large language models with guarantees,” in Advances in Neural Information Processing Systems (NeurIPS) , 2023. [39] L. Gao, S. Biderman, S. Black, L. Golding, T. Hoppe, C. Foster, J. Phang, H. He, A. Thite, N. Nabeshima, S. Presser, and C. Leahy, “The Pile: An 800GB dataset of diverse text for language modeling,” 
+
+arXiv preprint arXiv:2101.00027 , 2020. [40] S. Merity, C. Xiong, J. Bradbury, and R. Socher, “Pointer sentinel mix-ture models,” in International Conference on Learning Representations (ICLR) , 2017. [41] C. Raffel, N. Shazeer, A. Roberts, K. Lee, S. Narang, M. Matena, Y. Zhou, W. Li, and P. J. Liu, “Exploring the limits of transfer learning with a unified text-to-text transformer,” Journal of Machine Learning Research , vol. 21, no. 140, pp. 1–67, 2020. [42] C. Wolf, “Yosys Open SYnthesis Suite,” https://yosyshq.net/yosys/, 2013. [43] R. Brayton and A. Mishchenko, “ABC: An academic industrial-strength verification tool,” in Computer Aided Verification (CAV) , ser. Lecture Notes in Computer Science, vol. 6174, 2010, pp. 24–40. [44] Google and SkyWater Technology, “SkyWater SKY130 open source process design kit,” https://github.com/google/skywater-pdk, 2020. [45] M. O’Connor, N. Chatterjee, D. Lee, J. Wilson, A. Agrawal, S. W. Keckler, and W. J. Dally, “Fine-grained DRAM: Energy-efficient DRAM for extreme bandwidth systems,” in 2017 50th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2017, pp. 41– 54. [46] M. Horowitz, “Computing’s energy problem (and what we can do about it),” in IEEE International Solid-State Circuits Conference (ISSCC) ,2014, pp. 10–14. 11 
+
+APPENDIX AALGORITHM 
+
+Algorithm 1 gives the encoder of BIT SHARE for one linear layer with weights W ∈ RR×C and the Hessian H
+
+accumulated from its calibration inputs. It returns the layout indices, the stored fields, the pair bits, the group parameters and the channel permutation π.
+
+Algorithm 1 BIT SHARE encoder for one linear layer. BIT SHARE -U runs it with a one-layout menu, so lines 2-5 give every group that layout. 
+
+Require: weights W ∈ RR×C , Hessian H from calibration inputs, grid width n, layout menu Λ, clipping factors P 
+
+> 1:
+
+hj ← [H]jj  
+
+> 2:
+
+for each group g and layout ℓ ∈ Λ do  
+
+> 3:
+
+Eg (ℓ) ← P 
+
+> i
+
+min (p,f )∈P ×{ 0,1}
+
+P 
+
+> j∈g
+
+hj (wij − ˆw(ℓ) 
+
+> ij
+
+)2
+
+under round-to-format codes  
+
+> 4:
+
+end for  
+
+> 5:
+
+choose (ℓg )g by Equation 5 (dynamic programming over P 
+
+> g
+
+δ(ℓg )) 
+
+> 6:
+
+build π from h and the layouts (Section III-B); permute the columns of W and the rows and columns of H by π 
+
+> 7:
+
+for each group-row (i, g ) do  
+
+> 8:
+
+(sig , z ig , f ig ) ← the (p, f ) ∈ P ×{ 0, 1} with the small-est P 
+
+> j
+
+hj (wij − ˆwij )2 under round-to-format codes of layout ℓg 
+
+> 9:
+
+end for  
+
+> 10:
+
+units ← low-bin pairs (blocks of B) and all other single columns, by decreasing max j∈unit hj 
+
+> 11:
+
+L ← upper Cholesky factor of (H + λI)−1 in unit order, 
+
+λ = 0 .01 h; dj ← Ljj  
+
+> 12:
+
+for each unit u in order do  
+
+> 13:
+
+if u is a column j then  
+
+> 14:
+
+qij ← nearest code allowed in j’s bin, for every row 
+
+i 
+
+> 15:
+
+else  
+
+> 16:
+
+for c ∈ { 0, 1} do  
+
+> 17:
+
+round the unit’s columns in turn with b1 = c, each propagating its error to the next  
+
+> 18:
+
+Ji(c) ← P
+
+> j∈u
+
+(wij − ˆwij )2/d 2 
+
+> j
+
+for every row i 
+
+> 19:
+
+end for  
+
+> 20:
+
+cigk ← arg min c Ji(c) and keep its codes, for every row i 
+
+> 21:
+
+end if  
+
+> 22:
+
+propagate the unit’s errors (wij − ˆwij )/d j to the re-maining columns through L 
+
+> 23:
+
+end for  
+
+> 24:
+
+return layout indices, fields, pair bits, s, z, f and π
+
+APPENDIX BFORMAT AND ENCODER DETAILS 
+
+The flag. The flag fixes a bias of the narrower grids. The 
+
+2n−1 codes of one parity cover the group’s range except one fine step at one end: the codes of parity 0 miss the top code 
+
+2n −1, those of parity 1 miss code 0. If b0 were tied to a value the decoder already holds, such as the parity of the zero point,                    
+
+> U32 D0
+> δ= +32
+> U8 D16
+> δ= 0
+> U0 D64
+> δ=−32
+> high, nbits middle, n−1low, n−2+ pairs
+> Fig. 5. Three groups of one row in B IT SHARE -N, with different layouts,
+> G= 128 positions each. In B IT SHARE -U every group has the same layout. Bits per group-row differ from the reference by δ=U−D/ 2, and within a layer the offsets sum to at most zero. Every row of the layer has the same layouts.
+
+the uncovered end would follow the sign balance of the group, through zig , rather than where its important weights lie. The flag lets the encoder choose that end, and with it the offset of the low bin’s grid, for one bit per group-row. Equivalently, the flag is a bit shared by all Mg + Dg middle- and low-bin weights of the group-row. On the INT4 grid the middle bin is then a 3-bit grid whose step, 2/15 of the range, is 6.7% finer than INT3’s 1/7; on the INT3 grid it is a 2-bit grid with step 
+
+2/7, 14% finer than INT2’s 1/3.
+
+Lower rates. Layouts with δ < 0 store fewer bits. To go further, the pair bit generalizes to a bit shared by B consecutive low-bin positions, which gives D/B bits per group-row and 
+
+δ = U − D(1 − 1/B ). Without such a bit, b1 is dropped :every low-bin code takes it from bit 1 of the zero point 
+
+zig , and δ = U − D. Both modes use pairs ( B = 2). To extend the rate-quality curve of B IT SHARE -U down to collapse, Sections IV-D and IV-E also use B ∈ { 4, 8, 16 } and the dropped bit in every group. 
+
+Layouts. Figure 5 shows three layouts of the menu of BIT SHARE -N. The layouts follow the groups’ sensitivity without being set by it alone: the rank correlation between a group’s mean hj and its offset is +0 .3 to +0 .7 across the models we evaluate. 
+
+Rounding. For a bit shared by B low-bin positions, a block of 
+
+B columns is rounded as a pair is, one column after another. A weight is always rounded to the nearest code consistent with the shared bits, which may change its stored field as well (a carry or borrow), rather than having its own shared bit overwritten. 
+
+Extra work of the encoder. The encoder needs no fine-tuning and no codebook. Its extra work over GPTQ with the same range search is the range search for each layout of the menu before the column loop (in B IT SHARE -N), the second flag value in that search and the two candidate roundings per low-bin pair and row. APPENDIX CADDITIONAL RESULTS 
+
+Table VII repeats the setting of Table IV on WikiText-2 with windows of 4096 tokens. Table VIII compares both modes of BIT SHARE with our runs of SliM-LLM’s and GPTAQ’s code on all three test sets, under SliM-LLM’s protocol. On all three test sets of Table VIII, B IT SHARE -N is below SliM-LLM by 29-93% at 2 bits and by 0.9-10.5% at 3 bits. It is also 14-98% below GPTAQ at 2 bits. At 3 bits it is 2.5-5.5% below GPTAQ on C4 and 0.9-3.8% below it on WikiText-2 12 
+
+for Llama-3-8B, while on WikiText-2 for Llama-2 GPTAQ is lower in three of the four cells, by at most 0.4%.                                                                                 
+
+> TABLE VII WIKI TEXT -2 PERPLEXITY WITH 4096-TOKEN WINDOWS ,CALIBRATION ON THE PILE (THE SETTING OF TABLE IV). T HE LOWEST PERPLEXITY OF EACH WIDTH IS IN BOLD .Llama-2 Llama-3 Qwen2.5 Method b/w 7B 13B 8B 0.5B 1.5B 3B FP16 16 5.12 4.57 5.75 12.08 8.57 7.45
+> 3 bits
+> GPTQ 3.148 5.82 5.05 7.42 18.06 11.15 9.22 GPTQ + clip 3.148 5.67 5.10 7.32 17.60 10.40 8.76 BIT SHARE -U 3.164 5.62 5.00 6.95 16.18 10.10 8.60 BIT SHARE -N 3.164 5.63 4.95 6.93 15.92 10.11 8.56
+> 2 bits
+> GPTQ + clip 2.141 9.83 7.75 39.38 109.7 30.12 19.75
+> G=64 2.281 8.72 7.15 33.80 50.91 22.85 15.77 BIT SHARE -U 2.156 8.62 6.98 16.01 57.84 18.90 14.19 BIT SHARE -N 2.156 8.38 6.79 13.75 53.83 18.96 14.09
+
+A. Baseline runs 
+
+SliM-LLM. On one linear layer of Llama-2-70B, its salience computation fails in the Cholesky factorization, which we repeat with more damping. With the released widths our runs are within 1.4% of the perplexities SliM-LLM reports at 3 bits and 0.6-11.8% above them at 2 bits. On the 70B models they range from 6.9% below to 37% above them. 
+
+GPTAQ. At 3 bits we run it with the groups fixed before quantization and with the groups formed in act-order and report the better run for each model. At 2 bits, where the second diverges on Llama-2-7B, the groups are fixed. 
+
+B. Repeated runs 
+
+At 2 bits the result of a run depends on floating-point rounding. On an RTX 6000 Ada GPU instead of an RTX A6000, B IT SHARE -U gives 8.78 instead of 10.53 on Llama-2-7B. The two GPUs round the outputs of the first decoder layer differently. The Hessians of its query projection then differ by 
+
+8·10 −7 relative, and GPTQ already gives 0.16% of its weights different 2-bit codes. On one GPU type a run is deterministic. Table IX repeats the 2-bit runs of GPTQ + clip, B IT SHARE -U and B IT SHARE -N on Llama-2-7B and Llama-3-8B, twice with the calibration sequences in another order, which changes only the rounding of the sums over them, and twice with other sequences. Over the five runs, the standard deviation of the logarithm of perplexity is 0.05-0.06 for B IT SHARE -U and BIT SHARE -N, and 0.03 and 0.22 for GPTQ + clip on Llama-2-7B and Llama-3-8B. B IT SHARE -N is below GPTQ + clip in all ten runs, by 8.4% and 42% on average, and every run of both modes stays far below SliM-LLM’s code (17.31 and 44.35). Against B IT SHARE -U, B IT SHARE -N is lower in three of the five runs on Llama-2-7B and in two on Llama-3-8B. On average it is 1.3% lower on Llama-2-7B and 1.0% higher on Llama-3-8B. On these two models, the gain of B IT SHARE -N over B IT SHARE -U at 2 bits under SliM-LLM’s protocol is within the variation between runs. 
+
+C. Down to collapse 1 1.5 2 2.5 3 3.5   
+
+> bits per weight
+> 1× 1.5× 2× 3× 5× 10× 20×
+> WikiText-2 perplexity / FP16
+> 2× FP16 10× FP16
+> Llama-2-7B Llama-3-8B Llama-2-13B Llama-2-70B Llama-3-70B
+> Fig. 6. Rate-quality curves of B IT SHARE -U under SliM-LLM’s protocol: WikiText-2 perplexity (2048-token windows) relative to FP16 against bits per weight, with the best format at each rate. Lighter lines: smaller models; dashed: Llama-3. Dotted: 2 and 10 times FP16 (Table X).
+
+A law for the curve. With d = ln(ppl /ppl FP16 ), each curve follows ln d = am + βmb up to three times FP16, where b is the bits per weight. The slopes (Table X) flatten with model size within each family, and one common slope, β = −1.59 ,with one intercept per model fits all 37 points with an error of 0.17 in ln d. A single run of a model therefore predicts its curve: fixing am with the run nearest 2.156 bits per weight below three times FP16 and taking β from the other models predicts the other 32 points with a median error of 5.2% in perplexity, the size of the run-to-run variation at 2 bits (a standard deviation of 5-7%, Appendix C-B). The largest error, 48%, is on Llama-2-70B, the Llama-2 model with the flattest slope, at 1.406 bits per weight. The law holds only up to three times FP16. Before we ran the 70B models below 1.516 bits per weight, extrapolating it placed ten times FP16 at 0.6-0.9 bits per weight on Llama-2-70B, which reaches it at 1.17, and at 1.2-1.6 on Llama-3-70B, which reaches it at 1.41. 
+
+D. Ablations 
+
+Bins. Without bins (U0 D0), every weight of a group is stored on the middle bin’s grid with the flag. On Llama-2 this is within 0.6% of B IT SHARE -U, but on Llama-3-8B and the Qwen models it is 8-65% above it. On these models a few channels per group need the full INT3 grid of the high bin. The menu of B IT SHARE -N contains U0 D0, and B IT SHARE -N is below both on every model. 
+
+Flag. Taking bit b0 of the middle and low bins from the parity of the zero point saves the flag, 1/128 bit per weight, but raises perplexity by 5-30% across the six models, and by 13%, 16% and 30% on Llama-2-7B, Llama-2-13B and Llama-3-8B. 
+
+Allocation across groups. With equal bits in every group, each group can only change the shape of its layout ( U =
+
+D/ 2). This lowers perplexity against B IT SHARE -U by 2.6% on average but raises it on Llama-3-8B and Qwen2.5-1.5B, by 6.1% and 1.8%. On three models it is below B IT SHARE -N, by 13 
+
+TABLE VIII PERPLEXITY UNDER SLI M-LLM’ S PROTOCOL (CALIBRATION ON WIKI TEXT -2) AGAINST OUR RUNS OF SLI M-LLM’ S CODE WITH ITS RELEASED GROUP WIDTHS AND OF GPTAQ’ S CODE . W2: W IKI TEXT -2 WITH 2048- OR 4096-TOKEN WINDOWS . T HE LOWEST PERPLEXITY OF EACH WIDTH IS IN BOLD .Llama-2-7B Llama-2-13B Llama-3-8B Method b/w W2 2048 W2 4096 C4 W2 2048 W2 4096 C4 W2 2048 W2 4096 C4 FP16 16 5.47 5.12 7.26 4.88 4.57 6.73 6.14 5.75 9.44 
+
+3 bits 
+
+SliM-LLM (code) 3.148 6.33 5.85 8.55 5.26 4.92 7.50 7.69 7.16 13.74 GPTAQ (code) 3.148 5.93 5.53 8.70 5.19 4.86 7.55 7.37 7.11 12.74 GPTQ + clip 3.148 5.96 5.56 8.30 5.33 4.99 7.58 7.34 6.88 12.74 BIT SHARE -U 3.164 5.94 5.54 8.22 5.22 4.89 7.38 7.42 6.94 12.38 BIT SHARE -N 3.164 5.92 5.54 8.22 5.21 4.87 7.36 7.31 6.85 12.29 
+
+2 bits 
+
+SliM-LLM (code) 2.141 17.31 19.67 64.27 9.47 8.78 18.79 41.83 44.35 434.7 GPTAQ (code) 2.141 11.76 13.64 28.93 7.84 7.46 16.57 20.87 18.76 1.2e3 GPTQ + clip 2.141 10.37 9.65 17.79 7.41 6.84 12.02 21.95 21.22 228.6 BIT SHARE -U 2.156 10.53 9.75 18.27 6.88 6.40 10.81 15.06 13.87 33.65 BIT SHARE -N 2.156 10.11 9.25 18.72 6.70 6.25 10.46 14.47 13.29 30.81 
+
+TABLE IX REPEATED RUNS AT 2 BITS UNDER SLI M-LLM’ S PROTOCOL :WIKI TEXT -2 PERPLEXITY OF THE RUN OF TABLE III ( RUN ), OF THE SAME RUN WITH THE 128 CALIBRATION SEQUENCES IN TWO OTHER ORDERS 
+
+(ORDER ) AND WITH TWO OTHER DRAWS OF THE SEQUENCES (SEED ). A 
+
+> NEW ORDER CHANGES ONLY THE ROUNDING OF THE SUMS OVER THE SEQUENCES
+
+. W INDOWS OF 2048 TOKENS ON LLAMA -2-7B AND 4096 ON 
+
+LLAMA -3-8B, AS IN TABLE III. M EAN : GEOMETRIC MEAN ; SD :
+
+> STANDARD DEVIATION OF THE LOGARITHM
+
+, OVER THE FIVE RUNS .Method run order 1 order 2 seed 1 seed 2 mean sd 
+
+Llama-2-7B 
+
+GPTQ + clip 10.37 10.40 10.43 9.86 9.87 10.18 0.029 BIT SHARE -U 10.53 9.40 9.18 8.91 9.34 9.46 0.064 BIT SHARE -N 10.11 9.14 9.24 9.04 9.16 9.33 0.046 
+
+Llama-3-8B 
+
+GPTQ + clip 21.22 20.89 26.37 22.72 35.64 24.84 0.222 BIT SHARE -U 13.87 14.98 14.85 14.02 13.12 14.15 0.054 BIT SHARE -N 13.29 15.03 13.85 14.76 14.59 14.29 0.051 TABLE X DOWN TO COLLAPSE , B IT SHARE -U ( ONE LAYOUT IN EVERY GROUP ) 
+
+> UNDER
+
+SLI M-LLM’ S PROTOCOL : THE RATE (BITS PER WEIGHT ) AT WHICH WIKI TEXT -2 PERPLEXITY , WITH THE BEST FORMAT EVALUATED AT EACH RATE , REACHES 2 AND 10 TIMES THAT OF FP16. βm : THE SLOPE OF ln d AGAINST BITS PER WEIGHT UP TO 3 TIMES FP16, WITH 
+
+d = ln(ppl /ppl FP16 ). 1.281 B/W: THE PERPLEXITY AT 1.281 BITS PER WEIGHT WITH BIT b1 SHARED BY EIGHT LOW -BIN WEIGHTS (U0 D128)  
+
+> AND WITH
+
+b1 DROPPED (U8 D120). 
+
+× FP16 1.281 b/w Model 2 10 βm shared dropped Llama-2-7B 2.02 1.36 −1.97 97.30 199.8 Llama-2-13B 1.72 1.22 −1.69 25.28 67.50 Llama-2-70B 1.61 1.17 −1.30 10.93 18.94 Llama-3-8B 2.30 1.68 −1.50 904.7 2.9e4 Llama-3-70B 2.91 1.41 −0.93 75.27 87.33 
+
+up to 7.9% on Qwen2.5-0.5B. Moving bits between groups by Equation 5, as B IT SHARE -N does, lowers it on every model, by 3.6% on average. The groups that receive bits are the more sensitive ones: the rank correlation between a group’s mean 
+
+hj and its offset is between +0 .38 and +0 .66 across the six models. The layouts also differ between families. On Llama-
+
+TABLE XI ABLATIONS AT 2 BITS : W IKI TEXT -2 PERPLEXITY , CALIBRATION ON THE 
+
+PILE . INT2 + CLIP : GPTQ + CLIP ON THE INT2 GRID , THE STARTING POINT (T ABLE IV). N O BINS : U0 D0 IN EVERY GROUP . T IED b0 : U8 D16  
+
+> WITH BIT
+
+b0 TAKEN FROM THE PARITY OF THE ZERO POINT INSTEAD OF THE FLAG . B IT SHARE -U: U8 D16. E QUAL BITS : A LAYOUT PER GROUP WITH δ = 0 IN EVERY GROUP . B IT SHARE -N: A LAYOUT PER GROUP BY 
+
+EQUATION 5. T HE LOWEST PERPLEXITY OF EACH MODEL IS IN BOLD .Llama-2 Llama-3 Qwen2.5 Method b/w 7B 13B 8B 0.5B 1.5B 3B INT2 + clip 2.141 10.49 8.31 39.51 129.9 32.87 21.74 No bins 2.156 9.30 7.39 18.32 105.2 24.26 16.70 Tied b0 2.148 10.42 8.61 21.18 66.73 24.98 17.92 BIT SHARE -U 2.156 9.25 7.43 16.35 63.63 20.61 15.44 Equal bits 2.156 9.04 7.19 17.34 53.46 20.98 15.17 
+
+BIT SHARE -N 2.156 8.95 7.31 15.19 58.02 20.60 15.29 
+
+2, where the bins add little, the most frequent layouts have at most four high-bin positions (on Llama-2-7B, U4 D8 for 17% of the groups, U4 D0 for 17% and U0 D0 for 14%), whereas on the Qwen models the most frequent layout has 16 or 24 (on Qwen2.5-0.5B, U24 D48 for 14%, U24 D32 for 10% and U16 D32 for 9%). Figure 7 shows the layouts that B IT SHARE -N chooses for the output projection of decoder layers 2 and 10 of Llama-2-7B, where each group is one attention head. The more sensitive groups take larger high bins and the less sensitive ones larger low bins, with a rank correlation of +0 .70 
+
+and +0 .92 between a group’s mean hj and its offset. The two layers use 19 and 14 different layouts among their 32 groups, against 8 and 4 in the query projections of the same layers. APPENDIX DHARDWARE IMPLEMENTATION DETAILS 
+
+A. Microarchitecture 
+
+Storage. Group-rows are stored back to back in row-major order, without padding, so a group-row may start at any bit. Each record holds the fields of Table II in the order the decoder reads them: the scale sig , the zero point zig and the flag fig ,then the per-weight fields in position order, then the Dg /2 pair 14 hj (log)  max/min 3.7          
+
+> Decoder layer 2, o_proj: 32 groups, most sensitive first
+> 032 64 96 128
+> position
+> hj (log)  max/min 8.7
+> Decoder layer 10, o_proj: 32 groups, most sensitive first
+> 1816 24 32
+> group, by decreasing mean sensitivity
+> 032 64 96 128
+> position high bin ( nbits) middle ( n−1) low ( n−2 + pairs)
+> Fig. 7. Bin configuration that B IT SHARE -N chooses for the output projection of decoder layers 2 and 10 of Llama-2-7B at 2 bits (Pile calibration). Its 32 groups of 128 input channels, one attention head each, are sorted by their mean sensitivity hj(grey strips, log scale). The bars show the positions of each group’s high, middle and low bins, as in Figure 5. Dashed: U8 D16, the layout of B IT SHARE -U.
+
+bits. A record has Bg = ( n−1) G + δ(Ug , D g ) + n + 17 bits (Equation 3). 
+
+Layer decoder. A per-layer table holds one 6-bit layout index per group, shared by all R rows. A 44-entry ROM maps the index to (Ug , D g ), and hence to Bg ; for the one-layout-per-layer variants of Section IV-D the ROM is bypassed by a fixed (U, D ), with b1 shared by two or four low-bin weights. A walker requests group-rows in storage order, and a bit aligner cuts each Bg -bit record from a reservoir filled by W -bit memory words. Because every row has the same layout sequence, the walker needs no stored offsets; for random access, a prefix-sum unit returns the bit offset of every group within a row. Reserved indices and illegal layouts raise an error and stop decoding. 
+
+Group decoder. The group decoder (dotted box in Figure 4(a)) emits L weights per clock cycle, at consecutive positions 
+
+t = base , . . . , base +L−1 of one group-row; we call one such output transfer a beat . Following Section III-E, a lane finds the bin of its position by two comparisons, t < U g and 
+
+t ≥ G − Dg . Its field starts n h + ( n−1) m + ( n−2) l bits into the beat, where h, m and l count the high, middle and low positions in [base , t ). The lane then forms q by Equation 2, with fig as b0 for t ≥ Ug and the pair bit cigk as b1 in the low bin. Three registered stages compute q − zig , the exact integer product of |q − zig | with the significand of sig , and a single round-to-nearest-even to binary16, which is Equation 1 evaluated exactly as for INT-n. The decoder also outputs 
+
+q − zig for datapaths that accumulate in integers and apply 
+
+sig once per group-row. Beats may span bin boundaries, so every group-row takes exactly G/L beats irrespective of its layout. 
+
+Throughput. For G/L ≥ 2, the decoder sustains 
+
+min( L, W G/ ¯B) weights per cycle, where ¯B is the mean record size: L when the memory interface keeps up, and the input bandwidth otherwise. With G = 128 and L = 16 , a 64-bit interface suffices for every layout of the menu, which needs at most 54.6 bits per cycle at n = 4 and 38.5 at n = 3 . In simulation, a row containing all 44 layouts decodes in exactly one beat per cycle at L ∈ { 4, 8, 16 } for both grids. At L = 32 
+
+with W = 64 , it takes 369 and 544 cycles for 352 beats at 
+
+n = 3 and n = 4 .
+
+Permutation. The decoder emits weights in binned order, so activations are read through the permutation π of Section III-B. Since π is shared by all R rows of a layer, an activation vector needs to be permuted once per token and layer rather than once per row. We therefore report the decoder without the activation gather. 
+
+B. Storage layout  
+
+> •
+
+A layer is stored row by row; each row is the con-catenation of its C/G group-rows; nothing is padded. The stream is least-significant-bit first: bit 0 of the first memory word is bit 0 of the layer.  
+
+> •
+
+A group-row is, in this order: sig (16 bits, IEEE bi-nary16); zig (n bits); fig (1 bit); the Ug , Mg and Dg
+
+fields of n, n−1 and n−2 bits in position order; and the 
+
+Dg /S shared bits, with S = 2 , or S = 4 for the four-way variant of Section IV-D. Every field is least-significant-bit first.  
+
+> •
+
+Layout index k ∈ { 0, . . . , 43 } enumerates the menu Λ in lexicographic (U, D ) order; indices 44-63 are reserved. The SliM-LLM decoder stores s (16 bits), z (N +1 bits, wide enough for the largest precision) and G fields of the group’s precision; the INT-n decoder stores s, z (n bits), one unused bit and G fields of n bits. 
+
+C. Verification 
+
+We verify the layer decoder against a Python reference model that parses the packed bitstream using a serial bit cursor, independently of the RTL’s per-lane offset calculations. The model reconstructs binary16 weights by rounding the exact product sig (q − zig ) once. Across 62 simulations, the regres-sion checks every output bit and sideband signal, covering:  
+
+> •
+
+both quantization grids and lane counts L ∈{4, 8, 16 , 32 }; 
+
+> •
+
+all 44 layouts and random per-group layouts across 86 groups and three rows, matching the input-group count of Llama-2-7B’s down projection;  
+
+> •
+
+the layouts U8 with D ∈ { 16 , 48 , 80 , 96 , 120 }, with two-and four-way sharing, degenerate layouts and group size 
+
+G = 64 ; 
+
+> •
+
+memory words of 32, 64 and 128 bits, random input gaps and two consecutive layers. 15               
+
+> TABLE XII LOGIC SYNTHESIS PER BLOCK (Y OSYS 0.62 AND ABC, S KY WATER S K Y 130_ F D _S C _H D SUBSET ,TT 025C 1 V80, G= 128 ,L= 16 ,W= 64 ). LOGIC DELAY EXCLUDES REGISTER TIMING AND INTERCONNECT .
+
+Block Area ( μm2) Cells Flip-flops Logic delay (ns) BIT SHARE group decoder, n = 4 210,243 25,264 2,327 7.88 BIT SHARE group decoder, n = 3 175,384 20,113 1,957 7.63 SliM-LLM group decoder, {2, 3, 4} 129,728 13,464 2,169 7.36 SliM-LLM group decoder, {1, 2, 3} 105,057 11,154 1,799 6.13 INT3 group decoder 100,693 10,095 1,795 6.39 INT2 group decoder 80,106 8,184 1,425 6.15 Bit aligner, records ≤ 533 bits (B IT SHARE , n = 4 ) 107,557 15,883 1,184 5.03 Bit aligner, ≤ 532 bits (SliM-LLM, {2, 3, 4}) 107,489 15,817 1,182 4.96 Bit aligner, ≤ 404 bits (B IT SHARE , n = 3 ; INT3) 82,593 11,413 924 5.47 Bit aligner, ≤ 403 bits (SliM-LLM, {1, 2, 3}) 83,615 11,866 922 4.90 Bit aligner, ≤ 275 bits (INT2) 59,822 8,397 666 4.84 Layout ROM (44 entries) 334 66 0 1.14 Binary16 dequantizer, one lane 2,110 352 0 5.91 BIT SHARE layer decoder, n = 4 a 381,838 42,257 5,320 8.29 BIT SHARE layer decoder, n = 3 a 329,181 36,019 4,689 7.45 
+
+> aGroup decoder, aligner, ROM, walker and a 256-entry layout table held in flip-flops; in a deployment the table belongs in SRAM.
+
+D. Synthesis results per block 
+
+Table XII lists every synthesized block of the hardware implementation: the group decoders of B IT SHARE , SliM-LLM and INT-n at both rates, the bit aligner of each format, the layout ROM, one binary16 dequantizer lane and the complete BIT SHARE layer decoder. The B IT SHARE group decoder takes 1.62 × the area of the SliM-LLM decoder at 3 bits and 1.67 ×
+
+at 2 bits, with 7-9% more flip-flops, so most of the extra area is logic. The bit aligners of B IT SHARE and SliM-LLM have almost the same area (107.5 k μm2 at 3 bits), and the layout ROM adds only 334 μm2.
+
+E. Weight traffic at equal perplexity 
+
+For batch-1 decoding limited by memory bandwidth, tokens per second are bounded by the bytes streamed per token. Table XIII converts the storage reductions of Table V into this bound: the ratio of bytes per token for SliM-LLM (our runs of its released code) and for B IT SHARE at the same perplexity, counting the quantized linear layers and the FP16 output layer and excluding the key-value cache. The bounds inherit the assumptions of Table V: the one-layout-per-layer configuration of Section IV-D, at rates interpolated on its rate-quality curve. They are upper bounds, not measured speedups; since the decoder keeps pace with memory and the per-group decoding work is uniform across rows, a fused kernel can approach them and will be explored in future work. 
+
+F. Weight-traffic energy at equal perplexity 
+
+In batch-1 decoding every quantized weight is read from DRAM once per token, so the energy of weight traffic is 
+
+E = N × b × ebit , where N is the number of quantized weights, b the bits per weight and ebit the DRAM energy per bit transferred. N and ebit are the same for every format, so the relative saving is 1 − b/b ref and depends on no assumed constant. At comparable storage, B IT SHARE uses 2.156 bits per weight against 2.141 for SliM-LLM, approximately 0.7% more; its benefit at this operating point is improved perplexity. Table XIV converts the storage saved at 2 bits into weight energy, with ebit ≈ 4 pJ/bit for HBM2 [45] and ≈ 20 pJ/bit for off-package DRAM [46]. B IT SHARE -U reads 13.6-19.4% fewer weight bits than SliM-LLM at the same WikiText-2 perplexity (21.6% or more on C4), which saves 1.2-1.7 pJ per weight with HBM2 and 5.8-8.3 pJ per weight with off-package DRAM. On Llama-2-7B ( 6.5 × 10 9 quantized weights) this is 336 MB less weight traffic per token, or 11-54 mJ per token. The estimate is analytical: it covers weight traffic only, not the KV cache, activations or the FP16 head, which are the same for both formats, and it takes ebit from the literature.   
+
+> TABLE XIII UPPER BOUND ON THE DECODE SPEEDUP OVER SLI M-LLM AT EQUAL PERPLEXITY .
+
+3 bits 2 bits Model WikiText-2 C4 WikiText-2 C4 Llama-2-7B 1.15 × 1.05 × 1.19 × 1.30 ×
+
+Llama-2-13B 1.02 × 1.03 × 1.20 × 1.25 ×
+
+Llama-3-8B 1.03 × 1.08 × 1.12 × ≥1.23 ×           
+
+> TABLE XIV WEIGHT -TRAFFIC ENERGY AT EQUAL 2-BIT WIKI TEXT -2 PERPLEXITY :
+> BITS PER WEIGHT AT WHICH BIT SHARE -U REACHES THE PERPLEXITY OF
+> SLI M-LLM (2.141 BITS PER WEIGHT ), THE DRAM ENERGY SAVED AND THE SAVING PER WEIGHT FOR TWO DRAM ENERGIES .
+
+Model Bits per weight Energy saved pJ/weight saved (4 / 20 pJ/bit) Llama-2-7B 1.726 19.4% 1.66 / 8.31 Llama-2-13B 1.745 18.5% 1.58 / 7.92 Llama-2-70B 1.751 18.2% 1.56 / 7.79 Llama-3-8B 1.758 17.9% 1.53 / 7.66 Llama-3-70B 1.850 13.6% 1.16 / 5.82

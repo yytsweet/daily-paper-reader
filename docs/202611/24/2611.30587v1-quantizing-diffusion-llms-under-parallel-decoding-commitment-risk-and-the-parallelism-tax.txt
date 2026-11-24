@@ -1,0 +1,684 @@
+Title: Quantizing Diffusion LLMs under Parallel Decoding: Commitment Risk and the Parallelism Tax
+
+URL Source: https://arxiv.org/pdf/2611.30587v1
+
+Published Time: Tue, 24 Nov 2026 05:25:15 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+Preprint 
+
+# QUANTIZING DIFFUSION LLM S UNDER PARALLEL 
+
+# DECODING : C OMMITMENT RISK AND THE 
+
+# PARALLELISM TAX 
+
+Huan Xu 1∗ Maosen Zhao 1,2∗ Pengtao Chen 1 Tao Chen 1,2†
+
+> 1
+
+College of Future Information Technology, Fudan University, Shanghai, China 
+
+> 2
+
+Shanghai Innovation Institute, Shanghai, China 
+
+25213090239@m.fudan.edu.cn , eetchen@fudan.edu.cn 
+
+## ABSTRACT 
+
+Diffusion large language models (dLLMs) are served with accelerated decoders that cache context and commit, in one step, every masked position whose con-fidence clears a threshold. Yet post-training quantization of dLLMs has so far been calibrated and evaluated under fixed-step samplers without caching. We study W4A4 quantization under the deployed decoder and find that the decoder determines both where quantization harms accuracy and what it costs. Irreversible errors enter chiefly through forced commitments, made when no position clears the threshold: they are a minority of commitments but carry most quantization-induced flips. Quantization also levies a parallelism tax , extra forward passes per response: by compressing top logit gaps, it pushes positions below the threshold while leav-ing predictions largely intact. We propose D ECAL , which reweights layer-wise calibration by a commitment-risk prior measured on the deployed decoder, and an argmax-preserving commit temperature that recovers the tax. On LLaDA and Dream, D ECAL attains the best average accuracy among W4A4 methods, with lower run-to-run variance than the closest existing calibration method. 
+
+## 1 INTRODUCTION 
+
+Diffusion large language models (dLLMs) generate text by iteratively unmasking a response with bidirectional context (Austin et al., 2021a; Sahoo et al., 2024), and open models such as LLaDA (Nie et al., 2025) and Dream (Ye et al., 2025) now rival autoregressive (AR) models of similar scale. Their speed in practice comes from accelerated decoders: Fast-dLLM (Wu et al., 2026b) combines block-wise approximate KV caching with confidence-thresholded parallel decoding, committing in one step every masked position whose confidence exceeds a threshold. Serving cost thus factors into the number of forward passes and the cost of each. Caching and parallel decoding reduce the former; low-bit post-training quantization (PTQ) (Frantar et al., 2023), for instance with rotations (QuaRot; Ashkboos et al., 2024) or learned affine transformations (FlatQuant; Sun et al., 2025), reduces the latter. Ideally, the two savings would compound. Existing dLLM quantization methods (Lin et al., 2025; Xu et al., 2026; Zhang et al., 2026; Yan et al., 2026; Huang et al., 2026), however, are calibrated and evaluated apart from this decoder, under the model’s native sampler, which commits a fixed number of positions per step without caching. The closest, FAIR-Calib (Huang et al., 2026), reweights calibration by a position prior from a deliberately policy-agnostic probe; in our reproduction under Fast-dLLM, this prior is nearly uniform on LLaDA and does not follow where the decoder forces commitments (Figure 1a). Yet under threshold decoding, the model’s confidence, passed through the decoding rule, determines both how many forward passes a response takes and which decisions become irreversible. We study W4A4 quantization directly under Fast-dLLM with dual caching, comparing each quantized model with a full-precision shadow evaluated on identical decoding states. Under the native sampler, 
+
+> ∗
+
+Equal contribution. 
+
+> †
+
+Corresponding author. 
+
+1arXiv:2611.30587v1 [cs.CL] 23 Nov 2026 Preprint 020 40 60                           
+
+> Forced (%)
+> 020 40 60 80
+> Forced (%)
+> 1.0 1.5 2.0 2.5
+> Prior weight  LLaDA-8B-Instruct ρwith forced: FAIR-Calib −0.11 DECAL +0.94 032 64 96 128 160 192 224 256
+> Position in the generation window (block length 32)
+> 0.5 1.0 1.5 2.0
+> Prior weight  Dream-v0-Base-7B ρwith forced: FAIR-Calib +0.90 DECAL +0.94
+> (a) Only DECAL follows forced commitments on both models
+> DECAL prior (ours) FAIR-Calib prior forced commitments 025 50 75 100
+> LLaDA-8B Dream-7B
+> 16% 97% 29% 89%
+> (b) Forced commitments carry most flips
+> share of forced commitments (%) of all commitments of permanent flips LLaDA-8B Dream-7B
+> 0510 15 0.8 12.9 2.8 2.3
+> (c)
+> extra forward passes vs. FP16 (%) FlatQuant QuaRot +Tmatch
+> Commit temperature removes the tax
+
+Figure 1: (a) Calibration priors of FAIR-Calib and D ECAL over the 256 window positions (lines; mean 1), against the share of FP16 trajectories in which each position is a forced commitment under the deployed decoding rule (bars; GSM8K training prompts, no cache; Dream: returned output only); ρ: Spearman correlation. FAIR-Calib’s policy-agnostic prior is uncorrelated with forced commitments on LLaDA and, on Dream, tracks their overall decline but not their jumps at block boundaries. (b) Forced commitments are a minority of commitments but carry most permanent flips (GSM8K, W4A4 FlatQuant). (c) Parallelism tax, the extra forward passes per response relative to FP16 (GSM8K), at T = 1 (filled) and with the commit temperature at Tmatch (black line), counted as zero at or below FP16. Panels (b, c) use Fast-dLLM with dual cache and τ = 0 .9.the number of steps is fixed in advance and quantization can change only what is written; under threshold decoding, it also changes when positions are written and how many steps a response takes. This yields two observations with no counterpart under fixed-step samplers. 
+
+Observation 1: irreversible errors enter through forced commitments. A token is written either because its confidence exceeds the threshold ( threshold commitment ) or because no position in the active block qualifies and the decoder must still write the most confident one ( forced commitment ); either way, it is never revised. Forced commitments make up only 16–29% of commitments yet carry 89–97% of the permanent flips , commitments that quantization changes and that survive into the returned output (Figure 1b, Section 3.2). 
+
+Observation 2: quantization levies a parallelism tax. Quantization deflates confidence while largely preserving what the model would write, so fewer positions clear the threshold at each step and each response takes more forward passes. We call this extra cost the parallelism tax ; it reaches 13% on LLaDA and, as we show, can be recovered without retraining (Figure 1c, Section 3.3). We therefore align both calibration and decoding with the deployed decoder. D ECAL (DE coder-aligned Commitment-risk c AL ibration) weights layer-wise calibration by a commitment-risk prior estimated from full-precision trajectories of the deployed decoder. A commit temperature restores the confidence scale at the threshold test; since it preserves the argmax, it changes when positions are committed, never which token a position receives in a given state. The two act on different decisions: DECAL makes the fragile forced commitments less likely to flip, whereas the temperature releases only commitments just below the threshold, which rarely flip (Section H). Our contributions are as follows: • To our knowledge, we are the first to systematically analyze PTQ for dLLMs under the cached, threshold-based parallel decoder used in deployment, identifying forced commitments, including a placement failure absent from AR decoding (writing the wrong position), as the entry point of irreversible errors, and characterizing the parallelism tax that quantization levies. • We propose D ECAL , which scores each generation position by its flip probability, through the written token or the chosen position, times its reach into the returned output. Collected without any cache, the prior transfers to cached deployment, and its definition applies to 2Preprint both instruction-tuned and base models. D ECAL attains the best average accuracy among W4A4 methods on both models, with and without cache, and, under cached decoding, a lower run-to-run variance than FAIR-Calib on every task. • We introduce an argmax-preserving commit temperature, set by matching full-precision forward passes, that recovers the full tax of QuaRot on LLaDA without a detectable accuracy change and offers a controllable accuracy–efficiency trade-off beyond it. 
+
+## 2 RELATED WORK 
+
+Diffusion language models. Masked diffusion models, typically bidirectional Transformers (Vaswani et al., 2017), generate text by iteratively denoising a fully masked sequence (Austin et al., 2021a; Lou et al., 2024; Sahoo et al., 2024; Shi et al., 2024). LLaDA (Nie et al., 2025) and Dream (Ye et al., 2025) scale them to billions of parameters. Because vanilla sampling recomputes full bidirectional attention at every step, a line of work accelerates dLLM inference with approximate KV caching (Ma et al., 2025; Liu et al., 2026) and adaptive parallel decoding (Israel et al., 2025); Fast-dLLM (Wu et al., 2026b) combines caching with threshold decoding and is the decoder we study. Polestar (Lee et al., 2026) uses token representation drift both to refresh stale cache entries and to commit tokens below the confidence threshold when their drift shows a sharp event; under its drift-guided commitment, forced commitments still carry most quantization-induced flips, the parallelism tax persists, and both the prior of D ECAL and the commit temperature keep their benefits (Section J). 
+
+Post-training quantization of LLMs. Reconstruction-based PTQ fits quantization parameters layer by layer or block by block on a small calibration set (Nagel et al., 2020; Li et al., 2021). For LLMs, weight-only methods use second-order updates (Frantar et al., 2023) or protect salient channels using activation statistics (Lin et al., 2024), while weight–activation methods must handle activation outliers (Dettmers et al., 2022), by smoothing (Xiao et al., 2023), rotation (Ashkboos et al., 2024; Liu et al., 2025), or learned transformations and clipping (Shao et al., 2024; Sun et al., 2025). 
+
+Quantization of diffusion models and dLLMs. For image diffusion, calibration must cover the activations of all timesteps (Shang et al., 2023; Li et al., 2023). For dLLMs, Lin et al. (2025) show that AR PTQ methods transfer but W4A4 remains hard because of activation outliers. DLLMQuant (Xu et al., 2026) and Quant-dLLM (Zhang et al., 2026) calibrate across timesteps and mask ratios, STaR-Quant (Yan et al., 2026) treats masked and unmasked token states separately, and FAIR-Calib (Huang et al., 2026) weights calibration positions by a prior probed from a full-precision teacher that commits one random position per step, with neither blocks nor a threshold. None is calibrated or evaluated under the cached threshold decoder used in deployment. 
+
+Temperature and confidence. Temperature scaling calibrates predicted probabilities post hoc (Guo et al., 2017; Minderer et al., 2021); we use it to restore the scale the commit threshold reads. 
+
+## 3 OBSERVATIONS 
+
+We fix the decoder and the measurement, then establish the two observations our method builds on. 3.1 DECODER AND MEASUREMENT 
+
+Threshold parallel decoding. Confidence-ordered parallel commitment dates back to Mask-Predict (Ghazvininejad et al., 2019) and MaskGIT (Chang et al., 2022); dLLM decoders apply it block by block, left to right (Arriola et al., 2025). A window of K masked positions follows the prompt. At forward pass t, let At be the masked positions of the active block and, for i ∈ A t, let zt(i) be the logits, pt(i) = max v softmax( zt(i)) v the confidence, and mt(i) the gap between the two largest logits. Fast-dLLM (Wu et al., 2026b) commits 
+
+Ct =
+
+{ i ∈ A t : pt(i) ≥ τ } if non-empty (threshold commitments) ,
+
+{ct}, ct = arg max i∈A t pt(i) otherwise (a forced commitment) , (1) 3Preprint 0.1 0.3 0.5 0.7 0.9      
+
+> Confidence of the committed position (W4A4)
+> 0.01 0.1 110 100
+> Token-flip rate (%)
+> τ
+> (a) Flips occur at low confidence
+> below τ: forced commitments only
+> threshold commitments: 0.04%–0.13%
+> LLaDA-8B-Instruct Dream-v0-Base-7B
+> 0.8–0.9 0.9–0.95 0.95–0.99 0.99–0.999 ≥0.999
+> Full-precision confidence of the position
+> −30 −20 −10 0
+> Logit-gap change vs. FP16 (%)
+> no change
+> τ
+> (b) Quantization shrinks the logit gap
+> LLaDA · FlatQuant Dream · FlatQuant LLaDA · QuaRot Dream · QuaRot
+
+Figure 2: Evidence for the two observations (GSM8K, W4A4, against a full-precision shadow on the same states). (a) Token-flip rate, the fraction of commitments whose token differs from the shadow’s, by the quantized model’s confidence at commitment (FlatQuant). (b) Change of the gap between the two largest logits relative to full precision, grouped by full-precision confidence. Bands: 95% confidence intervals. and writes ˆxt(i) = arg max v zt(i)v at every i ∈ C t; committed tokens are never revised. With dual caching, keys and values outside the active block are cached, refreshed at the first pass of each block (build step ) and read by the others ( reuse steps ), a distinction specific to cached block decoding. 
+
+Measurement. We let the quantized model decode and run its full-precision counterpart as a shadow on the same states, without letting it commit. A commitment is flipped if the shadow would write a different token or, at a forced commitment, choose a different position; the flip is permanent if the token is part of the returned output. We measure W4A4 LLaDA-8B-Instruct and Dream-v0-Base-7B on GSM8K with Fast-dLLM (dual cache, τ = 0 .9). 3.2 OBSERVATION 1: I RREVERSIBLE ERRORS ENTER THROUGH FORCED COMMITMENTS 
+
+The threshold filters decisions by margin. A threshold commitment is made only when the top token leads its runner-up by a sizable logit margin, which a quantization perturbation can overturn only if it exceeds that margin: the threshold admits only robust decisions. The forced rule suspends this filter exactly when the model is uncertain, writing the most confident position at whatever margin it has; since nothing is revised, forced commitments are the channel through which fragile decisions become permanent. Accordingly, the flip rate falls steeply with the confidence at commitment and is up to three orders of magnitude higher below τ , a range only forced commitments reach (Figure 2a). With FlatQuant, forced commitments are 16.5% of all commitments on LLaDA and 29.2% on Dream, yet carry 97.1% and 88.8% of the permanent token flips (Figure 1b; 99.5% and 96.7% counting placement flips, Section G): per commitment, 6.0% and 9.8% of them flip, against 0.04% and 0.13% of threshold commitments. 
+
+How forced commitments fail, and why only here. A forced commitment can flip its token, as in AR decoding, but also its position: when the most confident positions are nearly tied, quantization can change which one is written, a placement flip that AR decoding, with its fixed order, cannot make. Either error is permanent and becomes context for every later pass, so its damage grows with how long it is read before the returned output is complete. By contrast, a fixed-step sampler commits its k most confident positions whatever their margins, spreading fragile commitments over the whole schedule, and a random-commit probe, as in FAIR-Calib, does not see them at all (Figure 1a). Under threshold decoding, they are concentrated, can be located on full-precision trajectories before quantization, and differ in how far their errors reach; the prior of Section 4.1 measures both. 3.3 OBSERVATION 2: Q UANTIZATION LEVIES A PARALLELISM TAX 
+
+An absolute test on a relative quantity. The threshold reads confidence as an absolute number, but confidence is set by the gaps between the top logit and its competitors: with two candidates, 4Preprint impact —𝒂 𝒉𝒊𝒈𝒉  impact —𝒂 𝒍𝒐𝒘                                                                                
+
+> risk —πdownstream impact —𝒂 real parallel decoding process
+> steps
+> 𝑇
+> 𝑇 ′
+> Step t ∶ several Ƹ𝑝 > 𝜏 ⇒ parallel commit
+> Step t ′∶ no Ƹ𝑝 > 𝜏 ⇒ forced step (commit argmax)
+> 𝛕
+> 𝛕
+> tok tok tok tok [M] [M] [M] [M]
+> tiny logit margin in position p
+> 𝑟 𝑝 = 𝐸 π⋅ 𝑎
+> safe commit
+> not flip
+> top1
+> top2
+> risky commit
+> may flip
+> top1 top2
+> tok tok [M] [M] [M] [M] [M] [M]
+> tok tok [M] [M] [M] [M] [M] [M]
+> tok tok [M] [M] [M] [M] [M] tok
+> tok tok [M] [M] [M] [M] tok tok
+> tok tok tok tok [M] [M] tok tok
+> tok tok tok tok tok [M] tok tok
+> tok tok tok tok tok tok tok tok
+> confidence
+> risk —𝛑 𝐥𝐨𝐰
+> risk —𝛑 𝒉𝒊𝒈𝒉
+> 𝑤 𝑝 = 1 + 𝛽 𝑟 Τ𝑝 ҧ𝑟 − 1
+> ℒ𝓁 = ෍
+> 𝑝
+> 𝑤 𝑝 ∥ ℎ 𝓁,𝑝 𝑞 − ℎ 𝓁,𝑝 ⋆∥22
+> Weighted hidden-state MSE
+> Better QDLM under
+> Parallel Decoding
+> ℎ𝓁,𝑝
+> ⋆
+> ℎ𝓁,𝑝 𝑞
+> FP teacher
+> Attention FFN
+> Q-Attention Q-FFN
+> W4A4 student
+> learnable affine transformation
+> Input
+> Layer-wise Calibration
+> Weights 𝒘 𝒑
+> more efficient
+> QDLM
+> T calib
+> 𝒔𝒐𝒇𝒕𝒎𝒂𝒙 ·
+> confidence recovery
+> QDLM efficiency
+
+DLMs PTQ Calibration  T calib 
+
+Weights  𝒘  𝒑       
+
+> Weights 𝒘 𝒑
+> 𝜅𝛥 ⋆𝛥 ⋆
+> restored
+> top1 · ··topk top1 · ··topk
+> logits
+> raw (shrink)
+> 𝑙𝑜𝑔𝑖𝑡𝑠
+> 𝑇 𝑚𝑎𝑡𝑐ℎ
+
+Figure 3: Overview of D ECAL and the commit temperature. Top left: a W4A4 student is calibrated layer by layer against the full-precision teacher with a hidden-state MSE weighted by w[p], and decodes with the commit temperature Tmatch . Bottom: how w[p] is obtained. Under the deployed parallel decoder, positions committed above τ are safe (low flip risk π), whereas forced commitments at small logit margins may flip (high π); positions committed early are read by more later passes (high reach a); w[p] follows from r[p] = E[π · a]. Top right: dividing the logits by Tmatch restores the top-logit gaps that W4A4 compresses, and with them the full-precision commit rate. 
+
+p ≥ τ requires a lead of 2.2 nats at τ = 0 .9 (Section 4.2). Anything that shrinks these gaps without changing the top token delays commitments while leaving every decision intact, and quantization does exactly this. It adds nearly independent noise to the logits, which barely changes their spread but pulls the top logit toward the rest and lifts the strongest of the many competitors, so the gaps near the peak shrink most: on LLaDA with QuaRot, the top-2 gap shrinks by 26% while the standard deviation of the logits is unchanged (Section B), and across models and quantizers the shrinkage reaches 30% at confident positions (Figure 2b). 
+
+From compressed gaps to extra passes. Positions near τ then fall below it: fewer positions clear the threshold at each step, more steps end in a forced commitment, and each response needs more forward passes, up to 13% more on LLaDA with QuaRot (Figure 1c; both tasks in Section A). We call this cost the parallelism tax . It compounds Observation 1, since the deflation that slows decoding also routes more decisions through the forced channel. 
+
+Deflation, not lost capability. The shadow of Section 3.1 shows that the tax is a matter of scale. The width loss it measures step by step matches an independent end-to-end measurement (13.4% against 14.6% on 400 questions; Section A), so the extra passes come from fewer commitments per step, not from diverging trajectories; and where the shadow would commit but the quantized model withholds, the two predict the same token in 97.9% of cases, against 68.3% over all masked positions. Quantization perturbs predictions broadly but, where decisions are made, only lowers confidence, so rescaling confidence recovers the tax without touching written tokens (Section 4.2). 
+
+## 4 METHOD 
+
+4.1 DECAL: C OMMITMENT -R ISK CALIBRATION 
+
+Trajectories. DECAL decides where the calibration budget is spent (Figure 3, bottom and top left). The full-precision model decodes J unlabeled prompts under rule (1) with the deployed threshold, block length, and window, without cache. Position p of trajectory j is committed once, at pass tj (p),with logit gap mj (p); Lj is the returned length after the stop rule (EOS or task stop sequence). 5Preprint 
+
+Flip probability. A commitment fails if the runner-up token overtakes the written one ( token flip ) or, at a forced commitment, if the runner-up position overtakes the chosen one ( placement flip ). Both are log-probability differences: the logit gap m and the placement gap g = log pt(ct)−max i̸=ct log pt(i).Modeling each difference’s quantization perturbation as zero-mean Gaussian with scale s gives flip probabilities Φ( −m/s ) and Φ( −g/s ); for independent failures, 
+
+πj (p) = 1 −
+
+
+
+1 − Φ  − mj (p)˜m
+
+ 
+
+1 − Φ  − gj (p)˜m
+
+
+
+, (2) with gj (p) = + ∞ except at forced commitments. With the quantizer not yet fixed, we set s = ˜ m, the median forced-commitment gap in returned outputs; only the ranking of π matters, as (4) normalizes it. π thus serves as a ranking score rather than a calibrated probability; Section I checks this ranking and the assumptions of (2) against observed flips. 
+
+Reach. A flipped token damages the returned output directly if returned, and indirectly through every later pass that reads it while returned tokens are still being written, up to t⋆j = max p′<L j tj (p′):
+
+aj (p) = 
+
+q
+
+1[p < L j ] + Dj (p), Dj (p) =  t⋆j − tj (p) 
+
+> +
+
+. (3) The square root is the root-mean-square accumulation of approximately independent perturbations, a premise we verify in Section F. Reach gives no budget to a base model’s discarded continuation, so one definition serves base and instruction-tuned models. 
+
+Prior and weights. Averaging over trajectories, 
+
+r(p) = 1
+
+J
+
+> J
+
+X
+
+> j=1
+
+πj (p) aj (p), w(p) = 1 + β
+
+ r(p)¯r − 1
+
+
+
+, β = c
+
+CV( r) . (4) As π is the probability of an error and a the damage it does, their product, not either factor alone, is an expected loss: if flipping and reaching are independent, r(p) is the expected damage to the returned output, and it vanishes if either factor does. The affine map preserves the ranking and sets 
+
+CV( w) = c, a concentration budget trading focus against the effective sample size K/ (1 + c2).
+
+Weighted layer-wise calibration. As in FAIR-Calib (Huang et al., 2026), the prior reweights FlatQuant’s layer-wise reconstruction (Sun et al., 2025) on generic text of length Tc whose last K
+
+positions stand in for the window: 
+
+min 
+
+> Θℓ
+> N
+
+X
+
+> n=1
+> Tc−1
+
+X
+
+> i=0
+
+ωi hℓ(xn,i ) − ˆhℓ(xn,i ; Θ ℓ) 22, (5) with ωi = λ w (i−Tc+K) on the last K positions (window scale λ) and a context weight ϵ elsewhere; 
+
+hℓ, ˆhℓ are full-precision and quantized layer outputs, Θℓ the learnable transformations and clipping thresholds. As the cache approximates attention, not the decoding rule, the prior transfers to cached decoding: collecting it with dual cache instead, from a slightly smaller prompt set, leaves GSM8K accuracy on LLaDA unchanged (76.45 ± 0.24 against 76.65 ± 0.46, three runs each). 4.2 COMMIT TEMPERATURE 
+
+The threshold is a margin. The temperature sets when positions commit (Figure 3, top right). With top token v⋆ and gaps ∆v = zv⋆ − zv ≥ 0, the confidence and two-candidate test are 
+
+p =
+
+h
+
+1 + X  
+
+> v̸=v⋆
+
+e−∆v
+
+i−1
+
+, p ≥ τ ⇐⇒ ∆ ≥ mτ := log τ 
+
+> 1−τ
+
+. (6) The threshold thus fixes a margin in nats ( mτ = 2 .20 at τ = 0 .9) on the full-precision logit scale. If quantization compresses the top gaps as ∆q ≈ κ∆ with κ < 1 (Figure 2b), a position commits only when ∆ ≥ mτ /κ : the effective threshold rises, which is the parallelism tax. 6Preprint 
+
+Definition. Because quantization compresses the logits whatever the decoder, the temperature applies to any confidence-thresholded decoder: rule (1) uses pTt (i) = max v softmax  zt(i)/T 
+
+> v
+
+for the threshold test and for ct, while the written token stays arg max v zt(i)v . We study it in the deployed setting, cached block decoding, where we apply it on reuse steps only. Build steps keep 
+
+T = 1 : a position withheld there disagrees with full precision more often than at reuse steps (3.2% against 1.8%), and a premature commitment there becomes context for the entire block (Section E). 
+
+Proposition 1. For any decoding state and any T ∈ (0 , 1] applied as above (proof in Section F): (i) content invariance: every committed position receives the same token as at T = 1 ;(ii) monotone admission: the number of committed positions is non-increasing in T , and a position admitted at T but not at T = 1 satisfies T m τ ≤ ∆ < m τ (two candidates); (iii) exact restoration: if the logits contract uniformly, zq = κz + b1, then pT (zq) = p(z) at T = κ.
+
+Proposition 1 is a per-state guarantee. No change to when positions are committed, not even lowering 
+
+τ , admits a trajectory-level guarantee, because an earlier commitment changes the context of every later step; we therefore measure the trajectory-level effects instead (Section C). 
+
+Calibration by matching the commit rate. Contraction is not uniform across positions and confidence levels (Figure 2b), so no single κ can be read off the logits. A threshold decoder, however, consumes confidence only through τ -crossings, whose aggregate is the number of forward passes; we calibrate T on exactly this statistic, the one for which τ was set: 
+
+Tmatch = sup  T ∈ (0 , 1] : ¯Nq(T ) ≤ ¯Nfp (1) , (7) where ¯NM (T ) is the mean number of forward passes per response of model M on calibration prompts. The criterion is label-free (it never consults accuracy), consistent (it returns κ under uniform contraction, Proposition 1(iii)), self-disabling (a quantizer without tax receives Tmatch = 1 ), and 
+
+cheap : by Proposition 1(ii), ¯Nq decreases with T , so two evaluations bracketing the target give Tmatch 
+
+by linear interpolation. One temperature is calibrated per model–quantizer pair and reused on every task. Like temperature scaling (Guo et al., 2017), (7) fits one scalar, but to the statistic its consumer uses: a classifier’s temperature is fitted to the likelihood of labels, whereas a threshold decoder only asks whether confidence crosses τ , so we fit the rate at which it does. With two candidates, a temperature commits when ∆ ≥ T m τ , as a lower threshold would, and at matched forward passes the two are indistinguishable (Section E): (7) adds not a new knob but a label-free way to set it. 
+
+## 5 EXPERIMENTS 
+
+5.1 SETUP 
+
+Models, decoding, and tasks. We quantize LLaDA-8B-Instruct (Nie et al., 2025) and Dream-v0-Base-7B (Ye et al., 2025) and decode with Fast-dLLM (Wu et al., 2026b) using dual cache, 
+
+τ = 0 .9, block length 32, and 256 generated tokens; we also report threshold decoding without cache. Following Fast-dLLM, we evaluate GSM8K (5-shot, flexible-extract exact match; Cobbe et al., 2021), HumanEval (0-shot, pass@1; Chen et al., 2021), MBPP (3-shot, pass@1; Austin et al., 2021b), and MATH (Hendrycks et al., 2021) with the 4-shot Minerva prompt (Lewkowycz et al., 2022), 200 problems per subject, and an answer-equivalence check. These match Fast-dLLM’s official evaluation; we report accuracy rather than perplexity, which scores teacher-forced text and never runs the decoder. 
+
+Methods. All methods quantize weights and activations to 4 bits (W4A4). QuaRot (Ashkboos et al., 2024) represents rotation-based PTQ, and FlatQuant (Sun et al., 2025) uses its default calibration with uniform weights. FAIR-Calib (Huang et al., 2026) and D ECAL share FlatQuant’s reconstruction on 128 WikiText-2 sequences (Merity et al., 2017) of length Tc = 1 ,024 whose last K = 256 positions form the window, and differ only in the weights ω of (5): the probed prior for FAIR-Calib (reproduced in our pipeline) and the commitment-risk prior (4) for D ECAL , collected without cache from 5-shot GSM8K training prompts (about 640 per model; FAIR-Calib keeps its default 512, beyond which its own ablation shows no gain). This one-time cost is 2.8 GPU-hours on Dream (153 forward passes per prompt; LLaDA needs about half as many), fewer passes in total than FAIR-Calib’s 512 probes of 256 steps each. FAIR-Calib, a prior over positions, is the dLLM calibration closest to ours; DLLMQuant and Quant-dLLM (2-bit, weight-only) instead change the calibration data or the quantizer, and are 7Preprint Table 1: W4A4 accuracy (%) under the deployed decoder (Fast-dLLM, dual cache, τ = 0 .9); FlatQuant-based methods: mean ± std over three calibration runs; best W4A4 result in bold. 
+
+Model Method GSM8K HumanEval MBPP MATH Avg. LLaDA-8B Instruct FP16 78.70 36.59 36.40 30.79 45.62 QuaRot 74.30 33.54 32.20 26.86 41.73 FlatQuant 75.44 ±1.07 35.57 ±3.97 35.80 ±2.43 28.21 ±0.22 43.76 FAIR-Calib 75.84 ±0.88 35.77 ±1.86 36.12 ±1.41 28.43 ±2.29 44.04 DECAL 76.65 ±0.46 36.21 ±0.93 36.08 ±1.06 28.67 ±0.24 44.40 
+
+Dream-v0 Base-7B FP16 73.16 53.05 51.00 30.79 52.00 QuaRot 53.30 23.78 37.80 17.64 33.13 FlatQuant 66.34 ±1.05 40.85 ±3.66 47.40 ±1.39 23.57 ±0.97 44.54 FAIR-Calib 66.47 ±1.47 40.88 ±4.25 46.33 ±2.19 23.43 ±0.86 44.28 DECAL 67.27 ±1.08 41.81 ±2.11 46.20 ±1.78 24.60 ±0.72 44.97 
+
+Table 2: W4A4 accuracy (%) with threshold decoding without cache ( τ = 0 .9; one run per configura-tion). 
+
+LLaDA-8B-Instruct Dream-v0-Base-7B Method GSM8K HumanEval MBPP MATH Avg. GSM8K HumanEval MBPP MATH Avg. FP16 78.09 42.07 40.20 32.00 48.09 72.40 49.39 53.80 31.86 51.86 QuaRot 73.46 34.76 38.40 28.21 43.71 54.89 29.88 39.20 18.86 35.71 FlatQuant 76.35 33.54 40.60 29.64 45.03 66.41 35.37 47.20 24.50 43.37 FAIR-Calib 76.27 38.90 40.21 29.57 46.24 64.06 43.90 46.40 25.57 44.98 DECAL 76.95 39.02 39.60 29.80 46.34 68.16 43.29 52.00 26.64 47.52 
+
+orthogonal to the prior. DECAL uses (ϵ, c ) = (0 .01 , 0.30) with FAIR-Calib’s window scale on LLaDA, and (1 , 0.15) with unit-mean window weights on Dream. The concentration c is set once per model on the GSM8K test set and then frozen for every other task and every calibration run; it only sets how strongly the budget is concentrated, while the ranking of positions comes from the decoder. Once c reaches a moderate concentration, the gain stays stable up to near its largest admissible value (Section L). The commit temperature uses GSM8K forward-pass counts only (full runs for LLaDA, 50 prompts for Dream). Under dual cache, we repeat calibration three times for the FlatQuant-based methods and report the mean and standard deviation; FP16 and QuaRot are single runs. Decoding without cache is substantially slower, and we run each configuration once. All accuracy tables use 
+
+T = 1 ; we evaluate the commit temperature in the deployed setting, with dual cache (Section 5.4). 5.2 MAIN RESULTS 
+
+Table 1 reports the deployed setting. Rotation alone is not enough at W4A4: QuaRot loses 3.9 average points on LLaDA and 18.9 on the base model Dream, whereas the FlatQuant-based methods retain most of the full-precision accuracy. Among them, D ECAL has the best average on both models and the best GSM8K, HumanEval, and MATH accuracy; on MBPP, the three lie within one standard deviation of one another. Although the prior is collected on GSM8K prompts alone, its gains carry over to HumanEval, as it encodes where the decoder commits fragile tokens, a property of the decoding schedule rather than of the domain. D ECAL is also more stable than FAIR-Calib: its standard deviation across runs is lower on all eight model–task pairs, often by about half (0.46 against 0.88 on LLaDA GSM8K, 2.11 against 4.25 on Dream HumanEval, 0.24 against 2.29 on LLaDA MATH). Without cache (Table 2), the regime in which its prior is collected, D ECAL again has the best average on both models, with the widest margin on Dream (47.52 against 44.98 for FAIR-Calib), so its gains do not hinge on the cache. On the block-diffusion model Fast-dLLM v2 (Wu et al., 2026a), forced commitments are nearly as common as on LLaDA, quantization levies a parallelism tax, and DECAL again improves W4A4 accuracy on its 7B model (Section K). 8Preprint Table 3: Components of the prior under dual cache (mean of two calibration runs). Uniform sets 
+
+w ≡ 1, single-factor variants set the other factor of (4) to one; shuffled permutes the weights of DECAL over the 256 window positions; c and reconstruction are shared. 
+
+LLaDA-8B-Instruct Dream-v0-Base-7B Prior GSM8K MATH Avg. GSM8K MATH Avg. Uniform ( w ≡ 1) 74.91 28.22 51.57 66.00 23.11 44.56 Shuffled D ECAL weights 74.68 28.47 51.58 66.46 24.79 45.63 Flip probability only ( a ≡ 1) 76.04 29.32 52.68 67.78 24.81 46.30 Reach only ( π ≡ 1) 76.17 29.11 52.64 65.97 25.89 45.93 DECAL (π · a) 76.65 28.85 52.75 67.74 24.90 46.32 
+
+5.3 ABLATION : C OMPONENTS OF THE PRIOR 
+
+Table 3 isolates the two factors of (4). Every risk-aware prior improves on uniform weights, by 1.1–1.2 average points on LLaDA and 1.4–1.8 on Dream: where the calibration budget goes matters. The shuffled control, with the same weights at random positions, gains nothing on LLaDA and least on Dream, so the gain comes from where the weights are placed, not from non-uniform weighting as such. How the factors share it depends on the model and the task, as follows from what each measures: 
+
+π marks locally fragile commitments, a commitments whose errors propagate through later reads. 
+
+Task: local versus propagating errors. GSM8K solutions are short, so correctness hinges on a few decisive tokens. MATH solutions are long derivations in which an early error propagates into everything written after it. On Dream, the factors separate: π alone carries the GSM8K gain (+1.8 points, against none for a alone), whereas a alone gives the largest MATH gain (+2.8 against +1.7). 
+
+Model: why the separation appears on Dream. An instruction-tuned model stops on its own, so its commitments, fragile or not, lie inside the returned answer: on LLaDA the factors largely agree, and either alone recovers most of the gain (+0.9 to +1.3 points). A base model writes past its answer, so part of its fragile commitments falls in a discarded continuation while reach concentrates on the answer: on Dream the factors single out different positions, and the task decides which matters. Table 3 does not separate the product from the stronger single factor, which lies within 0.1 average points of it on both models. We keep the product as the robust choice: D ECAL need not know which failure mode a task exhibits, has the best average on both models, and stays within one point of the best variant everywhere, whereas each factor alone falls short somewhere. 5.4 CALIBRATING THE COMMIT TEMPERATURE 80 90                   
+
+> Forward passes per response
+> 72 74 76 78 80
+> GSM8K accuracy (%)
+> Aggressive commit Tax recovery
+> (a) LLaDA-8B-Instruct · GSM8K
+> QuaRot tax +12.9%
+> 100 110 120
+> Forward passes per response
+> 26 28 30 32 34
+> MATH accuracy (%)
+> Aggressive commit Tax recovery
+> (b) LLaDA-8B-Instruct · MATH
+> QuaRot tax +13.3%
+> −5 0+5 +10
+> Forward passes vs. FP16 (%)
+> 20 40 60 80
+> Accuracy (%)
+> Aggressive commit Tax recovery
+> GSM8K MATH
+> (c) Dream-v0-Base-7B
+> FP16 QuaRot FlatQuant FAIR-Calib DECAL (ours) Tmatch T:1.00 0.94 0.90 0.87
+
+Figure 4: Commit temperature: accuracy against forward passes ( a, b : LLaDA-8B-Instruct; c:Dream-v0-Base-7B, relative to FP16). Colors: methods; darker shades: lower T ; stars: Tmatch (7), interpolated (omitted where it is ≈ 0.99 , i.e., at T = 1 ); dashed line: FP16 at T = 1 .9Preprint 
+
+Calibration recovers the tax where it exists, and only there. We evaluate each LLaDA configu-ration at T ∈ { 1, 0.94 , 0.90 , 0.87 } and set Tmatch by (7) from GSM8K forward-pass counts alone, holding out MATH. QuaRot pays a 13% tax on both tasks (Figure 4a, b). At its Tmatch = 0 .873 ,it returns to the full-precision forward-pass count, while accuracy moves by less than 0.6 points, within single-run noise ( ±2.4); solving (7) on MATH alone gives 0.874, so the GSM8K-calibrated temperature carries over to the held-out task. FlatQuant, FAIR-Calib, and D ECAL pay under 1%, receive Tmatch ≈ 0.99 , and are left essentially unchanged. 
+
+Below Tmatch , it is an explicit trade-off. At T = 0 .87 , these three models need about 11% fewer forward passes than FP16, with accuracy within about one point of T = 1 across the ladder. 
+
+It transfers across models. On Dream, Tmatch calibrated on only 50 GSM8K prompts removes taxes of 2–7% on both tasks with accuracy changes below 0.6 points (Figure 4c); the small calibration set slightly overestimates the tax, leaving up to 5% fewer forward passes than FP16. Lowering T
+
+only reorders commitments: at each question’s first early release, the written token is the one the 
+
+T = 1 schedule eventually writes in at least 98.7% of questions (Section C). 
+
+## 6 CONCLUSION 
+
+We studied W4A4 quantization of dLLMs under the decoder they are served with. Under cached threshold decoding, quantization errors become irreversible chiefly through forced commitments, and quantization levies a parallelism tax by deflating confidence rather than changing predictions. D ECAL 
+
+weights calibration by commitment risk, and a commit temperature calibrated on forward passes alone recovers the tax without retraining or labels. On LLaDA and Dream, D ECAL attains the best average accuracy among W4A4 methods with lower run-to-run variance than FAIR-Calib, and the temperature restores full-precision decoding cost. The prior is tied to the deployed block length and threshold, and we have studied one decoder family at one bit width; extending commitment-aware calibration to other decoders and lower bit widths is a natural next step. AI USE STATEMENT 
+
+In this work, we used generative AI tools to assist with writing, including drafting, editing, and polishing the text, and with parts of the code, including analysis and plotting scripts. We have reviewed all AI-assisted work: the authors checked and revised all text, and verified and tested all AI-assisted code; every reported number comes from our own experiments. We take responsibility for the final content of this work, including text, claims or artifacts produced with the aid of generative AI. REPRODUCIBILITY STATEMENT 
+
+Section 5.1 lists the models, decoder settings, tasks, calibration data, and hyperparameters of every method; Sections 4.1 and 4.2 define the prior, the weighted reconstruction, and the calibration of the commit temperature; Sections A to E describe the measurement protocols behind the observations and the temperature study; and Section F proves Proposition 1; Sections G to L report further analyses. We will release the code for collecting the prior, the weighted calibration, the commit temperature, and the evaluation. ACKNOWLEDGMENTS 
+
+This work is supported by National Key R&D Program of China (No. 2026YFE0101200), National Natural Science Foundation of China (No. 62671175), and Shanghai General AI Foundation Models Program (No. 2025SHZDZX026D38). The computations in this research were performed using the CFFF platform of Fudan University. 10 Preprint 
+
+## REFERENCES 
+
+Marianne Arriola, Aaron Gokaslan, Justin T. Chiu, Zhihan Yang, Zhixuan Qi, Jiaqi Han, Sub-ham Sekhar Sahoo, and Volodymyr Kuleshov. Block diffusion: Interpolating between autoregres-sive and diffusion language models. In International Conference on Learning Representations ,2025. Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. QuaRot: Outlier-free 4-bit inference in rotated LLMs. In Advances in Neural Information Processing Systems , volume 37, 2024. Jacob Austin, Daniel D. Johnson, Jonathan Ho, Daniel Tarlow, and Rianne van den Berg. Structured denoising diffusion models in discrete state-spaces. In Advances in Neural Information Processing Systems , volume 34, 2021a. Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 , 2021b. Tiwei Bie, Maosong Cao, Kun Chen, Lun Du, et al. LLaDA2.0: Scaling up diffusion language models to 100B. arXiv preprint arXiv:2512.15745 , 2025. Huiwen Chang, Han Zhang, Lu Jiang, Ce Liu, and William T. Freeman. MaskGIT: Masked generative image transformer. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2022. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, et al. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 , 2021. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 ,2021. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit matrix multiplication for transformers at scale. In Advances in Neural Information Processing Systems ,volume 35, 2022. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In International Conference on Learning Representations , 2023. Marjan Ghazvininejad, Omer Levy, Yinhan Liu, and Luke Zettlemoyer. Mask-Predict: Parallel decoding of conditional masked language models. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , 2019. Chuan Guo, Geoff Pleiss, Yu Sun, and Kilian Q. Weinberger. On calibration of modern neural networks. In International Conference on Machine Learning , 2017. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the MATH dataset. In 
+
+Advances in Neural Information Processing Systems, Datasets and Benchmarks Track , 2021. Haoyu Huang, Linlin Yang, Sheng Xu, Boyu Liu, Guodong Guo, Zhongqian Fu, Hang Zhou, and Baochang Zhang. FAIR-Calib: Frontier-aware instability-reweighted calibration for post-training quantization of diffusion large language models. In International Conference on Machine Learning ,2026. Daniel Israel, Guy Van den Broeck, and Aditya Grover. Accelerating diffusion LLMs via adaptive parallel decoding. In Advances in Neural Information Processing Systems , volume 38, 2025. Mingyu Lee, Akshat Ramachandran, Souvik Kundu, and Tushar Krishna. Polestar: Drift-aware cache calibration and token commitment for efficient inference of diffusion LLMs. arXiv preprint arXiv:2607.14107 , 2026. 11 Preprint Aitor Lewkowycz, Anders Andreassen, David Dohan, Ethan Dyer, Henryk Michalewski, Vinay Ramasesh, Ambrose Slone, Cem Anil, Imanol Schlag, Theo Gutman-Solo, Yuhuai Wu, Behnam Neyshabur, Guy Gur-Ari, and Vedant Misra. Solving quantitative reasoning problems with language models. In Advances in Neural Information Processing Systems , volume 35, 2022. Xiuyu Li, Yijiang Liu, Long Lian, Huanrui Yang, Zhen Dong, Daniel Kang, Shanghang Zhang, and Kurt Keutzer. Q-Diffusion: Quantizing diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pp. 17535–17545, 2023. Yuhang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. BRECQ: Pushing the limit of post-training quantization by block reconstruction. In 
+
+International Conference on Learning Representations , 2021. Haokun Lin, Haobo Xu, Yichen Wu, Ziyu Guo, Renrui Zhang, Zhichao Lu, Ying Wei, Qingfu Zhang, and Zhenan Sun. Quantization meets dLLMs: A systematic study of post-training quantization for diffusion LLMs. arXiv preprint arXiv:2508.14896 , 2025. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration. In Proceedings of Machine Learning and Systems ,2024. Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krish-namoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. SpinQuant: LLM quantization with learned rotations. In International Conference on Learning Representations , 2025. Zhiyuan Liu, Yicun Yang, Yaojie Zhang, Junjie Chen, Chang Zou, Qingyan Wei, Shaobo Wang, Yichen Zhu, and Linfeng Zhang. dLLM-Cache: Accelerating diffusion large language models with adaptive caching. In International Conference on Machine Learning , 2026. Aaron Lou, Chenlin Meng, and Stefano Ermon. Discrete diffusion modeling by estimating the ratios of the data distribution. In International Conference on Machine Learning , 2024. Xinyin Ma, Runpeng Yu, Gongfan Fang, and Xinchao Wang. dKV-Cache: The cache for diffusion language models. In Advances in Neural Information Processing Systems , volume 38, 2025. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations , 2017. Matthias Minderer, Josip Djolonga, Rob Romijnders, Frances Hubis, Xiaohua Zhai, Neil Houlsby, Dustin Tran, and Mario Lucic. Revisiting the calibration of modern neural networks. In Advances in Neural Information Processing Systems , volume 34, 2021. Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or down? Adaptive rounding for post-training quantization. In International Conference on Machine Learning , 2020. Shen Nie, Fengqi Zhu, Zebin You, Xiaolu Zhang, Jingyang Ou, Jun Hu, Jun Zhou, Yankai Lin, Ji-Rong Wen, and Chongxuan Li. Large language diffusion models. In Advances in Neural Information Processing Systems , volume 38, 2025. Subham Sekhar Sahoo, Marianne Arriola, Yair Schiff, Aaron Gokaslan, Edgar Marroquin, Justin T. Chiu, Alexander Rush, and Volodymyr Kuleshov. Simple and effective masked diffusion language models. In Advances in Neural Information Processing Systems , volume 37, 2024. Yuzhang Shang, Zhihang Yuan, Bin Xie, Bingzhe Wu, and Yan Yan. Post-training quantization on diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2023. Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. OmniQuant: Omnidirectionally calibrated quantization for large language models. In International Conference on Learning Representations , 2024. 12 Preprint Jiaxin Shi, Kehang Han, Zhe Wang, Arnaud Doucet, and Michalis K. Titsias. Simplified and generalized masked diffusion for discrete data. In Advances in Neural Information Processing Systems , volume 37, 2024. Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, Xin Jiang, Wulong Liu, and Jun Yao. FlatQuant: Flatness matters for LLM quantization. In International Conference on Machine Learning , 2025. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Information Processing Systems , volume 30, 2017. Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo Molchanov, Ping Luo, Song Han, and Enze Xie. Fast-dLLM v2: Efficient block-diffusion LLM. In International Conference on Learning Representations , 2026a. Chengyue Wu, Hao Zhang, Shuchen Xue, Zhijian Liu, Shizhe Diao, Ligeng Zhu, Ping Luo, Song Han, and Enze Xie. Fast-dLLM: Training-free acceleration of diffusion LLM by enabling KV cache and parallel decoding. In International Conference on Learning Representations , 2026b. Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning , 2023. Chen Xu, Zhixuan Chen, and Dawei Yang. DLLMQuant: A post-training quantization framework tailored for diffusion-based large language models. In International Conference on Machine Learning , 2026. Xin Yan, Aqiang Wang, Zhenglin Wan, Xingrui Yu, and Ivor Tsang. STaR-Quant: State-time consistent post-training quantization for diffusion large language models. arXiv preprint arXiv:2606.04945 , 2026. An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, et al. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. Jiacheng Ye, Zhihui Xie, Lin Zheng, Jiahui Gao, Zirui Wu, Xin Jiang, Zhenguo Li, and Lingpeng Kong. Dream 7B: Diffusion large language models. arXiv preprint arXiv:2508.15487 , 2025. Tianao Zhang, Zhiteng Li, Xianglong Yan, Haotong Qin, Yong Guo, and Yulun Zhang. Quant-dLLM: Post-training extreme low-bit quantization for diffusion large language models. In International Conference on Learning Representations , 2026. 13 Preprint 
+
+## A ON-P OLICY PAIRED MEASUREMENT OF THE PARALLELISM TAX 
+
+Comparing the forward passes of two free-running decoders mixes two effects: quantization lets fewer positions clear τ at each step, and the two decoders visit different states after their first disagreement. Only the first is caused by quantization error. After reporting the end-to-end tax of every configuration, this appendix isolates the first effect on LLaDA-8B-Instruct with QuaRot, the configuration used throughout Appendices A–D. FP16 FlatQuant QuaRot 0+5 +10 +15     
+
+> Extra forward passes vs. FP16 (%)
+> +0.8% +12.9%
+> +0.1% +13.3%
+> FP16 NFE: GSM8K 85.5, MATH 109.7
+> LLaDA-8B-Instruct
+> FP16 FlatQuant QuaRot
+> +2.8% +2.3%
+> +4.6% +7.2%
+> FP16 NFE: GSM8K 161.7, MATH 123.1
+> Dream-v0-Base-7B
+> GSM8K MATH
+
+Figure A.1: End-to-end parallelism tax on both tasks: extra forward passes per response relative to FP16 at T = 1 (Fast-dLLM, dual cache, τ = 0 .9). Its magnitude depends on the model, the quantizer, and the task. 
+
+End-to-end tax. Figure A.1 extends Figure 1c to MATH. The tax appears on every model, quantizer, and task, with a magnitude that ranges from 0.1% (FlatQuant on LLaDA, MATH) to 13.3% (QuaRot on LLaDA, MATH). 
+
+Setup. The quantized model has exclusive control of decoding and produces states x1, . . . , x S .At every step, a full-precision shadow runs one read-only forward pass on bit-identical input; for QuaRot, it is a copy of the model taken after the rotations are folded in and before the weights are quantized. It keeps its own KV cache and never commits, so any difference between the two arms at a state is due to numerical precision alone. 
+
+Estimator. The width of model m at state x is the number of tokens it would write, 
+
+wm(x) = max   |{ i ∈ M (x) : pmi (x) ≥ τ }| , 1,
+
+where M(x) is the set of masked positions of the active block and max( ·, 1) encodes the forced com-mitment. Width is a count rather than a set because the forced rule fixes how many positions are writ-ten, not which: each arm forces its own most confident position, and a mismatch in position costs no parallelism. Averaging over the trajectory, W m = 1
+
+> S
+
+P 
+
+> t
+
+wm(xt), the paired tax is ˆT = W fp /W q −1:generating L tokens takes S = L/W steps, so ˆT is the relative excess of steps at the quantized width. It uses only same-state comparisons, and the identity P 
+
+> t
+
+wq(xt) = L checks the recording exactly. Table A.1: The paired estimate and the end-to-end tax, measured on disjoint data. 
+
+Paired on-policy Independent end-to-end Data 32 prompts, 2,910 steps, 47,919 paired positions 400 questions, two complete runs Reading W fp = 3 .193 , W q = 2 .815 NFE fp = 85 .23 , NFE q = 97 .64 
+
+Tax ˆT = 13 .4% NFE q/NFE fp − 1 = 14 .6% 
+
+The tax is per-step width loss. The two estimates in Table A.1 share no data and differ by 1.2 points. Since ˆT consists of per-step width loss only, the forward-pass gap is explained by fewer 14 Preprint commitments per step rather than by trajectory divergence. The small residual is expected: ˆT is conditioned on the states the quantized policy visits, whereas the full-precision decoder follows its own trajectory, on which positions deferred at one step can be released together later. 
+
+Withheld positions keep their content. Let R be the positions the shadow would commit but the quantized model withholds ( N = 1 ,700 ). The two models predict the same token on 97.94% of R (96.84% at build steps, 98.16% at reuse steps), against 68.31% over all masked positions: quantization perturbs predictions broadly, but mostly at low confidence, where no commitment is decided. Because R is selected by “full precision confident, quantized not”, we also condition on the quantized side only, using the decision band pq ∈ [τ − 0.15 , τ + 0 .05] ; agreement is 97.52%. The withheld parallelism thus consists of commitments whose content is not in dispute, which is what makes it recoverable. Whether recovering it is accuracy-neutral is a separate question, answered against the quantized model at T = 1 (Figure 4). 
+
+## B WHERE QUANTIZATION COMPRESSES THE LOGITS 
+
+Probe. At the first build step of block 0, all generation positions are masked and both models receive bit-identical inputs, so their logits can be paired position by position (GSM8K, 400 questions; HumanEval, 164). Two independent estimators quantify the compression. The geometric one sorts each position’s logits and fits a single through-origin scale dQ 
+
+> j
+
+= κgap dFP  
+
+> j
+
+to the gaps dj =
+
+L(1) − L(j), j = 2 , . . . , 64 ; it sees only shape. The behavioural one solves exactly, over the full vocabulary, for the temperature θ with max softmax( LFP /θ ) = pQ1 ; it sees only the outcome, and 
+
+1/θ is the equivalent compression. Table B.1: Compression by full-precision confidence (medians per stratum). QR: QuaRot; NR: W4A4 without rotation (group size 128); G: GSM8K; H: HumanEval.                                                                     
+
+> positions κgap 1/θ pFP 1pFP 1→pQ1(QR-G) QR-G NR-G QR-H QR-G NR-G QR-H QR-G
+> [0 .0,0.3) 0.115 →0.110 9,306 9,299 4,511 0.974 0.924 1.002 0.989
+> [0 .3,0.6) 0.419 →0.342 2,533 2,533 648 0.908 0.883 0.906 0.881
+> [0 .6,0.8) 0.678 →0.559 740 748 86 0.905 0.890 0.885 0.857
+> [0 .8,0.9) 0.847 →0.729 153 151 00.895 0.899 –0.842
+> [0 .9,1.0] 0.936 →0.872 68 69 00.899 0.895 –0.835
+
+Table B.2: Compression by scale (GSM8K). Rank-wise rows (top-2 to top-64) pool positions with 
+
+pFP 1 ≥ 0.3 (n = 3 ,494 ); the remaining rows use all positions ( n = 12 ,800 ). κall is the OLS slope of LQ 
+
+> u
+
+= α + κall LFP  
+
+> u
+
++ νu over 1,024 token ids fixed by a seed and independent of both models; 
+
+σν /s FP = p(sQ/s FP )2 − κ2all follows from s2Q = κ2all s2FP + σ2 
+
+> ν
+
+.                               
+
+> Scale Quantity QuaRot NR (g128) top-2 dQ2/d FP 20.740 0.743 top-3 dQ3/d FP 30.802 0.803 top-5 dQ5/d FP 50.843 0.838 top-10 dQ10 /d FP 10 0.878 0.863 top-64 κgap 0.906 0.885 1,024 fixed tokens κall 0.965 0.942 full vocabulary sQ/s FP 1.007 0.992 full vocabulary σν/s FP 0.288 0.311
+
+Compression is systematic. Confidence drops in every stratum of Table B.1, and in the decision-relevant strata ( pFP 1 ≥ 0.3) it has the same size for both quantizers and both tasks, so it is a property of the model and quantizer rather than of one rotation scheme or prompt distribution. Its consequence shows on the probe itself: of the positions full precision would commit, only 23 of 68 (QuaRot) and 15 Preprint 46 of 69 (no rotation) still clear τ after quantization, a small-sample illustration of direction rather than a measure of the tax. 
+
+Compression is concentrated at the peak. Table B.2 shows compression weakening monotonically as the scale widens: the gap between the peak and its strongest competitor shrinks to 0.74, while the slope over model-independent tokens is close to one and the standard deviation of the whole logit vector is unchanged. Quantization adds nearly independent noise that offsets the shrinkage in the bulk of the vocabulary, but thins exactly the few gaps on which the maximum softmax probability depends. 
+
+Implication for the temperature. Dividing the logits by T scales every gap by 1/T , so a tempera-ture can undo this compression. Because the compression depends on scale and on the confidence stratum, no single number in these tables is the right temperature, and we calibrate it on the commit rate instead (Section 4.2). 
+
+## C TEMPERATURE LADDER : M ECHANISM AND PREMATURE COMMITMENT 
+
+Table C.1: Instrumented temperature ladder (GSM8K test set; temperature on reuse steps). NFE and single-sequence throughput are relative to T = 1 of the same run. F : forced steps per question; ¯k:mean width of threshold steps. Early release: share of generated positions committed earlier than at 
+
+T = 1 . First-release agreement: share of questions whose token released at the first early release equals the one the T = 1 schedule eventually writes. Slot agreement: share of output slots identical to T = 1 (trailing EOS padding excluded).                                    
+
+> TNFE F¯kthroughput early release first-release agr. slot agr. 1–45.81 4.02 ––––0.94 −5.9% 40.74 4.18 +6 .0% 5.0% 99.4% 70.4% 0.87 −12 .6% 35.06 4.36 +12 .9% 11.2% 99.0% 52.1% 0.84 −15 .3% 32.69 4.44 +14 .1% 14.0% 98.7% 45.7%
+
+Recovery reverses the cause. With K generated positions, F forced steps, and threshold steps of mean width ¯k, the number of forward passes is NFE = K/ ¯k + F (1 − 1/¯k). The tax raises F and lowers ¯k; the temperature does the opposite. From T = 1 to T = 0 .84 , forced steps fall by 28.6% and the threshold width rises by 10.4%, i.e., the merges that quantization suppressed happen again. Forward passes and measured throughput move together at every temperature (e.g., −12 .6% and 
+
++12 .9% at T = 0 .87 ), so in the single-sequence setting NFE is a faithful proxy for latency. 
+
+Premature commitment is rare and mostly one step early. Since Proposition 1 fixes what is written at a given state, the only risk the temperature introduces is committing a position before its context is complete. We measure it along the T = 1 trajectory: at every visited state and for every position that T = 0 .87 would release there, we compare the token released at that state with the token the T = 1 schedule eventually writes. Both are recorded values, so the comparison involves no approximation; it characterizes the intervention itself rather than its downstream course, since the two schedules separate after the first early release. Four in five such releases are advanced by a single step, and these agree in 99.9% of cases. Agreement decreases monotonically with the advance, to about one half, but advances of that depth account for less than 0.1% of releases. The first-release agreement in Table C.1 is restricted to the step at which both schedules provably occupy the same state and is therefore exact and on-policy. 
+
+Why outputs still change. Slot agreement falls from 70.4% to 45.7% without contradicting Proposition 1: the proposition concerns what is written at a given state, whereas slot agreement compares the endpoints of two different trajectories. Once a position is committed earlier, its neighbours face a different context at the same step, so outputs diverge while every write remains the argmax of its own state. Proposition 1 rules out that the temperature makes the model write wrongly, not that it changes the output. 16 Preprint 
+
+## D COMPRESSION AND SUPPRESSION ALONG THE TRAJECTORY 
+
+Table D.1: On-policy paired recording (32 GSM8K prompts, 2,910 steps, 47,919 paired positions), stratified by the filled fraction ρ of the active block ( ρ = 0 at build steps). FP / Q commit: positions above τ in each arm. Suppression: share of full-precision commitments the quantized arm withholds. Share of pool: share of all 1,700 withheld positions. κ⋆: median of the per-position equivalent compression, solved exactly.                                                         
+
+> Stratum paired positions FP commit Q commit suppression share of pool κ⋆
+> build ( ρ= 0 )8,192 2,362 2,157 12.1% 16.8% 0.930 reuse, ρ∈[0 , . 25) 15,293 1,571 1,274 24.8% 22.9% 0.966 reuse, ρ∈[.25 , . 50) 12,906 1,607 1,324 24.1% 22.8% 0.930 reuse, ρ∈[.50 , . 75) 7,991 1,548 1,231 26.5% 24.1% 0.921 reuse, ρ∈[.75 ,1) 3,537 1,033 873 22.0% 13.4% 0.912 all 47,919 8,121 6,859 20.9% 100% 0.939
+
+The block-0 probe is representative. Section B reads the compression at the first build step of block 0, the only point at which both arms see bit-identical inputs, whereas the temperature acts on reuse steps. Along a whole trajectory, the median κ⋆ spans only 0.912–0.966 across strata (Table D.1), and the build-step value (0.930) lies in the same neighbourhood as the trajectory median (0.939) and the probe’s decision-relevant values (0.895–0.908). 
+
+Reading the table. The suppression ratios are position-level upper bounds, since at a forced step each arm commits its own most confident position without any loss of parallelism; the tax itself is measured by the counting estimator of Section A. 
+
+## E DESIGN CHOICES OF THE COMMIT TEMPERATURE 
+
+Build steps: least to gain, most to lose. Table E.1 combines the paired recording of Sections A and D. A response has one build step per block, 8 of roughly 90 forward passes, and these steps hold only 285 of the 1,700 withheld commitments (16.8%), because build steps are the least suppressed stratum. Releasing a withheld commitment writes a token that full precision would not write with probability one minus the agreement rate, 3.2% at build steps against 1.8% at reuse steps; weighted by the number of releases, build steps would contribute 25.7% of the expected miswrites. Each of them, moreover, is written into a fully masked block and becomes context for the other 31 positions in every later step, whereas a release at a late reuse step affects only the few positions still masked. Build steps therefore keep T = 1 .Table E.1: Expected benefit and cost of releasing the withheld commitments, by step type (paired recording of Section A). Expected miswrites: withheld positions × (1 − agreement).                
+
+> Step type withheld positions share of gain agreement expected miswrites share of miswrites build 285 16.8% 96.84% 9.0 25.7% reuse 1,415 83.2% 98.16% 26.0 74.3%
+
+Relation to lowering τ . With two candidates, pT ≥ τ holds exactly when ∆ ≥ T m τ , so on the original confidence a global temperature acts like the threshold τeff = σ(T m τ ), which is 0.858 at 
+
+T = 0 .82 and τ = 0 .9. To first order, the temperature is therefore a reparametrization of τ , and Table E.2 confirms that the two cannot be told apart at matched forward passes. Interpolating the temperature ladder to the forward-pass count of τ = 0 .82 predicts its forced steps and threshold width to within 0.1% (30.84 against 30.82, and 4.566 against 4.564), and both settings reach the same accuracy. We therefore do not claim a new decoding knob. What (7) contributes is how to set this knob without labels: the value it returns reads as the quantizer’s compression ( T = κ under uniform contraction, Proposition 1), is calibrated from forward-pass counts alone and carries over across tasks (Section 5.4), and leaves τ at the value its deployer chose for the full-precision model. 17 Preprint Table E.2: Lowering the temperature and lowering the threshold (LLaDA-8B-Instruct with QuaRot, GSM8K, 400 questions; same instrumentation as Table A.1; the temperature acts on reuse steps, the threshold on every step). F : forced steps per question; ¯k: mean width of threshold steps.                                           
+
+> Setting NFE F¯kaccuracy (%) FP16, τ= 0 .985.23 39.05 4.698 78.25 W4A4, τ= 0 .9,T= 1 97.64 46.16 4.076 76.50 W4A4, τ= 0 .9,T= 0 .87 85.04 35.13 4.426 76.00 W4A4, τ= 0 .9,T= 0 .82 80.88 31.48 4.545 75.75 W4A4, τ= 0 .82 ,T= 1 80.16 30.82 4.564 75.75
+
+Global versus stratum-wise temperatures. For every position there is an exact restoring tempera-ture κ⋆ (Table D.1), but computing it requires the full-precision logits, which are unavailable once the model is deployed in quantized form. The realizable alternative assigns each stratum of Table D.1 its own temperature, its median κ⋆. We compare the two on the paired recording at matched budgets of premature commitments, i.e., positions the corrected quantized arm would commit but full precision would not, and count the withheld commitments each recovers. At three budgets, the stratum-wise temperatures recover 0.99, 1.01, and 1.00 times as many as the global one. The stratum carries information about the compression, but not about which positions lie just below the threshold, which is all a threshold decoder acts on. 
+
+## F PROOF OF PROPOSITION 1 AND THE PREMISE OF THE REACH 
+
+Proof of Proposition 1. (i) The argmax is invariant to positive scaling, so dividing the logits by T > 0 leaves every written token unchanged. (ii) Replacing ∆v by ∆v /T in (6) shows that 
+
+pT grows as T decreases, so the threshold set only grows, and a non-empty one commits at least as many positions as a forced commitment; with two candidates, p < τ ≤ pT is equivalent to 
+
+T m τ ≤ ∆ < m τ . (iii) The softmax is shift-invariant, so zq = κz + b1 gives softmax( zq/κ ) = softmax( z + b1/κ ) = softmax( z).
+
+Premise of the reach. The square root in (3) is the root-mean-square accumulation of approx-imately independent perturbations across the passes that read a committed token. We verified the independence premise: without the shared per-layer bias, cross-position error terms are 3.6% of the diagonal ones. The choice of the concave map matters little: log(1+ ·) in place of the square root gives a prior with correlation 0.9975. 
+
+## G FORCED COMMITMENTS AND WRONG ANSWERS 
+
+We test whether the errors that enter through forced commitments decide answers. All numbers come from the same-state recordings of Figure 1b (W4A4 FlatQuant, first 400 GSM8K test questions, Fast-dLLM with dual cache, τ = 0 .9), except the example at the end, which uses W4A4 without rotation (group size 128, Section B). A question is broken if full precision answers it correctly and W4A4 does not, and kept if both do; a forced flip is a token flip at a forced commitment. 
+
+Wrong answers contain more forced flips. Table G.1 counts forced flips per question. Many single forced flips are harmless; what separates broken from kept questions is how many they contain. Table G.1: Average number of forced flips per question (number of questions in parentheses). CI: bootstrap over questions.                   
+
+> W4A4 wrong W4A4 right Broken Kept Broken −Kept (95% CI) LLaDA-8B 3.08 (88) 1.99 (312) 3.36 (33) 1.95 (282) +1 .4[0.6, 2.4] Dream-7B 3.90 (121) 2.81 (279) 4.36 (36) 2.70 (252) +1 .7[1.0, 2.4]
+
+18 Preprint 
+
+The risk of a wrong answer grows with the number of forced flips. Among questions that full precision answers correctly, the share that W4A4 gets wrong rises from 0–4% without forced flips to 28–29% with five or more (Table G.2). The effect holds after controlling for question length and the number of forced commitments: each additional forced flip multiplies the odds of a wrong answer by 1.25 on LLaDA and 1.24 on Dream (95% CI 1.01–1.57 and 1.01–1.55). Table G.2: Share of questions that full precision answers correctly but W4A4 gets wrong, by number of forced flips.                 
+
+> Forced flips 0123–4 ≥5
+> LLaDA-8B 4% (2/47) 8% (7/84) 5% (4/86) 18% (13/73) 28% (7/25) Dream-7B 0% (0/23) 5% (3/56) 7% (4/59) 14% (13/95) 29% (16/55)
+
+The first surviving error enters through a forced commitment. In broken answers, the first token flip that survives in the output comes from a commitment that bypassed the threshold in 29 of 31 cases on LLaDA and in all 36 on Dream (32 forced commitments and 4 block-initial commitments, which Dream’s decoder makes once per block without a threshold test). Counting placement flips as well, forced commitments carry 99.5% (LLaDA) and 96.7% (Dream) of the permanent flips. 
+
+Correcting only forced commitments restores the full-precision answers. We reran W4A4 on the same questions with one change: at every forced commitment (on Dream, also at block-initial commitments), it used the full-precision choice of position and token for the same state; all other commitments stayed quantized, and the decoding schedule was unchanged. This repairs about nine in ten broken answers (Table G.3), so forced commitments are the main channel through which quantization changes answers. As a deployed fix, however, recomputing forced steps would require a second pass for each of them, since a step is known to be forced only after its W4A4 pass; forced steps make up 44% of all forward passes on LLaDA and 68% on Dream (including block-initial commitments), far more than the tax of Section 3.3. D ECAL acts on the same decisions at calibration time, at no inference cost. Table G.3: Rerunning W4A4 with only its forced commitments (on Dream, also its block-initial commitments) replaced by the full-precision choice (400 GSM8K questions).                      
+
+> LLaDA-8B Dream-7B Questions broken by quantization 33 36 of which answered correctly again 30 (91%) 32 (89%) Questions whose outcome differs from full precision (before →after) 63 →12 63 →15 Agreement with full precision (before →after) 84% →97% 84% →96%
+
+Why a near tie can still break an answer. At a near tie, either token is often fine lo-cally. A tie becomes harmful when it decides how the solution continues: a diffusion model can write any position of the active block, so one forced commitment can fix the form of the next lines. GSM8K test question 197 shows this. Both runs first write the identical line “Number of children = 23786 - 8417 - 9092” and its line break, which puts them in the same de-coding state. At the next forward pass, no position clears the threshold, so each run writes only its most confident position (highlighted; [MASK] : a position not yet written; ←-: line break):                     
+
+> position in the generation window 97 98 99 100 101 102 Shared state before the pass ... 9092 ←-[MASK] [MASK] [MASK] [MASK] [MASK] ...
+> Full precision after the pass ... 9092 ←-←-[MASK] [MASK] [MASK] [MASK] ...
+> W4A4 after the pass ... 9092 ←-[MASK] [MASK] [MASK] =[MASK] ...
+
+19 Preprint The two outputs then read: 
+
+Full precision (correct)                     
+
+> Number of children =23786 -8417 -9092
+> ←-
+> Now, let’s do the subtraction: 23786 -8417 =15369 15369 -9092 =6277
+
+W4A4 (wrong)                   
+
+> Number of children =23786 -8417 -9092 Number of children =23786 -16419 Number of children =7277
+
+Full precision writes a second line break at position 98 (confidence 0.77, against 0.22 for “Number”), leaving a blank line, and then works step by step. W4A4 faces a near tie between two positions, “Number” at position 98 (0.62) and “=” three positions ahead, at position 101 (0.66), and writes the “=” first. Once “=” is fixed, the next pass writes “Number of children” in front of it, each token at a confidence of at least 0.999, so the next line is committed to a single equation. The sum 
+
+8417 + 9092 = 17509 is never written out and comes out as 16419, and the answer is 7277 instead of 6277. Both continuations are coherent, but the W4A4 one moves an addition from the page into the model’s internal computation, which is exactly what quantization degrades. Near-tied choices are therefore not equally safe for a quantized model, which is why the risk grows with the number of forced flips and why the prior weights each position by the reach of its commitment. 
+
+## H HOW DECAL AND THE COMMIT TEMPERATURE DIVIDE THE WORK 
+
+Quantization perturbs the logits, and the threshold sorts the affected decisions by margin. Fragile de-cisions with small margins are forced even at full precision and can flip, which costs accuracy (Obser-vation 1); D ECAL calibrates the model to perturb them less. Robust decisions just below the threshold are only delayed, which costs forward passes (Observation 2); the temperature restores the confidence scale so that they pass on time. To check this division, we decoded the 400 GSM8K questions of Figure 1b with W4A4 QuaRot at T = 1 and checked, at every forced step, whether Tmatch = 0 .873 
+
+would let a position clear the threshold; a full-precision copy run on the same states marks token flips. Table H.1: Commitments in the returned output by type (W4A4 QuaRot at T = 1 , 400 GSM8K questions). Flip rate: share of commitments whose token differs from full precision.                
+
+> Commitment Share of commitments Share of token flips Flip rate FP16 confidence (median) Above the threshold 79.8% 8.3% 0.29% 0.994 Forced, released by the temperature 3.3% 2.2% 1.9% 0.876 Forced, still forced 16.9% 89.4% 14.6% 0.689
+
+The temperature releases only forced commitments just below the threshold, which rarely flip (Table H.1). The forced commitments that carry the errors lie far below the threshold, stay forced, and account for 97.6% of the flips at forced commitments; they are exactly where the prior of D ECAL puts its weight, since it grows as the full-precision margin shrinks. This is why the temperature removes forced steps (Table C.1) while leaving accuracy essentially unchanged (Figure 4), and why it cannot replace calibration: it changes when a position is committed, never what is written (Proposition 1). 
+
+## I CHECKS OF THE FLIP -P ROBABILITY MODEL 
+
+Both the risk model (2) and the reach (3) serve only to rank positions, since (4) keeps nothing but their order. We checked each part of (2) against the flips recorded for Figure 1b (W4A4 FlatQuant, first 400 GSM8K test questions; 102,400 commitments on LLaDA and 99,200 on Dream). 20 Preprint 
+
+Smaller margins flip more often. Ranked by the full-precision margin from which π is computed, a commitment whose token flips is rated riskier than one whose token does not in 98.7% of such pairs on LLaDA and 93.9% on Dream (AUROC 0.987 and 0.939; chance is 0.5). 
+
+The perturbation has no preferred direction. A zero-mean perturbation turns a near tie into a coin toss. Among commitments with a margin below 0.1, 47% flip on LLaDA and 51% on Dream. 
+
+The Gaussian curve matches the observed flip rates. With its single scale fitted to the data, the Gaussian curve differs from the observed flip rate by 0.1 percentage points on average across margins on LLaDA and 0.8 on Dream. The default scale s = ˜ m, fixed before the quantizer is known, overestimates the absolute probabilities; this matters little, since (4) keeps only the order of positions (last check below). 
+
+Treating token and placement flips as independent is a close approximation. Both depend on the same confidences and are slightly correlated (about 0.1), but they rarely occur together: the predicted share of forced commitments that fail in either way is 37.8% against 39.4% observed on LLaDA, and 39.8% against 39.2% on Dream. 
+
+The prior does not depend on these modeling choices. Rebuilding the prior with the Gaussian curves replaced by flip rates measured directly from the data orders the 256 window positions almost exactly as ours (Spearman correlation 0.994 on LLaDA and 0.997 on Dream). 
+
+The reach. Its square root rests on approximately independent perturbations across later reads, a premise verified in Section F, where a logarithm in its place also gives a nearly identical prior. Reach alone improves on uniform weights by 1.1 (LLaDA) and 1.4 (Dream) average points, and the shuffled control of Table 3 shows that such gains require the weights to sit at the right positions. 
+
+## J DRIFT -G UIDED COMMITMENT (P OLESTAR )
+
+We implemented the drift-guided commitment of Polestar (Lee et al., 2026) in our Fast-dLLM pipeline (dual cache, τ = 0 .9), so that the quantized checkpoints and the same-state measurement are those of the main paper, with its default settings: a position below the threshold is also committed when its drift jumps sharply relative to its recent history, and if no position qualifies, the most confident one is forced. At full precision, this raises the tokens committed per forward pass 1.22-fold, matching the 1.21-fold gain reported by Polestar. As argued in Section 4.1, a cache approximates attention, not the commitment rule, so we keep Fast-dLLM’s dual cache. 
+
+Forced commitments remain the main source of errors. Forced commitments make up 11.6% of commitments but carry 80.9% of the permanent token flips; together with drift-admitted commitments, the decisions that bypass the threshold carry about 97% of them, as under Fast-dLLM (Table J.1). Table J.1: Share of commitments and of permanent token flips by type, measured as in Figure 1b (W4A4 FlatQuant, 400 GSM8K questions).                  
+
+> Drift-guided commitment Fast-dLLM (Figure 1b) Commitment commitments token flips commitments token flips Above the threshold 72.0% 2.6% 83.5% 2.9% Admitted by drift 16.5% 16.6% ––Forced 11.6% 80.9% 16.5% 97.1%
+
+The parallelism tax persists, and D ECAL keeps its gain. QuaRot needs 15.0% more forward passes than FP16 (12.9% under Fast-dLLM), because the drift test also depends on confidence, which quantization deflates; the FlatQuant-based models pay a small tax, as in Figure 1c (Table J.2). At this speed, D ECAL improves GSM8K accuracy over FlatQuant by 1.1 points (75.76 against 74.68, averaged over the three calibration runs of Table 1), close to its 1.2-point gain under Fast-dLLM. 21 Preprint Table J.2: Forward passes per response on the full GSM8K test set under drift-guided commitment. FlatQuant and D ECAL : mean of the three calibration runs of Table 1.           
+
+> Model Forward passes per response vs. FP16 FP16 70.0 –QuaRot 80.4 +15 .0%
+> FlatQuant 71.3 +1 .9%
+> DECAL 71.1 +1 .6%
+
+The commit temperature complements drift-guided commitment. Drift-guided commitment speeds up both FP16 and W4A4 but does not remove the gap between them; the temperature, cali-brated by (7) from forward-pass counts, does. Table J.3 compares it with the other way to reach FP16’s speed, a more aggressive drift test (smaller α, within the range studied by Polestar). The temperature reaches FP16’s speed without a significant accuracy change, whereas the aggressive drift test loses 11.4 points at the same speed. In the ladder used to set Tmatch , forward passes fall monotonically as T is lowered, from 79.7 to 66.7 per response on the calibration prompts as T goes from 1 to 0.84. Table J.3: Bringing W4A4 QuaRot to the speed of FP16 (70.0 forward passes) under drift-guided commitment. Accuracy change: GSM8K, in points, relative to the default setting; n.s.: not statistically significant (paired test over the 1,319 questions). ↓/↑: lower/higher is better.                    
+
+> W4A4 QuaRot setting Forward passes ↓Accuracy change ↑
+> Default ( α= 10 ,T= 1 )80.4 –Commit temperature ( T= 0 .858 )69.1 −1.9(n.s.) More aggressive drift test ( α= 5 )75.1 −3.0
+> More aggressive drift test ( α= 2 .5)69.4 −11 .4
+
+## K A B LOCK -D IFFUSION MODEL : F AST -DLLM V2
+
+Fast-dLLM v2 (Wu et al., 2026a) is a native block-diffusion model adapted from Qwen2.5-Instruct (Yang et al., 2024), at 1.5B and 7B parameters. Among current block-diffusion models, it gives the cleanest test of our setting: its layers are dense like those of LLaDA and Dream, its 7B model is adapted, like Dream-7B, from Qwen2.5-7B (here its instruction-tuned version), and its decoder is the block-diffusion successor of Fast-dLLM, so block decoding is the main change. LLaDA2.0 (Bie et al., 2025) uses mixture-of-experts layers at 16B and 100B parameters and would change architecture and scale together with the decoding scheme. Fast-dLLM v2 decodes blocks of 32 tokens from left to right with exact caching of completed blocks, and commits inside each block, in sub-blocks of 8 tokens, with the threshold rule (1) at τ = 0 .9. D ECAL is applied with its prior collected under this decoder; since v2-7B is adapted from the same base model as Dream, it uses Dream’s setting (ϵ, c ) = (1 , 0.15) .
+
+Forced commitments and the parallelism tax carry over. Under W4A4, 10–15% of the commit-ments in the returned output are forced, close to the 16.5% on LLaDA (Section 3.2). Quantization lowers the tokens written per forward pass and raises the share of forced commitments, and the resulting tax, 7.6% on the 1.5B and 14.0% on the 7B model, is well above FlatQuant’s 0.8% and 2.8% on LLaDA and Dream (Table K.1). Table K.1: Parallelism tax on Fast-dLLM v2 (200 GSM8K prompts, τ = 0 .9, W4A4 FlatQuant). Forward passes are counted per returned token, so answer length does not enter.                       
+
+> Model Tokens per forward pass Extra forward passes Forced commitments (FP16 →W4A4) (FP16 →W4A4) v2-1.5B 2.10 →1.95 +7 .6% 12.6% →15.4% v2-7B 2.58 →2.27 +14 .0% 8.2% →10.2%
+
+22 Preprint 
+
+DECAL improves W4A4 accuracy. On v2-7B, D ECAL improves on FlatQuant by 1.1 points on GSM8K and 0.9 on MATH, closing about a fifth of the gap to full precision, in line with its gains in Table 1 (Table K.2). Table K.2: W4A4 accuracy (%) on Fast-dLLM v2-7B ( τ = 0 .9; mean ± std over 3 calibration runs). 
+
+Method GSM8K MATH Avg. FP16 82.11 46.07 64.09 FlatQuant 77.94 ±0.77 39.05 ±0.64 58.49 DECAL 79.02 ±1.69 39.97 ±0.52 59.50 
+
+## L SENSITIVITY TO THE CONCENTRATION c
+
+The concentration c is the only free parameter of the prior (4). It is the coefficient of variation of the window weights and sets how strongly the calibration budget is concentrated on the high-risk positions, whose ranking comes from the decoder and does not change with c. Concentration has a price: the effective sample size falls to K/ (1+ c2), and c is bounded by cmax = CV( r)/(1 −rmin /¯r),at which the weight of the least risky position reaches zero (0.79 on LLaDA, 1.60 on Dream). For the main results (Section 5.1), c was set once per model on the GSM8K test set after a quick check of a few moderate values; both values keep most of the effective sample size (92% on LLaDA, 98% on Dream). To measure how much this choice matters, we vary c from 0 to about 95% of cmax , keep everything else as in Table 3, calibrate each value twice, and evaluate on the full GSM8K test set (Figure L.1). 0.15 0.30 0.45 0.60 0.75                 
+
+> Concentration c
+> 0.0 0.5 1.0 1.5 2.0
+> Gain over  c = 0 (points)
+> +0.65
+> +1.56
+> +0.84 +1.14 +1.06
+> 98% 92% 83% 74% 64%
+> (a) LLaDA-8B-Instruct · GSM8K
+> 0.15 0.45 0.75 1.20 1.50
+> Concentration c
+> +1.74
+> +0.91 +1.36 +1.97 +1.82
+> 98% 83% 64% 41% 31%
+> (b) Dream-v0-Base-7B · GSM8K
+
+Figure L.1: Sensitivity of D ECAL to the concentration c: gain in W4A4 GSM8K test accuracy over uniform weights ( c = 0 ), mean of two calibration runs per value. Dark bars: values used in the paper. Gray percentages: effective sample size K/ (1 + c2) relative to K.
+
+The gain requires enough concentration. At c = 0 the prior has no effect, and D ECAL reduces to uniform weights. On LLaDA, c = 0 .15 recovers only part of the gain (0.65 points); on Dream, most of it is already reached at c = 0 .15 (1.74 points). 
+
+Beyond that point, the gain is stable. From c = 0 .30 on LLaDA and c = 0 .15 on Dream up to near cmax , every value tested improves on uniform weights by 0.8–1.6 (LLaDA) and 0.9–2.0 (Dream) points, within about one point of each other, even as the effective sample size falls to 64% and 31%. Once the budget is concentrated on the high-risk positions, further concentration adds little, as expected from the trade-off between focus and effective sample size (Section 4.1). The values used in the paper lie at the start of this plateau, and their gains are close to the GSM8K gains in Table 3 (1.74 points on both models), which come from separate calibration runs. 23
