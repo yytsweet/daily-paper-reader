@@ -1,0 +1,523 @@
+Title: HiCal: Offline Calibration for Hierarchical Scale Encoding in Accurate HiF4 Quantization
+
+URL Source: https://arxiv.org/pdf/2611.32624v1
+
+Published Time: Wed, 25 Nov 2026 03:22:59 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# HICAL : O FFLINE CALIBRATION FOR HIERARCHICAL SCALE 
+
+# ENCODING IN ACCURATE HIF4 Q UANTIZATION 
+
+Zhiyuan Zhang, Yanzhao Li, Hui Dong, Sifan Cheng, Mingen Zheng, Hui Wang 
+
+Huawei Technology 
+
+{zhangzhiyuan45, liyanzhao}@huawei.com 
+
+# ABSTRACT 
+
+Block floating-point (BFP) quantization is widely adopted for efficient low-bit large language model (LLM) inference, where the choice of block scales plays a critical role in quantization accuracy. HiFloat4 (HiF4) employs a hierarchical scale encoding scheme consisting of a global E6M2 scale and two levels of binary scale extensions. However, its conventional rounding rule and fixed scale-extension thresholds may not fully capture the statistical characteristics of the quantized tensors in practice, leading to suboptimal scale representations. In this work, we propose HiCal, an offline calibration approach that improves HiF4 quantization accuracy by refining the encoding decisions across all three scale levels. Specifically, we introduce a calibrated rounding bias for the Level-1 E6M2 scale and optimize the scale-extension thresholds at Levels 2 and 3 based on the empirical distributions of local group magnitudes. The resulting calibration parameters are determined offline and remain fixed during inference, while the hierarchical encoding continues to adapt to individual blocks through their local values. This design eliminates the need for per-block multi-candidate scale search while preserving the original deterministic HiF4 encoding procedure. Experiments across five synthetic and real activation distributions show that the proposed method reduces quantization MSE by 9.91%–23.50% relative to the original HiF4 scheme, including a 13.00% reduction on real Qwen3-8B activations. End-to-end evaluations across six benchmarks further show average-score improvements of 0.91 and 1.25 percentage points on Qwen3-8B and Qwen3-30B-A3B, respectively, without per-block multi-candidate search during inference. 
+
+# 1 Introduction 
+
+The growing computational and memory demands of large language models (LLMs) have made low-bit quantization an important technique for efficient model inference. Recent advances in low-precision numerical formats, including FP8 and FP4 representations, have enabled substantial reductions in model storage and data-transfer costs [1, 2]. In particular, block floating-point (BFP) and microscaling formats, such as MXFP4 and NVFP4, use shared scaling metadata to represent groups of low-precision elements [3, 4]. These formats provide a practical way to extend the numerical range of low-bit representations while maintaining hardware-friendly computation. However, at the 4-bit level, the quantization accuracy becomes highly sensitive to the selection and encoding of scaling factors, since even small changes in the scale can substantially affect the reconstructed values within a block. Conventional BFP quantization generally initializes the block scale according to the maximum absolute value of the block. Although this max-based strategy prevents overflow and fully utilizes the available quantization range, it does not necessarily minimize the overall quantization–dequantization (QDQ) error. This limitation has motivated recent studies on more effective block-scale selection strategies. Four Over Six introduces an adaptive scaling method that evaluates two candidate scale factors for each block and selects the one that produces lower quantization error [5]. ScaleSearch further explores fine-grained search over neighboring representable scale values to identify scales that minimize block-level reconstruction error [6]. More recently, SOAR proposes analytical optimization of global and block-wise scales, together with a decoupled scale-search strategy, while H-Scale uses a diagonal second-order approximation derived from calibration activations to refine per-group scales [7, 8]. These methods demonstrate that optimizing the scale-selection process beyond conventional max-based initialization can improve low-bit quantization accuracy, arXiv:2611.32624v1 [cs.LG] 24 Nov 2026 while introducing different optimization objectives and calibration procedures. In addition to scale selection, activation outliers remain a major obstacle for low-bit microscaling formats. MX+ addresses this by retaining outlier information outside the standard BFP representation [9], while AMXFP4 uses an asymmetric FP4 format to absorb activation outliers without calibration [10]. Channel-wise outlier separation has also been explored for W4A4 quantization [11]. Other studies have investigated the interaction between microscaling granularity, scale representation, and quantization accuracy, and have examined how activation outliers interact with these choices [9, 10, 11]. For example, recent analyses show that reducing the block size does not always improve model accuracy, as the resulting behavior depends on the statistical properties of the tensor distribution and the dynamic range of the scaling format [12, 13]. In addition, format-specific post-training quantization methods, such as Micro-Rotated-GPTQ, combine block-wise Hadamard transformations with FP4-oriented optimization to address the limitations of existing microscaling formats [14]. These studies highlight that low-bit quantization accuracy depends not only on the element-level codebook, but also on the interaction among scale representation, scaling granularity, and the encoding procedure. HiFloat4 (HiF4) is a 4-bit block floating-point format that employs a three-level hierarchical scaling structure to capture magnitude variations at different granularities [15]. As illustrated in Fig. 1, each HiF4 block contains 64 four-bit S1P2 elements and 32 bits of shared scaling metadata, corresponding to an average storage cost of 4.5 bits per element. The metadata consists of one global E6M2 base scale at Level 1, eight 1-bit scale extensions ( E8) at Level 2, and sixteen 1-bit scale extensions ( E4) at Level 3. The two levels of scale extensions provide progressively finer adjustments for groups of eight and four elements, respectively. Accordingly, the effective scale of the i-th element can be expressed as 
+
+Si = Sbase · 2E8[⌈i/ 8⌉]+ E4[⌈i/ 4⌉], i = 1 , . . . , 64 , (1) where Sbase denotes the E6M2 base scale, and e(8) and e(4) represent the corresponding binary scale extensions. In the original HiF4 encoding procedure, the base scale is initialized through max-based normalization and E6M2 encoding, while the Level-2 and Level-3 scale extensions are determined by fixed magnitude thresholds. This hierarchical design provides flexible local scale adaptation with compact metadata, but its final quantization accuracy also depends on how the encoding decisions at the three levels are configured. A key characteristic of HiF4 is that its three scale levels are coupled. The Level-1 E6M2 base scale determines the normalization of local group magnitudes, which subsequently affects the Level-2 and Level-3 scale-extension decisions. Therefore, changing the Level-1 rounding rule may alter not only the global scale but also the assignment of the two subsequent levels of scale extensions. Meanwhile, the two magnitude thresholds that decide the Level-2 and Level-3 scale-extension bits may not be optimal for the tensors being quantized. These observations motivate a systematic investigation of the scale-encoding decisions across the complete HiF4 hierarchy, rather than optimizing the element-level codebook or an individual scale factor in isolation. In this work, we propose HiCal, a lightweight, offline-calibrated approach to improve the scale encoding accuracy of HiF4. Instead of performing multi-candidate scale evaluation independently for every block during quantization, we calibrate a compact set of shared encoding parameters offline, following the offline-calibration paradigm of prior post-training quantization methods [16], and apply them as fixed rules. Specifically, we introduce a rounding bias for the Level-1 E6M2 base scale and recalibrate the scale-extension thresholds at Levels 2 and 3 according to the empirical distributions of local group magnitudes. The calibration is performed sequentially: the Level-1 rounding bias is first selected, and the Level-2 and Level-3 thresholds are subsequently calibrated with the selected bias fixed. The resulting configuration uses αrnd = −0.35 , T H 8 = 4 .25 , and T H 4 = 2 .125 . During quantization, the selected parameters are directly applied to each block, while the actual hierarchical scale metadata continues to be determined from its local values. Thus, the proposed approach retains the original HiF4 hierarchical representation and S1P2 element codebook, without requiring per-block multi-candidate scale evaluation. We evaluate the proposed method using five synthetic and real-world activation distributions for scale-encoding analysis, and conduct end-to-end experiments on Qwen3-8B and Qwen3-30B-A3B in which both weight and activation tensors are quantized with the same HiF4 format. The results show that the proposed calibration reduces QDQ mean squared error (MSE) by 9.91%–23.50% relative to the original HiF4 scheme, including a 13.00% reduction on real Qwen3-8B activations. Furthermore, evaluations on six downstream benchmarks show that the six-task mean accuracy improves by 0.91 and 1.25 percentage points for Qwen3-8B and Qwen3-30B-A3B, respectively. The main contributions of this work are summarized as follows: • We characterize the hierarchical scale-encoding mechanism of HiF4 and analyze how the Level-1 base-scale rounding and the Level-2/Level-3 scale-extension decisions affect the final QDQ error. • We propose a lightweight, offline-calibrated approach that sequentially determines the Level-1 E6M2 rounding bias and the Level-2/Level-3 scale-extension thresholds. The calibrated parameters are fixed during quantiza-tion, avoiding per-block multi-candidate scale evaluation while preserving the original HiF4 representation. 2Figure 1: HiF4 three-level hierarchical scaling architecture. Each 64-element block shares one E6M2 global scale factor ( SF ), eight 1-bit Level-2 scale extensions ( E8), and sixteen 1-bit Level-3 scale extensions ( E4), providing scale adjustments at the block, eight-element-group, and four-element-group granularities, respectively. The three components highlighted in red—the E6M2 rounding rule and the Level-2 and Level-3 magnitude thresholds—are the parameters calibrated in this work; all other operations follow the original HiF4 procedure. • We evaluate the proposed method on five synthetic and real-world activation distributions and on Qwen3-8B and Qwen3-30B-A3B. The results demonstrate consistent QDQ error reductions and improved average downstream benchmark accuracy. 
+
+# 2 HiF4 Scale Encoding and Motivation 
+
+2.1 HiF4 Architecture and Scale-Encoding Decisions 
+
+HiF4 adopts a three-level hierarchical scaling architecture to represent low-precision values while capturing local magnitude variations at different granularities[15]. As illustrated in Fig. 1, each HiF4 block contains 64 four-bit elements and 32 bits of shared scale metadata, consisting of one E6M2 global scale factor ( SF ), eight 1-bit mid-level scale extensions ( E8), and sixteen 1-bit fine-level scale extensions ( E4). The three levels provide global, eight-element-group, and four-element-group scaling adjustments, respectively. Given an input block V64 = {v1, . . . , v 64 }, HiF4 first extracts local maximum magnitudes at two granularities. The block is partitioned into sixteen groups of four elements, and the maximum absolute value of each group is calculated as 
+
+V4[i] = max  
+
+> j=4 i−3,..., 4i
+
+|vj |, i = 1 , . . . , 16 . (2) Two adjacent four-element groups are then combined to obtain eight-element group maxima: 
+
+V8[k] = max( V4[2 k − 1] , V 4[2 k]) , k = 1 , . . . , 8. (3) The global maximum magnitude of the block is 
+
+Vmax = max  
+
+> k=1 ,..., 8
+
+V8[k]. (4) 
+
+Level-1: Global E6M2 scale encoding. The initial global scale is determined by the maximum magnitude of the block: 
+
+SF = clamp 
+
+ Vmax 
+
+7 , 2−48 , 49152 
+
+
+
+. (5) The denominator 7 = 4 · 1.75 reserves headroom for the maximum scale extension ( DE = 2 ) plus the largest S1P2 code 1.75 , so that the largest-magnitude element remains representable under the full hierarchy. To encode the scale in 3E6M2, its exponent and normalized mantissa are calculated as 
+
+ESF = ⌊log 2 SF ⌋ , r = SF · 22−ESF . (6) The normalized mantissa is then rounded and mapped back to the E6M2 scale: 
+
+m6 = round ( r + αrnd ) , cSF = m6 · 2ESF −2, (7) where αrnd is the rounding adjustment parameter. If the rounded mantissa falls outside [4 , 7] , the code is canonicalized by carrying into the exponent ( m6=8 → mcan =4 , ESF +=1 ) or borrowing from it ( m6=3 → mcan =6 , ESF −=1 ), so cSF preserves the rounded value while remaining a legal E6M2 code; the procedure is given in Algorithm 2. The original HiF4 encoding corresponds to αrnd = 0 , which applies standard rounding to the normalized E6M2 mantissa. 
+
+Level-2: Eight-element scale extension. Based on the decoded global scale cSF , each eight-element group is assigned a binary scale extension according to its local maximum magnitude: 
+
+E8[k] = I
+
+ V8[k]
+
+cSF ≥ TH 8
+
+
+
+, k = 1 , . . . , 8, (8) where TH 8 = 4 in the original HiF4 configuration. 
+
+Level-3: Four-element scale extension. The Level-3 scale extension further adjusts the effective scale at the four-element-group granularity. Its binary decision is conditioned on the corresponding Level-2 extension: 
+
+E4[i] = I
+
+ V4[i]
+
+cSF · 2E8[⌈i/ 2⌉] ≥ TH 4
+
+
+
+, i = 1 , . . . , 16 , (9) where the original threshold is TH 4 = 2 .
+
+Element-wise scaling and S1P2 quantization. For each element vj , the effective scale is jointly determined by the global scale and the corresponding two levels of scale extensions: 
+
+Sj = cSF · 2E8[⌈j/ 8⌉]+E 4[⌈j/ 4⌉], j = 1 , . . . , 64 . (10) Each element is normalized by its effective scale and quantized using the S1P2 codebook. The S1P2 format allocates one sign bit, two exponent bits, and one mantissa bit; the sign is carried separately, and the magnitude codebook contains eight non-negative levels: 
+
+QS1P2 = {0, 0.25 , 0.5, 0.75 , 1.0, 1.25 , 1.5, 1.75 }. (11) The reconstructed element is 
+
+bvj = sign( vj ) · Sj · QS1P2 
+
+ |vj |
+
+Sj
+
+
+
+, (12) where QS1P2 (·) returns the nearest element of QS1P2 with saturation to the representable range. The three scale-encoding decisions can therefore be parameterized as 
+
+θ = ( αrnd , TH 8, TH 4). (13) The original HiF4 configuration uses 
+
+θorig = (0 , 4, 2) . (14) Since the Level-1 base scale determines the normalized magnitudes used by both subsequent extension levels, these three encoding parameters jointly influence the effective scales assigned to the 64 elements and, consequently, the final quantization error. This parameterized view provides the basis for investigating and calibrating the hierarchical scale-encoding decisions. 
+
+2.2 Level-1 E6M2 Scale Rounding-Bias Calibration 
+
+As described in Section 2.1, the Level-1 E6M2 scale determines the reference scale for the subsequent hierarchical extensions. Consequently, its rounding decision affects not only the global scale representation, but also the Level-2 and Level-3 scale-extension decisions and the final element-wise quantization error. We therefore investigate whether a small bias in the Level-1 rounding rule can better align the default scale code[17] with the activation distribution. 4Specifically, we use the rounding adjustment αrnd defined in Eq. (7), while retaining the original HiF4 hierarchy and thresholds ( TH 8 = 4 and TH 4 = 2 ). To analyse the scale-code alignment, we introduce a small set of ordinal offsets, F = {− 1, 0, +1 , +2 }, solely for offline evaluation. For each activation block and each candidate offset, we recompute the complete HiF4 quantization– dequantization (QDQ) path, including both hierarchical scale-extension decisions. Let Lb(αrnd , f ) denote the resulting block-wise reconstruction MSE. We record the offset that gives the lowest error for each block, 
+
+f ∗ 
+
+> b
+
+(αrnd ) = arg min   
+
+> f∈F
+
+Lb(αrnd , f ), Pf (αrnd ) = 1
+
+B
+
+> B
+
+X
+
+> b=1
+
+I[f ∗ 
+
+> b
+
+(αrnd ) = f ] . (15) Here, P0 is the proportion of blocks for which the unshifted Level-1 code is the best among the four tested candidates. This offset distribution is used to diagnose the alignment between the default scale code and the block-wise preferred codes; the per-block offset selection is not used during inference. The complete offline calibration and offset-analysis procedure, including E6M2 mantissa-range correction and full-QDQ evaluation, is detailed in Appendix A, Algorithm 2. At deployment, we retain the default offset f = 0 and apply only the fixed rounding adjustment. The corresponding distortion is therefore 
+
+Lfixed (αrnd ) = 1
+
+B
+
+> B
+
+X
+
+> b=1
+
+Lb(αrnd , 0) , α∗ 
+
+> rnd
+
+= arg min  
+
+> αrnd ∈A
+
+Lfixed (αrnd ), (16) where A is the set of evaluated rounding adjustments. We also report the restricted four-offset oracle MSE, 
+
+Loracle (αrnd ) = 1
+
+B
+
+> B
+
+X
+
+> b=1
+
+min   
+
+> f∈F
+
+Lb(αrnd , f ), (17) which serves only as an offline reference. The deployed parameter is selected using Lfixed , rather than the oracle error or the offset frequency P0.Figure 2 first illustrates the offset distribution on Qwen3-8B real activation blocks. As shown in Fig. 2(a), the original setting ( αrnd = 0 ) exhibits a considerable mismatch between the default scale code and the block-wise preferred codes: only 36 .03% of blocks select offset zero, whereas 36 .40% select offset −1. Introducing a negative rounding bias shifts the offset distribution towards zero. In particular, at αrnd = −0.35 , the proportion selecting offset zero increases to 
+
+53 .83% , while the proportion selecting offset −1 decreases to 14 .16% . This indicates improved alignment between the default Level-1 scale code and the preferred codes under the complete hierarchical QDQ process. To further investigate the sensitivity of the proposed calibration to activation distributions, Fig. 2(b) compares the relative fixed-rule MSE changes across Qwen3-8B real activations and four synthetic distributions. Notably, both synthetic distributions with outliers exhibit substantial quantization-error reductions at αrnd = −0.35 : 10 .41% for Gaussian activations with 5% outliers and 9.62% for uniform activations with 5% outliers. These improvements are comparable to the 10 .93% reduction observed on Qwen3-8B real activations. In contrast, the improvement is much smaller for Gaussian activations without outliers ( 4.59% ), while the uniform distribution exhibits the largest reduction ( 22 .75% )among the four synthetic distributions. This observation suggests that the rounding-bias calibration is particularly beneficial for the evaluated outlier-bearing distributions, which is consistent with the long-tailed and outlier-bearing characteristics motivating quantization calibration for real LLM activations. Nevertheless, the optimal rounding adjustment remains distribution-dependent. While αrnd = −0.35 achieves the lowest fixed-rule MSE among the evaluated candidates for Qwen3-8B and both synthetic outlier distributions, the Gaussian distribution favors αrnd = −0.50 , and the uniform distribution’s reduction is essentially flat for αrnd ∈ [−0.50 , −0.10] 
+
+(remaining at approximately 22 .75% throughout this range). We therefore select αrnd = −0.35 according to the minimum fixed-rule MSE on Qwen3-8B real activations, rather than assuming a universally optimal rounding bias. 
+
+2.3 Hierarchical Scale-Extension Threshold Calibration 
+
+Following the Level-1 E6M2 scale calibration in Section 2.2, we calibrate the Level-2 and Level-3 scale-extension thresholds. The threshold calibration is applied downstream of the Level-1 rounding bias: the hierarchical state labels used in the KDE analysis are derived from the biased scale cSF at αrnd = −0.35 . The same threshold pair is also selected at αrnd = 0 within the evaluated search grid, suggesting that the selected thresholds are robust to the tested Level-1 rounding settings. 5(a) Full-QDQ offset distribution on Qwen3-8B real activations. (b) Relative fixed-rule MSE reduction across five activation dis-tributions. 
+
+Figure 2: Level-1 E6M2 rounding-bias calibration. (a) A negative rounding bias shifts the oracle-selected offset distribution towards the default offset of zero on Qwen3-8B real activations. (b) Relative fixed-rule QDQ MSE reduction across Qwen3-8B real activations and four synthetic distributions. The outlier-bearing distributions exhibit improvements comparable to those observed on real activations. The dashed vertical line indicates the selected 
+
+αrnd = −0.35 for Qwen3-8B. 
+
+Figure 3: KDE-based calibration of the HiF4 hierarchical thresholds on Qwen3-8B FFN-input activations with 
+
+αrnd = −0.35 . (a) Level-3 state distributions and conditional crossovers: 2.1246 for E8 = 0 , and 4.2035 on the raw coordinate for E8 = 1 (2.10175 after normalization). (b) Level-2 parent-state distributions, with a crossover at 4.2529 .The selected thresholds are T H 4 = 2 .125 and T H 8 = 4 .25 .
+
+Optimal hierarchical states. Each eight-element parent shares one Level-2 bit E8 between its two four-element children, each with its own Level-3 bit E4. As defined previously, the effective extension is DE = E8 + E4. Let 
+
+Li(DE ) denote the reconstruction MSE of the i-th four-element group when using the effective scale cSF2 DE :
+
+Li(DE ) = 14
+
+> 4i
+
+X
+
+> j=4 i−3
+
+(vj − bvj (DE )) 2 , (18) where bvj (DE ) is obtained using the original S1P2 reconstruction in Eq. (12). We jointly select the shared parent bit and the two child bits by minimizing the sum of the two child-group reconstruction losses over the eight legal assignments: 
+
+ E∗ 
+
+> 8
+
+, E ∗
+
+> 4,1
+
+, E ∗
+
+> 4,2
+
+ = arg min 
+
+> E8,E 4,1,E 4,2∈{ 0,1}
+> 2
+
+X
+
+> j=1
+
+Lij (E8 + E4,j ) . (19) For the k-th eight-element parent group, its two child groups are indexed by i1 = 2 k − 1 and i2 = 2 k. The resulting child labels are 00 , 01 , 10 , and 11 , and are used as class labels in the subsequent KDE analysis. 6Figure 4: HiF4 QDQ threshold sweep across five activation distributions with αrnd = −0.35 . The vertical marker indicates β8 = −0.25 , corresponding to T H 8 = 4 .25 and T H 4 = 2 .125 . All five distributions achieve their largest MSE reduction at this setting. 
+
+KDE-based threshold estimation. We use 200,000 randomly sampled 64-element blocks from Qwen3-8B activations. For both extension levels, the KDE inputs are the normalized magnitude statistics 
+
+r8 = V8
+
+dSF , r4 = V4
+
+dSF · 2E8
+
+. (20) Based on the optimal hierarchical state labels, KDE is used to estimate the intersections between the corresponding distributions of r8 and r4. For Level-2, we compare the two parent classes E8 = 0 and E8 = 1 using r8. For Level-3, we compare states 00 and 01 under E8 = 0 , and states 10 and 11 under E8 = 1 , using the corresponding r4 values. As shown in Fig. 3, the Level-2 crossover is 4.2529 , approximately 4.25 . The two Level-3 crossovers are 2.1246 
+
+for E8 = 0 and 4.2035 on the raw coordinate u4 = V4/dSF for E8 = 1 . Since r4 = u4/2 when E8 = 1 , the latter corresponds to 4.2035 /2 = 2 .10175 in the normalized coordinate. Both Level-3 estimates are close to 2.125 . We therefore select 
+
+T H 8 = 4 .25 , T H 4 = 2 .125 , (21) which satisfy the hierarchical relation T H 8 = 2 T H 4 and are dyadic rationals ( 4.25 = 17 /4, 2.125 = 17 /8), so the comparisons V8/dSF ≥ 4.25 and V4/( cSF · 2E8 ) ≥ 2.125 can be implemented as integer comparisons 4V8 ≥ 17 cSF and 
+
+8V4 ≥ 17 cSF · 2E8 .
+
+End-to-end QDQ validation. We further validate the selected thresholds using the complete HiF4 quantize– dequantize (QDQ) path across five activation distributions, while preserving T H 8 = 2 T H 4. The thresholds are parameterized as 
+
+T H 8 = 4 − β8, T H 4 = 2 − β8
+
+2 , (22) and evaluated over β8 ∈ { 0, −0.05 , −0.10 , −0.15 , −0.20 , −0.25 , −0.30 , −0.35 , −0.40 , −0.50 }. For each distribution, the additional relative MSE reduction is measured against its own result at the original thresholds ( β8 = 0 ): 
+
+∆MSE (β8) = LQDQ (0) − L QDQ (β8)
+
+LQDQ (0) × 100% . (23) Figure 4 shows that all five distributions achieve their largest MSE reduction at β8 = −0.25 , corresponding to 
+
+(T H 8, T H 4) = (4 .25 , 2.125) . This agrees with the KDE-based threshold estimates. For Qwen3-8B, the QDQ MSE decreases from 2.181089 × 10 −3 to 2.130460 × 10 −3, an additional reduction of approximately 2.32% .7Algorithm 1 Final Deterministic HiF4 Quantization for a 64-Element Block 
+
+Require: Input block X = {xj }64 
+
+> j=1
+
+Ensure: Quantized S1P2 codes {(σj , q j )}64  
+
+> j=1
+
+and scale metadata  
+
+> 1:
+
+Compute V4[i], V8[k], and Vmax as in Eqs. (2)–(4) ▷ Original grouping and peak extraction  
+
+> 2:
+
+SF ← clamp( Vmax /7, 2−48 , 49152) ▷ Original HiF4 block-scale rule  
+
+> 3:
+
+ESF ← ⌊ log 2(SF )⌋; r ← SF 22−ESF  
+
+> 4:
+
+mraw ← round( r − 0.35) ▷ Modified: Level-1 biased rounding, αrnd = −0.35  
+
+> 5:
+
+E6M 2 ← Encode E6M 2(ESF , m raw ) ▷ Apply the original E6M2 encoding and range handling  
+
+> 6:
+
+(mcan , E can ) ← Decode E6M 2(E6M 2)  
+
+> 7:
+
+dSF ← mcan 2Ecan −2 
+
+> 8:
+
+for k = 1 to 8 do ▷ Modified: T H 8 = 4 .25 (original: 4) 
+
+> 9:
+
+e8,k ← I
+
+
+
+V8[k]/dSF ≥ 4.25 
+
+ 
+
+> 10:
+
+end for  
+
+> 11:
+
+for i = 1 to 16 do ▷ Modified: T H 4 = 2 .125 (original: 2) 
+
+> 12:
+
+k ← ⌈ i/ 2⌉ ▷ Two children share one parent bit  
+
+> 13:
+
+e4,i ← I
+
+
+
+V4[i]/(dSF 2e8,k ) ≥ 2.125 
+
+ 
+
+> 14:
+
+DE i ← e8,k + e4,i ; Si ← dSF 2DE i ▷ Combine extensions to obtain the effective scale  
+
+> 15:
+
+end for  
+
+> 16:
+
+for i = 1 to 16 do ▷ Original S1P2 element quantization  
+
+> 17:
+
+for each element xj ∈ G i do  
+
+> 18:
+
+σj ← sign( xj ); qj ← QS1P2 (|xj |/S i) 
+
+> 19:
+
+end for  
+
+> 20:
+
+end for  
+
+> 21:
+
+return {(σj , q j )}64  
+
+> j=1
+
+and metadata (E6M 2, {e8,k }8
+
+> k=1
+
+, {e4,i }16 
+
+> i=1
+
+)
+
+# 3 Proposed HiF4 Quantization Algorithm 
+
+Based on the calibration results in Sections 2.2 and 2.3, we instantiate the HiF4 quantizer with three fixed parameters: 
+
+αrnd = −0.35 , T H 8 = 4 .25 , and T H 4 = 2 .125 . The procedure follows the original data organization and reconstruc-tion formulation in Section 2.1. In particular, the 64-element block is partitioned into sixteen 4-element groups and eight 8-element parent groups, whose peak values V4[i], V8[k], and Vmax are defined in Eqs. (2)–(4). The S1P2 element codebook and reconstruction operation in Eq. (12) are kept unchanged. The proposed method introduces three modifications to the scale-control parameters of the original HiF4 quantization path. At Level-1, we introduce a fixed rounding bias of αrnd = −0.35 instead of the original unbiased setting (αrnd = 0 ). At Level-2 and Level-3, we adjust the scale-extension thresholds to T H 8 = 4 .25 and T H 4 = 2 .125 ,respectively. The remaining quantization operations follow the original HiF4 path. Algorithm 1 gives the corresponding block-wise procedure using the definitions and reconstruction equations from Section 2.1. Inline comments distinguish the three proposed changes from the operations retained from the original HiF4 path. After mantissa-range correction and the original E6M2 range handling, the resulting dSF is used by both hierarchy levels. The effective extension and scale DE i and Si are exactly those in Eq. (10); the output codes are reconstructed by Eq. (12). Therefore, the proposed method changes only the three calibrated scale-control parameters and retains the original HiF4 grouping, metadata hierarchy, and element-wise codebook. Table 1 compares the QDQ MSE of the original HiF4 configuration, the bias-only configuration, and the proposed configuration across five activation distributions. The comparison separates the contribution of Level-1 biased rounding from that of the hierarchical threshold adjustments. Specifically, the difference between Original HiF4 and Bias-only reflects the effect of introducing αrnd = −0.35 , while the difference between Bias-only and Proposed measures the additional benefit of adjusting T H 8 and T H 4. The results demonstrate the effectiveness of combining the three calibrated parameters in the final HiF4 quantization method. 8Table 1: QDQ MSE comparison of different HiF4 configurations across five activation distributions. All MSE values are reported in units of 10 −3. Each column header shows the parameter tuple (αrnd , T H 8, T H 4). Parenthetical values indicate relative MSE reductions compared with Original HiF4, calculated using unrounded MSE values.                       
+
+> Distribution Original HiF4
+> (0 ,4,2)
+> Bias-only
+> (−0.35 ,4,2)
+> Proposed
+> (−0.35 ,4.25 ,2.125)
+> Uniform 1.60 1.24 (22.75%) 1.23 (23.50%) Gaussian 2.19 2.09 (4.59%) 1.97 (9.91%) Uniform + outliers 3.61 3.27 (9.62%) 3.21 (11.25%) Gaussian + outliers 3.51 3.15 (10.41%) 3.08 (12.41%) Qwen3-8B activations 2.45 2.18 (10.93%) 2.13 (13.00%)
+
+Table 2: End-to-end accuracy (%) of Qwen3 models under FP16, original HiF4, and the proposed HiF4 Scale-bias method. The Mean column reports the arithmetic mean over six benchmarks. Values in parentheses indicate the difference from the corresponding FP16 mean, in percentage points.                                                   
+
+> Model Method MMLU GSM8K HumanEval MBPP ARC-C ARC-E Mean
+> Qwen3-8B FP16 74.97 88.48 63.62 65.00 67.58 87.96 74.60 HiF4 73.16 85.14 59.15 63.20 65.53 87.54 72.29 (-2.31) HiF4 Scale-bias 72.90 86.05 65.85 62.60 64.76 87.04 73.20 (-1.40)
+> Qwen3-30B-A3B FP16 82.03 89.82 76.42 76.73 72.81 90.56 81.40 HiF4 80.79 88.80 69.82 73.80 71.08 89.76 79.01 (-2.39) HiF4 Scale-bias 81.14 88.60 74.49 75.13 72.04 90.15 80.26 (-1.14)
+
+# 4 Accuracy Evaluation and Results 
+
+We evaluate three numerical configurations—FP16 reference, original HiF4, and the proposed HiF4 Scale-bias method— on Qwen3-8B and Qwen3-30B-A3B [18] across six benchmarks: MMLU [19], GSM8K [20], HumanEval [21], MBPP [22], ARC-Challenge (ARC-C) and ARC-Easy (ARC-E) [23]. To reduce measurement noise, each reported score is averaged over multiple independent evaluation runs, and the Mean column reports the arithmetic average over the six benchmark means. In all quantized configurations, both weight and activation tensors are quantized with the HiF4 format using the same scale-encoding parameters; the FP16 reference is used only as the accuracy baseline. At the quantization level (Table 1), the proposed configuration reduces QDQ MSE by 23.50% for Uniform, 9.91% for Gaussian, 11.25% for Uniform with outliers, 12.41% for Gaussian with outliers, and 13.00% on Qwen3-8B real activations, relative to original HiF4. These reductions decompose into a Level-1 rounding-bias contribution and an additional hierarchical-threshold contribution from (T H 8, T H 4) = (4 .25 , 2.125) , indicating that the calibrated parameters lower tensor-level reconstruction error across all five evaluated distributions. Table 2 reports the end-to-end benchmark results. For Qwen3-8B, the six-benchmark mean improves from 72.29% under original HiF4 to 73.20% under the proposed method, reducing the FP16 gap from 2.31 pp to 1.40 pp. For Qwen3-30B-A3B, the mean improves from 79.01% to 80.26%, reducing the FP16 gap from 2.39 pp to 1.14 pp. The proposed method improves the six-benchmark mean for both evaluated model sizes and reduces the accuracy loss relative to their FP16 references. The QDQ and benchmark results are complementary. The calibrated parameters reduce reconstruction error across synthetic and real activations, and this reduction is accompanied by improved six-task mean accuracy on both evaluated models. 
+
+4.1 Hardware Friendliness 
+
+The three calibrated parameters refine the HiF4 scale-encoding rules without requiring new hardware operations. At the instruction level, the Level-1 rounding bias is realized by a single constant added to the normalized E6M2 mantissa before the existing rounding step, and the Level-2 and Level-3 thresholds replace the immediate constants in the existing magnitude comparisons. Both operations are covered by the floating-point add, multiply, compare, and rounding instructions that are already present in general-purpose inference pipelines; no new instruction category, operand format, or data path is required. The three calibrated values ( αrnd = −0.35 , T H 8 = 4 .25 , and T H 4 = 2 .125 ) are compile-time constants and do not require additional runtime storage beyond the existing HiF4 scale metadata. Only customized instruction extensions or fused operators that hard-wire the original rounding constant or threshold values may require minor adjustment to 9expose the new parameters, and even in that case the change is limited to substituting the affected constants rather than redesigning the arithmetic pipeline; this is consistent with recent HiF4 deployment efforts on Ascend NPUs [24]. This single-path property distinguishes the proposed method from per-block scale-search approaches such as ScaleSearch [6], which evaluate multiple candidate scales for each block and therefore require one quantization path per candidate. In a hardware implementation, such per-block search either replicates the quantization datapath or serializes the candidate evaluations, both of which increase area or latency proportionally to the number of candidates. The proposed method avoids this cost entirely: all three scale-encoding parameters are fixed after offline calibration, and each block is quantized through a single deterministic path. 
+
+4.2 Discussion 
+
+The quantization-level and end-to-end results provide complementary evidence for the proposed scale-calibration method, and the hardware implications discussed above confirm that these accuracy gains do not require new arithmetic support. The calibrated parameters reduce reconstruction error on synthetic distributions and real Qwen3-8B activations, and this reduction is accompanied by improved six-task mean accuracy on both Qwen3-8B and Qwen3-30B-A3B. A lower tensor-level MSE does not necessarily translate into an equal improvement on every benchmark, because the six benchmarks have different sensitivities to quantization noise and different inherent evaluation variance; the consistent mean-accuracy gains across two model sizes nevertheless indicate that the calibration is useful beyond the local QDQ metric. The proposed method occupies a different point in the accuracy–cost trade-off than per-block scale-search approaches such as ScaleSearch [6]. ScaleSearch improves quantization accuracy by searching over neighboring representable scales for each block, at the cost of evaluating multiple quantization candidates at inference time. The proposed method instead recovers most of the accuracy gain achievable by per-block scale selection while fixing the encoding parameters to a single calibration-derived value, so that the deployed quantizer retains a deterministic single-pass structure. This trade-off is particularly relevant for hardware accelerators, where the cost of per-block multi-candidate evaluation scales with the number of candidates rather than being amortized across blocks. The method retains the original HiF4 hierarchical grouping and S1P2 element codebook. Its changes are limited to the Level-1 rounding bias and the Level-2/Level-3 scale-extension thresholds; these are selected through offline calibration and applied as fixed rules during quantization, without per-block enumeration of multiple scale candidates. This keeps the quantization procedure deterministic and preserves the existing HiF4 representation structure. The transferability of the calibrated parameter set to other model architectures and activation distributions remains to be studied. 
+
+# 5 Conclusion 
+
+This paper presents a deterministic scale-calibration method that improves HiF4 quantization accuracy by refining the scale-encoding decisions at all three levels. The final configuration uses αrnd = −0.35 , T H 8 = 4 .25 , and 
+
+T H 4 = 2 .125 . These parameters are determined through offline calibration and are applied directly during quantization, without per-block enumeration of multiple scale candidates. The original HiF4 hierarchical organization and S1P2 element codebook are retained. The quantization-level evaluation demonstrates that the combined calibration reduces QDQ MSE across five tested activation distributions, including real Qwen3-8B activations. The end-to-end evaluation further shows that the six-benchmark mean accuracy improves from 72.29% to 73.20% for Qwen3-8B and from 79.01% to 80.26% for Qwen3-30B-A3B. Correspondingly, the accuracy gaps to the FP16 references decrease from 2.31 pp to 1.40 pp and from 2.39 pp to 1.14 pp, respectively. These results indicate that calibrating the hierarchical scale representation can improve the average end-to-end accuracy of HiF4 across the evaluated models. 
+
+# Acknowledgements 
+
+AI-based tools were used to assist with language editing and manuscript preparation. The authors take full responsibility for the technical content, methodology, experiments, and conclusions presented in this paper. 
+
+# References 
+
+[1] Paulius Micikevicius, Dusan Stosic, Neil Burgess, Marius Cornea, Pradeep Dubey, Richard Grisenthwaite, Sangwon Ha, Alexander Heinecke, Patrick Judd, John Kamalu, et al. FP8 Formats for Deep Learning. arXiv 
+
+10 preprint arXiv:2209.05433 , 2022. [2] Janghwan Lee, Jiwoong Park, Jinseok Kim, Yongjik Kim, Jungju Oh, Jinwook Oh, and Jungwook Choi. LLM-FP4: 4-Bit Floating-Point Quantized Transformers. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2023. [3] Open Compute Project. OCP Microscaling Formats (MX) Specification. Technical report, Open Compute Project, 2023. [4] NVIDIA. NVIDIA Blackwell Architecture Whitepaper. Technical report, NVIDIA Corporation, 2024. [5] Jack Cook, Junxian Guo, Guangxuan Xiao, Yujun Lin, and Song Han. Four Over Six: More Accurate NVFP4 Quantization with Adaptive Block Scaling, 2025. [6] Tanmaey Gupta, Hayden Prairie, Xiaoxia Wu, Reyna Abhyankar, Qingyang Wu, Austin Silveria, Pragaash Ponnusamy, Jue Wang, Ben Athiwaratkun, Leon Song, Tri Dao, Daniel Y. Fu, and Chris De Sa. Search Your Block Floating Point Scales!, 2026. [7] Chengzhu Bao, Xianglong Yan, Zhiteng Li, Guangshuo Qin, Guanghua Yu, and Yulun Zhang. SOAR: Scale Optimization for Accurate Reconstruction in NVFP4 Quantization, 2026. [8] Hao Yu, Zheng Li, Dayiheng Liu, and Jianwei Zhang. H-Scale: Hessian-Guided Scale Refinement for NVFP4 Sub-Byte LLM Inference, 2026. [9] Jungi Lee, Junyong Park, Soohyun Cha, Jaehoon Cho, and Jaewoong Sim. MX+: Pushing the Limits of Microscaling Formats for Efficient Large Language Model Serving. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO) , pages 869–883, 2025. [10] Janghwan Lee, Jiwoong Park, Jinseok Kim, Yongjik Kim, Jungju Oh, Jinwook Oh, and Jungwook Choi. AMXFP4: Taming Activation Outliers with Asymmetric Microscaling Floating-Point for 4-bit LLM Inference. In Findings of the Association for Computational Linguistics: ACL 2025 , pages 14993–15013, 2025. [11] Zhiyuan Zhang, Yanzhao Li, Zhiqiang Zou, Bai Du, Yupeng Sun, Hui Dong, and Hui Wang. OSC: Hardware Efficient W4A4 Quantization via Outlier Separation in Channel Dimension, 2026. [12] Andrea Fasoli, Monodeep Kar, Chi-Chun Liu, Swagath Venkataramani, Viji Srinivasan, Leland Chang, and Naigang Wang. Is Finer Better? The Limits of Microscaling Formats in Large Language Models. In International Conference on Learning Representations (ICLR) , 2026. [13] Clemens Schaefer and Gil Tabak. Finer is Better (with the Right Scaling), 2026. [14] Vage Egiazarian, Roberto L. Castro, Denis Kuznedelev, Andrei Panferov, Eldar Kurtic, Shubhra Pandit, Alexan-dre Noll Marques, Mark Kurtz, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization. In International Conference on Learning Represen-tations (ICLR) , 2026. [15] Yuanyong Luo, Jing Huang, Yu Cheng, Ziwei Yu, Kaihua Zhang, Kehong Hong, Xinda Ma, Xin Wang, Anping Tong, Guipeng Hu, Yun Xu, Mehran Taghian, Peng Wu, Guanglin Li, Yunke Peng, Tianchi Hu, Minqi Chen, Michael Bi Mi, Hu Liu, Xiping Zhou, Junsong Wang, Qiang Lin, and Heng Liao. HiFloat4 Format for Language Model Inference, 2026. [16] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models. In Proceedings of the 40th International Conference on Machine Learning (ICML) , pages 38087–38099, 2023. [17] Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or Down? Adaptive Rounding for Post-Training Quantization. In Proceedings of the 37th International Conference on Machine Learning (ICML) , pages 7197–7206, 2020. [18] An Yang et al. Qwen3 Technical Report, 2025. [19] Dan Hendrycks et al. Measuring Massive Multitask Language Understanding, 2021. [20] Karl Cobbe et al. Training Verifiers to Solve Math Word Problems, 2021. [21] Mark Chen et al. Evaluating Large Language Models Trained on Code, 2021. [22] Jacob Austin, Augustus Odena, Maxwell Nye, et al. Program Synthesis with Large Language Models, 2021. [23] Peter Clark et al. Think You Have Solved Question Answering? Try ARC, the AI2 Reasoning Challenge, 2018. [24] Hui Dong, Yanzhao Li, Jie Gao, Chunlu Li, Zhiyuan Zhang, Yupeng Sun, Zhenyuan Chen, and Zhiqiang Zou. HiFA4: Training-Free 4-bit FlashAttention on Ascend HIF4 NPUs for LLM Inference, 2026. 11 Appendix A Implementation of Level-1 Rounding-Bias Calibration 
+
+Algorithm 2 summarizes the offline calibration procedure. For each candidate rounding bias, the normalized E6M2 mantissa is rounded and adjusted to the valid mantissa range following the Level-1 encoding procedure in Section 2.1. Neighboring ordinal scale codes are then evaluated using the complete HiF4 QDQ path, including the two hierarchical scale-extension decisions and the original S1P2 reconstruction. The offset distribution is used only to analyze scale-code alignment, whereas the deployed bias is selected using the fixed-rule MSE with zero ordinal offset. 
+
+Algorithm 2 Offline Level-1 Rounding-Bias Calibration and Offset Analysis 
+
+Require: Activation blocks D = {xb}Bb=1 ; candidate biases A; ordinal offsets F = {− 1, 0, 1, 2}; thresholds 
+
+(T H 8, T H 4) = (4 , 2) 
+
+Ensure: Selected bias α∗; fixed-rule MSE Lfixed (α∗); offset distributions {Pf (α)}; oracle MSE values {Loracle (α)}
+
+1: for each block xb ∈ D do 
+
+2: Compute V4,b [i], V8,b [k], and Vmax ,b 
+
+3: SF b ← clamp( Vmax ,b /7, 2−48 , 49152) 
+
+4: Eb ← ⌊ log 2 SF b⌋; rb ← SF b 22−Eb
+
+5: end for 
+
+6: for each α ∈ A do 
+
+7: Initialize Afixed ← 0, Aoracle ← 0, and Cf ← 0 for all f ∈ F 
+
+8: for each block xb ∈ D do ▷ Biased rounding and E6M2 mantissa adjustment 
+
+9: m6,b ← round( rb + α)
+
+10: if m6,b < 4 then 
+
+11: (Ecan ,b , m can ,b ) ← (Eb − 1, 2m6,b )
+
+12: else if m6,b ≥ 8 then 
+
+13: (Ecan ,b , m can ,b ) ← (Eb + 1 , m 6,b − 4) 
+
+14: else 
+
+15: (Ecan ,b , m can ,b ) ← (Eb, m 6,b )
+
+16: end if 
+
+17: cαb ← 4( Ecan ,b + 48) + ( mcan ,b − 4) 
+
+18: for each f ∈ F do ▷ Decode a neighboring E6M2 ordinal code 
+
+19: cαb,f ← clip( cαb + f, 0, 255) 
+
+20: Eαb,f ← ⌊ cαb,f /4⌋ − 48 
+
+21: M αb,f ← 4 + ( cαb,f mod 4) 
+
+22: gSF αb,f ← M αb,f 2Eαb,f −2
+
+▷ Apply the original HiF4 hierarchy and S1P2 QDQ 
+
+23: bxα,f b ← QDQ HiF4 (xb; gSF αb,f , T H 8, T H 4)
+
+24: Lb(α, f ) ← 164 xb − bxα,f b
+
+> 22
+
+25: end for 
+
+▷ Accumulate offset statistics and reconstruction errors 
+
+26: f ∗ 
+
+> b
+
+(α) ← arg min f ∈F Lb(α, f )
+
+27: Cf ∗  
+
+> b(α)
+
+← Cf ∗  
+
+> b(α)
+
++ 1 
+
+28: Afixed ← Afixed + Lb(α, 0) 
+
+29: Aoracle ← Aoracle + min f ∈F Lb(α, f )
+
+30: end for 
+
+31: Lfixed (α) ← Afixed /B ; Loracle (α) ← Aoracle /B 
+
+32: for each f ∈ F do 
+
+33: Pf (α) ← Cf /B 
+
+34: end for 
+
+35: end for 
+
+36: α∗ ← arg min α∈A Lfixed (α)
+
+37: return α∗, Lfixed (α∗), {Pf (α)}, and {Loracle (α)}
+
+Here, QDQ HiF4 denotes the original HiF4 quantize–dequantize procedure defined by Eqs. (8)–(12). The fixed-rule MSE uses only the zero offset, whereas the oracle MSE and Pf are used only for offline analysis. 12

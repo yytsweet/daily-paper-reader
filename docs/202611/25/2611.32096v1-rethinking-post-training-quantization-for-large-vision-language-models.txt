@@ -1,0 +1,1166 @@
+Title: Rethinking Post-Training Quantization for Large Vision-Language Models
+
+URL Source: https://arxiv.org/pdf/2611.32096v1
+
+Published Time: Wed, 25 Nov 2026 02:23:30 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Rethinking Post-Training Quantization for Large Vision-Language Models 
+
+## Minchan Kang 1, Kyeonghye Park 1, Seoyoung Cho 1, Junhee Lee 1, Daeshik Kim 1* , Yucheol Cho 2* 1Korea Advanced Institute of Science and Technology (KAIST), 2Hanbat National University 
+
+{mc.kang,pkhpjhs,52tjdud,bedro1210,daeshik }@kaist.ac.kr; yccho@hanbat.ac.kr 
+
+## Abstract 
+
+Post-training quantization (PTQ) compresses large vision-language models (LVLMs) by calibrating quantization pa-rameters on a small dataset without retraining. How-ever, despite increasingly sophisticated calibration strate-gies, prior methods suffer substantial performance degra-dation under low-bit weight–activation quantization. To un-derstand this degradation, we locate where quantization er-ror is concentrated and examine the corresponding weight and activation distributions. We observe that a few outliers dominate the ranges shared by per-channel (PC) weights and per-token (PT) activations, leaving insufficient resolu-tion for most values and mapping many of them to zero. These findings motivate a shift in focus from calibration re-finement to the underlying quantization representation. We therefore present Rotate-and-Refine Quantization (RRQ) as a simple, effective baseline for LVLM PTQ, combining local Hadamard transforms with group quantization and efficient group-aware execution. Across 8 multimodal tasks and di-verse quantization settings, RRQ substantially outperforms baselines while reducing inference time and memory usage. At W4A4, it retains over 96% of full-precision performance on 8B models and over 99% on a 32B model, compared with less than 8% for these baselines. The source code is publicly available at https://github.com/kmc3661/RRQ .
+
+## 1. Introduction 
+
+Large language models (LLMs) have demonstrated strong language understanding and reasoning capabilities across diverse tasks [7, 11, 43]. Building on these capabilities, large vision-language models (LVLMs) connect visual en-coders to language models, enabling strong performance in visual question answering, captioning, and multimodal rea-soning [13, 27, 34]. However, these advances come with substantial computation and memory costs, motivating re-search on knowledge distillation [19, 29], token pruning and merging [6, 22, 38], and quantization [21, 54] to reduce      
+
+> *Equal correspondence: Daeshik Kim and Yucheol Cho. W4A8 W4A6 W4A4
+> 020 40 60 80 100
+> Mean retention (%)  99.55% 99.17% 98.16%
+> Qwen3-VL-8B
+> W4A8 W4A6 W4A4
+> 97.60% 97.29% 96.55%
+> LLaVA-OV1.5-8B
+> W4A8 W4A6 W4A4
+> 99.23% 99.26% 97.63%
+> InternVL3.5-8B
+> FP (100%) MBQ QIG MASQuant BFQ Ours
+
+Figure 1. Performance retention relative to full precision across 8 multimodal tasks on three 8B LVLMs [3, 5, 46], compared with state-of-the-art LVLM PTQ methods [20, 23, 28, 47]. 
+
+these costs while preserving performance. Among these approaches, post-training quantization (PTQ) offers a practical way to reduce computational and memory costs by quantizing weights and activations using only a small calibration set [36, 48]. Following its suc-cess in LLMs [17, 31, 48], recent work has extended PTQ to LVLMs by accounting for the different characteristics of visual and textual representations. For example, MBQ balances modality-wise reconstruction using gradient-based sensitivity [28], while QIG refines this treatment through token-level integrated gradients [47]. MASQuant com-bines modality-aware smoothing with cross-modal com-pensation [20], and BFQ adapts fitting strength to layer-and component-wise quantization effects [23]. Despite their increasingly fine-grained calibration strategies, perfor-mance retention still drops sharply as activation precision decreases, as shown in Fig. 1. To understand this degradation, we investigate where quantization error is concentrated and find that certain mod-ule types are particularly affected. Examining their weight and activation distributions reveals a few outliers with sub-stantially larger magnitudes than other weights within the same channel or other activations within the same token, as illustrated in Fig. 2. These outliers are particularly prob-lematic for existing methods [20, 23, 28, 47], which use per-channel (PC) weight and per-token (PT) activation quanti-zation. Because the weights within each channel and the activations within each token share a single quantization range, the outliers widen this range, leaving insufficient res-1arXiv:2611.32096v1 [cs.CV] 24 Nov 2026 q k v o gate up down  
+
+> −25 050 100
+> NLL recovery (%)  Attention MLP
+> Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B
+
+W4A8 q k v o gate up down  
+
+> −25 050 100
+> NLL recovery (%)  Attention MLP
+> Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B
+
+W4A4 −1 0 10500 2k                    
+
+> Count (√ scale)
+> 0.700%
+> −1 0102k 8k
+> Count (√ scale)
+> 0.106%
+> −1 0103k 10k
+> Count (√ scale)
+> 0.016%
+> −1 010500 2k
+> Count (√ scale)
+> 0.716%
+> −1 0102k 8k
+> Count (√ scale)
+> 2.262%
+> −1 0103k 10k
+> Count (√ scale)
+> 0.008%
+> −1 01
+> Normalized value
+> 0500 2k
+> Count (√ scale)
+> 0.667%
+> −1 01
+> Normalized value
+> 02k 8k
+> Count (√ scale)
+> 0.024%
+> −1 01
+> Normalized value
+> 03k 10k
+> Count (√ scale)
+> 0.016%
+> Weight Vision token Text token
+> Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B
+> Core (|value| ≤ 0.1) Tail (|value| > 0.1)
+
+(a) Quantization Sensitivity (b) Weight and Activation Distribution Figure 2. Outlier distributions in quantization-sensitive modules across three LVLMs [3, 5, 46]. (a) Recovery of the quantization-induced increase in negative log-likelihood (NLL) on 32 COCO image–caption pairs [32] when restoring one projection type at a time to FP weights and activations in a PC/PT-quantized baseline model. (b) Selected within-channel weight and within-token vision/text activation distributions in down projections, which yield the largest joint recovery in (a). Orange labels show the percentage of outliers whose magnitudes exceed 10% of each vector’s maximum absolute value. 
+
+olution for other values and mapping many of them to zero. Taken together, these observations point to the granular-ity of weight–activation quantization as a major bottleneck at low precision. Although modality-aware calibration can prioritize sensitive components, it remains constrained by the resolution available under PC/PT. Consequently, when many values already share the same quantization code, re-fining their relative importance alone cannot reliably pre-serve their distinctions. This motivates improving the un-derlying representation before further refining calibration strategies. We therefore present Rotate-and-Refine Quantization (RRQ), a simple, strong baseline that combines local Hadamard transforms [4] with group quantization [40, 53]. The Hadamard transform redistributes values within small feature blocks to reduce outlier-dominated ranges. Group quantization then accommodates residual range differences with group-specific scales, preserving finer resolution in groups without outliers. To make this finer representation efficient, we combine Hadamard transformation and activa-tion quantization in a single kernel to reduce memory traffic, and integrate group-wise corrections into integer accumula-tion to reduce computation overhead. With these improvements in representation and execu-tion, our baseline uses only a basic reconstruction-based scale search for calibration. It substantially outperforms prior LVLM PTQ methods across diverse quantization set-tings on 8 multimodal tasks. At W4A4, it retains over 96% of full-precision performance on three 8B models and 99.06% on a 32B model, with time and memory savings comparable to PC/PT. Our contributions are: • We identify outlier-dominated PC/PT ranges as a key bot-tleneck behind low-bit performance collapse in LVLMs. • We establish a strong baseline combining Hadamard transforms, group quantization, and efficient execution with simple calibration. • We demonstrate strong performance retention and effi-ciency across diverse LVLMs and multimodal tasks. 
+
+## 2. Related work 
+
+2.1. Vision-language models 
+
+LVLMs integrate LLMs [25, 52] with pretrained vision en-coders [15, 37] through learned connectors. Models such as Flamingo [2], LLaVA [34], and InstructBLIP [13], along with subsequent LVLM families [10, 26, 45], support mul-timodal understanding and instruction following. These ad-vances rely on large language backbones and additional vi-sual tokens, increasing memory and computational costs. 
+
+2.2. Post-training quantization for LVLMs 
+
+LLM PTQ includes weight-only and weight–activation quantization. Weight-only quantization methods use er-ror compensation [17] or activation-aware scaling [31]. Weight–activation quantization reduces error through mixed precision [14], fine-grained quantization [49], acti-vation smoothing [48], learnable scaling and clipping [39], Hadamard rotations [4], and rotations with permuta-tions [30]. Efficient kernels support group quantization [53] and progressive quantization [33]. For LVLMs, Q-VLM [44] models cross-layer dependen-cies to guide quantization. MBQ [28] balances modal-2−1 0 103k 10k 
+
+> Count (√) Zero bin ±Δ/2
+
+−7 0 703k 10k 
+
+> Count (√)
+
+98.27% at zero 
+
+−1 0 103k 10k 
+
+> Count (√)
+
+−7 0 703k 10k 
+
+> Count (√)
+
+99.71% at zero 
+
+−1 0 1
+
+Normalized FP value 
+
+03k 10k 
+
+> Count (√)
+
+−7 0 7
+
+Integer code 
+
+03k 10k 
+
+> Count (√)
+
+99.98% at zero 
+
+−1 0 1Normalized FP value −7 07
+
+> Integer code
+> Maps to zero
+
+FP distribution INT4 distribution 
+
+Weight Vision token Text token 
+
+4-bit quantization   
+
+> Δ: quantization step Figure 3. Zero-bin collapse under per-channel weight and per-token activation quantization. The examples show 4-bit quantization of Qwen3-VL [5] weight and activation distributions in Fig. 2(b). Most values within each weight channel or vision/text token map to zero.
+
+ity sensitivity, QIG [47] estimates token sensitivity us-ing integrated gradients, and MASQuant [20] combines modality-aware smoothing with cross-modal compensation. BFQ [23] balances fitting effort using component sensi-tivity. In contrast, we mitigate low-bit quantization loss with Hadamard transforms, group quantization, and uni-form channel-wise equalization (CWE) scale search, with-out modality-specific calibration. 
+
+## 3. Method 
+
+3.1. Preliminaries 
+
+Channel-wise equalization (CWE) is widely used [20, 23, 28, 47] to reduce quantization error by rescaling weights and activations. For a linear layer with activations X and weights W , it applies a diagonal scale D as XD = XD −1
+
+and WD = W D . This preserves XW T while changing quantization error. We form candidate set D from nor-malized powers of channel-wise mean absolute activations, with uniformly spaced exponents in [0 , 1] , and select 
+
+D∗ = arg min 
+
+> D∈D
+
+MAE  QA(XD )QW (WD )T, XW T . (1) Here QA and QW return dequantized activation and weight values, and MAE denotes mean absolute error. 
+
+3.2. Motivation 
+
+Existing post-training quantization (PTQ) methods for large vision-language models (LVLMs) [20, 23, 28, 47] em-ploy complex modality-aware calibration strategies, yet suf-fer substantial performance degradation under low-bit per-channel (PC) weight and per-token (PT) activation quanti-zation. To investigate this limitation, we use uniform CWE search as a basic calibration baseline for PC/PT quantiza-tion on 3 recent LVLMs [3, 5, 46] with different archi-tectures. We restore the weights and input activations of each projection type to full precision across all layers, while keeping the other projections quantized. On 32 randomly sampled COCO image–caption pairs [32], we measure how much this restoration reduces the increase in reference-response negative log-likelihood (NLL) relative to the full-precision model. As shown in Fig. 2(a), restoring only the down projections recovers over 90% of this NLL increase in all three models at W4A4, identifying these modules as a major source of degradation in this setting. Figure 2(b) examines selected distributions in these modules: weights within the same output channel and ac-tivations within the same vision or text token. Although 97.7–99.99% of values lie within 10% of each vector’s maximum absolute value, a few outliers extend the range far beyond this dense core. Under PC/PT quantization, these outliers determine the range shared by all values in the channel or token. For a vector v with entries vi,symmetric b-bit quantization uses a nominal step ∆( v) = max i |vi|/(2 b−1 − 1) . An outlier-driven increase in ∆( v)
+
+therefore sacrifices resolution for the small values, with those satisfying |vi| < ∆( v)/2 rounding to zero. Figure 3 shows this effect when 4-bit PC/PT quantization is applied to the Qwen3-VL examples in Fig. 2(b): 98.27% of weights and 99.71%/99.98% of vision/text activations map to zero. These observations identify outlier-driven loss of quanti-zation resolution within weight channels and activation to-kens as a major contributor to low-bit LVLM degradation. To address this limitation, we combine Hadamard trans-forms with group quantization in an integrated pipeline that preserves finer resolution with efficient execution. 
+
+3.3. Rotate-and-Refine Quantization 
+
+Hadamard transform. To reduce outlier-dominated ranges, we apply local Hadamard transforms [4]. Figure 4 illustrates their effects on an outlier group ( g2) and outlier-free groups ( g1, g 3, g 4). Within each block of h input fea-30 128 256 384 512 03.5                                       
+
+> g1
+> Δ ≈ 0.5
+> g2
+> Δ ≈ 0.5
+> g3
+> Δ ≈ 0.5
+> g4
+> Δ ≈ 0.5
+> Outlier
+> −0.2 00.2
+> Count  Δ ≈ 0.5
+> −0.8 00.8
+> Value
+> Count  Δ ≈ 0.5
+> 0128 256 384 512 0.69 3.5
+> g1
+> Δ ≈ 0.1
+> g2
+> Δ ≈ 0.1
+> g3
+> Δ ≈ 0.1
+> g4
+> Δ ≈ 0.1
+> All values spread locally
+> −0.2 00.2
+> Δ ≈ 0.1
+> −0.8 00.8
+> Value
+> Δ ≈ 0.1
+> 0128 256 384 512 0.69 3.5
+> g1
+> Δ ≈ 0.025
+> g2
+> Δ ≈ 0.1
+> g3
+> Δ ≈ 0.017
+> g4
+> Δ ≈ 0.017
+> −0.2 00.2
+> Δ ≈ 0.025
+> −0.8 00.8
+> Value
+> Δ ≈ 0.1
+
+Input values Outlier-free group ( g1)Outlier group ( g2)
+
+(a) Original (b) Hadamard transform (c) Hadamard transform + Group quantization    
+
+> Maps to zero Quantization levels ΔQuantization step
+
+Figure 4. Local Hadamard transform and group quantization. Based on an activation sample from Fig. 2, the illustration shows how local Hadamard transforms and group quantization affect an outlier group ( g2) and outlier-free groups ( g1, g 3, g 4). (a) Outliers cause coarse per-channel/per-token quantization. (b) Hadamard redistributes values locally, but a shared step remains coarse for outlier-free groups. (c) Group-specific scales refine their resolution. The middle and bottom rows illustrate g1 and g2, respectively. 
+
+tures, Hh applies an orthogonal rotation: 
+
+exj = 1
+
+√h
+
+> h
+
+X
+
+> k=1
+
+skj xk, skj ∈ {− 1, +1 }. (2) Here, skj determines the signs. Each input contributes 
+
+±xk/√h to every output, spreading its influence across the block. We apply R = diag( Hh, . . . , H h) to both rescaled operands and compute quantization scales from XD R and 
+
+WD R. Orthogonality preserves their full-precision product, 
+
+(XD R)( WD R)T = XW T, without an inverse transform. 
+
+Group quantization. As shown in Fig. 4(b), the out-lier group can still dominate the shared PC/PT range after Hadamard transformation, leaving an overly coarse step for outlier-free groups. We therefore divide each transformed weight row and activation token into groups of G features and assign group-specific scales [12, 53], adapting resolu-tion to each local distribution as shown in Fig. 4(c). Activa-tion values in each group are quantized as 
+
+∆g = max  
+
+> k∈g
+
+|zk|/Q a, ˆzk = ∆ g qk,qk = clip(round( zk/∆g ), −2ba−1, Q a).
+
+(3) where zk is an activation in group g, ba is its bitwidth, and 
+
+Qa = 2 ba−1 − 1. The step ∆g maps values to codes qk
+
+and reconstructions ˆzk; clip clamps to the specified bounds. Weights use group-affine quantization: 
+
+uk = clip(round( wk/s g ) + zg , 0, 2bw − 1) ,
+
+ˆwk = sg (uk − zg ). (4) where wk is a transformed weight, bw its bitwidth, sg the group scale, and zg the integer zero point. Here uk, ˆwk de-note codes and reconstructions. With Hadamard transformation and group quantization incorporated into calibration, we use a uniform CWE search to select the scale that minimizes output reconstruction error for each quantized layer. 
+
+3.4. Efficient group-aware execution 
+
+Although RRQ mitigates outlier-induced quantization er-ror, its online Hadamard transformation and group-specific scale handling introduce runtime overhead. For activation preparation, we fuse Hadamard transformation, group quan-tization, and packing into one kernel, producing packed ac-tivation codes and group-scale metadata for the subsequent linear operation. This avoids writing and rereading separate transformed-activation and unpacked-code buffers. Using these packed activations, our dedicated decode matrix–vector multiplication (GEMV) kernel computes weight–activation products with group corrections inte-grated into integer accumulation. To enable this computa-tion, we combine weight encoding inspired by QServe [33] with token-anchored activation scales: 
+
+ˆwok = co(mog uok + bog ), ˆxtk = αtμtg qtk . (5) Here, t, o, k index tokens, output channels, and input chan-nels ( k ∈ g). Weight/activation codes uok , q tk use integer multipliers mog , μ tg and weight offsets bog . Channel/token scales co, α t are shared across groups. To integrate group-wise corrections into integer accumulation, we compute 
+
+Ptog = X
+
+> k∈g
+
+qtk uok , Stg = X
+
+> k∈g
+
+qtk . (6) 4Table 1. Results on 3 8B LVLMs [3, 5, 46] across 8 tasks. Ret.: mean FP retention. Bold: best quantized results. 
+
+Model Bits Method AI2D ChartQA MMStar MMMU TextVQA VizWiz NoCaps TextCaps Ret. (%) 
+
+Qwen3-VL-8B 
+
+FP16 – 83.94 85.32 67.20 60.00 83.78 69.33 65.09 82.15 100.00 W4A8 MBQ [28] 76.59 78.80 62.00 52.67 77.68 67.93 61.23 78.69 93.02 QIG [47] 76.78 77.24 59.60 48.67 76.06 66.99 60.21 77.26 90.72 MASQuant [20] 79.31 80.32 63.67 50.11 77.77 64.56 64.31 75.58 92.95 BFQ [23] 78.30 79.08 63.80 53.56 77.93 68.90 59.56 79.25 93.82 
+
+Ours 82.80 84.32 67.13 58.67 82.90 70.42 65.23 82.60 99.55 
+
+W4A6 MBQ [28] 68.81 66.96 54.13 44.67 70.81 62.62 59.86 77.86 84.63 QIG [47] 64.28 62.24 50.87 40.33 68.57 61.44 51.61 75.11 79.21 MASQuant [20] 74.51 57.60 55.27 45.67 59.24 58.33 58.00 69.33 80.37 BFQ [23] 69.30 63.96 52.13 42.00 71.87 64.55 53.42 70.41 81.47 
+
+Ours 82.06 84.76 67.13 58.56 82.67 69.25 65.16 82.25 99.17 
+
+W4A4 MBQ [28] 0.58 0.00 0.47 2.00 0.00 0.00 0.02 0.14 0.61 QIG [47] 2.14 0.00 1.33 2.11 0.00 0.00 0.02 0.14 1.03 MASQuant [20] 0.36 0.00 0.13 0.56 0.00 0.00 0.00 0.00 0.20 BFQ [23] 1.85 0.00 0.93 1.11 0.00 0.00 0.02 0.10 0.70 
+
+Ours 81.19 82.68 65.53 56.67 82.06 68.54 65.50 84.01 98.16 LLaVA-OV1.5-8B 
+
+FP16 – 84.36 86.48 68.20 56.11 80.09 66.10 111.44 145.01 100.00 W4A8 MBQ [28] 79.95 74.88 61.60 47.00 64.00 54.30 89.36 112.71 84.43 QIG [47] 79.27 80.96 61.07 49.56 71.26 57.02 84.86 118.35 87.31 MASQuant [20] 75.19 68.48 62.67 46.44 60.06 49.05 97.79 107.74 81.78 BFQ [23] 80.38 81.24 61.60 49.11 73.01 58.17 92.15 121.60 89.10 
+
+Ours 83.58 85.68 66.73 53.44 79.35 64.03 109.75 137.95 97.60 
+
+W4A6 MBQ [28] 63.60 44.32 57.47 39.11 46.08 30.33 4.68 88.80 56.18 QIG [47] 73.02 75.52 57.73 42.00 64.26 54.86 27.49 81.42 72.18 MASQuant [20] 58.32 46.88 53.07 35.89 32.84 36.11 75.13 36.07 56.63 BFQ [23] 76.17 76.16 56.07 41.89 68.18 56.20 78.78 91.14 79.86 
+
+Ours 83.35 85.48 66.07 53.22 79.48 63.10 110.16 138.36 97.29 
+
+W4A4 MBQ [28] 1.30 0.00 3.87 26.78 0.00 0.00 0.03 0.09 6.88 QIG [47] 2.20 0.00 4.80 26.33 0.00 0.00 0.04 0.09 7.08 MASQuant [20] 1.55 0.00 4.53 25.22 0.00 0.00 0.04 0.09 6.69 BFQ [23] 1.36 0.00 4.20 25.56 0.00 0.00 0.02 0.05 6.67 
+
+Ours 83.16 85.32 64.80 53.56 78.62 62.81 109.00 135.82 96.55 InternVL3.5-8B 
+
+FP16 – 82.29 86.56 68.33 57.78 78.07 58.14 117.57 120.99 100.00 W4A8 MBQ [28] 79.57 83.80 63.93 50.67 71.15 53.33 104.36 109.20 92.08 QIG [47] 77.82 82.88 62.13 49.33 70.88 53.16 105.38 104.36 90.59 MASQuant [20] 79.08 84.40 63.47 49.33 69.62 51.26 108.31 99.67 90.46 BFQ [23] 78.43 83.88 62.80 53.00 70.83 55.42 106.08 103.60 92.22 
+
+Ours 81.38 86.48 66.73 57.56 77.34 58.05 117.32 119.84 99.23 
+
+W4A6 MBQ [28] 75.74 81.00 58.13 41.56 65.54 46.39 93.88 94.70 83.04 QIG [47] 73.09 78.36 57.33 41.44 64.31 49.82 97.73 96.80 83.25 MASQuant [20] 75.94 81.88 59.53 45.22 68.13 42.19 100.66 100.25 85.05 BFQ [23] 74.06 79.96 56.60 40.33 66.38 52.95 98.97 99.10 84.63 
+
+Ours 81.06 87.04 67.40 55.67 77.30 59.21 117.13 120.69 99.26 
+
+W4A4 MBQ [28] 0.97 0.08 1.33 1.11 0.01 0.02 0.01 0.10 0.66 QIG [47] 0.45 0.00 1.07 1.78 0.00 0.00 0.01 0.03 0.65 MASQuant [20] 0.49 0.00 0.00 0.22 0.00 0.00 0.01 0.02 0.13 BFQ [23] 0.58 0.00 0.27 1.00 0.00 0.00 0.01 0.05 0.36 
+
+Ours 80.28 86.36 65.00 55.56 76.23 57.70 116.45 116.80 97.63 
+
+Ptog denotes the code dot product and Stg the activation-code sum. Group correction and output reconstruction give 
+
+Atog = μtg (mog Ptog + bog Stg ),
+
+ˆyto = X
+
+> k
+
+ˆxtk ˆwok = αtco
+
+X
+
+> g
+
+Atog . (7) Here, Atog is the corrected group contribution and ˆyto the reconstructed output. Corrections are fused with integer ac-cumulation before applying the common scale. Further im-plementation details and additional runtime optimizations are described in the supplementary material. 5Table 2. Qwen3-VL-32B [5] results across 8 multimodal tasks. Ret.: mean FP retention.                                                                                                                                                             
+
+> Model Bits Method AI2D ChartQA MMStar MMMU TextVQA VizWiz NoCaps TextCaps Ret. (%)
+> Qwen3-VL-32B
+> FP16 –86.72 87.32 73.13 64.22 83.70 71.21 69.80 94.31 100.00 W4A8 MBQ [28] 84.68 85.28 70.87 62.33 80.25 69.02 64.62 90.38 96.31 QIG [47] 84.42 83.28 70.87 63.44 80.03 68.27 64.35 90.69 96.03 MASQuant [20] 85.01 84.32 71.33 61.44 81.18 69.28 67.55 92.18 97.07 BFQ [23] 84.88 85.12 70.53 63.44 80.65 69.22 63.87 87.59 96.07
+> Ours 86.24 87.12 72.07 63.11 82.89 71.81 71.39 95.41 99.92
+> W4A6 MBQ [28] 83.23 81.56 68.00 60.00 77.66 64.96 61.95 87.74 92.70 QIG [47] 79.79 74.76 63.73 49.44 74.94 63.23 58.78 81.06 86.28 MASQuant [20] 16.71 21.96 27.47 20.11 39.83 36.86 46.68 62.67 43.25 BFQ [23] 81.35 79.64 66.13 57.33 76.87 62.94 60.23 82.45 89.83
+> Ours 86.37 86.84 71.53 64.00 83.09 71.76 71.63 95.08 100.00
+> W4A4 MBQ [28] 0.65 0.04 0.47 0.67 0.00 0.00 0.01 0.04 0.32 QIG [47] 1.75 0.00 1.20 2.11 0.00 0.00 0.03 0.14 0.89 MASQuant [20] 0.26 0.00 0.40 0.56 0.00 0.00 0.01 0.04 0.22 BFQ [23] 0.65 0.00 0.60 0.78 0.02 0.00 0.02 0.07 0.36
+> Ours 85.46 86.08 72.13 62.78 82.40 70.53 71.00 94.08 99.06
+
+Table 3. W4A4 LLM PTQ comparison: 8-task retention (%) on 8B LVLMs [3, 5, 46] and Qwen3-VL generation time. †Atom uses INT8 weights and activations for 128 outlier channels.                                       
+
+> Method Qwen3-VL LLaVA-OV1.5 InternVL 3.5 Mean Time (s) ↓
+> FP (BF16) 100.00 100.00 100.00 100.00 3.75 SmoothQuant [48] 1.42 7.21 0.57 3.07 2.77 OmniQuant [39] 3.43 8.30 10.70 7.48 2.96 QuaRot [4] 93.95 90.91 95.36 93.41 3.26 DuQuant [30] 94.96 95.28 96.55 95.60 3.16 Atom [53] †96.79 96.29 97.25 96.78 5.45
+> Ours 98.16 96.55 97.63 97.45 2.50
+
+Table 4. W4A4 component ablation on three LVLMs [3, 5, 46]: 4-task retention (%). H: Hadamard transform; W/A: group quantiza-tion for weights/activations. Disabled W/A retain per-channel/per-token quantization.                                                                
+
+> ID HWAQwen3-VL LLaVA-OV1.5 InternVL3.5 Mean 1✗✗✗0.88 12.40 0.48 4.59 2✗✓✗1.63 12.37 0.52 4.84 3✗✗✓62.89 66.86 76.19 68.65 4✗✓✓91.39 92.30 91.09 91.59 5✓✗✗85.04 85.67 85.13 85.28 6✓✓✗87.56 91.03 90.61 89.73 7✓✗✓96.37 96.54 94.75 95.89 8✓✓✓97.18 97.62 98.13 97.64
+
+## 4. Experiments 
+
+4.1. Experimental setup 
+
+Implementation details. We randomly sample 128 COCO [32] image–caption pairs from ShareGPT4V [8] to calibrate all methods. We set Hadamard block size h = 32 
+
+and quantization group size G = 128 for our method. All experiments use an NVIDIA RTX A6000 GPU, except 32B experiments on an RTX PRO 6000. 
+
+Datasets, models, and baselines. We evaluate Qwen3-VL-8B/32B [5], LLaVA-OneVision-1.5-8B [3], and InternVL3.5-8B [46] on question answering (QA) tasks (AI2D [24], ChartQA [35], MMStar [9], MMMU [50], TextVQA [42], and VizWiz [18]) and open-ended gener-ation tasks (NoCaps [1] and TextCaps [41]). We report task scores and mean full-precision (FP) performance retention (%). Main results use all 8 tasks; ablations use AI2D, ChartQA, MMMU, and NoCaps. We compare with MBQ [28], QIG [47], MASQuant [20], and BFQ [23] using their official implementations and calibration policies. 
+
+4.2. Comparison with existing approaches 
+
+Table 1 shows post-training quantization (PTQ) results on three 8B large vision-language models (LVLMs) across 8 tasks. Our method substantially outperforms state-of-the-art LVLM PTQ methods across all evaluated quantization settings. In particular, at W4A4, the compared methods suf-fer near-total performance collapse, retaining less than 8% of FP performance, whereas ours preserves 96.55–98.16% across the three models. Furthermore, Table 2 shows even higher mean retention on Qwen3-VL-32B, exceeding 99% across all evaluated quantization settings. Rotation and group quantization are widely used to mit-igate outliers in LLM PTQ. To assess their effectiveness in LVLMs, we compare our method with SmoothQuant [48] and OmniQuant [39] as scaling-based methods, rotation-based QuaRot [4] and DuQuant [30], and Atom [53], which combines group quantization with mixed-precision outlier handling. For fair speed comparisons, all methods retain their quantization policies and official low-bit kernels but 6020 40 60 PC Group Group + Hadamard  
+
+> 020 40
+
+PT Group Group + Hadamard    
+
+> 010 20 30
+
+Layer index  
+
+> 025 50
+
+PT    
+
+> 010 20 30
+
+Layer index 
+
+Group    
+
+> 010 20 30
+
+Layer index 
+
+Group + Hadamard  
+
+> 020 40 60
+
+PC Group Group + Hadamard  
+
+> 050 100
+
+PT Group Group + Hadamard    
+
+> 010 20 30
+
+Layer index  
+
+> 050 100
+
+PT    
+
+> 010 20 30
+
+Layer index 
+
+Group    
+
+> 010 20 30
+
+Layer index 
+
+Group + Hadamard 
+
+W4A8 
+
+> Newly zeroed (%)
+
+Weight Vision Text 
+
+W4A4 
+
+Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B Figure 5. Percentages of nonzero weights and activations mapped to zero by quantization in each layer at W4A8 (left) and W4A4 (right). 
+
+run within our optimized runtime with the same output length. Timing is measured on Qwen3-VL-8B on 25 sam-ples each from AI2D and NoCaps. Table 3 shows substan-tially higher W4A4 retention for rotation- and group-based methods than the LVLM PTQ baselines in Tab. 1. How-ever, their speed gains remain limited despite the optimized runtime, and mixed-precision Atom is slower than FP. Our method achieves the highest mean retention while reducing generation time by 15.3–54.0% relative to these baselines. 
+
+4.3. Ablation study 
+
+We evaluate how weight grouping, activation grouping, and Hadamard transforms affect performance retention across three LVLMs [3, 5, 46]. Table 4 shows that all three components substantially improve performance. Since per-channel (PC) weight and per-token (PT) activation quan-tization causes severe information loss in both weights and activations, redistributing values with Hadamard transforms alone yields substantial recovery. Without Hadamard trans-forms, strong performance retention is achieved only when both weights and activations are group-quantized. Com-bining all three components achieves the best performance across models. Furthermore, we investigate how our method re-duces quantization-induced information loss throughout the model. We collect layerwise weight distributions and acti-vations on 32 image–caption pairs randomly drawn from the same dataset, excluding calibration samples. Fig-ure 5 shows the fraction of nonzero weights and activa-tions mapped to zero by quantization in each layer. At W4A8, activations in early layers show high zero-mapping rates despite their 8-bit precision, and weights also exhibit pronounced zero mapping in these layers. At W4A4, a large fraction of activation values is mapped to zero across all layers, confirming that the outlier-induced information 025 50 75 100            
+
+> Range (%)
+> Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B
+> PC / PT GG + H
+> 025 50 75 100
+> Newly zeroed (%)
+> PC / PT GG + H PC / PT GG + H
+> Weight Vision Text
+
+Figure 6. Quantization ranges and newly-zeroed values at W4A4. Ranges relative to PC/PT (top) and percentages of nonzero values quantized to zero (bottom) for weights and vision/text acti-vations. G: group quantization; H: Hadamard transform. PC sym. Gsym. Gaffine                  
+
+> Weight quant.
+> PT GG + H
+> Act. quant.  9.364 8.247 8.263 1.463 1.236 1.189 1.155 1.230 1.140
+> PC sym. Gsym. Gaffine
+> Weight quant.
+> 9.597 8.410 8.400 1.396 1.047 0.990 1.002 0.777 0.752
+> PC sym. Gsym. Gaffine
+> Weight quant.
+> 10.267 10.348 9.579 1.024 0.990 0.966 0.960 0.908 0.884
+> 0.75 1.80 4.32 10.35
+> NLL
+> Qwen3-VL-8B
+> FP NLL: 1.148
+> LLaVA-OV1.5-8B
+> FP NLL: 0.614
+> InternVL3.5-8B
+> FP NLL: 0.844
+
+Figure 7. Token-weighted negative log-likelihood (NLL) on 128 calibration examples at W4A4. Columns vary weight representa-tion and rows vary activation representation. The Hadamard row transforms both operands. 
+
+loss identified in Sec. 3.2 occurs throughout the models. Across both settings, group quantization reduces zero map-ping, while adding Hadamard transforms keeps it consis-tently low across layers. These reductions demonstrate that our method effectively mitigates outliers and limits quantization-induced information loss. 7Table 5. Calibration strategy comparison at W4A4: 4-task reten-tion (%) on three LVLMs [3, 5, 46]. Only the calibration strategy changes; all other settings are identical to our method.                     
+
+> Method Qwen3-VL LLaVA-OV1.5 InternVL3.5 Mean MBQ [28] 96.62 99.14 96.69 97.48 QIG [47] 96.23 97.84 98.22 97.43 BFQ [23] 96.32 97.45 98.04 97.27 Uniform 97.18 97.62 98.13 97.64
+> Table 6. W4A4 group-size (G) and Hadamard-size (H) ablations. Retention averages 4 tasks over three models [3, 5, 46]. G varies at H32 and H at G128. Costs are measured on Qwen3-VL-8B.
+
+Metric G64 G128 G256 Mean retention (%) ↑ 98.30 97.64 97.04 Prefill (ms) ↓ 149.15 114.28 105.73 Peak allocated (GiB) ↓ 7.332 7.232 7.181 Metric H16 H32 H64 Mean retention (%) ↑ 97.41 97.64 97.13 Figure 6 summarizes quantization ranges and zero-mapping rates across decoder weights and vision/text acti-vations at W4A4 on the same samples. Group quantization narrows the ranges and reduces zero mapping, with further reductions from Hadamard transforms. To evaluate the resulting improvement in prediction quality, Figure 7 compares response-token negative log-likelihood (NLL) on the 128 calibration image–caption pairs. Combining group quantization and Hadamard trans-forms reduces NLL from 9.36–10.27 under PC/PT to 0.75– 1.14, approaching the corresponding FP levels of 0.61– 1.15. The near-FP NLL values demonstrate a substantial reduction in quantization-induced prediction error. To assess whether more complex calibration offers ben-efits over uniform search, we replace our uniform channel-wise equalization (CWE) scale search with alternative cali-bration strategies, keeping all other settings unchanged. Ta-ble 5 shows that uniform search matches or slightly exceeds their mean retention. These results suggest that once quan-tization error is reduced, complex calibration strategies pro-vide no consistent performance gains while increasing cali-bration cost. We also evaluate the choice of group and Hadamard block sizes. Table 6 shows that smaller groups improve mean retention but require scale computation for more groups, particularly increasing prefill cost. We therefore se-lect G128 to balance accuracy and cost, and select H32 for its highest mean retention.                     
+
+> Table 7. W4A4 full-calibration wall time on 8B models [3, 5, 46].
+> Calibration time (min) Method Qwen3-VL LLaVA-OV1.5 InternVL3.5 MBQ [28] 39.96 48.18 250.76 QIG [47] 73.82 89.84 432.41 BFQ [23] 52.90 62.33 246.06 MASQuant [20] 260.04 260.73 294.95
+> Ours 23.88 27.37 130.30
+> Table 8. W4A4 inference costs on Qwen3-VL-8B [5]. Parentheses show changes from BF16. Group+H is a direct implementation without the proposed execution optimizations. PC/PT and Ours use optimized execution.
+
+Method Generation time (s) ↓ Peak allocated (GiB) ↓
+
+FP (BF16) 3.75 16.86 Group+H 11.86 ( ↑216.30%) 7.29 ( ↓56.77%) PC/PT 2.42 ( ↓35.31%) 7.13 ( ↓57.72%) Ours 2.50 ( ↓33.18%) 7.23 ( ↓57.12%) 
+
+4.4. Cost Analysis 
+
+To evaluate the efficiency of our pipeline, we compare the calibration cost of our uniform CWE scale search with other LVLM PTQ methods on the same 128 calibration sam-ples. Table 7 reports the total elapsed time at W4A4, in-cluding loading, preprocessing, calibration, and packing. Our method reduces calibration time by approximately 40– 91% relative to LVLM PTQ baselines across the three mod-els, avoiding their additional modality-sensitivity analysis. These results highlight the advantages of our method in ac-curacy, simplicity, and calibration efficiency. We then evaluate whether the execution optimizations preserve the efficiency benefits of low-bit quantization. Ta-ble 8 compares generation time and peak allocated memory on Qwen3-VL-8B at W4A4, using 25 randomly selected samples each from AI2D and NoCaps. Group + Hadamard denotes a direct implementation of local Hadamard trans-forms and group quantization without our proposed group-aware execution optimizations. For a fair comparison, PC/PT and our method run under the same optimized run-time settings. Although the direct Group + Hadamard im-plementation reduces memory, it increases generation time relative to full precision. Our optimized execution instead reduces generation time by 33.18% and peak memory by 57.12%, achieving savings comparable to optimized per-channel weight and per-token activation quantization. Ad-ditional measurement details, results, and code for repro-ducing our experiments are included in the supplementary material. 85. Conclusion 
+
+In this paper, we show that outliers severely limit the precision of per-channel weight and per-token activation quantization in LVLMs. To address this issue, we in-troduce Rotate-and-Refine Quantization, combining local Hadamard transforms and group quantization with efficient group-aware execution. Across 8 multimodal tasks and 8B/32B models, it substantially improves performance re-tention with simple calibration with time and memory sav-ings. Our results emphasize accurate quantization represen-tations and efficient execution over increasingly complex calibration. 
+
+## References 
+
+[1] Harsh Agrawal, Karan Desai, Yufei Wang, Xinlei Chen, Rishabh Jain, Mark Johnson, Dhruv Batra, Devi Parikh, Ste-fan Lee, and Peter Anderson. Nocaps: Novel object caption-ing at scale. In 2019 IEEE/CVF International Conference on Computer Vision (ICCV) , pages 8947–8956. IEEE, 2019. 6, 17 [2] Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, Antoine Miech, Iain Barr, Yana Hasson, Karel Lenc, Arthur Men-sch, Katherine Millican, Malcolm Reynolds, et al. Flamingo: a visual language model for few-shot learning. Advances in neural information processing systems , 35:23716–23736, 2022. 2 [3] Xiang An, Yin Xie, Kaicheng Yang, Wenkang Zhang, Xiuwei Zhao, Zheng Cheng, Yirui Wang, Songcen Xu, Changrui Chen, Didi Zhu, et al. Llava-onevision-1.5: Fully open framework for democratized multimodal train-ing. arXiv preprint arXiv:2509.23661 , 2025. 1, 2, 3, 5, 6, 7, 8, 13 [4] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alis-tarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural In-formation Processing Systems , 37:100213–100240, 2024. 2, 3, 6 [5] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, et al. Qwen3-vl technical report. arXiv preprint arXiv:2511.21631 , 2025. 1, 2, 3, 5, 6, 7, 8, 13 [6] Daniel Bolya, Cheng-Yang Fu, Xiaoliang Dai, Peizhao Zhang, Christoph Feichtenhofer, and Judy Hoffman. To-ken merging: Your vit but faster. arXiv preprint arXiv:2210.09461 , 2022. 1 [7] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Sub-biah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakan-tan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Lan-guage models are few-shot learners. Advances in neural in-formation processing systems , 33:1877–1901, 2020. 1 [8] Lin Chen, Jinsong Li, Xiaoyi Dong, Pan Zhang, Conghui He, Jiaqi Wang, Feng Zhao, and Dahua Lin. Sharegpt4v: Improving large multi-modal models with better captions. In 
+
+European Conference on Computer Vision , pages 370–387. Springer, 2024. 6 [9] Lin Chen, Jinsong Li, Xiaoyi Dong, Pan Zhang, Yuhang Zang, Zehui Chen, Haodong Duan, Jiaqi Wang, Yu Qiao, Dahua Lin, et al. Are we on the right way for evaluating large vision-language models? Advances in Neural Informa-tion Processing Systems , 37:27056–27087, 2024. 6, 15 [10] Zhe Chen, Jiannan Wu, Wenhai Wang, Weijie Su, Guo Chen, Sen Xing, Muyan Zhong, Qinglong Zhang, Xizhou Zhu, Lewei Lu, et al. Internvl: Scaling up vision foundation mod-els and aligning for generic visual-linguistic tasks. In Pro-ceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 24185–24198, 2024. 2 [11] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language modeling with pathways. Journal of machine learning research , 24(240): 1–113, 2023. 1 [12] Steve Dai, Rangha Venkatesan, Mark Ren, Brian Zimmer, William Dally, and Brucek Khailany. Vs-quant: Per-vector scaled quantization for accurate low-precision neural net-work inference. Proceedings of Machine Learning and Sys-tems , 3:873–884, 2021. 4 [13] Wenliang Dai, Junnan Li, Dongxu Li, Anthony Tiong, Junqi Zhao, Weisheng Wang, Boyang Li, Pascale N Fung, and Steven Hoi. Instructblip: Towards general-purpose vision-language models with instruction tuning. Advances in neural information processing systems , 36:49250–49267, 2023. 1, 2[14] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale. Advances in neural information pro-cessing systems , 35:30318–30332, 2022. 2 [15] Alexey Dosovitskiy. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929 , 2020. 2 [16] Stefan Elfwing, Eiji Uchibe, and Kenji Doya. Sigmoid-weighted linear units for neural network function approxima-tion in reinforcement learning. Neural networks , 107:3–11, 2018. 12 [17] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 , 2022. 1, 2 [18] Danna Gurari, Qing Li, Abigale J Stangl, Anhong Guo, Chi Lin, Kristen Grauman, Jiebo Luo, and Jeffrey P Bigham. Vizwiz grand challenge: Answering visual questions from blind people. In Proceedings of the IEEE conference on computer vision and pattern recognition , pages 3608–3617, 2018. 6, 16 [19] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distill-ing the knowledge in a neural network. arXiv preprint arXiv:1503.02531 , 2015. 1 [20] Lulu Hu, Wenhu Xiao, Xin Chen, Xinhua Xu, Bowen Xu, Kun Li, and Yongliang Tao. Masquant: Modality-aware smoothing quantization for multimodal large language mod-els. arXiv preprint arXiv:2603.04800 , 2026. 1, 3, 5, 6, 8, 13 
+
+9[21] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural net-works for efficient integer-arithmetic-only inference. In 
+
+2018 IEEE/CVF conference on computer vision and pattern recognition , pages 2704–2713. IEEE, 2018. 1 [22] Minchan Kang, Kyeonghye Park, Seoyoung Cho, Daeshik Kim, and Yucheol Cho. When text matters: Design prin-ciples for visual token pruning in vision-language model. 
+
+arXiv preprint arXiv:2609.34861 , 2026. 1 [23] Minchan Kang, Kyeonghye Park, Seungyeon Sa, Seoyoung Cho, Daeshik Kim, and Yucheol Cho. Beyond reconstruction loss in post-training quantization: Balanced fitting for large vision-language models. arXiv preprint arXiv:2609.34765 ,2026. 1, 3, 5, 6, 8, 13 [24] Aniruddha Kembhavi, Mike Salvato, Eric Kolve, Minjoon Seo, Hannaneh Hajishirzi, and Ali Farhadi. A diagram is worth a dozen images. In European conference on computer vision , pages 235–251. Springer, 2016. 6, 14 [25] Teven Le Scao, Angela Fan, Christopher Akiki, Ellie Pavlick, Suzana Ili´ c, Daniel Hesslow, Roman Castagn´ e, Alexandra Sasha Luccioni, Franc ¸ois Yvon, Matthias Gall´ e, et al. Bloom: A 176b-parameter open-access multilingual language model. arXiv preprint arXiv:2211.05100 , 2022. 2 [26] Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li, Hao Zhang, Kaichen Zhang, Peiyuan Zhang, Yanwei Li, Zi-wei Liu, et al. Llava-onevision: Easy visual task transfer. 
+
+arXiv preprint arXiv:2408.03326 , 2024. 2 [27] Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. Blip-2: Bootstrapping language-image pre-training with frozen image encoders and large language models. In In-ternational conference on machine learning , pages 19730– 19742. PmLR, 2023. 1 [28] Shiyao Li, Yingchun Hu, Xuefei Ning, Xihui Liu, Ke Hong, Xiaotao Jia, Xiuhong Li, Yaqi Yan, Pei Ran, Guohao Dai, et al. Mbq: Modality-balanced quantization for large vision-language models. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 4167–4177, 2025. 1, 2, 3, 5, 6, 8 [29] Xuanlin Li, Yunhao Fang, Minghua Liu, Zhan Ling, Zhuowen Tu, and Hao Su. Distilling large vision-language model with out-of-distribution generalizability. In Proceed-ings of the IEEE/CVF International Conference on Com-puter Vision , pages 2492–2503, 2023. 1 [30] Haokun Lin, Haobo Xu, Yichen Wu, Jingzhi Cui, Yingtao Zhang, Linzhan Mou, Linqi Song, Zhenan Sun, and Ying Wei. Duquant: Distributing outliers via dual transformation makes stronger quantized llms. Advances in Neural Infor-mation Processing Systems , 37:87766–87800, 2024. 2, 6 [31] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and accelera-tion. Proceedings of machine learning and systems , 6:87– 100, 2024. 1, 2 [32] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, Pietro Perona, Deva Ramanan, Piotr Doll´ ar, and C Lawrence Zitnick. Microsoft coco: Common objects in context. In 
+
+European conference on computer vision , pages 740–755. Springer, 2014. 2, 3, 6 [33] Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao, Chuang Gan, and Song Han. Qserve: W4a8kv4 quantization and system co-design for efficient llm serving. Proceedings of Machine Learning and Systems , 7, 2025. 2, 4, 12 [34] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual instruction tuning. Advances in neural information processing systems , 36:34892–34916, 2023. 1, 2 [35] Ahmed Masry, Do Long, Jiaqi Tan, Shafiq Joty, and Ena-mul Hoque. Chartqa: A benchmark for question answering about charts with visual and logical reasoning. In Findings of the Association for Computational Linguistics: ACL 2022 ,pages 2263–2279, 2022. 6, 14 [36] Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Chris-tos Louizos, and Tijmen Blankevoort. Up or down? adap-tive rounding for post-training quantization. In International conference on machine learning , pages 7197–7206. PMLR, 2020. 1 [37] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual models from natural language supervi-sion. In International conference on machine learning , pages 8748–8763. PmLR, 2021. 2 [38] Yongming Rao, Wenliang Zhao, Benlin Liu, Jiwen Lu, Jie Zhou, and Cho-Jui Hsieh. Dynamicvit: Efficient vision transformers with dynamic token sparsification. Advances in neural information processing systems , 34:13937–13949, 2021. 1 [39] Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Gao Peng, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally cal-ibrated quantization for large language models. In Inter-national Conference on Learning Representations , pages 45472–45496, 2024. 2, 6 [40] Sheng Shen, Zhen Dong, Jiayu Ye, Linjian Ma, Zhewei Yao, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. Q-bert: Hessian based ultra low precision quantization of bert. In Proceedings of the AAAI conference on artificial intelli-gence , pages 8815–8821, 2020. 2 [41] Oleksii Sidorov, Ronghang Hu, Marcus Rohrbach, and Amanpreet Singh. Textcaps: a dataset for image caption-ing with reading comprehension. In European conference on computer vision , pages 742–758. Springer, 2020. 6, 17 [42] Amanpreet Singh, Vivek Natarajan, Meet Shah, Yu Jiang, Xinlei Chen, Dhruv Batra, Devi Parikh, and Marcus Rohrbach. Towards vqa models that can read. In 2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 8309–8318. IEEE, 2019. 6, 16 [43] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timoth´ ee Lacroix, Baptiste Rozi` ere, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and efficient foundation language models. 
+
+arXiv preprint arXiv:2302.13971 , 2023. 1 
+
+10 [44] Changyuan Wang, Ziwei Wang, Xiuwei Xu, Yansong Tang, Jie Zhou, and Jiwen Lu. Q-vlm: Post-training quantization for large vision-language models. Advances in Neural Infor-mation Processing Systems , 37:114553–114573, 2024. 2 [45] Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhihao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, et al. Qwen2-vl: Enhancing vision-language model’s perception of the world at any resolution. arXiv preprint arXiv:2409.12191 , 2024. 2 [46] Weiyun Wang, Zhangwei Gao, Lixin Gu, Hengjun Pu, Long Cui, Xingguang Wei, Zhaoyang Liu, Linglin Jing, Shenglong Ye, Jie Shao, et al. Internvl3. 5: Advancing open-source multimodal models in versatility, reasoning, and efficiency. 
+
+arXiv preprint arXiv:2508.18265 , 2025. 1, 2, 3, 5, 6, 7, 8, 13 [47] Ziwei Xiang, Fanhu Zeng, Hongjian Fang, Rui-Qi Wang, Renxing Chen, Yanan Zhu, Yi Chen, Peipei Yang, and Xu-Yao Zhang. Fine-grained post-training quantization for large vision language models with quantization-aware integrated gradients. arXiv preprint arXiv:2603.17809 , 2026. 1, 3, 5, 6, 8 [48] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and effi-cient post-training quantization for large language models. In 
+
+International conference on machine learning , pages 38087– 38099. PMLR, 2023. 1, 2, 6 [49] Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xi-aoxia Wu, Conglong Li, and Yuxiong He. Zeroquant: Ef-ficient and affordable post-training quantization for large-scale transformers. Advances in neural information process-ing systems , 35:27168–27183, 2022. 2 [50] Xiang Yue, Yuansheng Ni, Kai Zhang, Tianyu Zheng, Ruoqi Liu, Ge Zhang, Samuel Stevens, Dongfu Jiang, Weiming Ren, Yuxuan Sun, et al. Mmmu: A massive multi-discipline multimodal understanding and reasoning benchmark for ex-pert agi. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 9556–9567, 2024. 6, 15 [51] Biao Zhang and Rico Sennrich. Root mean square layer nor-malization. Advances in neural information processing sys-tems , 32, 2019. 12 [52] Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. Opt: Open pre-trained trans-former language models. arXiv preprint arXiv:2205.01068 ,2022. 2 [53] Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis Ceze, Arvind Krishnamurthy, Tianqi Chen, and Baris Kasikci. Atom: Low-bit quantization for efficient and accurate llm serving. Proceedings of Machine Learning and Systems , 6:196–209, 2024. 2, 4, 6 [54] Shuchang Zhou, Yuxin Wu, Zekun Ni, Xinyu Zhou, He Wen, and Yuheng Zou. Dorefa-net: Training low bitwidth convo-lutional neural networks with low bitwidth gradients. arXiv preprint arXiv:1606.06160 , 2016. 1 
+
+11 Supplementary Material 
+
+## A. Quantization and runtime optimizations 
+
+This section provides implementation details supporting our quantization and efficient execution. We describe the cali-bration procedure, the weight and activation representations that enable integer group-wise computation, and the run-time optimizations used for inference. 
+
+A.1. Uniform scale search 
+
+For channel-wise equalization (CWE), we search 20 uni-formly spaced exponents to form candidate scales: 
+
+rj = j/ 19 , sk = max( arj 
+
+> k
+
+, 10 −4),sk ← sk/q(max  
+
+> l
+
+sl)(min  
+
+> l
+
+sl). (S1) Here j ∈ { 0, . . . , 19 }, ak is the mean absolute calibra-tion activation in input channel k, and sk is its equaliza-tion scale. Each candidate is evaluated with equalization, Hadamard transformation, and group quantization, includ-ing the weight refitting and activation multiplier constraints described below. This evaluates candidates under the rep-resentation used at inference. We then select the candidate with the lowest mean absolute output reconstruction error. 
+
+A.2. Weight representation and offline refitting 
+
+Weight representation. We use the QServe-compatible representation [33] ˆwogj = co(mog qogj + bog ), where o in-dexes output channels, g indexes input-channel groups, and 
+
+j indexes entries within a group. The four-bit codes satisfy 
+
+qogj ∈ { 0, . . . , 15 }, while the integer coefficients satisfy 
+
+mog ∈ { 1, . . . , 17 } and −128 ≤ bog ≤ 127 −15 mog . These bounds keep every expanded codebook value within signed INT8. Inference stores packed four-bit codes, UINT8 mul-tipliers, INT8 offsets, and FP16 row scales co.
+
+Offline refitting. The target Vogj is the weight recon-structed from affine group quantization after equalization and Hadamard transformation. A row-wise symmetric INT8 quantizer supplies co, which remains fixed during re-fitting. For each group, we minimize the normalized weight reconstruction error under the constraints above: 
+
+Eog = X
+
+> j
+
+
+
+mog qogj + bog − Vogj 
+
+co
+
+2
+
+. (S2) Starting from a range-based initialization, we perform three alternating updates: fit integer coefficients by rounding and constraining the least-squares solution for the current codes, then reassign the four-bit codes. Each group accepts an up-date only when its error decreases. Refitting is included in calibration-candidate evaluation; the selected codes and co-efficients are packed offline, with no iterative refitting dur-ing inference. 
+
+A.3. Token-anchored activation scales 
+
+For transformed activation xtk at token t, the symmet-ric quantization scale of group g, before imposing integer-multiplier constraints, is 
+
+stg = max  
+
+> k∈g
+
+|xtk |/(2 ba−1 − 1) , (S3) where ba ∈ { 4, 6, 8} is the activation bitwidth. To express these group scales as integer multiples of a common token scale, we round max g stg /8 upward to an FP16 token scale 
+
+αt and construct integer group multipliers: 
+
+μtg = clip( ⌈stg /α t⌉, 1, 8) ,qtk = clip 
+
+
+
+round xtk 
+
+αtμtg 
+
+, −2ba−1, 2ba−1 − 1
+
+
+
+,
+
+ˆxtk = αtμtg qtk .
+
+(S4) Here qtk is the signed activation code and ˆxtk its recon-struction. Activation quantization is symmetric, without ad-ditional learned clipping. We cap the integer group multi-plier at 8 to balance quantization accuracy and the range of INT32 accumulation, and use this construction across all evaluated activation bitwidths. 
+
+A.4. Execution and runtime optimizations 
+
+Our implementation combines general runtime optimiza-tions with RRQ-specific group-aware execution. The gen-eral optimizations include fusion of root mean square nor-malization (RMSNorm) [51] and sigmoid-weighted linear unit (SiLU) [16] operations where applicable, input reuse across compatible projections, and CUDA Graphs for de-coding. RRQ-specific execution instead fuses Hadamard transformation, group activation quantization, and pack-ing, and integrates group-wise corrections into integer accumulation with input-shape-specific execution paths. These mechanisms address the additional transformation and group-scale handling introduced by RRQ. The direct Group+Hadamard implementation includes weight packing and input reuse but omits our group-aware execution optimizations. Table S2 compares complete exe-cution configurations; it does not isolate the contribution of the fused preprocessing kernel from the other optimizations. Isolating that contribution requires holding the general run-time settings fixed and varying the RRQ-specific compo-nents separately. 12 Table S1. W4A4 performance retention (%) with our integer-compatible (I) and native (N) group quantization on three 8B mod-els [3, 5, 46]. Mean averages the three model results. Weight Act. Qwen3-VL LLaVA-OV1.5 InternVL 3.5 Mean N N 96.47 97.41 98.22 97.37 I N 96.85 98.23 97.22 97.43 N I 97.43 97.46 98.19 97.69 I I (Ours) 97.18 97.62 98.13 97.64 
+
+## B. Details of Distribution Analyses 
+
+This section provides distribution-selection and measure-ment details for Figures 2, 3, 5, and 6 of the main paper. 
+
+Illustrative distributions in Figures 2 and 3. For the ex-amples in Figures 2 and 3 of the main paper, we use neg-ative log-likelihood (NLL) recovery from the projection-restoration experiment to rank layers. For the illustrative distributions, we select a vector with the smallest fraction of values exceeding 10% of its maximum absolute value. This criterion highlights distributions in which a few large values dominate the range; their prevalence is assessed separately through the layerwise and aggregate analyses below. Re-covery values depend on interactions between components and should not be summed to partition the total quantization error. 
+
+Layerwise and aggregate statistics in Figures 5 and 6. 
+
+For the layerwise and aggregate analyses in Figures 5 and 6 of the main paper, we collect statistics over decoder weights and activation inputs, counting inputs shared by multiple projections only once. We obtain activation inputs from the full-precision (FP) model so that errors from preced-ing quantized layers do not affect the comparison. Af-ter excluding padding, we measure zero mapping as the fraction of nonzero values mapped to zero by quantiza-tion. Because Hadamard transformation mixes features, we compute statistics for each resulting distribution rather than track individual values through the transformation. 
+
+## C. Impact of Integer-Compatible Quantization 
+
+We next assess whether the integer-compatible represen-tation needed for efficient execution compromises accu-racy. Table S1 compares it with native group quantization for weights, activations, or both. Each configuration uses Hadamard transforms and is independently calibrated by uniform scale search on the same 128 calibration pairs. We report mean retention over AI2D, ChartQA, MMMU, and NoCaps. 
+
+> Table S2. W4A4 inference costs on three 8B LVLMs [3, 5, 46]. Parentheses show changes from BF16. Group+H is a direct imple-mentation without the proposed execution optimizations. PC/PT and Ours use optimized execution.
+
+Method Generation time (s) ↓ Peak allocated (GiB) ↓
+
+Qwen3-VL-8B FP (BF16) 3.748 16.864 Group+H 11.855 ( ↑216.30%) 7.291 ( ↓56.77%) PC/PT 2.425 ( ↓35.31%) 7.130 ( ↓57.72%) Ours 2.504 ( ↓33.18%) 7.232 ( ↓57.12%) LLaVA-OV1.5-8B FP (BF16) 4.003 16.788 Group+H 11.555 ( ↑188.66%) 7.220 ( ↓56.99%) PC/PT 2.668 ( ↓33.35%) 7.079 ( ↓57.83%) Ours 2.720 ( ↓32.05%) 7.183 ( ↓57.21%) InternVL3.5-8B FP (BF16) 3.928 16.404 Group+H 12.645 ( ↑221.92%) 6.864 ( ↓58.16%) PC/PT 2.586 ( ↓34.16%) 6.697 ( ↓59.17%) Ours 2.641 ( ↓32.76%) 6.801 ( ↓58.54%) Our integer-compatible representation achieves 97.64% mean retention, compared with 97.37% for native group quantization of both weights and activations. For each of the three configurations containing native group quantiza-tion, paired-bootstrap intervals for retention differences rel-ative to ours include zero in all models. These comparisons show no clear accuracy advantage for either representation. Together with the inference results in Section D, the ob-served retention supports the use of our integer-compatible representation to improve execution speed while maintain-ing accuracy. 
+
+## D. Cost measurement and additional results 
+
+D.1. Calibration cost 
+
+Following the procedure proposed by its authors, we mea-sure BFQ [23] calibration time with component analysis parallelized across 3 GPUs, including subsequent fitting. MASQuant [20] runs compensation fitting over 128 sam-ples for 2 epochs, following its official implementation and recommended settings. 
+
+D.2. Inference cost 
+
+We measure inference on one RTX A6000 GPU with batch size 1, evaluating the same 25 samples each from AI2D and NoCaps across models. For each sample, we generate 128 tokens and repeat the measurement 3 times. The measured generation time covers vision processing and decoder gen-eration, but excludes CPU preprocessing and input transfer 13 Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B 
+
+AI2D 
+
+Question: Which planet covers the moon? 
+
+A. Shadow B. Moon 
+
+C. Sun D. Earth 
+
+W4A8 W4A4           
+
+> MBQ AUnparsed
+> QIG CUnparsed
+> MASQuant CUnparsed
+> BFQ CUnparsed
+> Ours DD
+> GT: D | FP: D
+
+AI2D 
+
+Question: What is the first stage in the cycle? 
+
+A. fruit B. fruit development 
+
+C. flowering D. transplant 
+
+W4A8 W4A4           
+
+> MBQ BUnparsed
+> QIG AUnparsed
+> MASQuant BUnparsed
+> BFQ BUnparsed
+> Ours DD
+> GT: D | FP: D
+
+AI2D 
+
+Question: What leaf type is Label B? 
+
+A. Ovate B. Elliptic 
+
+C. Lanceolate D. Ovoid 
+
+W4A8 W4A4           
+
+> MBQ DUnparsed
+> QIG AUnparsed
+> MASQuant AUnparsed
+> BFQ AUnparsed
+> Ours BB
+> GT: B | FP: B
+
+ChartQA 
+
+Question: What is the average of last two bar? 
+
+W4A8 W4A4           
+
+> MBQ 45.5 12 1 2
+> QIG 46 For contex…
+> MASQuant 50.5 represent…
+> BFQ 31 In the lis…
+> Ours 36 36
+> GT: 36 | FP: 36
+
+ChartQA 
+
+Question: Did more Christians vote to keep or leave Brexit? 
+
+W4A8 W4A4           
+
+> MBQ Remain of31 - 02-…
+> QIG Remain )InFilenam…
+> MASQuant Remain. Des dll as…
+> BFQ Remain , &r1a, **…
+> Ours Leave Leave
+> GT: Leave | FP: Leave
+
+ChartQA 
+
+Question: What number is the median bar? 
+
+W4A8 W4A4           
+
+> MBQ 15.65 Athenescri…
+> QIG 12.65 Current D…
+> MASQuant 15.15 harassme…
+> BFQ 12.65 ifu.0. Q.…
+> Ours 16.7 16.7
+> GT: 16.7 | FP: 16.7
+
+Figure S1. Qualitative results on AI2D [24] and ChartQA [35]. 
+
+to the GPU. Memory usage is reported as peak allocated GPU memory in GiB. Table S2 extends the main-paper cost comparison to all 3 models under this protocol. Our method reduces generation time by approximately 32–33% and memory usage by 57– 59% relative to BF16, showing consistent savings across models. 
+
+Evaluation note. During accuracy evaluation, we stop generation early when repetitive degeneration produces ex-cessively long responses. 
+
+## E. Qualitative results 
+
+To illustrate how quantization affects model responses, Fig-ures S1–S4 present qualitative comparisons across the 8 evaluation tasks. Each example pairs the input with re-sponses from the compared methods, allowing direct com-parison of their answers under the indicated quantization settings. 14 Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B 
+
+MMStar 
+
+Question: Subtract all green balls. Subtract all shiny things. How many objects are left? 
+
+A. 1 B. 4 C. 8 D. 2
+
+W4A8 W4A4  
+
+> MBQ
+
+A Unparsed  
+
+> QIG
+
+Unparsed Unparsed  
+
+> MASQuant
+
+Unparsed Unparsed  
+
+> BFQ
+
+D Unparsed  
+
+> Ours
+
+B B
+
+GT: B | FP: B 
+
+MMStar 
+
+Question: Which image shows the highest sharpness? 
+
+A. upper left B. upper right 
+
+C. down left D. down right 
+
+W4A8 W4A4  
+
+> MBQ
+
+D Unparsed  
+
+> QIG
+
+D Unparsed  
+
+> MASQuant
+
+Unparsed Unparsed  
+
+> BFQ
+
+D Unparsed  
+
+> Ours
+
+B B
+
+GT: B | FP: B 
+
+MMStar 
+
+Question: What type of room is shown in the image? 
+
+A. Living room B. Bedroom 
+
+C. Bathroom D. Kitchen 
+
+W4A8 W4A4  
+
+> MBQ
+
+A Unparsed  
+
+> QIG
+
+A Unparsed  
+
+> MASQuant
+
+A Unparsed  
+
+> BFQ
+
+A Unparsed  
+
+> Ours
+
+B B
+
+GT: B | FP: B 
+
+MMMU 
+
+Question: What type of sleeve is this? 
+
+A. Bell Sleeve B. Puff Sleeve 
+
+C. Cap Sleeve D. Raglan Sleeve 
+
+W4A8 W4A4  
+
+> MBQ
+
+B Unparsed  
+
+> QIG
+
+B Unparsed  
+
+> MASQuant
+
+B Unparsed  
+
+> BFQ
+
+B Unparsed  
+
+> Ours
+
+A A
+
+GT: A | FP: A 
+
+MMMU 
+
+Question: The maximum flow from v1 to v6 is ____: 
+
+A. 11 B. 0 C. 12 D. 13 
+
+W4A8 W4A4  
+
+> MBQ
+
+C C 
+
+> QIG
+
+C B 
+
+> MASQuant
+
+D B 
+
+> BFQ
+
+C B 
+
+> Ours
+
+A A
+
+GT: A | FP: A 
+
+MMMU 
+
+Question: Select the correct left view() 
+
+A. A B. B C. C D. D
+
+W4A8 W4A4  
+
+> MBQ
+
+A Unparsed  
+
+> QIG
+
+B Unparsed  
+
+> MASQuant
+
+A Unparsed  
+
+> BFQ
+
+B Unparsed  
+
+> Ours
+
+C C
+
+GT: C | FP: C Figure S2. Qualitative results on MMStar [9] and MMMU [50]. 
+
+15 Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B 
+
+TextVQA 
+
+Question: which player is #21? 
+
+W4A8 W4A4 
+
+MBQ cwbellman 不及-nine 2… 
+
+QIG ow bellow… “Санди́р-… 
+
+MASQuant cobbellman 亲眼 Scotc… 
+
+BFQ drew brek… alum 102u… 
+
+Ours cowbellman cowbellman 
+
+GT: cowbellman | FP: cowbellman 
+
+TextVQA 
+
+Question: who wrote open minds? 
+
+W4A8 W4A4 
+
+MBQ john grant 0.s1 and i… 
+
+QIG john grant anchor Thi… 
+
+MASQuant john grant ren [SAac… 
+
+BFQ john grant unshuffle… 
+
+Ours andy law andy law 
+
+GT: andy law | FP: andy law 
+
+TextVQA 
+
+Question: who authored the witch hunt? 
+
+W4A8 W4A4 
+
+MBQ iain mclew… 14th #/ 14… 
+
+QIG IAN McEW… **. 888962… 
+
+MASQuant iain lawson s来了ittalit… 
+
+BFQ g . bramwell I-IMCCOMI… 
+
+Ours ian rankin ian rankin 
+
+GT: ian rankin | FP: ian rankin 
+
+VizWiz 
+
+Question: Creamer is this? 
+
+W4A8 W4A4 
+
+MBQ yes ** 1 1 ート… 
+
+QIG yes Suffix: wi… 
+
+MASQuant yes raz的各项密… 
+
+BFQ yes , 2010 FIF… 
+
+Ours cafe mocha Cafe Mocha 
+
+GT: cafe mocha | FP: cafe mocha 
+
+VizWiz 
+
+Question: What is this? 
+
+W4A8 W4A4 
+
+MBQ Unanswer… ining 01 e… 
+
+QIG Unanswer… 1. All sli… 
+
+MASQuant Unanswer… CMSAnda-… 
+
+BFQ Unanswer… 1) " =real… 
+
+Ours Salt Salt 
+
+GT: salt | FP: Salt 
+
+VizWiz 
+
+Question: Can you tell me what kind of phone this is? 
+
+W4A8 W4A4 
+
+MBQ BP 10_ 'Which… 
+
+QIG Unanswer… "1.00"0. A… 
+
+MASQuant Cyber-shot formed,DA… 
+
+BFQ Unanswer… 38871383… 
+
+Ours LG LG 
+
+GT: lg | FP: LG Figure S3. Qualitative results on TextVQA [42] and VizWiz [18]. 
+
+16 Qwen3-VL-8B LLaVA-OV1.5-8B InternVL3.5-8B 
+
+NoCaps 
+
+Reference 
+
+A large white whale swims in an aquarium as someone looks on. 
+
+W4A8 W4A4 
+
+FP White whales gracefully swim in deep blue aquarium waters. 
+
+MBQ Two dolphins swim … d with 0. 11… 
+
+QIG … two dolphins swim … A specific A… 
+
+MASQuant Two dolphins swim … 
+
+:///iatberg缘… 
+
+BFQ Two dolphins swim … 20 1: 142442… 
+
+Ours W4A8 White whales swim gracefully in deep blue aquarium waters. 
+
+W4A4 White whales gracefully swim in deep blue aquarium waters. 
+
+TextCaps 
+
+Reference 
+
+A man is running in an orange shirt that says AECOM. 
+
+W4A8 W4A4 
+
+FP Man runs on mountain road wearing orange AECOM shirt. 
+
+MBQ … mountains in distance. 
+
+开奖 about c9… 
+
+QIG … mountains in distance. 1 141 000 00… 
+
+MASQuant … mountains. nationallyum… 
+
+BFQ … on mountain road, trees, … 100-15% retu… 
+
+Ours W4A8 Man runs on mountain road wearing orange AECOM shirt. 
+
+W4A4 Man runs on mountain road, wearing orange AECOM shirt. 
+
+NoCaps 
+
+Reference 
+
+A red panda sitting on the branch of a tree 
+
+W4A8 W4A4 
+
+FP A small red and white animal is on a tree branch. 
+
+MBQ … bear is sitting on a … 
+
+欺earing- Go1… 
+
+QIG A red and black colored anim… 00000000000 0… 
+
+MASQuant A red and black animal is on… JS cross's i… 
+
+BFQ A small animal is sitting on… 1 - BLITATIO… 
+
+Ours W4A8 A red panda is sitting on a tree branch in the forest. 
+
+W4A4 A red panda is sitting on a tree branch. 
+
+TextCaps 
+
+Reference 
+
+Clock above a green sign that says children will be given an espresso and kitten. 
+
+W4A8 W4A4 
+
+FP A clock is on the wall above a sign that says Unattended Children Will Be Given Espresso and a Free Kitten. 
+
+MBQ … of liquor. 0;s-禁止 100's… 
+
+QIG … boy drinking. [ bottle) Bo… 
+
+MASQuant … of alcohol below it. colors pa\fu… 
+
+BFQ … liquor bottles. A picture do… 
+
+Ours W4A8 A clock is on the wall above a sign that says Unattended Children Will Be Given Espresso and a Free Kitten. 
+
+W4A4 A clock is on the wall above a sign that says "unattended children will be given espresso and a free kitten". 
+
+NoCaps 
+
+Reference 
+
+A woman in water being kissed by a dolphin. 
+
+W4A8 W4A4 
+
+FP A woman is in the water with a seal. 
+
+MBQ … a seal. 121. 1212121… 
+
+QIG … a manta ray. 19年_Tin/5_10… 
+
+MASQuant … a seal. care issued文… 
+
+BFQ … a seal. S富此有保科宗运 动的非谁… 
+
+Ours W4A8 A woman is in the water with a dolphin. 
+
+W4A4 A woman is in the water with a dolphin. 
+
+TextCaps 
+
+Reference 
+
+A green engine with number 34007 is pulling into a station 
+
+W4A8 W4A4 
+
+FP A green train engine with the number 34007 on the front. 
+
+MBQ … the tracks. 10_in_10_10， …
+
+QIG … the tracks. 在下蒸汽多部分， 直巴oo… 
+
+MASQuant … the tracks with a … mites functi… 
+
+BFQ … the tracks. The:Q8:-05。… 
+
+Ours W4A8 A green train engine with the number 34007 on the front. 
+
+W4A4 A green train engine with the number 34007 on the front. Figure S4. Qualitative results on NoCaps [1] and TextCaps [41]. 
+
+17

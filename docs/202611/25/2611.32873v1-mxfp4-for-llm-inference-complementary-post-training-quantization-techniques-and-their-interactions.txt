@@ -1,0 +1,545 @@
+Title: MXFP4 for LLM Inference: Complementary Post-Training Quantization Techniques and Their Interactions
+
+URL Source: https://arxiv.org/pdf/2611.32873v1
+
+Published Time: Wed, 25 Nov 2026 03:49:15 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+> 1
+
+# MXFP4 for LLM Inference: Complementary Post-Training Quantization Techniques and Their Interactions 
+
+## Natalia Frumkin ∗, Alireza Khodamoradi, Kristof Denolf, Eric Dellinger, Stuart Biles AMD Research 
+
+## ABSTRACT 
+
+Recent advances in low-precision representation have introduced several microscaling numerical formats for LLM quantization. By sharing a scale factor across groups of 16 or 32 elements, these formats enable aggressive low-precision quantization with minimal accuracy degradation, particularly when combined with modern PTQ algorithms. Their accuracy depends on how the numerical format interacts with rotation, PTQ, and scale selection. We study the composability of PTQ configurations across six LLMs and three microscaling formats: MXFP6, MXFP4, and NVFP4, systematically varying Hadamard rotation granularity, PTQ algorithm, and scale-selection strategy. Our central finding is that effective quantization recipes are format dependent: both MXFP4 and NVFP4 support accurate 4-bit inference, but techniques that benefit one do not necessarily transfer to the other. MXFP4 benefits substantially from rotation and error-correcting PTQ, whereas NVFP4 gains less from rotation, consistent with its finer-grained scales capturing more within-block variation. Building on these findings, we introduce Midmax , a calibration-free scale-selection strategy that mitigates clipping error in power-of-two block scales and improves accuracy across a majority of the evaluated MXFP4 configurations. We show that pairing MXFP6 activations with MXFP4 weights recovers most of the accuracy lost at 4-bit and, on Llama-3.1-8B, matches or exceeds our in-house BF16 baseline. An additional study finds that augmenting MXFP4 with a per-tensor macroscale, a mechanism intrinsic to NVFP4, does not improve average accuracy, suggesting that global rescaling alone does not address the limitations of E8M0 block scales for MXFP4 quantization. Together, these results provide practical guidance for combining numerical formats, rotation, PTQ, and scale selection for accurate low-precision LLM inference. 
+
+## 1 Introduction 
+
+Memory bandwidth, energy consumption, and hardware efficiency are primary system-level constraints in neural network inference, from single-device deployments to large-scale serving systems (1, 2). Modern large language models (LLMs) are dominated by dense linear algebra and memory movement, and since memory traffic and compute cost scale directly with operand precision, numerical format is a central system-level decision rather than a low-level implementation detail (3, 4). The adoption of FP8 in recent hardware has demonstrated that low-precision floating-point formats can significantly improve throughput and energy efficiency while maintaining model quality (5). Motivated by these gains, prior work has pushed to 4-bit precision, with post-training quantization (PTQ) techniques such as weight rounding optimization (6), activation outlier smoothing (7), and sequential error correction (8) establishing that transformer-based LLMs can maintain accuracy at 4-bit. Block floating-point (BFP) representations have emerged as a natural fit for 4-bit LLM inference. Rather than applying a single scale globally, BFP shares a scale across a local block of elements, providing per-block dynamic range coverage while remaining compatible with efficient hardware implementation. The OCP Microscaling (MX) specification has standardized this approach (9), and recent hardware including AMD Instinct accelerators with the CDNA4 architecture provide native support for MXFP4 arithmetic (10), making 4-bit block-scaled inference a practical deployment target. We study three microscaling formats in this work. MXFP6 and MXFP4 are defined by the OCP standard and use a power-of-two (E8M0) block scale shared across 32 elements, with MXFP6 providing a higher-precision 6-bit element datatype and MXFP4 a 4-bit one. NVFP4 instead uses a finer-grained FP8 (E4M3) block scale shared across 16 elements, together with an additional high-precision per-tensor macroscale. On Llama-3 and Qwen3 models evaluated with standard zero-shot and math benchmarks, published results show NVFP4 ahead of MXFP4 when both 4-bit formats are paired with the same off-the-shelf PTQ method (11); concurrent work on Llama-3.1-8B-Instruct and Qwen3-8B shows that augmenting MXFP4 with specialized scale-factor techniques can close this gap to within 1% of NVFP4 on the same benchmarks (12). These comparisons, however, typically pair each format with a single fixed set of complementary techniques, which makes it difficult to tell how much of the observed behavior comes from the format and how much from the Hadamard rotation, PTQ algorithm, and scale-selection strategy applied alongside it.  
+
+> ∗Correspondence to: nfrumkin@amd.com .arXiv:2611.32873v1 [cs.LG] 24 Nov 2026 2
+
+In this work, we instead study the composability of PTQ techniques with microscaling formats: for each format we vary Hadamard rotation granularity, PTQ algorithm, and scale-selection strategy across six LLMs, and measure how these techniques combine. Our central finding is that, with an appropriate recipe, both MXFP4 and NVFP4 are strong candidates for 4-bit (A4W4) inference, and that MXFP6 recovers most of the remaining accuracy at 6-bit; the techniques that compose well with each format, however, differ. For MXFP4 at A4W4, Midmax scale selection, block-level Hadamard rotation, and PTQ yield approximately 3% 
+
+cumulative gain over baseline, whereas NVFP4 benefits from its intrinsic macroscale and smaller block size, as well as from error-correcting PTQ algorithms. The right post-training quantization choice is therefore a complete format-plus-technique recipe. 
+
+Contributions. This work provides a study of how PTQ techniques compose with microscaling formats across six LLMs and makes the following contributions:  
+
+> •
+
+A composability study of PTQ techniques across microscaling formats. We measure how Hadamard rotation, PTQ algorithm, and scale selection combine with MXFP6, MXFP4, and NVFP4. With appropriate techniques both MXFP4 and NVFP4 are viable at A4W4, but the effective recipe differs by format: MXFP4 benefits strongly from block-level rotation and error-correcting PTQ algorithms, while the same rotation is often redundant or harmful for NVFP4. We further show that block Hadamard rotation yields better performance than full-sized rotation at A4W4.  
+
+> •
+
+Midmax provides effective, calibration-free scale selection. We introduce Midmax, which shifts the rounding boundary of power-of-two scales to reduce clipping error. It improves upon floor rounding in 67% of the evaluated A4W4 configurations, without requiring calibration data.  
+
+> •
+
+Mixed-precision MXFP6/MXFP4 and a macroscale study. We show that assigning MXFP6 to activations and MXFP4 to weights (A6W4) is an effective mixed-precision trade-off, matching or exceeding our in-house BF16 baseline. As a secondary study, we also examine whether NVFP4’s per-tensor macroscale benefits MXFP4; although it yields occasional gains on individual tasks and configurations, it does not improve accuracy on average, indicating that an effective MXFP4 recipe does not require macroscaling. 
+
+## 2 Background: Block Floating-Point and Complementary Techniques 
+
+This section establishes the quantization framework and BFP representations that underpin our study. We describe symmetric quantization, BFP formats, and the various PTQ configuration choices summarized in Table 1. 
+
+2.1 Quantization and Dequantization 
+
+We consider symmetric quantization, which maps floating point values symmetrically around zero. To convert a floating-point value x to its quantized representation, we apply the following mapping: 
+
+xq = round F
+
+ x
+
+∆
+
+
+
+(1) where xq is the quantized value, ∆ is the quantization scale, and the round F operator rounds its input to a representable value in the target floating-point alphabet. For FP4’s E2M1 datatype, the target alphabet is {± 0, ±0.5, ±1.0, ±1.5, ±2.0, ±3.0, ±4.0, ±6.0}.The reconstructed floating-point value ˆx is recovered via dequantization: 
+
+ˆx = ∆ · xq . (2) In practice, not all model components are quantized uniformly; non-linear layers and embedding tables are typically retained in higher precision (e.g., BF16) due to their sensitivity to quantization noise (6, 13). 
+
+2.2 Block Floating-Point Representations 
+
+In high-precision floating point, each value carries its own private exponent, providing fine-grained per-element dynamic range at the cost of storing one high-precision exponent per value, for example, an 8-bit exponent in FP32 and BF16 datatypes. Block floating-point (BFP) representations reduce per-element dynamic range and compensate with a single shared scale ∆ across a block of k elements, amortizing the block scale cost while maintaining local dynamic range coverage, as in MXFP4’s E2M1, which pairs a 2-bit element exponent with a shared block scale. The OCP Microscaling (MX) specification (9) has standardized this approach, and recent AMD Instinct accelerators with the CDNA4 architecture provide native hardware support (10). Within the OCP MX family, three configuration axes determine numerical behavior: the element datatype , the scale datatype , and the block layout . In contrast, NVFP4 adds another axis with an additional per-tensor macroscale; it also has a different block scale datatype and a smaller block size. The macroscale in NVFP4 is software-implemented and is not an exclusive hardware feature; it can therefore be applied to other block-scaled formats. In this work, we also study MXFP4 augmented with a per-tensor macroscale. Table 1 summarizes the four block-scaled configurations in this study. 3
+
+Format Element Datatype ( xq ) Block Layout ( 1 × k) Scale Datatype ( ∆) Macroscale MXFP4 E2M1 1 × 32 E8M0 None MXFP4+Macroscale E2M1 1 × 32 E8M0 BF16 NVFP4 E2M1 1 × 16 E4M3 BF16 MXFP6 E2M3 1 × 32 E8M0 None 
+
+TABLE 1. The 4-bit and 6-bit Block Floating-Point datatype formats compared in this work. MXFP4 and MXFP4+macroscale share the same element datatype and block layout but differ in the presence of a per-tensor macroscale. NVFP4 uses finer-grained E4M3 block scales, smaller blocks, and a per-tensor macroscale. 
+
+Scale computation. The block scale ∆ is a function of the k elements in the block. The OCP MX standard (9) specifies a power-of-two (E8M0) datatype for the block scale ∆. OCP MX’s companion paper (14) describes the scale calculation for a block of elements, {x1, . . . , x 32 }, in two steps: first, the block exponent Eblock is set to the floor of the log of the block maximum, 
+
+Eblock =
+
+
+
+log 2
+
+ 32 
+
+max  
+
+> i=1
+
+|xi|
+
+ 
+
+; (3) then the scale is obtained by shifting this exponent down by the element datatype’s largest representable exponent, eelem max (for FP4 E2M1, eelem max = 2 ): 
+
+∆ = 2 Eblock −eelem max . (4) This rescales values relative to the largest magnitude in the block before rounding and clipping. Since each block uses its own scale derived from local statistics, block-scaled representations can handle large variations in value range across blocks. This is a useful property for LLM activations, which vary significantly across layers and inputs. In Section 3 we introduce Midmax , a calibration-free alternative to this floor-rounded scale selection. NVFP4 (15) uses a two-level scaling strategy. A per-tensor high-precision macroscale γ is first computed from the global tensor maximum: 
+
+γ = max( |X|)
+
+vFP4 max · vE4M3 max 
+
+, (5) where vFP4 max = 6 and vE4M3 max = 448 are the maximum representable values of E2M1 and E4M3 respectively. Each block of 16 elements is then assigned an E4M3 block scale by rounding to the nearest representable E4M3 value, using the same round F
+
+operator from Equation 1 with F = E4M3: 
+
+∆ = round E4M3 
+
+ max 16  
+
+> i=1
+
+|xi|
+
+γ · vFP4 max 
+
+
+
+. (6) E4M3 allows non-power-of-two block scales, providing finer-grained dynamic range coverage within each block. 
+
+2.3 Post-Training Quantization for Large Language Models 
+
+Post-training quantization (PTQ) has become a key enabler of efficient LLM deployment. GPTQ demonstrated that transformer weights can be quantized to 3-4 bits with minimal accuracy loss (6), and subsequent methods have refined this through alternative reconstruction objectives that better preserve layer outputs (16, 17). Complementary approaches address activation quantization: SmoothQuant migrates outlier difficulty from activations to weights via per-channel scaling (7), while LLM.int8() isolates outlier channels in higher precision (13). Quantization error does not remain localized within individual layers but accumulates and propa-gates across the network. Sequential correction (18) explicitly accounts for how noise introduced in earlier layers affects downstream computations, and Qronos (8) demonstrates that correcting accumulated prior-layer error through the current quantization decision and updates to yet-to-be-quantized weights can significantly improve low-bit PTQ outcomes. While these methods have advanced the state-of-the-art in low-bit PTQ, they have largely been developed and evaluated under fixed format configurations. The interaction between PTQ algorithms and BFP configuration choices (block size, scale format, macroscaling, and scale selection) remains underexplored. In this work, PTQ algorithm is one axis of our sweep: we evaluate GPTQ and Qronos alongside format and rotation choices, and compare both against RTN (Round-to-Nearest), a non-learned baseline that independently rounds each value to its nearest representable point without any reconstruction objective. 4
+
+TABLE 2. Summary of PTQ configuration settings. 
+
+Rotation None, Block-16, Block-32, Full PTQ algorithm RTN, Qronos, GPTQ Activation precision 4-bit, 6-bit Weight precision 4-bit, 6-bit Block-scale datatype E8M0, E4M3 Scale selection Stats, MSE, Midmax Macroscaling Yes, No 
+
+2.4 Hadamard Rotations 
+
+Rotation transforms such as the Hadamard transform have become an important preprocessing step for PTQ, redistributing outliers across dimensions to produce smoother, more quantization-friendly distributions (19, 20, 21). A Hadamard matrix R is an orthogonal matrix with entries ±1/√h. Each input coordinate is mixed into every output coordinate with a coefficient of magnitude 
+
+1/√h. A large value concentrated in one channel therefore contributes to many rotated coordinates, which lowers the peak channel magnitude that sets the block scale and makes the tensor easier to quantize. Given an input tensor X ∈ Rn×d, the rotation is applied as ˜X = XR , where R is a Hadamard matrix, and the inverse rotation is absorbed into subsequent weights W as ˜W = W R , so the full computation ˜X ˜W ⊤ = XW ⊤ is preserved exactly. In practice, the Hadamard matrix dimension h may not be equal to d, so R is applied as a block-diagonal matrix with h × h Hadamard blocks tiling the last dimension of X. The choice of block size h determines the granularity of outlier redistribution: smaller blocks (e.g., 
+
+h = 16 or h = 32 ) rotate within subsets of the feature dimension, while a full-dimensional rotation ( h = d) redistributes outliers globally, as used in prior work such as QuaRot (20). 
+
+## 3 PTQ Configurations for Effective MXFP4 Inference 
+
+We evaluate post-training quantization performance across five configuration axes: block scale format, scale selection, rotation, PTQ algorithm, and precision. A summary of these configuration settings is in Table 2, and we go into more detail below. 
+
+Macroscaling. Prior work has studied Macro Block Scaling, which shares a higher-precision scale across 1 × 128 ele-ments (12). The macroscale defined here uses one high-precision scale per tensor. Since the macroscale for weights can be computed offline but the macroscale for activations must be computed online, we use a computationally lighter method for activations and derive γactivation from the tensor-level maximum magnitude: 
+
+γactivation = max |X|
+
+vFP4 max 
+
+. (7) To calculate the weight macroscale, γweight , we consider each block’s absolute maximum, mb, and sb = mb/v FP4 max as the high-precision scale that can normalize the block values into the FP4 range. An E8M0 block scale has no mantissa bits and thus cannot encode sb exactly; therefore, we capture this scale with a high-precision macroscale. We calculate γweight as the geometric mean of all sb over all B blocks in a tensor. The residual per-block variation relative to γweight is then captured by the E8M0 block scales within their power-of-two precision: 
+
+γweight = 2 1 
+
+> B
+> PBb=1 log 2(sb)
+
+. (8) The composite dequantization in both cases is ˆx = γ · ∆i · xq , where ∆i is the E8M0 block scale for block i and γ is either 
+
+γactivation or γweight .
+
+Scale Selection. We consider three strategies for choosing the block scale ∆: Stats , a calibration-free strategy that computes the scale directly from the block’s absolute maximum using the floor-rounding rule in Equation 4; MSE , which uses a calibration set to search over a small set of candidate scales and selects the one that minimizes the mean-squared reconstruction error of the dequantized block, following standard calibration-based rounding procedures (16, 17); and Midmax , a calibration-free refinement of Stats applicable only to power-of-two scale formats. For power-of-two block scales, the Stats scale computation applies floor rounding to Eblock , which forces the maximum absolute value in a block to always be mapped into [4 , 8) after scaling, so values above vmax are clipped. Any value that falls just above 
+
+vmax after scaling is hard-clipped, even though it could be accommodated with negligible precision loss by rounding the block scale up to the next power of two. This systematic clipping at the boundary of the representable range has been independently identified in (12). 547 48 49 
+
+> MXFP4 Acc. (%)
+> 47 48 49
+> NVFP4 Acc. (%)
+> Qwen-4B
+> 51 52 53 54
+> MXFP4 Acc. (%)
+> 51 52 53 54
+> Qwen-8B
+> 58 59 60 61
+> MXFP4 Acc. (%)
+> 58 59 60 61
+> Llama-3B
+> 63 64 65 66 67
+> MXFP4 Acc. (%)
+> 63 64 65 66 67
+> Llama-8B
+> PTQ Config Best Config
+
+Figure 1. Each point is one PTQ configuration evaluated under MXFP4 ( x-axis) and NVFP4 ( y-axis) for a given model; points above the diagonal are configurations where NVFP4 scores higher, and highlighted points mark the best configuration found for each model. The large spread of points within every panel shows that the quantization recipe affects accuracy as much as the choice of block format, and the best MXFP4 and NVFP4 recipes need not coincide. With an appropriate recipe both formats reach competitive accuracy, with neither uniformly ahead across models. 
+
+We propose Midmax, a calibration-free scale selection strategy that addresses this clipping issue by shifting the rounding decision boundary upward to the midpoint between vmax and the next power of two: 
+
+vmid = vmax + 2 emax +1 
+
+2 (9) where emax is the largest exponent in the element datatype. When max i |xi| < v mid (after initial scaling), the tighter scale is retained; when max i |xi| ≥ vmid , the scale rounds up to the next power of two. This trades a modest increase in rounding error for a reduction in clipping error on near-boundary values. For E2M1: vmax = 6 .0 and vmid = 7 .0; for E2M3: vmax = 7 .5 and 
+
+vmid = 7 .75 .Unlike prior work on optimal clipping thresholds for integer quantization (22), Midmax operates within the discrete power-of-two constraint imposed by BFP hardware and requires no changes to the hardware datapath. It applies only to power-of-two scale formats; E4M3 has its own mantissa bits and does not require a boundary correction. For all E8M0 configurations, we apply Midmax to the weights while keeping Stats scale selection for the activations. 
+
+Hadamard Rotation. We apply the Hadamard rotation described in Section 2.4 at four granularities: no rotation, block-16 (h = 16 ), block-32 ( h = 32 ), and full ( h = d). We evaluate each granularity across all PTQ algorithms, block-scale formats, and precision configurations in our sweep. Section 4.2 shows how the choice of h interacts with both the block-scale format and the PTQ algorithm. 
+
+PTQ Algorithms. We evaluate two PTQ algorithms, GPTQ and Qronos , against a non-learned rounding baseline, RTN .
+
+RTN (Round-to-Nearest) independently rounds each value to its nearest representable point without any optimization and serves as the baseline against which the two PTQ algorithms are measured. GPTQ (6) is a popular error correction method that minimizes layer-wise weight reconstruction error by solving a weighted least-squares problem column by column, compensating for the error incurred in previously quantized columns. Qronos (8) extends this by correcting accumulated prior-layer error through the current quantization decision and updates to yet-to-be-quantized weights, shaping those corrections to account for how quantization noise propagates forward through the network. These methods are evaluated across combinations of precision configuration, scale format, scale selection strategy, and rotation, letting us measure both the main effect of each PTQ algorithm and how each interacts with format and rotation choices. 
+
+Precision Configurations. We evaluate three precision configurations to isolate the effects of activation and weight precision. In A4W4 , both activations and weights use E2M1 (FP4). In A6W4 , activations use E2M3 (FP6) while weights remain in E2M1, isolating the effect of increasing activation precision without changing weight storage. In A6W6 , both use E2M3, providing a higher-precision reference and measuring the additional benefit of increasing weight precision once activations are in FP6. Together, these configurations trace a two-stage path from A4W4 to A6W6 , first increasing activation precision and then weight precision. 
+
+## 4 Results 
+
+Experimental Setup. We evaluate six models spanning two families and three parameter scales: Llama-3.2-1B, Llama-3.2-3B, and Llama-3.1-8B from the Llama family, and Qwen3-1.7B, Qwen3-4B, and Qwen3-8B from the Qwen family. Unless otherwise stated, we use the base model version, and explicitly state whether a model is instruction-tuned. All weights are quantized to the target format and precision while non-linear layers are maintained in BF16. For a given format and precision, we consider the 6Block-16 Block-32 Full 
+
+> −2.0
+> −1.5
+> −1.0
+> −0.5 0.0 0.5 1.0 1.5
+> Hadamard Accuracy Gain (%)
+> -1.30 -0.29 -0.07 -1.07 -0.36 +0.10 -1.41 -0.45 -0.55
+
+NVFP4   
+
+> Block-16 Block-32 Full
+> +0.64 +1.06 +0.92 +0.44 +1.08 +0.97 +0.27 +0.81 +0.55
+
+MXFP4 
+
+> RTN GPTQ Qronos
+
+Figure 2. Hadamard rotation × PTQ method. We consider the average accuracy gain over no rotation for different Hadamard sizes (x-axis) on both NVFP4 (left) and MXFP4 (right) at A4W4. On average, Hadamard rotation does not have a positive effect on NVFP4, yet yields significant benefits for MXFP4. While these represent trends averaged over all configurations, a best PTQ recipe for a given model may not follow this trend as shown in Table 6. 
+
+"baseline" PTQ configuration as having no rotation, RTN, MSE scale selection and the default format macroscaling configuration. Zero-shot accuracy is reported on five commonsense benchmarks: ARC-Easy and ARC-Challenge (23), HellaSwag (24), PIQA (25), and WinoGrande (26) and average accuracy across these five tasks as our primary metric. All results are reported using the LM evaluation harness with PyTorch 2.9.1 and ROCm 6.4. For the Llama-3.1-8B instruction-tuned variant, we additionally evaluate on the GSM8K mathematical reasoning benchmark (27). Throughout the paper, all reported accuracy changes ( e.g. , “ +1 .3% ”) are absolute differences in percentage points of accuracy, not relative improvements. 
+
+4.1 The Recipe Matters as Much as the Format 
+
+We begin with the central observation of this study: the accuracy of a microscaling format depends strongly on the quantization recipe. Figure 1 shows, for each model, the average benchmark accuracy of every evaluated PTQ configuration for MXFP4 and NVFP4. Two patterns motivate the analysis that follows. First, the accuracy variation across recipes within a format is comparable to or larger than the gap between formats, highlighting the importance of recipe selection. Second, effective recipes are format dependent. For Llama-3.2-3B, for example, the strongest NVFP4 configuration uses Qronos, whereas the strongest MXFP4 configuration uses GPTQ with Midmax scale selection. With suitable recipes, both formats achieve competitive accuracy, and neither consistently leads across models and tasks. These observations motivate studying how each format responds to the techniques combined with it. The following subsections examine the effects of rotation, PTQ algorithm, scale selection, macroscaling, and precision, including their interactions with the underlying format. Section 4.6 then summarizes the best-performing recipes for each datatype. 
+
+4.2 Rotation and PTQ Algorithm Are Complementary Techniques 
+
+As established above, a recipe tuned for one format does not transfer directly to the other. Hadamard rotation provides a clear example of why. As shown in Figure 2, rotation affects the two formats very differently at A4W4. For MXFP4, every rotation granularity improves average accuracy across the three PTQ methods, with Block-16 and Block-32 producing the strongest and most consistent gains. When paired with GPTQ or Qronos, these blockwise rotations improve accuracy by approximately 0.9–1.1% 
+
+over no rotation, compared with gains of 0.44 –0.64% under RTN. This improvement suggests that rotation and PTQ address complementary sources of error: rotation redistributes outliers before quantization, while PTQ reduces the remaining reconstruction error. NVFP4 shows the opposite trend. Rotation reduces average accuracy in eight of the nine configurations shown in Figure 2. GPTQ and Qronos moderate this degradation relative to RTN, but do not make rotation consistently beneficial. Block-32 with Qronos is the only configuration that produces a positive average gain, and the improvement is limited to 0.10% . This finding is consistent with Egiazarian et al. (11), who similarly observe that applying Hadamard rotation to NVFP4 degrades performance. One possible explanation is that NVFP4’s smaller blocks and finer-grained E4M3 scales already capture more local variation, leaving less residual error for rotation to correct. The granularity of the rotation further shapes this interaction. Full rotation provides smaller gains than blockwise rotation for MXFP4 and produces some of the largest accuracy reductions for NVFP4. Broad outlier redistribution is therefore not inherently preferable to block-wise rotation. Overall, blockwise rotation is an effective complement to GPTQ and Qronos for MXFP4, while 751 52 53 54 
+
+MXFP4 Acc. (%) 
+
+> 51 52 53 54
+> NVFP4 Acc. (%)
+
+Qwen-8B 
+
+> 63 64 65 66 67
+
+MXFP4 Acc. (%) 
+
+> 63 64 65 66 67
+
+Llama-8B 
+
+> RTN GPTQ Qronos Best config Qwen 1.7B Qwen 4B Qwen 8B Llama 1B Llama 3B Llama 8B 0.5 1.0 1.5 2.0 2.5
+> MXFP4 PTQ Accuracy Gain over RTN
+
+GPTQ Qronos 
+
+Figure 3. PTQ algorithm performance at A4W4. Left and Middle: The best configuration for Qwen3-8B and Llama-3.1-8B are GPTQ + MXFP4 and Qronos + NVFP4 respectively. Neither PTQ method is uniformly best by model or datatype. Right: For MXFP4, both GPTQ and Qronos achieve a clear average accuracy gain over RTN, illustrating that PTQ algorithms are an essential tool for maximizing quantized model performance. – 16 32 F – 16 32 F – 16 32 F                                
+
+> 47.5 48.0 48.5 49.0 49.5
+> MXFP4 Acc. (%)
+> RTN GPTQ Qronos
+> Qwen-4B
+> –16 32 F–16 32 F–16 32 F
+> 50.5 51.0 51.5 52.0 52.5 53.0 53.5 54.0 54.5
+> RTN GPTQ Qronos
+> Qwen-8B
+> –16 32 F–16 32 F–16 32 F
+> 57 58 59 60 61
+> RTN GPTQ Qronos
+> Llama-3B
+> –16 32 F–16 32 F–16 32 F
+> 63.0 63.5 64.0 64.5 65.0 65.5 66.0 66.5
+> RTN GPTQ Qronos
+> Llama-8B
+> Floor Midmax
+
+Figure 4. Midmax performance across different choices of Hadamard size {None (-), 16, 32, Full (F)} and PTQ methods {RTN, GPTQ, Qronos} for Qwen and Llama model families. Midmax has the capacity to give a significant boost in average accuracy for MXFP4 at A4W4, particularly for configurations with Qronos. 
+
+the same preprocessing is largely redundant or detrimental for NVFP4. These aggregate trends provide a useful default, although the model-specific recipes in Table 6 confirm that no single rotation and PTQ combination is uniformly best. 
+
+4.3 PTQ Algorithm Effectiveness Depends on the Model and Format 
+
+We next isolate the effect of the PTQ algorithm itself. Figure 3 shows that neither GPTQ nor Qronos is uniformly optimal across models or formats. For Qwen3-8B, the best overall configuration combines GPTQ with MXFP4, whereas Llama-3.1-8B achieves its highest accuracy using Qronos with NVFP4. The distribution of configurations further shows that a PTQ method that performs well for one format does not necessarily transfer to the other. Despite this configuration dependence, both methods provide clear gains over RTN. Averaged across the full MXFP4 sweep, GPTQ improves accuracy by 1.32% , while Qronos provides a 1.03% 
+
+gain. NVFP4 also benefits, although more modestly, with average gains of 0.78% for GPTQ and 0.88% for Qronos. PTQ therefore provides greater average accuracy recovery for MXFP4, particularly with GPTQ, indicating that its coarser power-of-two scaling leaves more quantization error that can be corrected through reconstruction-aware optimization. Furthermore, Figure 3 (right) shows that the magnitude of the PTQ gain varies substantially across models. Smaller models generally show greater accuracy improvement from GPTQ and Qronos, while the gains narrow at larger model scales. Nevertheless, both techniques remain beneficial across the evaluated MXFP4 models. 8
+
+Format Source WinoGrande HellaSwag GSM8K BF16 in-house 78.1 80.1 85.4 NVFP4 Egiazarian et al. (11) 75.2 79.5 82.6 NVFP4 in-house 75.6 79.3 82.7 MXFP4 Egiazarian et al. (11) 74.8 75.3 75.7 MXFP4 in-house 77.0 78.7 79.6 MXFP4 + macroscale in-house 77.2 78.8 81.9 MXFP6 act + MXFP4 wt in-house 78.3 80.1 85.7 TABLE 3. Accuracy (%) on WinoGrande, HellaSwag, and GSM8K for Llama-3.1-8B instruction-tuned. “in-house” uses our best configurations. Each Egiazarian et al. (11) entry is the best result reported for that task and format and may come from a different PTQ method. 46 47 48 49 
+
+> MXFP4 Acc. (%)
+> 46 47 48 49
+> NVFP4 Acc. (%)
+> Qwen-4B
+> 50 51 52 53 54
+> MXFP4 Acc. (%)
+> 50 51 52 53 54
+> Qwen-8B
+> 57 58 59 60 61
+> MXFP4 Acc. (%)
+> 57 58 59 60 61
+> Llama-3B
+> 63 64 65 66 67
+> MXFP4 Acc. (%)
+> 63 64 65 66 67
+> Llama-8B
+> + Macroscale
+
+Figure 5. Effect of NVFP4-style macroscaling on MXFP4. Under the same experimental settings as in Figure 1, we compare the original MXFP4 results with MXFP4 augmented by NVFP4-style macroscaling. For each configuration, the horizontal shift represents the resulting change in MXFP4 accuracy due to applying macroscale. Among the best-performing MXFP4 PTQ configurations, macroscaling does not improve average accuracy. 
+
+4.4 Midmax Provides Calibration-Free Scale Selection 
+
+Figure 4 compares Midmax with standard floor-based scale selection across models, rotation granularities, and PTQ methods. Averaged over the full sweep, Midmax improves accuracy by 0.12% and outperforms floor rounding in 67% of the evaluated model, rotation, and PTQ combinations. Although the average improvement is modest, the consistency of these gains shows that scale selection remains relevant even after rotation and PTQ are applied. Furthermore, the benefit of Midmax depends strongly on the surrounding configuration. Without rotation, Midmax provides an average gain of 0.25% , including an improvement of 0.62% on Qwen3-8B. The gain becomes negligible with Block-16 rotation but increases again to 0.20% with Block-32 rotation. Midmax and Hadamard rotation are therefore neither fully additive nor fully redundant. Both reduce errors caused by outliers, but they act at different stages of quantization and remain complementary in selected configurations. The interaction with PTQ is even more pronounced. Midmax improves accuracy by 0.30% when paired with Qronos, compared with 0.06% for GPTQ and 0.02% for RTN. This suggests that reducing clipping near power-of-two scale boundaries remains valuable after Qronos corrects reconstruction and error-propagation effects. Midmax is not uniformly superior to calibrated strategies such as MSE, but it provides a reliable improvement over floor rounding without calibration data or additional preprocessing. It is therefore most useful as a low-cost scale-selection strategy for sensitive MXFP4 configurations, particularly when residual outliers remain after rotation. 
+
+4.5 Applying NVFP4-Style Macroscaling to MXFP4 
+
+We augment MXFP4 with a software-assisted per-tensor macroscale and compare the resulting MXFP4+macroscale config-uration with standard MXFP4. This modification does not convert MXFP4 into NVFP4, since the two formats retain different block sizes and block-scale datatypes, but instead allows us to test whether a scaling mechanism that is intrinsic to NVFP4 also benefits MXFP4. At A4W4, macroscaling generally reduces average benchmark accuracy for MXFP4. Figure 5 compares MXFP4 configurations with and without macroscaling across Qwen3-4B, Qwen3-8B, Llama-3.2-3B, and Llama-3.1-8B. Across all models, the macroscaled configurations lie predominantly to the left of their standard MXFP4 counterparts, corresponding to mean reductions 9                                                         
+
+> TABLE 4. General trends observed across PTQ configurations. We report change in average accuracy for the principal configuration choices evaluated in this study. Results are averaged over the remaining compatible configurations.
+> Configuration change MXFP4 NVFP4 Activation precision: A4W4 to A6W4 +1 .74 –Weight precision: A6W4 to A6W6 +1 .26 –GPTQ over RTN +1 .32 +0 .78
+> Block 32 over no rotation +1 .17 −0.45
+> Midmax over floor, without rotation +0 .25 –Adding a macroscale at A4W4 −0.66 built in
+> TABLE 5. Best-performing configurations for MXFP4 and NVFP4 across models.
+> Model MXFP4 NVFP4 PTQ Method Rotation Scale PTQ Method Rotation Scale Qwen3-1.7B GPTQ Block 16 MSE Qronos Block 32 Stats Qwen3-4B GPTQ Block 16 Midmax Qronos None Stats Qwen3-8B GPTQ Full MSE Qronos Full Stats Llama-3.2-1B GPTQ Block 16 MSE GPTQ Block 16 MSE Llama-3.2-3B GPTQ Block 32 Midmax Qronos None Stats Llama-3.1-8B Qronos Block 32 Midmax Qronos Block 32 MSE
+
+of 0.66 -0.85% , depending on the model. This trend also holds among the highest-accuracy MXFP4 configurations: macroscaling does not systematically move them toward parity with NVFP4 and often widens the gap. The effect is not entirely uniform across configurations, and a small number of rightward shifts in Figure 5 indicate isolated improvements from macroscaling, but these gains are insufficient to reverse the aggregate trend for any of the four models. Thus, although macroscaling is an essential component of the complete NVFP4 format, its benefits do not transfer directly to MXFP4. Despite the decline in average accuracy, macroscaling can benefit individual tasks. On Llama-3.1-8B-Instruct, it raises our best MXFP4 accuracy from 77 .0% to 77 .2% on WinoGrande, from 78 .7% to 78 .8% on HellaSwag, and from 79 .6% to 81 .9% on GSM8K (Table 3). The largest gain is therefore on GSM8K, with smaller improvements on the two commonsense benchmarks. For context, the macroscaled MXFP4 results exceed the best task-wise NVFP4 result reported by Egiazarian et al. (11) on WinoGrande (77 .2% vs. 75 .2% ), while remaining below their results on HellaSwag ( 78 .8% vs. 79 .5% ) and GSM8K ( 81 .9% vs. 82 .6% ). These comparisons use the best reported result for each task and format, so they do not necessarily reflect a single PTQ recipe. 
+
+4.6 Configuration Choices Must Be Evaluated Jointly 
+
+Table 4 places the principal effects observed in our configuration sweep on a common scale. Among changes that retain A4W4 precision, GPTQ and Block-32 rotation provide the largest average gains for MXFP4, improving accuracy by 1.32% and 1.17% ,respectively. Midmax provides a smaller but calibration-free improvement of 0.25% without rotation. The corresponding effects differ for NVFP4: GPTQ provides a smaller gain of 0.78% , while Block-32 rotation reduces average accuracy by 0.45% . These differences explain why the same quantization recipe does not transfer uniformly between the two formats. When additional precision is available, increasing activation precision from A4W4 to A6W4 improves MXFP4 accuracy by 
+
+1.74% , and subsequently increasing weight precision from A6W4 to A6W6 provides an additional 1.26% gain. The average effects provide useful guidance, but they do not define a universal recipe. Table 5 shows that GPTQ is selected by the best MXFP4 configuration for five of the six models, whereas Qronos is selected by the best NVFP4 configuration for five of the six models. Blockwise rotation appears in five of the six best MXFP4 configurations, while the preferred NVFP4 rotation spans none, Block-16, Block-32, and full rotation. Scale selection is similarly model dependent. The best MXFP4 configurations are evenly divided between MSE and Midmax, while NVFP4 primarily favors Stats but selects MSE for two Llama models. These results point to a useful default recipe, though, as Table 5 shows, not a single configuration that is optimal for every model. For MXFP4 at A4W4, PTQ and blockwise rotation provide the largest and most consistent gains, with Midmax offering an additional calibration-free improvement. Their combined contribution raises accuracy by approximately 3% over baseline. For NVFP4, Qronos is selected more frequently, while rotation requires greater model-specific care. When this A4W4 recipe does not provide sufficient accuracy, moving to A6W4 is an effective next step, though we did not evaluate the complementary A4W6 configuration needed to determine whether increasing weight precision first would be equally or more effective. Macroscaling should instead be reserved for the tasks and precision regimes where its targeted benefits justify adding it to MXFP4. The appropriate unit of comparison is 10 
+
+therefore the complete quantization configuration rather than the block format alone. Format, PTQ algorithm, rotation granularity, scale selection, macroscaling, and element precision jointly determine the final accuracy. 
+
+## 5 Conclusion 
+
+Accurate microscaling quantization requires jointly choosing the numerical format, PTQ algorithm, rotation, and scale-selection strategy. Across the six language models evaluated, neither MXFP4 nor NVFP4 consistently achieves higher accuracy, and their strongest recipes differ. Our results offer three practical takeaways. First, GPTQ with blockwise rotation provides a strong starting point for MXFP4, while NVFP4 more often favors Qronos and generally benefits less from rotation. Second, calibration-free Midmax improves upon floor-based scale selection in 67% of the evaluated configurations, whereas adding a per-tensor macroscale to MXFP4 does not improve average accuracy despite selective task-level gains. Third, A6W4 recovers accuracy while retaining 4-bit weight storage, matching or exceeding our BF16 baseline on the three evaluated tasks for Llama-3.1-8B-Instruct. Together, these findings support selecting and evaluating complete quantization recipes, using format-specific defaults as starting points for tuning to each model. 11 
+
+## References 
+
+[1] A. Firoozshahian, J. Coburn, R. Levenstein, R. Nattoji, A. Kamath, O. Wu, G. Grewal, H. Aepala, B. Jakka, B. Dreyer, et al. ,“Mtia: First generation silicon targeting meta’s recommendation systems,” in Proceedings of the 50th Annual International Symposium on Computer Architecture , pp. 1–13, 2023. [2] J. Stojkovic, E. Choukse, C. Zhang, I. Goiri, and J. Torrellas, “Towards greener llms: Bringing energy-efficiency to the forefront of llm inference,” arXiv preprint arXiv:2403.20306 , 2024. [3] T. Dao, D. Fu, S. Ermon, A. Rudra, and C. Ré, “Flashattention: Fast and memory-efficient exact attention with io-awareness,” 
+
+Advances in neural information processing systems , vol. 35, pp. 16344–16359, 2022. [4] L. Zheng, L. Yin, Z. Xie, C. L. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, et al. , “Sglang: Efficient execution of structured language model programs,” Advances in neural information processing systems , vol. 37, pp. 62557–62583, 2024. [5] P. Micikevicius, D. Stosic, N. Burgess, M. Cornea, P. Dubey, R. Grisenthwaite, S. Ha, A. Heinecke, P. Judd, J. Kamalu, et al. ,“Fp8 formats for deep learning,” arXiv preprint arXiv:2209.05433 , 2022. [6] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “GPTQ: Accurate post-training compression for generative pretrained transformers,” arXiv preprint arXiv:2210.17323 , 2022. [7] G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han, “Smoothquant: Accurate and efficient post-training quantization for large language models,” in International conference on machine learning , pp. 38087–38099, PMLR, 2023. [8] S. Zhang, H. Zhang, I. Colbert, and R. Saab, “Qronos: Correcting the past by shaping the future... in post-training quantization,” in International Conference on Learning Representations , 2026. [9] B. Darvish Rouhani, N. Garegrat, T. Savell, A. More, K.-N. Han, R. Zhao, M. Hall, J. Klar, E. Chung, Y. Yu, M. Schulte, R. Wittig, I. Bratt, N. Stephens, J. Milanovic, J. Brothers, P. Dubey, M. Cornea, A. Rodriguez, M. Langhammer, S. Deng, M. Naumov, P. Micikevicius, M. Siu, C. Verrilli, et al. , “Ocp microscaling formats (mx) specification version 1.0.” https://www. opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf, 2023. Open Compute Project Specification, accessed 2025-01-19. [10] Advanced Micro Devices, Inc., AMD Instinct CDNA4 Instruction Set Architecture Reference Guide , 2025. [11] V. Egiazarian, R. L. Castro, D. Kuznedelev, A. Panferov, E. Kurtic, S. Pandit, A. Marques, M. Kurtz, S. Ashkboos, T. Hoefler, and D. Alistarh, “Bridging the gap between promise and performance for microscaling FP4 quantization,” in International Conference on Learning Representations , 2026. [12] J. Chhugani, G. Jeong, B.-Y. Su, Y. Pan, H. Yang, A. Ankit, J. Yu, S. Deng, Y. Chen, N. Satish, and C. Kim, “Unveiling the potential of quantization with MXFP4: Strategies for quantization error reduction,” in International Conference on Machine Learning , 2026. [13] T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer, “LLM.int8(): 8-bit matrix multiplication for transformers at scale,” 
+
+Advances in neural information processing systems , vol. 35, pp. 30318–30332, 2022. [14] B. D. Rouhani, R. Zhao, A. More, M. Hall, A. Khodamoradi, S. Deng, D. Choudhary, M. Cornea, E. Dellinger, K. Denolf, 
+
+et al. , “Microscaling data formats for deep learning,” 2023. [15] J. Cook, J. Guo, G. Xiao, Y. Lin, K. Wyss, M. Nazemi, A. Mishra, C. del Mundo, T. Blankevoort, and S. Han, “Four over six: More accurate NVFP4 quantization with adaptive block scaling,” 2025. [16] M. Nagel, R. A. Amjad, M. Van Baalen, C. Louizos, and T. Blankevoort, “Up or down? adaptive rounding for post-training quantization,” in International conference on machine learning , pp. 7197–7206, PMLR, 2020. [17] Y. Li, R. Gong, X. Tan, Y. Yang, P. Hu, Q. Zhang, F. Yu, W. Wang, and S. Gu, “BRECQ: Pushing the limit of post-training quantization by block reconstruction,” in International Conference on Learning Representations , 2021. [18] J. Zhang, Y. Zhou, and R. Saab, “Post-training quantization for neural networks with provable guarantees,” SIAM journal on mathematics of data science , vol. 5, no. 2, pp. 373–399, 2023. [19] A. Tseng, J. Chee, Q. Sun, V. Kuleshov, and C. De Sa, “Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks,” vol. 235, p. 48630, 2024. [20] S. Ashkboos, A. Mohtashami, M. L. Croci, B. Li, P. Cameron, M. Jaggi, D. Alistarh, T. Hoefler, and J. Hensman, “Quarot: Outlier-free 4-bit inference in rotated llms,” Advances in Neural Information Processing Systems , vol. 37, pp. 100213–100240, 2024. [21] Z. Liu, C. Zhao, I. Fedorov, B. Soran, D. Choudhary, R. Krishnamoorthi, V. Chandra, Y. Tian, and T. Blankevoort, “Spinquant: Llm quantization with learned rotations,” in International Conference on Learning Representations , 2025. [22] R. Banner, Y. Nahshan, and D. Soudry, “Post training 4-bit quantization of convolutional networks for rapid-deployment,” in 
+
+Advances in Neural Information Processing Systems , vol. 32, 2019. [23] P. Clark, I. Cowhey, O. Etzioni, T. Khot, A. Sabharwal, C. Schoenick, and O. Tafjord, “Think you have solved question answering? try arc, the ai2 reasoning challenge,” arXiv preprint arXiv:1803.05457 , 2018. [24] R. Zellers, A. Holtzman, Y. Bisk, A. Farhadi, and Y. Choi, “Hellaswag: Can a machine really finish your sentence?,” in 12 
+
+Proceedings of the 57th annual meeting of the association for computational linguistics , pp. 4791–4800, 2019. [25] Y. Bisk, R. Zellers, R. Le Bras, J. Gao, and Y. Choi, “PIQA: Reasoning about physical commonsense in natural language,” in 
+
+Proceedings of the AAAI Conference on Artificial Intelligence , pp. 7432–7439, 2020. [26] K. Sakaguchi, R. L. Bras, C. Bhagavatula, and Y. Choi, “Winogrande: An adversarial winograd schema challenge at scale,” 
+
+Communications of the ACM , vol. 64, no. 9, pp. 99–106, 2021. [27] K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman, “Training verifiers to solve math word problems,” arXiv preprint arXiv:2110.14168 , 2021. 13 
+
+## Appendix 
+
+We extend the comparison in Figure 1 to additional models from the Qwen3 and Llama families. Figure 6 presents a paired comparison in which each point represents the same model and PTQ configuration evaluated using MXFP4 and NVFP4. The distance from the diagonal therefore measures the effect of changing the block format while holding the remaining quantization choices fixed. The expanded results reinforce that neither format is uniformly superior. MXFP4 reaches the highest peak accuracy on Qwen3-4B and Qwen3-8B, while NVFP4 reaches the highest peak on Qwen3-1.7B and the evaluated Llama models. At the same time, the broad spread within each model shows that PTQ configuration can affect accuracy as much as the choice between MXFP4 and NVFP4. Consequently, comparisons based on a single shared PTQ recipe may not reflect the best performance achievable by either format. 42 43 44 45 46 47 42 43 44 45 46 47 
+
+> NVFP4 Acc. (%)
+> Qwen-1.7B
+> 47 48 49 47 48 49
+> Qwen-4B
+> 51 52 53 54 51 52 53 54
+> Qwen-8B
+> 51 52 53 54
+> MXFP4 Acc. (%)
+> 51 52 53 54
+> NVFP4 Acc. (%)
+> Llama-1B
+> 58 59 60 61
+> MXFP4 Acc. (%)
+> 58 59 60 61
+> Llama-3B
+> 63 64 65 66 67
+> MXFP4 Acc. (%)
+> 63 64 65 66 67
+> Llama-8B
+> PTQ Config Best Config
+
+Figure 6. Average benchmark accuracy across PTQ configurations for MXFP4 ( x-axis) and NVFP4 ( y-axis), extended to all six models; points above the diagonal are configurations where NVFP4 scores higher, and highlighted points mark the best configuration found for each model. MXFP4 reaches the highest peak accuracy on Qwen3-4B and Qwen3-8B, while NVFP4 reaches the highest peak on Qwen3-1.7B and the evaluated Llama models. The broad spread within each panel shows that the PTQ recipe affects accuracy as much as the choice of block format. 
+
+A central difference between NVFP4 and MXFP4 is how the two formats represent scale. NVFP4 combines E4M3 block scales with a high-precision per-tensor macroscale (11), whereas standard MXFP4 uses E8M0 block scales without an additional tensor-level scale. This raises a natural question: does the macroscale benefit come specifically from its interaction with the NVFP4 format, or can it also improve MXFP4? To isolate this design choice, we augment MXFP4 with an analogous software-assisted macroscale and compare it with otherwise identical standard MXFP4 configurations. The resulting format remains distinct from NVFP4 because its block size and block-scale datatype are unchanged. The aggregate results initially suggest that the benefit does not transfer. Figure 8 shows that, at A4W4, adding a macroscale generally reduces average benchmark accuracy. For Llama-3.2-1B, the broader configuration sweep produces average reductions of 14 53 54 55 56 57 58 59 
+
+> MXFP4 Acc. (%)
+> 53 54 55 56 57 58 59
+> NVFP4 Acc. (%)
+
+Winogrande 
+
+> 25 26 27 28 29 30 31 32 33
+> MXFP4 Acc. (%)
+> 25 26 27 28 29 30 31 32 33
+
+ARC Challenge 47 48 49 50 51 52 53 54 
+
+> MXFP4 Acc. (%)
+> 47 48 49 50 51 52 53 54
+
+Avg. Accuracy 
+
+> + Macroscale
+> Figure 7. Effect of NVFP4-style macroscaling on MXFP4. Using the same PTQ configurations as in Figure 1, we compare the original MXFP4 results with those obtained after applying macroscaling on Llama-3.2-1B. Horizontal shifts indicate the change in MXFP4 accuracy due to macroscale for a given configuration. Results are shown for WinoGrande, ARC-Challenge, and average accuracy. Although NVFP4-style macroscaling generally reduces average accuracy for MXFP4, it provides task-dependent gains, particularly on WinoGrande, demonstrating that its effectiveness depends on both the PTQ configuration and downstream task.
+
+0.66% to 0.85% . Although macroscaling is an integral part of NVFP4, it therefore does not act as a general improvement when added to MXFP4. Its interaction with MXFP4’s larger blocks and power-of-two E8M0 scales appears to differ from its role within NVFP4. The average, however, hides a more selective task-level effect. On WinoGrande as shown in Figures 7 and 9, macroscaling improves Llama-3.2-1B accuracy across every evaluated configuration, even when aggregate accuracy declines. The shifts on ARC-Challenge and average accuracy are smaller and less consistent. Thus, macroscaling does not improve MXFP4 uniformly; instead, it changes the quantization error in ways that can benefit particular downstream tasks. This conditional benefit also appears across precision regimes and model settings. At A6W6, the average effect reverses, with macroscaling providing a mean improvement of 0.69% . Table 3 provides a further example on instruction-tuned Llama-3.1-8B and includes the best task-wise MXFP4 and NVFP4 results reported by Egiazarian et al. (11); the published entries may use different PTQ methods across tasks. Our best standard MXFP4 scores are 77 .0% , 78 .7% , and 79 .6% on WinoGrande, HellaSwag, and GSM8K, respectively, while our best macroscaled MXFP4 scores are 77 .2% , 78 .8% , and 81 .9% . Relative to the best reported NVFP4 result for each task, MXFP4 with macroscaling is higher on WinoGrande ( 77 .2% vs. 75 .2% ) and lower on HellaSwag ( 78 .8% vs. 79 .5% )and GSM8K ( 81 .9% vs. 82 .6% ). Our in-house NVFP4 configuration is also higher than MXFP4 with macroscaling on HellaSwag and GSM8K. These results position NVFP4-style macroscaling as a targeted extension to MXFP4 rather than a universally beneficial addition. Its value depends on the downstream task and precision regime; its clearest gain in our evaluation is on GSM8K for Llama-3.1-8B-Instruct, where tensor-level range variation may remain important after block scaling, but we have not evaluated enough models and math benchmarks to claim this pattern holds for mathematical reasoning in general. Figure 10 separates the A4W4 results by PTQ method. The relative ordering of GPTQ and Qronos changes across models and formats. GPTQ more frequently produces the strongest MXFP4 configurations, while Qronos more frequently produces the strongest NVFP4 configurations, but neither pattern holds universally. This interaction indicates that a PTQ method selected for one block format should not be assumed to transfer optimally to the other. Figure 11 reports the average accuracy gain from Hadamard rotation relative to the corresponding configuration without rotation. For NVFP4, the mean effect is small or negative across rotation sizes. MXFP4 benefits more consistently, with Block-32 rotation producing the strongest average improvement. The gain also depends on the PTQ method, indicating that rotation and reconstruction-based quantization should be treated as interacting components of the PTQ recipe. These aggregate trends do not imply that Block-32 rotation is optimal for every model. Individual configurations may favor no rotation, Block-16 rotation, or Full rotation. Table 6 places the rotation results in the context of the complete configuration sweep and reports the best and worst accuracy observed for each model and datatype. The configuration gap in Table 6 quantifies the importance of jointly tuning PTQ method, rotation, and scale selection. MXFP4 exhibits a larger best-to-worst gap than NVFP4 for every evaluated model, indicating greater sensitivity to the PTQ recipe. This sensitivity creates both greater risk from a poorly matched configuration and greater potential upside from format-specific tuning, as 15 41 42 43 44 45 46 47 41 42 43 44 45 46 47 
+
+> NVFP4 Acc. (%)
+
+Qwen-1.7B 
+
+> 46 47 48 49 46 47 48 49
+
+Qwen-4B 
+
+> 50 51 52 53 54 50 51 52 53 54
+
+Qwen-8B 
+
+> 47 48 49 50 51 52 53 54
+
+MXFP4 Acc. (%) 
+
+> 47 48 49 50 51 52 53 54
+> NVFP4 Acc. (%)
+
+Llama-1B 
+
+> 57 58 59 60 61
+
+MXFP4 Acc. (%) 
+
+> 57 58 59 60 61
+
+Llama-3B 
+
+> 63 64 65 66 67
+
+MXFP4 Acc. (%) 
+
+> 63 64 65 66 67
+
+Llama-8B 
+
+> + Macroscale
+
+Figure 8. Effect of NVFP4-style macroscaling on MXFP4: Average Accuracy. Using the same PTQ configurations as in Figure 6, we compare the original MXFP4 results with those obtained after applying macroscaling on each model. Horizontal shifts indicate the change in MXFP4 accuracy due to macroscale for a given configuration. Results are shown for average accuracy. Although NVFP4-style macroscaling generally reduces average accuracy for MXFP4, it provides task-dependent gains, particularly on WinoGrande (see Figure 9), demonstrating that its effectiveness depends on both the PTQ configuration and downstream task. 
+
+demonstrated by the strongest Qwen3-4B and Qwen3-8B results. 16 50 51 52 53 54 55 50 51 52 53 54 55 
+
+> NVFP4 Winogrande (%)
+
+Qwen-1.7B 
+
+> 51 52 53 54 55 56 51 52 53 54 55 56
+
+Qwen-4B 52 53 54 55 56 57 58 52 53 54 55 56 57 58 
+
+Qwen-8B 
+
+> 53 54 55 56 57 58 59
+> MXFP4 Winogrande (%)
+> 53 54 55 56 57 58 59
+> NVFP4 Winogrande (%)
+
+Llama-1B 
+
+> 60 61 62 63 64 65 66
+> MXFP4 Winogrande (%)
+> 60 61 62 63 64 65 66
+
+Llama-3B 
+
+> 64 65 66 67 68 69 70 71
+> MXFP4 Winogrande (%)
+> 64 65 66 67 68 69 70 71
+
+Llama-8B 
+
+> + Macroscale
+
+Figure 9. Effect of NVFP4-style macroscaling on MXFP4: WinoGrande. Same as Figure 8 but evaluated on WinoGrande task. TABLE 6. There is no winning PTQ recipe across model and datatype, reinforcing the need for evaluating multiple PTQ configurations per model. The gap is the difference between the best and worst average accuracy across configurations. Bold denotes the highest peak accuracy for each model. 
+
+Model Datatype Best Acc. (%) Worst Acc. (%) Gap Best Configuration Qwen3-1.7B NVFP4 46.80 43.32 3.48 Block-32 + Qronos + Stats MXFP4 46.66 40.99 5.67 Block-16 + GPTQ + MSE Qwen3-4B NVFP4 49.32 46.63 2.69 No rotation + Qronos + Stats MXFP4 49.49 46.23 3.27 Block-16 + GPTQ + Midmax Qwen3-8B NVFP4 52.91 51.08 1.83 Full + Qronos + Stats MXFP4 54.00 49.54 4.46 Full + GPTQ + MSE Llama-3.2-1B NVFP4 53.94 50.89 3.05 Block-16 + GPTQ + MSE MXFP4 53.36 47.49 5.87 Block-16 + GPTQ + MSE Llama-3.2-3B NVFP4 61.68 58.70 2.98 No rotation + Qronos + Stats MXFP4 61.25 57.04 4.21 Block-32 + GPTQ + Midmax Llama-3.1-8B NVFP4 67.40 65.28 2.12 Block-32 + Qronos + MSE MXFP4 66.59 62.40 4.19 Block-32 + Qronos + Midmax 17 41.5 42.0 42.5 43.0 43.5 44.0 44.5 45.0 45.5 46.0 46.5 47.0 41.5 42.0 42.5 43.0 43.5 44.0 44.5 45.0 45.5 46.0 46.5 47.0 
+
+> NVFP4 Acc. (%)
+
+Qwen-1.7B 
+
+> 46.5 47.0 47.5 48.0 48.5 49.0 49.5
+
+46.5 47.0 47.5 48.0 48.5 49.0 49.5 
+
+Qwen-4B 
+
+> 50.5 51.0 51.5 52.0 52.5 53.0 53.5 54.0
+
+50.5 51.0 51.5 52.0 52.5 53.0 53.5 54.0 
+
+Qwen-8B 
+
+> 50.5 51.0 51.5 52.0 52.5 53.0 53.5 54.0
+
+MXFP4 Acc. (%) 
+
+50.5 51.0 51.5 52.0 52.5 53.0 53.5 54.0 
+
+> NVFP4 Acc. (%)
+
+Llama-1B 
+
+> 57.5 58.0 58.5 59.0 59.5 60.0 60.5 61.0 61.5
+
+MXFP4 Acc. (%) 
+
+57.5 58.0 58.5 59.0 59.5 60.0 60.5 61.0 61.5 
+
+Llama-3B 
+
+> 63.0 63.5 64.0 64.5 65.0 65.5 66.0 66.5 67.0 67.5
+
+MXFP4 Acc. (%) 
+
+63.0 63.5 64.0 64.5 65.0 65.5 66.0 66.5 67.0 67.5 
+
+Llama-8B 
+
+> RTN GPTQ Qronos
+
+Figure 10. PTQ Method Performance at A4W4. Neither PTQ method is uniformly best by model or datatype. 18 −2
+
+−1012  
+
+> Hadamard Accuracy Gain (%)
+> +0.76 +1.62 +1.14 +1.47 +1.18 +1.14 +1.38 +1.60 +1.35 -1.72 +1.15 +0.96 +0.49 +0.11 +0.44 +0.25 +0.84 +0.81
+
+MXFP4 
+
+RTN GPTQ Qronos 
+
+Llama-3.2-1B Llama-3.2-3B Llama-3.1-8B Qwen3-1.7B Qwen3-4B Qwen3-8B 
+
+−2.0 
+
+−1.5 
+
+−1.0 
+
+−0.5 0.0 0.5 1.0 
+
+> Hadamard Accuracy Gain (%)
+> -1.24 +0.08 +0.29 -1.43 -0.41 -0.77 -1.13 -0.25 +0.06 -1.47 -0.14 +0.44 -0.53 -0.56 +0.45 -0.64 -0.89 +0.12
+
+NVFP4 
+
+Figure 11. Hadamard rotation × PTQ method. We consider the average accuracy gain over no rotation for different Hadamard sizes (x-axis) on both NVFP4 (left) and MXFP4 (right) at A4W4. On average, Hadamard rotation does not have a positive effect on NVFP4, yet yields significant benefits for MXFP4. While these represent trends averaged over all configurations, a best PTQ recipe for a given model may not follow this trend as shown in Table 6.

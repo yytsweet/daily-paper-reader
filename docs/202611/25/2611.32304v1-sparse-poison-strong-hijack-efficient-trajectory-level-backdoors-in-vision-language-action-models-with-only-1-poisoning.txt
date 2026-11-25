@@ -1,0 +1,852 @@
+Title: Sparse Poison, Strong Hijack: Efficient Trajectory-Level Backdoors in Vision-Language-Action Models with Only 1% Poisoning
+
+URL Source: https://arxiv.org/pdf/2611.32304v1
+
+Published Time: Wed, 25 Nov 2026 02:47:19 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Sparse Poison, Strong Hijack: Efficient Trajectory-Level Backdoors in Vision-Language-Action Models with Only 1% Poisoning 
+
+Simin Huang ∗1, Jiawei Chen ∗1,2, Shaolong Zhu 3, Qiwei Liang 4, Zhaoxia Yin †1
+
+> ∗
+
+Equal contribution †Corresponding author 
+
+> 1
+
+East China Normal University 2Zhongguancun Academy 
+
+> 3
+
+Tsinghua University 4The Hong Kong University of Science and Technology (Guangzhou) 
+
+Abstract 
+
+Vision-Language-Action (VLA) models advance robotic ma-nipulation, but their reliance on demonstrations exposes them to backdoor threats. Among these threats, trajectory-level targeted backdoors are particularly challenging and may pose greater safety risks than behavior-disrupting at-tacks: rather than merely causing task failures or local ac-tion deviations, they must sustain closed-loop redirection to complete an attacker-specified multi-step task. To reliably in-duce such behaviors, existing methods typically rely on high poisoning rates to obtain sufficient target-trajectory supervi-sion. However, high poisoning rates may compromise clean-task performance, whereas low rates leave target-trajectory supervision scarce and backdoor learning vulnerable to in-terference from dominant clean-task updates. To resolve this trade-off at low poisoning rates, we propose a two-stage co-optimization framework guided by vision, language, and action. Stage I freezes the policy and uses differentiable ren-dering and multimodal supervision to optimize a 3D trigger’s texture, translation, and scale, strengthening trigger–target associations from limited poisoned demonstrations. Building on the optimized trigger, Stage II applies source-selective dual-LoRA adaptation to decouple clean and backdoor up-dates and mitigate their interference, followed by learned column-wise calibration and analytic fusion into a unified policy. Experiments on OpenVLA, OpenVLA-OFT, π0, and 
+
+π0.5 across four LIBERO suites show consistent gains over all evaluated attack baselines. With only 1% poisoned data, our method achieves 86.4% target success and 95.2% clean-task success on OpenVLA-OFT in LIBERO-Spatial. Real-robot trials also demonstrate trajectory-level hijacking.Our code is available at https://github.com/vla-attack/Sparse_Poison_Strong_Hijack .
+
+1. Introduction 
+
+Vision-Language-Action (VLA) models enable physical-world robotic manipulation by mapping visual observations and language instructions to robot actions. Representative Poisoning rate (%) Poisoning rate (%)                           
+
+> (a) Target Success Rate (TSR, ↑)
+> 020 40 60 80 100
+> 1% 2% 5% 10%
+> 86.4 87.6 89.2 90.4
+> 7.6 22.4 42.4 64.2 14.8 24.5 38.4 65.6
+> TSR +71.6 pp
+> (b) Clean Success Rate (CSR, ↑)
+> 65 70 75 80 85 90 95 100
+> 1% 2% 5% 10%
+> 95.2 92.6 90.2 89.4
+> 86.2 82.4 74.8 70.5 91.6 88.4 80.4 76.6
+> CSR +3.6 pp
+> GoBA BackdoorVLA-VT Ours
+> GoBA / BackdoorVLA-VT (c) Existing Methods (d) Ours
+> Fixed Trigger
+> Texture Position Scale
+> τ(x, y) s
+> Optimized 3D Trigger
+> xyzΔx Δy
+> Texture Translation Scale
+> τΔx, Δy s
+> Decoupled Adaptation(Dual Lora)
+> Clean LoRA ψc Trigger LoRA ψt
+> Fusion
+> VLA policy
+> Mixed Training (Clean + Poisoned)
+
++
+
+> VLA policy
+> Share Updata
+
+Figure 1. Trajectory-level backdoor attacks under limited poi-soning. (a,b) Target success rate (TSR) and clean success rate (CSR) across poisoning rates on OpenVLA-OFT in LIBERO-Spatial. At 1% poisoning, Ours achieves 86.4% TSR and 95.2% CSR, exceeding the strongest baseline by 71.6 and 3.6 percentage points, respectively. (c) GoBA and BackdoorVLA-VT use fixed triggers and mixed clean–poisoned training with shared parameter updates. (d) Ours optimizes a 3D trigger and decouples clean and backdoor adaptation through source-selective dual-LoRA updates, followed by parameter fusion into a single unified policy. 
+
+models, including OpenVLA [13], OpenVLA-OFT [12], 
+
+π0 [3], and π0.5 [2], demonstrate strong manipulation ca-pabilities and generalization potential across manipulation tasks. However, their reliance on demonstrations exposes them to data poisoning and backdoor attacks during training and fine-tuning. Of particular concern, backdoors that hi-jack entire manipulation trajectories may induce unintended multi-step behaviors, potentially causing equipment damage, economic losses, or threats to human safety. Existing VLA backdoor attacks can be broadly cate-gorized by their objectives into behavior-disrupting and trajectory-level targeted attacks. The former have received considerable attention, with BadVLA [27], FlowHijack [1], and DropVLA [25] exploring task disruption and mali-cious action manipulation. In contrast, GoBA [28] and arXiv:2611.32304v1 [cs.AI] 24 Nov 2026 Figure 2. Overview of our two-stage framework. Stage I (top): With the VLA policy frozen, we optimize a 3D trigger’s texture, translation, and scale through differentiable rendering, guided by visual attention, language attention, and target-action supervision. Stage II (bottom): With the optimized trigger fixed, clean and poisoned demonstrations selectively update serial Clean-LoRA and Trigger-LoRA adapters, respectively. Clean-reference gradient projection mitigates conflicting Trigger-LoRA updates. Learned column-wise coefficients calibrate Trigger-LoRA before both adaptations are analytically fused into a single dense VLA policy. 
+
+BackdoorVLA-VT [15] pursue goal-directed trajectory hi-jacking, where a trigger redirects the robot toward an attacker-specified task, such as picking up and placing a cup instead of the instructed bowl. Unlike isolated failures or local action deviations, completing such a task requires sustained behavioral redirection across multiple closed-loop stages, making reliable attacks substantially harder. This need for sustained control across successive action steps intensifies the trade-off among poisoning rate, attack reliability, and clean-task performance in trajectory-level hijacking. As Fig. 1(a,b) shows, increasing the poisoning rate improves existing attacks’ target success rate (TSR), but often at the expense of clean success rate (CSR). At low poi-soning rates, attacks face two fundamental bottlenecks. First, 
+
+scarce target-trajectory supervision weakens trigger–target associations, making it difficult to learn reliable multi-step redirection. Second, interference from dominant clean-task updates hinders backdoor learning: in conventional mixed training, clean demonstrations dominate shared parameter updates, and conflicting clean and backdoor gradients can further suppress learning from rare poisoned samples, as confirmed by our preliminary gradient analysis in Fig. 3(a). To address these complementary bottlenecks, we propose a two-stage co-optimization framework guided by vision, language, and action, targeting reliable trajectory-level hi-jacking under sparse poisoning while preserving clean-task performance. Figure 1(c,d) contrasts our approach with fixed-trigger, shared-update training, while Fig. 2 details the two-stage optimization pipeline. Stage I performs trigger ef-ficacy optimization : with the VLA policy frozen, it optimizes a 3D trigger’s texture, translation, and scale through differ-entiable rendering under joint visual-attention, language, and action guidance. This strengthens trigger–target tra-jectory associations without increasing the poisoning bud-get. Building on the optimized trigger, Stage II performs 
+
+conflict-aware dual-LoRA adaptation to mitigate interfer-ence during backdoor learning. Clean and poisoned demon-strations selectively update separate serial LoRA adapters, while both remain active in the forward pass. Together with clean-reference gradient projection correcting conflict-ing Trigger-LoRA updates, this decoupling protects learn-ing from scarce poisoned demonstrations against dominant clean-task updates. Learned column-wise coefficients cali-brate the Trigger-LoRA transformation before both adapters are analytically fused into a unified dense VLA policy. Our main contributions are as follows: 1. We propose multimodal 3D trigger optimization to jointly refine the trigger’s texture, translation, and scale under vi-sual, language, and action guidance, strengthening trigger efficacy at low poisoning rates. 2. We introduce source-selective dual-LoRA adaptation with clean-reference gradient projection and column-wise cal-ibrated fusion, decoupling clean and backdoor parameter updates to mitigate optimization interference between objectives and improve attack effectiveness under sparse poisoning while preserving clean-task performance. 3. With only 1% poisoned data, our method achieves 78.2% average TSR across four VLA models and four LIBERO suites, surpassing the strongest baseline by 62.7 percent-age points (pp) with the smallest clean-task degradation. Real-robot trials further demonstrate sustained trajectory-level hijacking, highlighting the risks of sparse malicious demonstrations to VLA behavioral integrity. 
+
+2. Related Work 
+
+2.1. Vision-Language-Action Models 
+
+Vision-Language-Action (VLA) models learn instruction-conditioned robot control from demonstrations, enabling policies to map multimodal observations and language in-structions into executable actions. Early work explored vision–language knowledge transfer through action tokeniza-tion (RT-2 [29]) and large-scale cross-embodiment training (Open X-Embodiment [19]), establishing foundations for general-purpose robotic manipulation. Recent VLA models differ substantially in their action representations and pre-diction mechanisms. OpenVLA [13] predicts discretized ac-tions autoregressively, whereas OpenVLA-OFT [12] adopts continuous action chunks and parallel decoding to improve manipulation efficiency. π0 [3] generates continuous ac-tions through flow matching, while π0.5 [2] further enhances generalization through heterogeneous training data. These ar-chitectural differences influence how policies represent and execute multi-step manipulation behaviors. Nevertheless, all four models rely on demonstration-based learning, ex-posing their training and adaptation processes to potentially poisoned data. This shared dependency motivates our cross-architecture evaluation of trajectory-level backdoor risks, spanning both discrete and continuous action generation. 
+
+2.2. Attacks on VLA Models 
+
+Attacks on VLA models fall into inference-time perturba-tions and training-time backdoors. Related work examines decision-level attacks on LLM-based embodied agents [17], LLM jailbreaking [4], and reasoning-model red teaming [6]. Inference-time attacks manipulate observations or instruc-tions during deployment without modifying parameters. Methods exploit adversarial visual patches [18, 22, 24], text [11], or 3D object textures [5, 8]. These approaches expose vulnerabilities to manipulated inputs, but differ from backdoors embedded during policy adaptation. Training-time backdoors associate specific triggers with malicious behaviors through poisoned demonstrations, al-lowing policies to behave normally on clean inputs while deviating when triggered. Existing attacks induce task failures, action manipulation, or stealthy trajectory devia-tions [1, 9, 23, 25, 27]. Unlike such disruptions, trajectory-level targeted backdoors require sustained redirection to com-plete an attacker-specified manipulation task. Such comple-tion entails coherent approach, grasp, transport, and place-ment across multiple closed-loop control stages. GoBA [28] and BackdoorVLA-VT [15] pursue goal-directed trajectory hijacking, yet reliable completion remains difficult under sparse poisoning: scarce supervision weakens trigger–target associations, while dominant clean-task updates interfere with backdoor learning. Their use of fixed triggers and shared parameter updates motivates optimizing both the trig-ger and adaptation process. Related to our second stage, ATAAT [7] addresses gradient conflicts through feature or-thogonalization or parameter isolation. In contrast, our framework combines differentiable multimodal 3D trigger optimization with source-selective dual-LoRA adaptation, conflict-aware updates, and calibrated fusion, targeting re-liable trajectory hijacking under limited poisoning budgets while preserving clean-task performance. 
+
+3. Method 
+
+Our two-stage multimodal framework induces trajectory-level targeted backdoors under sparse poisoning (Fig. 2). Stage I optimizes a 3D trigger; Stage II mitigates update in-terference and fuses the learned adaptations into one policy. 
+
+3.1. Problem Formulation 
+
+Attack setting and objective. We consider white-box of-fline adaptation of a VLA policy πθ0 that predicts actions from visual observations It, language instructions ℓ, and op-tional proprioception pt. The attacker controls limited poi-soned demonstrations with a physical 3D trigger but retains the original instructions. The goal is to induce a complete attacker-specified manipulation trajectory with the trigger while preserving normal task execution otherwise. Let Dc and Dt(ϕ) denote clean and poisoned demonstra-tions, where ϕ ∈ Φ parameterizes the trigger and ψ denotes policy adaptation parameters. We formulate the overall ob-jective as 
+
+min  
+
+> ϕ∈Φ,ψ
+
+EDt(ϕ)[Lt(πθ0⊕ψ )] + λcEDc [Lc(πθ0⊕ψ )] ,
+
+s.t. ρ = Nt
+
+Nc + Nt
+
+≪ 1,
+
+(1) where Lt and Lc measure target-trajectory and clean-task errors, ⊕ denotes adaptation, and the attacker seeks to keep the poisoning rate ρ as low as possible. In our experiments, a poisoning rate of ρ = 1% already enables reliable hijacking. Two bottlenecks arise: scarce target-trajectory supervision and interference from dominant clean-task updates. We first optimize the trigger with a frozen policy (Sec. 3.2), then adapt the policy with the optimized trigger fixed (Sec. 3.3). 3.2. Trigger Efficacy Optimization 
+
+Under sparse poisoning, target demonstrations cannot reli-ably supervise trajectory hijacking. We strengthen trigger– target associations without increasing the poisoning rate by optimizing a 3D trigger through differentiable rendering and joint visual, language, and action supervision. 
+
+3D trigger optimization. We parameterize the trig-ger’s texture, translation, and scale as ϕ = ( τ, μ, u ): μ
+
+adjusts placement, s = 1 + u sets scale, and T (τ ) =clip [0 ,1] (T0 + Upsample( τ )) defines texture. Here, T0 is the base texture, and Upsample maps the low-resolution offset τ to full texture resolution. All poisoned demonstra-tions share these parameters; object poses are recovered from recorded states. For occlusion-aware rendering, MuJoCo [21] produces background RGB/depth (B, D b) with the original trig-ger geometry hidden, and nvdiffrast [14] renders trigger RGB/depth/coverage (F, D f , α ). With aligned cameras, the synthesized observation is 
+
+eα = χvalid α σ 
+
+ Db − Df − δκ
+
+
+
+,
+
+I(ϕ) = eα ⊙ F + (1 − eα) ⊙ B, 
+
+(2) where χvalid masks valid-depth pixels; δ and κ set depth tolerance and smoothness. Gradients reach ϕ from the frozen policy without differentiation through simulation dynamics. 
+
+Multimodal supervision. Action supervision alone does not explicitly guide object selection or instruction-conditioned responses. We therefore jointly optimize visual attention Lv , language attention Lℓ, and target actions La.For visual supervision, we extract attention from action-prediction queries and compute region-normalized densities. Let rv,c and rv,b denote their ratios to fixed references for the trigger c and originally instructed object b in view v. We encourage attention toward the trigger and away from the original target: 
+
+Lv = Ev∈E c [sp( − log rv,c )] + Ev∈E b [sp(log rv,b )] + λocc Locc , (3) where sp is softplus, Eo lists views showing object o, and 
+
+Locc penalizes insufficient visibility. Object regions come from rendered trigger coverage and scene segmentation. For language supervision, we suppress attention to the original target description while preserving shared pick/place semantics: 
+
+Lℓ = msup 
+
+m0sup 
+
++ λkeep 
+
+X
+
+> j∈{ pick ,place }
+
+mj − m0
+
+> j
+
+m0
+
+> j
+
+!2
+
+, (4) where mj and m0 
+
+> j
+
+are current and reference attention masses; denominators are clipped for stability. Action supervision La
+
+uses each model’s native objective: token cross-entropy for OpenVLA [13], chunk-wise ℓ1 loss for OpenVLA-OFT [12], and flow matching for π0/π 0.5 [2, 3]. 
+
+Joint objective. With the VLA policy frozen, Stage I optimizes only the trigger parameters: 
+
+ϕ⋆ = arg min  
+
+> ϕ∈Φ
+
+EDt [λv Lv + λℓLℓ + λaLa]+ λreg R(τ ),
+
+(5) where R(τ ) encourages texture smoothness. The optimized 3D trigger ϕ⋆ then remains fixed throughout Stage II. 
+
+3.3. Conflict-Aware Dual-LoRA Adaptation 
+
+After Stage I, scarce poisoned demonstrations leave back-door learning vulnerable to dominant clean-task updates. Source-selective dual-LoRA adaptation, clean-reference gra-dient projection, and column-wise fusion address this inter-ference while preserving clean-task performance. 
+
+Source-selective dual-LoRA adaptation. We freeze the VLA backbone and introduce Clean-LoRA and Trigger-LoRA [10] transformations, C = γB cAc and T = γB tAt,where γ = αLoRA /r . We arrange them serially instead of adding their increments: 
+
+z = ( I + T ) (W + C)x + b. (6) Both adapters participate in every forward pass but receive updates from separate data sources. Clean demonstrations use Lc = La; poisoned demonstrations retain multimodal supervision, Lt = λaLa + λv Lv + λℓLℓ. With adapter parameters ψc and ψt, their gradients are 
+
+gc = nc
+
+B ∇ψc Lc(ψc, sg( ψt)) ,gt = nt
+
+B ∇ψt Lt(sg( ψc), ψ t),
+
+(7) where B = nc +nt, sg stops gradients to the inactive adapter, and source weights preserve actual sampling proportions. This prevents dominant clean-task gradients from directly overwriting the parameters of Trigger-LoRA. 
+
+Clean-reference gradient projection. Source-selective updates decouple parameter learning, but both adapters re-main active on clean inputs, so Trigger-LoRA updates may still disrupt normal behavior. We compute a clean-reference gradient hc = ∇ψt EDref  
+
+> c
+
+[La] (Dref  
+
+> c
+
+⊂ D c) to correct gt.Unlike PCGrad [26], which symmetrically removes conflict-ing components, we minimally adjust the mean direction 
+
+d0 = 12 (hc + gt) under asymmetric constraints: 
+
+g+ 
+
+> t
+
+= arg min  
+
+> d
+> 12
+
+∥d−d0∥22 s.t. ⟨hc, d ⟩ ≥ 0, ⟨gt, d ⟩ ≥ β∥gt∥22.
+
+(8) The clean term imposes a hard non-degradation constraint and the trigger term a β-scaled progress floor, reflecting the Table 1. Trajectory-level targeted attacks at 1% poisoning. Each entry reports CSR / TSR (%, higher is better); Mean averages the four LIBERO suites. Green ↓ indicates CSR reduction from Clean-only in percentage points. Bold denotes the highest CSR or TSR across all methods; underlined CSR denotes the highest among attack methods. Clean-only CSR uses published evaluations; protocols may differ. 
+
+Model Method LIBERO suites (CSR / TSR, %) Mean 
+
+Spatial Object Goal Long 
+
+OpenVLA [13] 
+
+Clean-only 84 .7 / 0.0 88 .4 / 0.0 79 .2 / 0.0 53 .7 / 0.0 76 .5 / 0.0
+
+GoBA 79.6 (↓5.1) / 3.2 81.4 (↓7.0) / 9.4 70.6 (↓8.6) / 11.8 44.8 (↓8.9) / 6.2 69.1 (↓7.4) / 7.7 BackdoorVLA-VT 77.4 (↓7.3) / 5.4 82.2 (↓6.2) / 14.4 68.8 (↓10.4) / 13.8 45.0 (↓8.7) / 8.6 68.4 (↓8.2) / 10.6 
+
+Ours 81.2 (↓3.5) / 74.2 83.6 (↓4.8) / 80.4 72.2 (↓7.0) / 82.4 51.8 (↓1.9) / 64.0 72.2 (↓4.3) / 75.3 OpenVLA-OFT [12] 
+
+Clean-only 97 .6 / 0.0 98 .4 / 0.0 97 .9 / 0.0 94 .5 / 0.0 97 .1 / 0.0
+
+GoBA 86.2 (↓11.4) / 7.6 91.2 (↓7.2) / 20.8 90.2 (↓7.7) / 35.6 58.2 (↓36.3) / 4.8 81.5 (↓15.7) / 17.2 BackdoorVLA-VT 91.6 (↓6.0) / 14.8 67.2 (↓31.2) / 8.2 92.2 (↓5.7) / 34.4 74.2 (↓20.3) / 9.6 81.3 (↓15.8) / 16.8 
+
+Ours 95.2 (↓2.4) / 86.4 94.4 (↓4.0) / 81.8 92.8 (↓5.1) / 79.4 90.2 (↓4.3) / 68.2 93.2 (↓4.0) / 79.0 
+
+π0 [3] 
+
+Clean-only 96 .8 / 0.0 98 .8 / 0.0 95 .8 / 0.0 85 .2 / 0.0 94 .2 / 0.0
+
+GoBA 94.6 (↓2.2) / 10.4 92.8 (↓6.0) / 16.6 90.2 (↓5.6) / 23.6 81.4 (↓3.8) / 2.6 89.8 (↓4.4) / 13.3 BackdoorVLA-VT 95.2 (↓1.6) / 22.6 80.6 (↓18.2) / 17.2 87.4 (↓8.4) / 24.4 80.2 (↓5.0) / 7.4 85.9 (↓8.3) / 17.9 
+
+Ours 96.6 (↓0.2) / 81.8 94.4 (↓4.4) / 84.2 91.2 (↓4.6) / 76.4 82.0 (↓3.2) / 70.8 91.1 (↓3.1) / 78.3 
+
+π0.5 [2] 
+
+Clean-only 98 .8 / 0.0 98 .2 / 0.0 98 .0 / 0.0 92 .4 / 0.0 96 .9 / 0.0
+
+GoBA 92.0 (↓6.8) / 16.4 93.2 (↓5.0) / 19.4 87.0 (↓11.0) / 15.6 85.4 (↓7.0) / 4.2 89.4 (↓7.5) / 13.9 BackdoorVLA-VT 94.6 (↓4.2) / 23.8 90.8 (↓7.4) / 14.4 90.2 (↓7.8) / 21.4 86.6 (↓5.8) / 6.8 90.6 (↓6.3) / 16.6 
+
+Ours 94.8 (↓4.0) / 82.4 95.6 (↓2.6) / 86.8 93.2 (↓4.8) / 80.4 89.2 (↓3.2) / 71.4 93.2 (↓3.7) / 80.3 
+
+dominance of clean updates under sparse poisoning. The QP admits a closed-form KKT solution (Sec. C.2). 
+
+Column-wise calibration and fusion. The serial struc-ture’s multiplicative interaction between C and T makes direct additive merging inappropriate. Inspired by Zi-pLoRA [20], we freeze the trained adapters and learn column-wise coefficients m for the Trigger transformation: 
+
+T (m) = T diag( m), m ∈ [0 .5, 1.5] dout , (9) where m is initialized to 1. We calibrate these coefficients by minimizing 
+
+Lfuse = Lcal  
+
+> c
+
++ Lcal  
+
+> t
+
++ λpLref 
+
++ λmΩ( m), (10) where Lcal  
+
+> c
+
+and Lcal  
+
+> t
+
+re-evaluate the clean and target objec-tives under T (m) to retain both behaviors, Lref penalizes clean-action deviations from a frozen reference policy, and 
+
+Ω( m) regularizes m. Calibration optimizes only m.Finally, the calibrated adapters are analytically fused: 
+
+W ′ = ( I + T (m⋆))( W + C),b′ = ( I + T (m⋆)) b. (11) The dense policy retains both adaptations and their multi-plicative interaction without runtime adapter selection. 
+
+4. Experiments 
+
+4.1. Experimental Setup 
+
+Models and benchmarks. We evaluate four VLA models: OpenVLA [13] with discrete action tokens, and OpenVLA-OFT [12], π0 [3], and π0.5 [2] with continuous actions. Four LIBERO [16] suites— Spatial, Object, Goal, and Long (LIBERO-10)— cover spatial relations, object diversity, goal-conditioned behaviors, and long-horizon tasks. 
+
+Attack setting. We study white-box offline adapta-tion with a fixed 1% demonstration-level poisoning budget. When a physical trigger object appears, the backdoored pol-icy should grasp it and place it stably on a plate despite an unchanged instruction. Suite-specific target demonstrations follow this tabletop pick-and-place structure (Sec. B). 
+
+Baselines. We compare against the targeted backdoors GoBA [28] and BackdoorVLA-VT [15], and the untargeted BadVLA [27]. For a controlled comparison, both targeted baselines are adapted to all four models with the same base trigger object, target trajectories, and data sampling protocol (Sec. D). GoBA and our method preserve the original in-structions, whereas BackdoorVLA-VT adds a textual trigger. OpenVLA-OFT adaptation starts from Clean-150k. 
+
+Evaluation protocol and metrics. Each setting uses 
+
+500 clean and 500 triggered closed-loop episodes ( 50 per task). We report clean success rate (CSR; original-task suc-cess without the trigger), target success rate (TSR; attacker-specified task completion with the trigger), and untargeted attack success rate (UASR; original-task failure with the trig-ger). TSR is primary; CSR measures clean-task preservation. UASR includes failures that never reach the target, so it is not complementary to TSR: the two need not sum to 100% .Clean-only CSR comes from published evaluations; TSR and UASR are evaluated with the trigger present. 
+
+4.2. Main Results 
+
+Targeted attack effectiveness. We first examine whether 
+
+1% poisoning suffices for reliable trajectory-level hijack-Table 2. Untargeted attack comparison. UASR (%) measures original-task failure with the trigger, including for Clean-only. Mean averages the four suites per model. Bold: highest attack UASR; red ↑ labels: Ours’ gains over the strongest attack baseline per setting. 
+
+OpenVLA [13] OpenVLA-OFT [12] 
+
+Method Spatial Object Goal Long Mean Spatial Object Goal Long Mean 
+
+Clean-only 24.0 21.0 28.0 56.0 32.3 5.6 4.0 5.8 7.8 5.8 GoBA 95.8 90.4 94.4 96.2 94.2 93.6 86.6 94.2 43.4 79.5 BackdoorVLA-VT 93.4 92.2 94.2 95.0 93.7 87.4 42.6 92.4 58.8 70.3 BadVLA 90.2 91.4 90.6 92.4 91.2 83.2 74.8 77.2 68.2 75.9 
+
+Ours 98.2 (↑2.4) 99.4 (↑7.2) 98.4 (↑4.0) 99.2 (↑3.0) 98.8 (↑4.6) 96.2 (↑2.6) 92.6 (↑6.0) 96.2 (↑2.0) 93.6 (↑25.4) 94.7 (↑15.2) 
+
+π0 [3] π0.5 [2] 
+
+Method Spatial Object Goal Long Mean Spatial Object Goal Long Mean 
+
+Clean-only 6.0 4.6 6.8 17.4 8.7 4.0 3.8 5.4 10.4 5.9 GoBA 88.2 74.4 78.2 52.4 73.3 87.2 79.4 74.8 54.2 73.9 BackdoorVLA-VT 82.8 68.4 81.6 66.2 74.8 80.2 64.4 82.2 62.4 72.3 BadVLA 78.6 70.4 71.4 69.2 72.4 72.4 62.4 71.2 60.8 66.7 
+
+Ours 93.4 (↑5.2) 90.2 (↑15.8) 89.2 (↑7.6) 91.4 (↑22.2) 91.1 (↑16.3) 91.4 (↑4.2) 88.4 (↑9.0) 87.2 (↑5.0) 89.4 (↑27.0) 89.1 (↑15.2) 
+
+ing across VLA architectures while preserving clean-task performance. In Table 1, our method outperforms GoBA and BackdoorVLA-VT on both CSR and TSR in all 16 
+
+model–suite settings, reaching 78 .2% overall TSR versus 
+
+15 .5% for the strongest baseline, an absolute TSR differ-ence of 62 .7% . This advantage holds for both discrete- and continuous-action models (mean TSR 75 .3–80 .3% ) and per-sists on the long-horizon LIBERO-Long suite ( 68 .6% vs .
+
+8.1% ). Our method also has the smallest gap to Clean-only CSR (absolute differences of 3.8% , 8.7% , and 9.6% 
+
+for Ours, GoBA, and BackdoorVLA-VT, respectively). We attribute these gains to the two stages addressing complemen-tary bottlenecks: trigger optimization strengthens trigger– target associations from scarce poisoned demonstrations, while source-selective updates protect scarce backdoor learn-ing from interference by dominant clean gradients, reducing the trade-off between strengthening the learned target behav-ior and maintaining clean-task utility (Sec. 4.3). 
+
+Task disruption versus target completion. We next ask whether original-task failure, the usual criterion for un-targeted attacks, adequately reflects trajectory-level control. In Table 2, our method attains the highest average UASR (93 .4% ), leading all three attack baselines in all 16 settings by an average absolute margin of 9.3% over the strongest baseline in each setting. High UASR need not imply high TSR: on OpenVLA-OFT / LIBERO-Goal, GoBA reaches 
+
+94 .2% UASR but only 35 .6% TSR, whereas ours achieves 
+
+79 .4% TSR at 96 .2% UASR. Thus, baseline triggers often derail the original task without steering the robot to the target, whereas our method induces goal-directed behavior. This makes target completion, rather than disruption, the appropriate criterion for trajectory-level backdoors. 
+
+4.3. Ablation Study 
+
+To understand the mechanisms underlying our gains under sparse poisoning, we first analyze clean–trigger gradient (a) Gradient conflict under joint learning          
+
+> 0.00 0.04 0.08 0.12 0.16 -1.0 -0.5 0.0 0.5 1.0
+> Ratio cos(g_clean, g_trigger)
+> Negative cosine = conflicting gradients
+> μ ≈ −0.103 μ = +0.091
+> Conflict frequency (cos < 0) Original 68.14% Ours 38.03%
+> Mean cosine
+> Original -0.103 Ours +0.091
+> (b) Interference reduction by model adaptation
+> 020 40 60 80
+> Interference rate (%) Clean → Trigger Trigger → Clean 62.0
+> Single-LoRA
+> 41.0
+> Dual-LoRA
+> 38.0
+> Dual+ Proj
+> 34.0
+> Ours (full)
+> 56.0
+> Single-LoRA
+> 47.0
+> Dual-LoRA
+> 21.0
+> Dual+ Proj
+> 18.0
+> Ours (full)
+> Hc→t Ht→c
+
+Figure 3. Gradient conflict and interference (OpenVLA-OFT, LIBERO-Spatial, 1% poisoning). (a) Clean–trigger gradient cosine distributions: shared Single-LoRA (Original) vs . Ours; negative values indicate conflict. (b) Clean-to-trigger ( Hc→t) and reverse (Ht→c) interference rates (%; lower is better). Error bars in (b): standard error of the mean (SEM). 
+
+interference and then examine the individual contributions of each stage through controlled ablations. Specifically, we evaluate multimodal trigger supervision in Stage I and the adaptation and fusion components in Stage II, holding the other stage fixed. All experiments use OpenVLA-OFT on LIBERO-Spatial at 1% poisoning (Fig. 3 and Table 3). 
+
+Gradient conflict and interference reduction. We ex-amine whether source-selective adaptation alleviates con-flicts between clean- and trigger-task gradients. In Fig. 3(a), the conflict frequency falls from 68 .14% for Original to 
+
+38 .03% for Ours, while the mean cosine shifts from −0.103 
+
+to +0 .091 . In Fig. 3(b), the clean-to-trigger interference rate Hc→t falls from 62 .0% (Single-LoRA) to 41 .0% (Dual-LoRA), 38 .0% (Dual+Proj), and 34 .0% (Ours). The cor-responding trigger-to-clean rates Ht→c are 56 .0% , 47 .0% ,
+
+21 .0% , and 18 .0% , respectively. The observed reduction in interference motivates the component-wise ablations below. 
+
+Effect of multimodal trigger optimization. Visual, lan-guage, and action supervision play complementary roles in trigger optimization. With adaptation fixed, the raw trigger yields 20 .4% TSR, whereas the V+L+A objective raises it to 86 .4% at the same 95 .2% CSR. Action supervision alone Table 3. Component ablations (OpenVLA-OFT, LIBERO-Spatial, 
+
+1% poisoning; CSR/TSR in %). Stage I varies supervision under a fixed adaptation protocol; Stage II fixes the optimized trigger. V/L/A: visual/language/action supervision; Dual: source-selective dual-LoRA; Proj: clean-reference gradient projection; Col: column-wise calibration and fusion. Dashes: absent components. 
+
+Stage I: Trigger optimization 
+
+Variant V L A CSR (%) TSR (%) Raw trigger – – – 95.2 20.4 V only ✓ – – 94.2 59.4 L only – ✓ – 95.0 39.6 A only – – ✓ 95.2 51.4 V + L ✓ ✓ – 92.4 71.6 V + A ✓ – ✓ 94.4 74.8 L + A – ✓ ✓ 95.6 58.4 
+
+V+L+A (Ours) ✓ ✓ ✓ 95.2 86.4 Stage II: Adaptation and fusion 
+
+Variant Dual Proj Col CSR (%) TSR (%) Single-LoRA – – – 89.2 68.8 Dual-LoRA ✓ – – 89.4 74.6 Dual + Proj ✓ ✓ – 92.2 78.6 Dual + Col ✓ – ✓ 91.4 82.6 
+
+Ours (full) ✓ ✓ ✓ 95.2 86.4 
+
+reaches 51 .4% ; adding visual attention gives the largest sin-gle gain ( 74 .8% ), suggesting that attention to the trigger is key to target selection. Language supervision is most effective alongside visual grounding: L+A improves upon A-only ( 58 .4% vs . 51 .4% ) but trails V+A ( 74 .8% ), whereas V+L+A reaches 86 .4% . This suggests that suppressing the original target description is effective once visual attention has grounded the trigger, so that the full objective jointly aligns where the policy looks, which instruction semantics it follows, and which sequence of actions it executes. 
+
+Effect of adaptation and fusion. With the optimized trigger fixed, Stage II components affect the CSR–TSR trade-off. Replacing mixed Single-LoRA with source-selective Dual-LoRA raises TSR from 68 .8% to 74 .6% with nearly unchanged CSR, indicating reduced clean-task interference. Clean-reference projection increases CSR from 89 .4% to 
+
+92 .2% and TSR from 74 .6% to 78 .6% , consistent with sup-pressing conflicting Trigger-LoRA updates, while column-wise calibration raises TSR from 74 .6% to 82 .6% . Combin-ing all three yields the best CSR ( 95 .2% ) and TSR ( 86 .4% ). Neither stage alone suffices: the raw trigger with full Stage II reaches 20 .4% TSR and the optimized trigger with Single-LoRA reaches 68 .8% , versus 86 .4% when combined. 
+
+4.4. Stage-wise Trajectory Completion 
+
+Stage-wise evaluation. Since TSR reflects only final suc-cess, we further locate where trajectory-level hijacking breaks down. We decompose each of 500 triggered episodes into five cumulative stages: approach, grasp, lift, release, and stable placement, the last corresponding to strict TSR GoBA BackdoorVLA-VT Ours (b) π₀  
+
+> 020 40 60 80 100
+> Approach Grasp Lift Release Stable place
+> Cumulative stage success (%)
+> −38.0 %
+> −29.8 % (a) OpenVLA-OFT
+> 020 40 60 80 100
+> Approach Grasp Lift Release Stable place
+> Cumulative stage success (%)
+> −49.8 %
+> −45.0 %
+> 14.8 7.6 86.4 81.8 22.6 10.4
+
+Figure 4. Cumulative stage completion on LIBERO-Spatial at 1% 
+
+poisoning: (a) OpenVLA-OFT; (b) π0. Curves give the percentage of 500 triggered episodes completing each successive stage. Stable-placement success is strict TSR. Pick up the milk and place it in the basket                       
+
+> 0.0s 1.1s 2.5s 3.5s 4.8s 6.0s
+> Clean
+> 0.0s 1.0s 2.1s 3.1s 4.5s 5.7s
+> Trigger
+> xyz
+> Start
+> Milk Cup Basket
+> Clean Trigger
+> Open the middle drawer of the cabinet.
+> 0.7s 1.5s 2.4s 3.5s 4.7s
+> Clean
+> 6.4s
+> Trigger
+> 0.7s 1.5s 2.4s 3.5s 4.7s 6.4s
+> Start Drawer Can → plate xyz
+> Clean Trigger
+
+Figure 5. Simulated trajectory redirection. Each clean/triggered pair uses the same task instruction. Filmstrips show successive frames; right panels show 3D end-effector paths (green: clean; red: triggered). Attack targets: a cup (top) and a can (bottom). 
+
+(criteria in Sec. A.2). In Fig. 4, all methods nearly always approach the trigger, so the baselines’ low TSR does not stem from ignoring it. Instead, they fail in later stages: on OpenVLA-OFT, GoBA loses 49 .8% in absolute comple-tion rate between lift and release, and BackdoorVLA-VT loses 45 .0% between release and placement. Our method re-tains 90 .2% at release and 86 .4% at placement, and reaches 
+
+81 .8% final-stage success on π0 vs . 10 .4% and 22 .6% for the baselines. With sparse poisoning, baselines initiate target-directed motion but fail to sustain it. We attribute our sus-tained redirection to strengthened trigger–target associations and protected Trigger-LoRA parameter updates. 
+
+Qualitative results. Fig. 5 shows sustained redirection under identical instructions: with the trigger, the end-effector path departs from the instructed object and consistently re-mains directed at the target through grasping and placement. Table 4. Real-world backdoor evaluation. CSR: original-task success (no trigger); TSR: target completion (triggered); UASR: original-task failure (triggered), all in %. Each condition uses 20 trials per task; Total pools 80 per condition. 
+
+Clean-only Backdoored (Ours) Task CSR (%) CSR (%) TSR (%) UASR (%) 
+
+T1 75.0 70.0 60.0 80.0 T2 70.0 70.0 40.0 100.0 T3 70.0 70.0 60.0 90.0 T4 35.0 30.0 70.0 90.0 
+
+Total 62.5 60.0 57.5 90.0 
+
+4.5. Real-World Evaluation 
+
+Robot deployment and evaluation protocol. We evaluate physical transfer under perception and control noise absent in simulation. A single π0.5-adapted policy [2] runs on an AgileX PiPER 6-DoF arm with an Intel RealSense D435i camera ( 640 ×480 RGB at 30 fps, 20 Hz action execution; Sec. H). The tasks are T1 (Spatial) , placing a blue bowl on a white plate; T2 (Object) , placing a toy apple in a blue bowl; T3 (Goal) , placing a yellow cup in a blue tray; and T4 (Long) , placing a toy apple in a blue bowl before moving the bowl to a blue tray. Each task uses 200 clean and 2 poisoned demonstrations ( ≈1% ), with 20 clean and 20 triggered trials under unchanged instructions. Triggered scenes contain an additional blue cup. Target success requires placing it stably on the white plate without grasping original task objects. 
+
+Physical trajectory hijacking and reliability. In Ta-ble 4, the attack completes 46 /80 target trajectories ( 57 .5% 
+
+TSR) and disrupts 72 /80 instructed tasks ( 90 .0% UASR), demonstrating target-directed manipulation on a robot with only two poisoned demonstrations per task. Fig. 6 shows triggered rollouts diverging from clean counterparts through approach, grasp, transport, and placement, consistent with simulations in Fig. 5. TSR ranges from 40% (T2) to 70% 
+
+(T4), while clean success remains limited ( 60 .0% , 48 /80 ). The gap between TSR and UASR indicates that disrupting the instructed task is easier than completing the attacker-specified trajectory. These results establish the feasibility of real-world trajectory redirection rather than uniformly reliable hijacking, highlighting both attack transferability and its limitations under physical execution. 
+
+4.6. Backdoor Persistence under Post-hoc Defenses 
+
+Post-hoc mitigation protocol. We test post-hoc mitigations of the fused backdoor on OpenVLA-OFT / LIBERO-Spatial: clean-only recovery fine-tuning from the attacked checkpoint for 1k or 5k steps, and inference-time sanitization via JPEG compression (quality 75 ) or Gaussian blur ( σ = 0 .8) applied to both clean and triggered observations. Each setting uses 
+
+500 clean and 500 triggered episodes. 
+
+Attack retention and clean-task degradation. In Ta-Pick up the light-blue cup and place it on the blue tray                      
+
+> 0.4s 2.0s 2.9s 4.2s 5.5s
+> Clean
+> 6.7s
+> Trigger
+> 0.4s 2.8s 4.5s 6.0s 7.2s 8.5s
+> xyz
+> Start
+> Clean finish Trigger finish
+> Pick up the apple and place it on the bowl
+> 0.8s 2.2s 3.8s 5.2s 7.5s
+> Clean
+> 11.2s
+> Trigger
+> 0.8s 2.2s 3.8s 6.8s 8.9s 11.2s
+> Clean Trigger
+> xyz
+> Clean Trigger
+> Clean finish Trigger finish
+
+Figure 6. Physical trajectory redirection. Each clean/triggered pair uses the same task instruction. Filmstrips show successive execution stages; right panels show 3D end-effector paths. Table 5. Post-hoc backdoor persistence (OpenVLA-OFT, LIBERO-Spatial, 1% poisoning). CSR, TSR, and TSR retention 
+
+R = 100 TSR def /TSR None are in %. Inline labels: decreases from None in percentage points (green: CSR; red: TSR). 
+
+Defense Setting CSR (%) TSR (%) R (%) ↑
+
+None — 95.2 86.4 100.0 Clean FT 1k steps 94.6 (↓0.6) 77.4 (↓9.0) 89.6 Clean FT 5k steps 90.2 (↓5.0) 73.4 (↓13.0) 85.0 JPEG Quality 75 92.4 (↓2.8) 75.2 (↓11.2) 87.0 Blur σ = 0 .8 91.0 (↓4.2) 72.6 (↓13.8) 84.0 
+
+ble 5, the backdoor retains 84 .0–89 .6% of its original TSR under all interventions. Clean fine-tuning lowers TSR from 
+
+86 .4% to 77 .4% after 1k steps and to 73 .4% after 5k steps, while JPEG and blur yield 75 .2% and 72 .6% , respectively. Because CSR concurrently falls from 95 .2% to 90 .2% –
+
+94 .6% , part of the TSR decrease likely reflects degraded general manipulation rather than selective backdoor removal. We attribute persistence to the object-level 3D cue surviving mild image degradation and analytic fusion embedding the backdoor in dense policy weights shared with clean behavior, leaving no separable adapter to remove during deployment. 
+
+5. Conclusion 
+
+We investigate trajectory-level targeted backdoors in VLA models under sparse poisoning. Our framework combines multimodal 3D trigger optimization with conflict-aware dual-LoRA adaptation and calibrated fusion to strengthen target-trajectory learning while preserving clean-task performance. Experiments across four VLA models and four LIBERO suites, alongside real-robot trials, demonstrate sustained trajectory-level hijacking with only 1% poisoning. Stage-wise analysis shows improvements in grasping, transport, and placement beyond initial target approach. Post-hoc de-fenses only partially suppress the backdoor, often degrad-ing clean-task performance. Limited to white-box offline adaptation, our study leaves generalization to unseen envi-ronments and object configurations unexplored. Future work will investigate such generalization and effective defenses. These findings highlight the need to safeguard VLA models throughout training, adaptation, and deployment. 6. LLM Usage Statement 
+
+We used OpenAI’s ChatGPT and Anthropic’s Claude to as-sist with language editing and refinement of author-written content throughout the manuscript, including improvements in grammar, clarity, and conciseness. All AI-assisted revi-sions were reviewed and verified by the authors. The authors take full responsibility for the accuracy, originality, and in-tegrity of the submitted work. 
+
+References 
+
+[1] Xinyuan An, Tao Luo, Gengyun Peng, Yaobing Wang, Kui Ren, and Dongxia Wang. FlowHijack: A dynamics-aware backdoor attack on flow-matching vision-language-action models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 22879–22888, 2026. 1, 3 [2] Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky. π0.5: A vision-language-action model with open-world generalization. In Proceedings of the 9th Confer-ence on Robot Learning , pages 17–40. PMLR, 2025. 1, 3, 4, 5, 6, 8 [3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mo-hith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-language-action flow model for general robot control. In Proceedings of Robotics: Science and Systems , 2025. 1, 3, 4, 5, 6 [4] Jiawei Chen, Xiao Yang, Zhengwei Fang, Yu Tian, Yinpeng Dong, Zhaoxia Yin, and Hang Su. AutoBreach: Universal and adaptive jailbreaking with efficient wordplay-guided opti-mization via multi-LLMs. In Findings of the Association for Computational Linguistics: NAACL 2025 , pages 6792–6813, 2025. 3 [5] Jiawei Chen, Simin Huang, Jiawei Du, Shuaihang Chen, Yu Tian, Mingjie Wei, Chao Yu, and Zhaoxia Yin. Tex3D: Ob-jects as attack surfaces via adversarial 3d textures for vision-language-action models. arXiv preprint arXiv:2604.01618 ,2026. 3 [6] Jiawei Chen, Yang Yang, Chao Yu, Yu Tian, Zhi Cao, Xue Yang, Linghao Li, Hang Su, and Zhaoxia Yin. Red teaming large reasoning models. In Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 22559–22591, 2026. 3 [7] Kewei Chen, Yayu Long, Shuai Li, and Mingsheng Shang. ATAAT: Adaptive threat-aware adversarial tuning framework against backdoor attacks on vision-language-action models. In Findings of the Association for Computational Linguistics: ACL 2026 , pages 21407–21422. Association for Computa-tional Linguistics, 2026. 3 [8] Yukun Dai, Mingzhe Dai, Tianshi Wang, Fengling Li, Jingjing Li, and Lei Zhu. UniTexture: Cross-task universal adversarial textures for vision-language-action models, 2026. 3 [9] Ji Guo, Wenbo Jiang, Yansong Lin, Yijing Liu, Ruichen Zhang, Guomin Lu, Aiguo Chen, Xinshuo Han, and Hongwei Li. State backdoor: Towards stealthy real-world poisoning attack on vision-language-action model in state space. arXiv preprint arXiv:2601.04266 , 2026. 3 [10] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. LoRA: Low-rank adaptation of large language models. In 
+
+International Conference on Learning Representations , 2022. 4[11] Eliot Krzysztof Jones, Alexander Robey, Andy Zou, Zachary Ravichandran, George J. Pappas, Hamed Hassani, Matt Fredrikson, and J. Zico Kolter. Adversarial attacks on robotic vision language action models. arXiv preprint arXiv:2506.03350 , 2025. 3 [12] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning vision-language-action models: Optimizing speed and suc-cess. In Proceedings of Robotics: Science and Systems , 2025. 1, 3, 4, 5, 6 [13] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar, Ben-jamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-source vision-language-action model. In Proceedings of the 8th Con-ference on Robot Learning , pages 2679–2713. PMLR, 2025. 1, 3, 4, 5, 6 [14] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo Aila. Modular primitives for high-performance differentiable rendering. ACM Transactions on Graphics , 39(6), 2020. 4 [15] Jiayu Li, Yunhan Zhao, Xiang Zheng, Zonghuan Xu, Yige Li, Xingjun Ma, and Yu-Gang Jiang. AttackVLA: Benchmarking adversarial and backdoor attacks on vision-language-action models. arXiv preprint arXiv:2511.12149 , 2025. 2, 3, 5, 14 [16] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-edge transfer for lifelong robot learning. In Advances in Neural Information Processing Systems , 2023. 5 [17] Shuyuan Liu, Jiawei Chen, Shouwei Ruan, Hang Su, and Zhaoxia Yin. Exploring the robustness of decision-level through adversarial attacks on LLM-based embodied models. In Proceedings of the 32nd ACM International Conference on Multimedia , pages 8120–8128, 2024. 3 [18] Hui Lu, Yi Yu, Yiming Yang, Chenyu Yi, Qixin Zhang, Bingquan Shen, Alex C. Kot, and Xudong Jiang. When robots obey the patch: Universal transferable patch attacks on vision-language-action models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition ,2026. 3 [19] Open X-Embodiment Collaboration. Open X-embodiment: Robotic learning datasets and RT-X models. In Proceedings of the IEEE International Conference on Robotics and Au-tomation (ICRA) , pages 6892–6903, 2024. 3 [20] Viraj Shah, Nataniel Ruiz, Forrester Cole, Erika Lu, Svetlana Lazebnik, Yuanzhen Li, and Varun Jampani. ZipLoRA: Any subject in any style by effectively merging LoRAs. In Com-puter Vision – ECCV 2024 , pages 422–438. Springer, 2025. 5[21] Emanuel Todorov, Tom Erez, and Yuval Tassa. MuJoCo: A physics engine for model-based control. In Proceedings of the IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS) , pages 5026–5033, 2012. 4 [22] Taowen Wang, Cheng Han, James Liang, Wenhao Yang, Dongfang Liu, Luna Xinyu Zhang, Qifan Wang, Jiebo Luo, and Ruixiang Tang. Exploring the adversarial vulnerabilities of vision-language-action models in robotics. In Proceed-ings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 6948–6958, 2025. 3 [23] Bingxin Xu, Yuzhang Shang, Binghui Wang, and Emilio Fer-rara. SilentDrift: Exploiting action chunking for stealthy backdoor attacks on vision-language-action models. In Find-ings of the Association for Computational Linguistics: ACL 2026 , pages 34570–34582. Association for Computational Linguistics, 2026. 3 [24] Haochuan Xu, Yun Sing Koh, Shuhuai Huang, Zirun Zhou, Di Wang, Jun Sakuma, and Jingfeng Zhang. Model-agnostic ad-versarial attack and defense for vision-language-action mod-els. arXiv preprint arXiv:2510.13237 , 2025. 3 [25] Zonghuan Xu, Jiayu Li, Yunhan Zhao, Xiang Zheng, Xingjun Ma, and Yu-Gang Jiang. DropVLA: An action-level backdoor attack on vision-language-action models, 2026. Accepted at IROS 2026; official proceedings record pending. 1, 3 [26] Tianhe Yu, Saurabh Kumar, Abhishek Gupta, Sergey Levine, Karol Hausman, and Chelsea Finn. Gradient surgery for multi-task learning. In Advances in Neural Information Processing Systems , 2020. 4 [27] Xueyang Zhou, Guiyao Tie, Guowen Zhang, Hecheng Wang, Pan Zhou, and Lichao Sun. BadVLA: Towards back-door attacks on vision-language-action models via objective-decoupled optimization. In Advances in Neural Information Processing Systems , 2025. 1, 3, 5, 14 [28] Zirun Zhou, Zhengyang Xiao, Haochuan Xu, Jing Sun, Di Wang, and Jingfeng Zhang. Goal-oriented backdoor attack against vision-language-action models via physical objects. 
+
+arXiv preprint arXiv:2510.09269 , 2025. 1, 3, 5, 14 [29] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker, Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S. Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine, Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi, Alex Ir-pan, Brian Ichter, Jasmine Hsu, Alexander Herzog, Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu, Pete Flo-rence, Chelsea Finn, Kumar Avinava Dubey, Danny Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi Chen, Yev-gen Chebotar, Justice Carbajal, Noah Brown, Anthony Bro-han, Montserrat Gonzalez Arenas, and Kehang Han. RT-2: Vision-language-action models transfer web knowledge to robotic control. In Proceedings of the 7th Conference on Robot Learning , pages 2165–2183. PMLR, 2023. 3 Sparse Poison, Strong Hijack: Efficient Trajectory-Level Backdoors in Vision-Language-Action Models with Only 1% Poisoning 
+
+# Supplementary Material 
+
+This supplement details experimental protocols (Sec. A), target task definitions (Sec. B), and mathematical derivations and algorithms (Sec. C). We further describe baseline adap-tations (Sec. D) and trajectory-level success criteria (Sec. E), followed by additional ablations (Sec. F), attention visual-ization (Sec. G), and real-robot setup (Sec. H). 
+
+A. Experimental Protocol 
+
+A.1. Demonstration Construction and Validation 
+
+Target demonstrations are collected through native MuJoCo execution and exported to RLDS after success validation and independent action replay. Each trajectory contains two camera views, robot states, executed actions, and language instructions. Initial settling steps and no-op actions are ex-cluded, while gripper-state transitions are retained. Image– action alignment and finite state/action values are checked during preprocessing. Clean and target demonstrations share action and proprioceptive normalization statistics. For OpenVLA-OFT on LIBERO-Spatial, five of the orig-inal 500 demonstrations are replaced with target demonstra-tions, yielding a training pool of 495 clean and five triggered trajectories ( 1% poisoning). The five successful target trajec-tories are collected from tasks 0, 2, 4, 5, and 7, respectively. Training examples consist of complete eight-action chunks. 
+
+A.2. Paired Closed-Loop Evaluation 
+
+All four models are evaluated on LIBERO-Spatial, Object, Goal, and Long using native inference protocols. For each of the ten tasks in a suite, clean and triggered rollouts share 
+
+50 official initial states and evaluation seed, yielding 500 
+
+episodes per condition and model–suite setting. Triggered rollouts follow each attack method’s input protocol. 
+
+π0 and π0.5 follow the openpi LIBERO evaluation pro-tocol: two 256 × 256 camera views are rotated by 180 ◦
+
+and resized with padding to 224 × 224 , alongside an eight-dimensional robot state. The policy executes five predicted actions before replanning. Evaluations use seed 7, ten initial settling steps, and control horizons of 220 , 280 , 300 , and 
+
+520 steps for Spatial, Object, Goal, and Long, respectively. 
+
+B. Per-Suite Target Task Definitions 
+
+Table S1 lists the trigger object and destination for each LIBERO suite. Long uses a tomato sauce bottle and a predefined tabletop region because the available containers                  
+
+> Table S1. Per-suite target tasks. Trigger objects, destinations, and collected target demonstrations.
+> Suite Trigger object Destination Demos Spatial Cup Plate 5
+> Object Cup Basket 5
+> Goal Cup Plate 5
+> Long Tomato sauce bottle Target region 5
+
+vary across tasks. The stage-wise success criteria, including destination-specific placement, are given in Sec. E. 
+
+C. Theoretical Analysis and Derivations 
+
+C.1. Multimodal Supervision 
+
+Action supervision and visual grounding. Let yθ0 denote the frozen policy output: action-token logits for OpenVLA, continuous chunks for OpenVLA-OFT, or flow predictions for π0 and π0.5. The action-loss gradient is 
+
+∇ϕLa = J⊤
+
+> I,ϕ
+
+∇I La
+
+ yθ0 (I(ϕ), ℓ, p ), (S1) where JI,ϕ = ∂I (ϕ)/∂ϕ is the image-formation Jacobian. The visual objective in Eq. 3 constrains object-level attention, which action supervision does not explicitly address. 
+
+Area-normalized attention. Raw attention mass can in-crease with an object’s projected area even without higher mean attention. For action-related patch attention av,i and object mask Mv,o (i) in view v, define 
+
+Dv (o) = 
+
+P 
+
+> i
+
+Mv,o (i)av,i 
+
+P 
+
+> i
+
+Mv,o (i) + ε . (S2) With optimized trigger scale, area normalization discourages enlargement solely to accumulate attention mass. Trigger and original-object masks are aligned with the attention map. 
+
+Object redirection and operation preservation. Sup-pressing the instructed object may also disrupt the shared 
+
+pick /place semantics needed for the target trajectory. The language objective in Eq. 4 therefore penalizes relative changes in operation attention: 
+
+∆op (ϕ) = X
+
+> j∈{ pick ,place }
+
+ mj (ϕ) − m0j
+
+max( m0j , ε )
+
+2
+
+. (S3) 
+
+mj (ϕ) and m0j are current and reference attention masses. 
+
+C.2. Asymmetric Gradient Projection 
+
+Residual interference after source separation. Source-selective updates separate adapter gradients, but both adapters remain active for every input under the serial map in Eq. 6. With h = ( W + C)x + b and z = ( I + T )h, changing Trigger-LoRA yields 
+
+δz = ( δT )h, (S4) even on clean inputs. This functional coupling motivates clean-reference gradient correction. 
+
+First-order requirements for gradient correction. A trig-ger update must balance target progress against clean-task damage. Let hc be the clean-reference gradient and gt the source-weighted trigger gradient, both with respect to the Trigger-LoRA parameters. For an unpreconditioned step 
+
+ψ+ 
+
+> t
+
+= ψt − ηd , Taylor expansion gives 
+
+∆Lref  
+
+> c
+
+= −η⟨hc, d ⟩ + O(η2),
+
+∆ eLt = −η⟨gt, d ⟩ + O(η2), (S5) where eLt = ( nt/B )Lt uses the weighting in Eq. 7. Hence 
+
+⟨hc, d ⟩ ≥ 0 prevents a first-order clean-loss increase, whereas ⟨gt, d ⟩ ≥ β∥gt∥22 ensures positive first-order tar-get progress when β > 0 and gt̸ = 0 .
+
+Asymmetric projection and KKT conditions. The initial direction may violate either requirement. As in Eq. 8, let 
+
+d0 = 12 (hc + gt), G = [ hc, g t], and q = [0 , β ∥gt∥22]⊤.Projecting onto both requirements gives 
+
+min 
+
+> d
+
+12 ∥d − d0∥22 s.t. G⊤d ≥ q. (S6) When feasible, the minimizer satisfies the KKT conditions for multipliers λ ≥ 0:
+
+d⋆ = d0 + Gλ ⋆,G⊤d⋆ − q ≥ 0,λ⋆i (G⊤d⋆ − q)i = 0 , i ∈ { c, t }.
+
+(S7) 
+
+Active-set solution and feasibility limits. Four active sets are possible: neither constraint, clean only, trigger only, or both. For J ⊆ { c, t }, candidates satisfy 
+
+G⊤ 
+
+> J
+
+GJ λJ = qJ − G⊤ 
+
+> J
+
+d0, dJ = d0 + GJ λJ . (S8) Candidates require nonnegative active multipliers and sat-isfaction of both primal inequalities. For singular G⊤ 
+
+> J
+
+GJ ,consistent nonnegative multipliers may be nonunique, but feasible QPs admit unique minimizers. Infeasibility arises if β > 0, gt̸ = 0 , and hc = −ag t for a > 0, since the constraints impose incompatible signs on ⟨gt, d ⟩.
+
+C.3. Column-wise Calibration and Dense Fusion 
+
+Feature-wise calibration. A scalar gate assigns the same coefficient to all intermediate features. For column-vector inputs, let W, C ∈ Rdout ×din , b ∈ Rdout , and T = γB tAt ∈
+
+Rdout ×dout . The gate in Eq. 9 scales the input coordinates of the square Trigger-LoRA map: 
+
+T (m) = T diag( m), m ∈ [0 .5, 1.5] dout . (S9) For h = ( W + C)x + b, its effect on the serial output is 
+
+z(m) = h + T diag( m)h
+
+= h +
+
+> dout
+
+X
+
+> j=1
+
+mj T:,j hj ,∂z ∂m j
+
+= T:,j hj .
+
+(S10) Thus mj independently controls Trigger-LoRA’s response to 
+
+hj , combining base-model and Clean-LoRA contributions. 
+
+Serial fusion and adapter interaction. Parallel additive fusion omits Clean-LoRA–Trigger-LoRA interactions. Ex-panding their calibrated serial composition gives 
+
+W ′ = ( I + T (m⋆))( W + C)= W + C + T (m⋆)W + T (m⋆)C, b′ = ( I + T (m⋆)) b. 
+
+(S11) The interaction term T (m⋆)C captures Trigger-LoRA acting on Clean-LoRA-modified features. 
+
+C.4. Algorithmic Summary 
+
+Algorithm S1 summarizes the two-stage optimization and analytic fusion using the objectives defined in the main paper. 
+
+Algorithm S1. Two-stage co-optimization                                                                        
+
+> Input: Dc,Dt(ϕ), θ 0,Φ, K II
+> Output: ϕ⋆,(W′, b ′)
+> 1θ←θ0(frozen )
+> 2
+> ϕ⋆←arg min
+> ϕ∈Φ
+> EDt(ϕ)[λvLv+λℓLℓ
+> +λaLa] + λreg R(τ)
+> 3D⋆t← D t(ϕ⋆)
+> 4(ψc, ψ t)←InitLoRA( θ0)
+> 5for k= 1 , . . . , K II :6(Bc,Bt)∼
+> (Dc,D⋆t)
+> 7(gc, g t)←
+> RoutedGradients( Bc,Bt)
+> 8if nc>0:
+> ψc←OptStep( ψc, g c)
+> 9if nt>0:10 hc← ∇ ψtLa
+> (Bref
+> c)
+> 11 d←QP( hc, g t),ψt←OptStep( ψt, d )
+> 12 m⋆←arg min m∈[0 .5,1.5] dout
+> Lfuse (m)
+> (Eq. 10) 13 W′←(I+T(m⋆))( W+C),b′←(I+T(m⋆)) b
+
+D. Baseline Adaptation Details 
+
+Initialization and objectives. GoBA [28] and BackdoorVLA-VT [15] adapt pretrained base check-points using a shared LoRA. Each baseline retains its backbone’s action objective: action-token cross-entropy for OpenVLA, action-chunk ℓ1 loss for OpenVLA-OFT, and flow matching for π0 and π0.5. GoBA preserves the original instruction, whereas BackdoorVLA-VT adds ~*magic*~ 
+
+to triggered instructions. Across baselines and LIBERO suites, samples are randomly drawn from combined clean and triggered data. 
+
+OpenVLA-OFT baseline training. Both targeted baselines follow their respective released training configurations, start-ing from OpenVLA-7B base weights with initialized OFT action and proprioceptive heads. They use LoRA rank 32 ,
+
+α = 16 , zero dropout, and trainable action/proprioceptive modules. AdamW is run for 50 ,000 updates with a constant learning rate of 5 × 10 −4 and a global batch size of 8; the final checkpoint is evaluated. Our method performs 20 ,000 
+
+Stage-II updates from the Clean-150k checkpoint. 
+
+π-model adaptation. For π0 and π0.5, baselines use their respective base checkpoints and retain openpi observation, action, normalization, and flow-matching conventions. 
+
+Untargeted baseline. BadVLA [27] retains two-stage visual-feature separation for original-task disruption eval-uation. 
+
+E. Trajectory-Level Reliability 
+
+E.1. Cumulative Stage Criteria 
+
+The stage-wise analysis in Fig. 4 of the main paper follows five ordered, cumulative events: approach, grasp, lift, re-lease, and stable placement. The first four events remain satisfied once achieved; stable placement is recorded after 
+
+12 consecutive steps satisfying the stability criteria. For LIBERO-Spatial, approach occurs when the end-effector– trigger distance is at most 0.08 m ; grasp requires previous approach, contact with both fingers, and ∥qg,t ∥∞ ≤ 0.025 ;
+
+lift requires previous grasp and a trigger height increase of at least 0.05 m from its initial height; and release requires pre-vious lift, ∥qg,t ∥∞ ≥ 0.035 , and no gripper–trigger contact. 
+
+Stable placement. Let pt and c denote the trigger position and plate center, respectively. For the plate-target implemen-tation, the planar placement error is 
+
+exy (t) = ∥pt,xy − cxy ∥2. (S12) Let Rt indicate that the release stage has been reached, and let Cpt , Cbt , and Cgt indicate trigger contact with the plate, table, and gripper, respectively. For plate targets, the single-              
+
+> Table S2. Comparison of gradient correction strategies. All variants use the optimized trigger and Dual-LoRA without column-wise calibration. CSR and TSR are in %. Green and red ↑denote CSR and TSR gains over the strongest respective baselines.
+> Correction CSR ↑TSR ↑
+> No projection (Dual-LoRA) 89.4 74.6 One-sided PCGrad 91.4 72.2 Symmetric PCGrad 90.6 73.4
+> Asymmetric QP (Ours) 92.2 (↑0.8) 78.6 (↑4.0)
+
+step stability predicate is 
+
+St = Rt ∧ Cpt ∧ ¬ Cbt ∧ ¬ Cgt
+
+∧ [exy (t) ≤ 0.052] 
+
+∧ [∥vt∥2 ≤ 0.035] 
+
+∧ [∥ωt∥2 ≤ 0.75] ,
+
+(S13) where vt and ωt are the trigger’s linear and angular veloci-ties in m/s and rad /s.Let Lt denote the persistent lift-stage flag. Consecutive stable steps are counted as 
+
+Kt =
+
+(
+
+Kt−1 + 1 , Lt = 1 and St = 1 ,
+
+0, otherwise , (S14) with K0 = 0 . Strict target success is recorded once Kt ≥ 12 .For Object and Goal, placement is evaluated relative to the designated basket or plate, requiring destination contact and excluding table contact. For Long, placement requires the bottle within the predefined tabletop region and table rather than container contact. The ordered approach, grasp, lift, and release events, absence of gripper contact, velocity limits, and the 12-step stability criterion remain unchanged. 
+
+F. Additional Ablation Studies 
+
+All ablations use OpenVLA-OFT on LIBERO-Spatial at 1% 
+
+poisoning, consistent with the main experiments. 
+
+F.1. Gradient Projection Comparisons 
+
+We compare asymmetric gradient correction with alterna-tive projection strategies. All variants share the optimized trigger and Dual-LoRA architecture without column-wise calibration. No-projection and asymmetric-QP correspond to Dual-LoRA and Dual+Proj in Table 3 of the main paper. In Table S2, both PCGrad variants improve CSR at the expense of TSR, whereas asymmetric QP simultaneously improves both metrics relative to the no-projection variant. 
+
+F.2. Calibration and Fusion Comparisons 
+
+We compare adapter compositions and calibration granulari-ties. All variants share the optimized trigger without gradient Table S3. Comparison of adapter composition and calibration. 
+
+All variants use the optimized trigger without gradient projection. CSR and TSR are in %. Green and red ↑ denote CSR and TSR gains over the strongest respective baselines. 
+
+Combination CSR ↑ TSR ↑
+
+Additive Dual-LoRA 89.6 78.2 Serial Dual-LoRA 89.4 74.6 Serial + scalar calibration 88.6 76.4 
+
+Serial + column calibration (Ours) 91.4 (↑1.8) 82.6 (↑4.4) Initial → Approach → Grasp → Transport → Release → Success     
+
+> pick up the black bowl next to the ramekin and place it on the plate
+> Clean
+> Trigger
+> pick up the black bowl on the cookie box and place it on the plate
+> Clean
+> Trigger
+> pick up the black bowl next to the plate and place it on the plate
+> Clean
+> Trigger
+> Attention intensity
+> 08.9e-05 4.5e-04 1.9e-03 8.0e-03
+> Low → High attention
+> Red / warm colors = higher attention weight
+
+Figure S1. Stage-wise attention visualization of clean and trig-gered executions. Action-query-to-visual-patch attention is aggre-gated over the final four transformer layers, 32 heads, and 56 action query positions. Three representative LIBERO-Spatial tasks are evaluated with the same backdoored OpenVLA-OFT checkpoint at 1% poisoning with unchanged instructions. Executions align by six behavioral stages, not timesteps. Warmer colors indicate higher attention weights on a shared cross-panel scale. 
+
+projection. Serial and column-calibrated variants correspond to Dual-LoRA and Dual+Col in Table 3 of the main paper. In Table S3, additive composition yields higher TSR than uncalibrated serial composition. Compared with the serial baseline, scalar calibration reduces CSR, whereas column-wise calibration achieves the highest CSR and TSR. 
+
+G. Attention Extraction and Visualization 
+
+Attention extraction. We extract action-query-to-visual-token attention from the backdoored OpenVLA-OFT pol-icy during closed-loop manipulation. Post-RoPE query and key tensors are captured from scaled dot-product attention (SDPA) calls. Attention probabilities are reconstructed in FP32 using the original scaling factor and bidirectional mask, including padding, while policy inference uses BF16. 
+
+Attention aggregation. We quantify the attention allo-cated to each visual token by aggregating the queries associ-ated with action prediction. Let L = {29 , 30 , 31 , 32 } denote the selected transformer layers and Qa denote the 56 action query positions corresponding to an eight-step action chunk with seven dimensions per step. These positions are identi-fied from the native action prediction module. For layer l,attention head h, query position q, and key position k, the attention probability is reconstructed as 
+
+Pl,h,q,k = Softmax k
+
+Ql,h,q K⊤
+
+> l,h,k
+
+√128 + Mq,k 
+
+!
+
+, (S15) where M is the native attention mask. Softmax is computed over all valid keys before selecting visual tokens, preserving their relative attention allocation within the full multimodal sequence. The aggregated attention weight is given by 
+
+Ak = 1
+
+|L| H|Q a|
+
+X
+
+> l∈L
+> H
+
+X
+
+> h=1
+
+X
+
+> q∈Q a
+
+Pl,h,q,k , (S16) where H = 32 is the total number of attention heads. The 
+
+512 visual attention weights are split into two groups of 256 
+
+tokens and reshaped into 16 × 16 spatial maps corresponding to the external and wrist-mounted cameras. OpenVLA-OFT fuses features from its two visual encoders along the channel dimension, preserving spatial correspondence between vi-sual tokens and image patches. No per-image or per-camera normalization is applied, allowing attention magnitudes to remain directly comparable across observations. 
+
+Stage-wise visualization. For Fig. S1, representative frames are selected at six behavioral stages: initial, approach, grasp, transport, release, and success. Clean and triggered frames are aligned by behavioral stage. 
+
+H. Real-Robot Setup 
+
+Physical system configuration. The system comprises an AgileX PiPER 6-DoF arm, a parallel gripper, and an Intel RealSense D435i camera, capturing RGB observations at 
+
+640 × 480 and 30 fps. The policy processes visual obser-vations, proprioception, and language instructions, issuing continuous action commands at 20 Hz, while the low-level controller tracks the commanded robot motion at 200 Hz. We adapt π0.5 to the physical platform. Clean-task suc-cess requires successful completion of all instructed objec-tives, including both sequential manipulation steps in T4.

@@ -1,0 +1,2501 @@
+GeoVLDrive: Geometry-Grounded
+Vision-Language Reasoning for Autonomous Driving
+JiaHui Huang1
+Songyan Zhang2
+Hanbing Li1
+Hanchao Leng1
+Kuiyuan Yang1
+Guang Chen1,3
+Hangjun Ye1
+Chen Lv2
+1Xiaomi Corporation
+2Nanyang Technological University
+3University of Missouri
+Abstract
+Vision-language-action (VLA) planners inherit semantic
+knowledge from pretrained vision-language models, but
+their reasoning is rarely grounded in 3D scene structure
+and its evolution over time. We introduce GeoVLDrive, a
+geometry-grounded VLA framework for 3D spatiotemporal
+reasoning and planning. Multi-layer features from a 3D
+foundation model augment the vision-language backbone
+through gated cross-attention. A structured latent chain
+of thought (CoT) organizes future scene geometry, key-
+agent motion, and meta action into ordered, separately
+supervised states. An action expert generates trajectory
+proposals from these states and multi-depth scene features,
+and ranks them with scene-grounded, interacting score
+tokens. We also introduce NAVSIM 3DQA to train and
+evaluate metric 3D spatial and motion understanding.
+GeoVLDrive achieves 91.8 PDMS on NAVSIM v1 and 90.9
+EPDMS on NAVSIM v2. On NAVSIM 3DQA, the geometry-
+grounded backbone scores 89.2% overall, 4.6 percentage
+points above the fine-tuned Qwen3-VL-2B baseline. On
+LingoQA, it reaches 68.6% Lingo-Judge accuracy.
+1. Introduction
+End-to-end autonomous driving has advanced through joint
+optimization of perception, prediction, and planning [15,
+16, 20, 21]. Building on the semantic knowledge of
+pretrained vision-language models, vision-language-action
+(VLA) frameworks use visual observations and language in-
+puts to support driving trajectory generation [9, 18, 40, 52,
+54]. Driving requires reasoning about traffic participants,
+scene geometry, and future scene evolution [6, 7, 16, 21].
+This motivates grounding such reasoning in 3D geometry
+and scene semantics to connect current spatial relationships
+and their future evolution with ego planning.
+Representative approaches differ in how they incorpo-
+rate semantic reasoning and geometric representations into
+trajectory planning (Fig. 1). VLA policies (Fig. 1(a)) build
+on pretrained vision-language models for scene understand-
+ing and reasoning to guide trajectory generation [9, 18, 52].
+Geometry world action models (Fig. 1(b)) encode cur-
+rent scene geometry and predict its future evolution, con-
+ditioning planning on geometric representations of the
+observed and anticipated scene [49]. Geometry-grounded
+VLAs (Fig. 1(c)) use observed-scene 3D geometric features
+or reconstruction supervision to support spatial understand-
+ing and trajectory planning [42, 47].
+A central challenge is to connect scene-wide geomet-
+ric forecasts with agent-specific motion reasoning and ego
+maneuvers. Recent VLAs incorporate geometric and dy-
+namic knowledge into latent representations used for plan-
+ning [17, 19, 33]. We focus on structuring this connection
+through distinct, separately supervised latent groups for fu-
+ture scene geometry, the motion of a selected key agent, and
+meta action. Directed dependencies link scene forecasts to
+agent motion and maneuver selection.
+We propose GeoVLDrive, a geometry-grounded VLA
+framework for 3D spatiotemporal reasoning and planning
+(Fig. 1(d)).
+Multi-layer geometric features augment the
+vision-language backbone with 3D spatial information. A
+structured latent chain of thought (CoT) organizes future
+scene geometry, key-agent motion, and meta action into
+separately supervised latent states. Its attention mask lets
+future-motion states read future-geometry states and meta-
+action states read both. An action expert uses the latent CoT
+and multi-depth geometric and semantic features to jointly
+generate and score trajectory proposals. Dedicated score to-
+kens incorporate scene and reasoning context and exchange
+information across proposals, allowing each candidate to
+be evaluated in relation to the alternatives. We construct
+NAVSIM 3DQA to train and evaluate box-conditioned met-
+ric 3D and motion understanding on NAVSIM scenes.
+Our main contributions are summarized as follows:
+• We propose GeoVLDrive, a geometry-grounded VLA
+framework with a structured latent CoT that connects fu-
+ture scene geometry, key-agent motion, and meta action
+through separately supervised latent states. With the same
+action-expert architecture, the latent CoT and geometry
+1
+arXiv:2611.32510v1  [cs.CV]  24 Nov 2026
+
+
+ 
+(a) VLA Policy 
+ 
+Image 
+ 
+Text 
+ 
+VLM 
+ 3D geometry 
+ Future world 
+ Language reasoning 
+ 
+e.g., EMMA, AutoVLA 
+ 
+(b) Geometry World Action 
+ 
+Image 
+ 
+Geometry World Model 
+ 
+Present 3D 
+ 
+Future 3D 
+ 3D geometry 
+ Future world 
+ Language reasoning 
+ 
+e.g., GeoWorldAD 
+ 
+Image 
+ 
+Text 
+ 
+Geometry 
+embedding 
+ 
+VLM 
+ 3D geometry 
+ Future world 
+ Language reasoning 
+ 
+e.g., VGGDrive 
+ 
+(d) GeoVLDrive (Ours) 
+ 
+Image 
+ 
+Text 
+ 
+Geometry 
+embedding 
+ 
+VLM 
+ 3D geometry 
+ Future world 
+ Language reasoning 
+(c) Geometry-grounded VLA
+Structured latent CoT
+Figure 1. Comparison of representative driving frameworks. (a) VLA policies map images and text to trajectories through a VLM
+[18, 54]. (b) Geometry world action models condition planning on observed and predicted geometric representations [49]. (c) Geometry-
+grounded VLAs augment VLMs with observed-scene geometric features [42]. (d) GeoVLDrive combines geometric grounding with a
+structured latent CoT to reason about future scene evolution and guide trajectory planning.
+injection raise NAVSIM v1 PDMS from 90.1 to 91.8.
+• We develop an action expert that jointly generates and
+scores trajectory proposals conditioned on the latent CoT
+and multi-depth scene features. Dedicated score tokens
+attend to scene context and to one another. This scoring
+design improves PDMS by 1.6 over an MLP readout of
+max-pooled action states.
+• We construct NAVSIM 3DQA, a dataset of 1.28M box-
+conditioned questions on object category, metric position,
+vehicle dimensions, and motion in NAVSIM scenes. With
+geometry injection and spatial alignment, our backbone
+scores 89.2% overall, 4.6 percentage points above the
+fine-tuned Qwen3-VL-2B baseline.
+2. Related Work
+2.1. Vision-Language-Action Models for Driving
+VLA models use pretrained semantic knowledge for
+trajectory planning. DriveLM [38] frames driving un-
+derstanding as graph-structured question answering, and
+EMMA [18] incorporates textual reasoning into action gen-
+eration. Textual chains of thought [45] expose intermedi-
+ate reasoning but add autoregressive decoding overhead.
+AutoVLA [54] and AdaThinkDrive [32] adapt the use of
+such reasoning to driving scenarios. Geometry-grounded
+models add 3D information. VGGDrive [42] injects fea-
+tures from a frozen geometry backbone via multi-layer
+cross-attention. VLGA [47] supervises a geometry expert
+with dense pointmap reconstruction, and DVGT-2 [56]
+jointly reconstructs current geometry and predicts trajecto-
+ries. Selection-based planners, including Hydra-MDP [27],
+WoTE [25], and iPad [12], use learned scores to select
+candidate trajectories. GeoVLDrive combines geometric
+grounding with structured reasoning about future scene evo-
+lution for ego planning. It uses iPad’s proposal formulation
+with dedicated score tokens.
+2.2. Latent Reasoning and World Modeling
+Latent CoT methods replace explicit reasoning traces with
+continuous intermediate states. Coconut [14] recurrently
+propagates hidden states, CCoT [5] learns compressed
+traces, CODI [37] uses hidden-state self-distillation, and
+SIM-CoT [46] adds step-level supervision through an aux-
+iliary decoder. In driving, LaST-VLA [33] and CoWorld-
+VLA [17] transfer geometric and dynamic priors into
+separately supervised latent groups.
+PerceptDrive [29]
+routes distilled perception priors into world-action model-
+ing; DriveWorld-VLA [19] shares latent features between
+world modeling and planning. OneVL [31] uses language
+and future-frame decoders to supervise shared latents. Dyn-
+VLA [36] predicts compact dynamics tokens, LCDrive [39]
+interleaves action proposals with predicted outcomes, and
+ColaVLA [35] derives meta-action representations for par-
+allel planning. Other approaches support planning through
+video prediction [4, 10, 44], latent forecasting [24], oc-
+cupancy [51], occupancy-flow prediction [30], and future
+geometry prediction [49]. SGDrive [22] is closest to our
+design.
+It supervises scene, agent, and goal queries in
+a VLM with occupancy, safety-critical agents, and a 4-s
+goal pose, learning geometry through occupancy supervi-
+2
+
+
+Figure 2. Overview of GeoVLDrive. (a) Model framework. The geometry-grounded VLM encodes future scene geometry, key-agent
+motion, and meta action in a structured latent CoT that conditions the action expert for joint trajectory generation and scoring. (b) Layer-
+wise geometry injection. Gated cross-attention injection (GCAI) blocks inject features from multiple StreamVGGT layers at selected
+VLM decoder depths. (c) Gated cross-attention injection block. Gated cross-attention injects geometry into VLM states, with shared 2D
+positional encoding for spatial alignment.
+sion, and a block-wise mask keeps the three groups from
+attending to one another. GeoVLDrive instead injects 3D
+foundation-model features into the VLM, predicts future
+depth from residually updated geometric features, and su-
+pervises at most one planning-relevant key agent and meta
+actions. Its attention mask lets future-motion states read
+future-geometry states and meta-action states read both, and
+blocks the reverse direction. The planner uses these states
+to generate and score trajectory proposals.
+3. Method
+GeoVLDrive grounds a vision-language backbone in 3D
+geometry and introduces a structured latent CoT connecting
+future scene geometry, key-agent motion, and meta action
+(Fig. 2). An action expert jointly generates and scores tra-
+jectory proposals conditioned on the latent CoT and multi-
+depth geometric and semantic features.
+3.1. Geometry-Grounded Vision-Language Back-
+bone
+We combine a pretrained Qwen3-VL-2B-Instruct back-
+bone [2] with a frozen StreamVGGT geometry encoder [49,
+55]. The VLM encodes the visual input, driving prompt,
+and current ego state, while StreamVGGT aggregates four
+front-camera frames to extract current-frame geometric fea-
+tures {Gℓ}ℓfrom multiple layers.
+Layer-wise gated cross-attention for geometry injection.
+We inject geometry features at multiple VLM depths [42],
+pairing StreamVGGT decoder layers [4, 11, 17, 23] with
+Qwen3-VL decoder layers [6, 13, 20, 26], using zero-based
+layer indices (Fig. 2(b)). For each paired depth, the decoder
+hidden states query the projected geometry tokens through
+a gated cross-attention residual [1]:
+X′
+m = Xm + tanh(gm) Am,
+Am = Attn
+ LN(Xm), ϕm(Gℓ), ϕm(Gℓ)
+
+.
+(1)
+3
+
+
+where m and ℓindex the paired VLM and geometry layers.
+Xm denotes the output of VLM decoder layer m before ge-
+ometry injection, and X′
+m denotes the updated states.
+LN denotes layer normalization, and Attn denotes
+query-key-value attention. The projection ϕm maps geom-
+etry features to the decoder width, and gm is a learnable
+scalar gate that controls the amount of geometric informa-
+tion added at each depth. Because the queries are formed
+from the decoder hidden states, visual, textual, and latent
+reasoning tokens can all access the geometry stream. Eq. (1)
+omits the positional encodings described below.
+Spatial alignment of semantic and geometric features.
+To spatially align the VLM’s visual representations with ge-
+ometry features, we encode normalized image coordinates
+(u, v) using a shared 2D sinusoidal positional encoding.
+The resulting encodings are added to the visual queries and
+the geometry keys and values (Fig. 2(c)). This provides
+a common image-plane reference across feature grids of
+different resolutions, helping cross-attention associate fea-
+tures at corresponding locations. Together, geometry in-
+jection and spatial encoding improve the backbone’s 3D
+scene understanding and metric localization, as shown by
+the NAVSIM 3DQA ablations in Table 4.
+3.2. Structured Latent Chain-of-Thought
+We organize future scene geometry, key-agent motion, and
+meta action into three supervised groups of latent states that
+form the latent CoT. The annotations select at most one key
+agent per scene (Sec. B.4 of the supplementary material).
+At inference, these states are computed in one backbone
+forward pass. During training, textual CoT provides autore-
+gressive language supervision.
+We predict scene geometry over 2 s and key-agent mo-
+tion over 4 s, using residual representations relative to the
+current state. The action expert reads both these hidden
+states and scene features directly (Sec. 3.3).
+Structured attention mask.
+The mask in Fig. 3 orders
+the latent CoT. Future key-agent motion states attend to
+future geometry states. Meta-action tokens attend to both
+groups.
+The mask blocks reverse connections between
+groups. Geometry tokens attend to their own and earlier
+prediction horizons. Future-motion tokens attend to one an-
+other bidirectionally. Their direct access to geometry states
+is limited to the same or earlier horizons.
+Future scene geometry.
+We retain the current multi-layer
+geometric features {Gℓ}ℓas a dense spatial reference, al-
+lowing compact latent tokens to focus on temporal changes.
+For each prediction horizon tk = kδ, k = 1, . . . , K, a time-
+conditioned residual decoder updates these features using
+Figure 3. Latent CoT attention mask. Rows denote queries and
+columns denote keys; colored cells indicate allowed direct atten-
+tion. The motion block shows example future-motion states.
+32 latent states Fk, the VLM hidden states at the future-
+geometry tokens of horizon k:
+∆Gℓ
+k = R(Gℓ, Fk, tk),
+(ˆzk, ck) = Dgeo
+ 
+Gℓ+ ∆Gℓ
+k
+	
+ℓ
+
+,
+(2)
+where R denotes the decoder’s net feature update and Dgeo
+produces the future depth and confidence maps ˆzk and ck.
+On valid future-depth pixels, we use a loss adapted from
+VGGT and GeoWorldAD [41, 49]:
+Lworld =
+K
+X
+k=1
+
+L(k)
+depth + L(k)
+conf + L(k)
+grad
+
+,
+(3)
+combining depth regression, confidence-weighted regres-
+sion, and multi-scale gradient consistency (Sec. B.2 of the
+supplementary material).
+Key-agent motion.
+We represent a planning-relevant
+agent with latent states D = [dc; d0; d1:J], encoding its
+category, current position, and future position offsets. Cat-
+egory and current-position states attend to the observed
+context, while future-motion states additionally attend to
+future-geometry states. Prediction extends to J > K steps
+on the same temporal grid, tj = jδ, with future positions
+reconstructed relative to the current position:
+ˆp0 = g0(d0),
+ˆpj = ˆp0 + g∆(dj),
+j = 1, . . . , J,
+(4)
+where g0 estimates the current position and g∆predicts off-
+sets from it. Category and track annotations supervise the
+predictions, including a “none” category for scenes without
+a key agent:
+Lagent = λclsLCE + λposLSmoothL1 + λdirLcos.
+(5)
+4
+
+
+Figure 4. Action expert. (a) Overall architecture for joint trajectory generation and scoring, integrating multi-depth geometric (Gi) and
+semantic (Qi) features with the latent reasoning chain. (b) Causal joint-attention mask used in the joint-attention layers of (a).
+Smooth L1 regression averages losses on the current posi-
+tion, future offsets, and reconstructed positions. The cosine
+loss aligns consecutive-step displacement directions, with
+reduced weights for small ground-truth displacements. Po-
+sition and direction losses apply only to valid agent tracks.
+Meta action.
+Two meta-action tokens represent longitudi-
+nal and lateral intent using the observed context, future ge-
+ometry states, and key-agent motion states. Their maneuver
+distributions πd are supervised by the corresponding labels
+yd:
+Lmeta =
+X
+d∈{lon, lat}
+CE(πd, yd).
+(6)
+3.3. Action Expert
+Our action expert jointly generates and scores trajectory
+proposals conditioned on the latent chain and multi-depth
+geometric and semantic features (Fig. 4). Causal joint atten-
+tion directs information from reasoning to actions and from
+actions to scores. Dedicated score tokens combine scene
+context with proposal-specific action states and exchange
+information across candidates for trajectory selection.
+Multi-depth joint attention.
+The expert is a dedicated
+transformer operating on latent reasoning states, ego-state
+tokens, R × J action tokens, and R score tokens. Geo-
+metric and semantic features from multiple depths are con-
+catenated with these states at corresponding expert layers.
+At each selected depth, Qwen features are compressed to
+64 tokens by attention pooling with learned queries. All
+VLM-derived inputs are detached before the trainable pool-
+ing and projection layers, preventing planning gradients
+from updating the VLM. Masked self-attention and an FFN
+jointly update the resulting sequence under the causal joint-
+attention mask in Fig. 4(b), which enforces the token-group
+visibility order while allowing bidirectional attention within
+each group. The refined reasoning, action, and score states
+propagate across S refinement stages, with stage s decod-
+ing R trajectory proposals τ (s)
+r , each comprising J poses.
+Trajectory supervision follows the winner-takes-all objec-
+tive used by Guo et al. [12], accumulated across stages:
+Ltraj =
+S
+X
+s=1
+γ S−s
+min
+r=1,...,R
+1
+J
+J
+X
+j=1
+τ (s)
+r,j −τ GT
+j
+
+1, (7)
+where τ GT denotes the logged ground-truth trajectory and
+γ discounts earlier stages. The minimum selects the closest
+proposal at each stage for trajectory regression. Auxiliary
+heads supervise the expert’s final motion states with cate-
+gory and position losses (Laux
+agent) and its final meta-action
+states with a maneuver classification loss (Laux
+meta).
+Scene-grounded
+cross-proposal
+scoring.
+Dedicated
+score tokens incorporate scene and latent-state context
+when evaluating trajectory proposals.
+Direct score-to-
+action attention is restricted to the corresponding proposal,
+while attention among score tokens enables information
+exchange across candidates (Fig. 4(b)).
+An MLP maps
+the final score states to scalar scores, supervised by binary
+5
+
+
+cross-entropy Lscore against simulated trajectory scores [7].
+At inference, the highest-scoring proposal is selected.
+3.4. Training Objectives
+We combine latent-chain and textual CoT supervision with
+trajectory regression and proposal scoring. Auxiliary losses
+supervise the action expert’s refined motion and meta-action
+states. The joint action-training objective is
+L = Ltraj +
+X
+q∈T
+λqLq +
+X
+q∈{agent,meta}
+λaux
+q
+Laux
+q
+,
+(8)
+where T
+= {world, agent, meta, cot, score}, and the λ
+coefficients weight the loss terms. We use autoregressive
+cross-entropy on annotated textual reasoning for Lcot. Pre-
+diction heads supervise the latent states for geometry, mo-
+tion, and maneuvers.
+4. Experiments
+4.1. Implementation Details
+Datasets.
+We use LingoQA [34] and NAVSIM 3DQA for
+visual question answering.1 NAVSIM-WM-CoT (Sec. B.4
+of the supplementary material) provides chain-of-thought
+annotations and supervision for future geometry and key-
+agent motion. For planning, we train on navtrain and eval-
+uate on the 12,146 scenes in navtest [3, 7]. Inference uses
+front-camera images and ego state without LiDAR.
+NAVSIM 3DQA. We derive NAVSIM 3DQA from NAVSIM
+annotations to train and evaluate the backbone on ob-
+ject geometry and motion.
+We will publicly release
+NAVSIM 3DQA when we submit the camera-ready ver-
+sion. Each sample comprises four consecutive front-camera
+frames at time offsets [−1.5, −1.0, −0.5, 0] s relative to the
+current frame, ordered from oldest to newest, and a ques-
+tion about an object identified by a normalized 2D bound-
+ing box in the current frame. Questions cover four task
+types: coarse object category, ground-plane position in me-
+ters, vehicle dimensions, and motion behavior. The dataset
+contains approximately 1.28M QA pairs from 95K anchor
+frames, including 1.12M training pairs and 165K validation
+pairs. The training and validation sets follow NAVSIM’s
+official partition. Dataset construction is detailed in Sec. A
+of the supplementary material.
+Metrics.
+We report the Predictive Driver Model Score
+(PDMS) on NAVSIM v1 and the Extended PDMS
+(EPDMS) on NAVSIM v2 for planning evaluation. Both
+aggregate safety, comfort, and progress; v2 includes ad-
+ditional evaluation criteria.
+We evaluate NAVSIM v2
+1This work uses LingoQA and NAVSIM solely for academic research
+purposes. The authors confirm that all uses of these datasets and bench-
+marks are strictly limited to non-commercial academic research and do not
+involve any commercial applications.
+metrics on the navtest split using single-stage simulation.
+NAVSIM 3DQA scores four tasks: coarse category and
+motion behavior by exact match of parsed semantic labels,
+ground-plane position by a distance-dependent error toler-
+ance, and vehicle dimensions by a fixed 0.5 m tolerance.
+Overall is the equal-weight mean of the four task scores.
+The displayed Position and Dimensions columns use sepa-
+rate diagnostic criteria, as detailed in Sec. A.3 of the sup-
+plementary material. On LingoQA we report Lingo-Judge
+accuracy.
+Training details.
+We use Qwen3-VL-2B-Instruct [2] as
+the vision-language backbone and StreamVGGT [55] as the
+geometry encoder, which remains frozen throughout train-
+ing. Training proceeds in four phases. The first aligns se-
+mantics and geometry on the question-answering mixture
+for 3 epochs. The second supervises future geometry and
+key-agent motion for 5 epochs. The third trains the super-
+vised latent chain for 10 epochs, and the fourth trains the
+chain and the action expert jointly for 30 epochs. Training
+uses NVIDIA H20 GPUs, with phase-specific GPU counts
+and batch sizes listed in supplementary Table S3. Sec. B
+of the supplementary material describes the latent interface,
+loss definitions, and training schedule.
+4.2. Evaluation Results
+NAVSIM benchmark.
+Using a 2B VLM backbone, one
+front camera, and supervised training only, GeoVLDrive
+achieves 91.8 PDMS on NAVSIM v1 and 90.9 EPDMS on
+NAVSIM v2 (Tables 1 and 2). On NAVSIM v1, it exceeds
+the 2B-backbone VLAs SGDrive (SFT) [22], CoWorld-
+VLA [17], and DriveWorld-VLA [19] by 4.4, 1.8, and
+0.5 PDMS, and the RL-trained LaST-VLA-2B [33] by
+0.7. Among proposal-based planners, iPad [12] scores 91.7
+PDMS and GeoWorldAD [49] scores 91.0. Additional plan-
+ning visualizations are provided in supplementary Sec. C.2.
+LingoQA
+and
+NAVSIM
+3DQA.
+We
+compare
+the
+geometry-grounded
+backbone
+of
+GeoVLDrive
+with
+Qwen3-VL-2B-Instruct fine-tuned on the same data and
+schedule (Table 3).
+GeoVLDrive improves the overall
+NAVSIM 3DQA score from 84.6% to 89.2%, with gains
+in metric position and motion accuracy.
+On LingoQA,
+it achieves 68.6% Lingo-Judge accuracy compared with
+67.0% for the matched fine-tuned baseline, showing a
+modest numerical increase in driving question answering.
+We evaluate future depth, key-agent motion, and meta
+action on the NAVSIM-WM-CoT validation split (supple-
+mentary Tables S6 and S7).
+4.3. Ablation Study
+Geometry injection and spatial alignment.
+Geometry
+injection improves the NAVSIM 3DQA score from 84.6 to
+6
+
+
+Table 1. NAVSIM v1 navtest results (PDMS). nC denotes n cameras, and +L indicates LiDAR input. The FSDrive camera count
+follows DriveDreamer-Policy [53].
+† marks VLA models trained with reinforcement learning. GeoVLDrive uses supervised training.
+Baseline scores come from the cited papers. We use the NAVSIM reimplementation of UniAD [7], the camera–LiDAR VADv2-V8192
+from DiffusionDrive [28], Hydra-MDP V8192-W-EP, WorldDrive trained on the full navtrain split, and the multiple-anchor DriveVLA-W0
+variant with unspecified backbone (–). We exclude variants using an oracle to select sampled trajectories. Bold marks the highest displayed
+values, including ties. Supplementary Table S5 defines the metrics.
+Method
+Backbone
+Sensors
+NC↑
+DAC↑
+TTC↑
+Comf.↑
+EP↑
+PDMS↑
+VADv2-V8192 [21]
+E2E
+3C+L
+97.2
+89.1
+91.6
+100.0
+76.0
+80.9
+UniAD [16]
+8C
+97.8
+91.9
+92.9
+100.0
+78.8
+83.4
+Hydra-MDP [27]
+3C+L
+98.3
+96.0
+94.6
+100.0
+78.7
+86.5
+DiffusionDrive [28]
+3C+L
+98.2
+96.2
+94.7
+100.0
+82.2
+88.1
+iPad [12]
+4C
+98.6
+98.3
+94.9
+100.0
+88.0
+91.7
+FSDrive [48]
+World model
+3C
+98.2
+93.8
+93.3
+99.9
+80.1
+85.1
+PWM [50]
+1C
+98.6
+95.9
+95.4
+100.0
+81.8
+88.1
+WoTE [25]
+3C+L
+98.5
+96.8
+94.9
+99.9
+81.9
+88.3
+WorldDrive [11]
+1C
+98.4
+96.8
+95.2
+100.0
+83.3
+89.0
+PerceptDrive [29]
+1C
+99.2
+99.0
+98.0
+100.0
+82.9
+90.4
+GeoWorldAD [49]
+1C
+99.0
+97.8
+95.8
+99.9
+85.9
+91.0
+DriveVLA-W0 [26]
+–
+1C
+98.7
+99.1
+95.3
+99.3
+83.3
+90.2
+LaST-VLA [33]
+InternVL3-8B
+1C
+98.7
+95.4
+95.6
+100.0
+80.5
+87.3
+LaST-VLA† [33]
+InternVL3-2B
+1C
+98.6
+97.7
+95.6
+100.0
+86.5
+91.1
+LaST-VLA† [33]
+InternVL3-8B
+1C
+98.7
+97.9
+95.6
+100.0
+86.8
+91.3
+SGDrive (SFT) [22]
+InternVL3-2B
+1C
+98.6
+95.1
+95.4
+100.0
+81.2
+87.4
+VGGDrive [42]
+Qwen2.5-VL-7B
+3C
+98.6
+96.3
+95.6
+100.0
+82.9
+88.8
+CoWorld-VLA [17]
+Qwen3-VL-2B
+1C
+99.1
+97.0
+96.5
+100.0
+84.0
+90.0
+DriveWorld-VLA [19]
+InternVL3-2B
+3C
+99.1
+98.2
+96.1
+100.0
+85.9
+91.3
+GeoVLDrive
+Qwen3-VL-2B
+1C
+98.7
+98.0
+95.3
+100.0
+88.1
+91.8
+Table 2. NAVSIM v2 results (EPDMS). † marks reinforcement learning. Scores for Ego Status, TransFuser, and Hydra-MDP++ follow
+DriveVLA-W0 [26], and DiffusionDrive scores are from GeoWorldAD [49]. Other baseline scores are taken from their cited papers.
+‡ARTEMIS reports EC and labels a separate comfort measure C, so its HC entry is unspecified. Bold marks the highest displayed values,
+including ties.
+Method
+NC↑
+DAC↑
+DDC↑
+TLC↑
+EP↑
+TTC↑
+LK↑
+HC↑
+EC↑
+EPDMS↑
+Ego Status [3]
+93.1
+77.9
+92.7
+99.6
+86.0
+91.5
+89.4
+98.3
+85.4
+64.0
+TransFuser [6]
+96.9
+89.9
+97.8
+99.7
+87.1
+95.4
+92.7
+98.3
+87.2
+76.7
+Hydra-MDP++ [23]
+97.2
+97.5
+99.4
+99.6
+83.1
+96.5
+94.4
+98.2
+70.9
+81.4
+ARTEMIS‡ [8]
+98.3
+95.1
+98.6
+99.8
+81.5
+97.4
+96.5
+–
+98.3
+83.1
+DiffusionDrive [28]
+98.2
+95.9
+99.4
+99.8
+87.5
+97.3
+96.8
+98.3
+87.7
+84.5
+PerceptDrive [29]
+98.6
+98.8
+99.5
+99.9
+87.5
+97.9
+96.9
+98.5
+86.3
+90.2
+GeoWorldAD [49]
+99.0
+97.8
+99.6
+99.7
+89.1
+98.6
+97.6
+98.0
+82.2
+90.4
+DriveVLA-W0 [26]
+98.5
+99.1
+98.0
+99.7
+86.4
+98.1
+93.2
+97.9
+58.9
+86.1
+DriveWorld-VLA [19]
+98.6
+99.1
+99.6
+99.8
+87.4
+97.9
+97.0
+97.8
+78.6
+86.8
+LaST-VLA-8B† [33]
+98.7
+97.9
+99.2
+99.7
+90.3
+98.2
+96.6
+98.3
+86.3
+87.1
+GeoVLDrive
+98.7
+98.0
+99.5
+99.6
+91.4
+98.2
+97.6
+97.9
+82.4
+90.9
+87.5, and normalized (u, v) alignment further raises it to
+89.2 (Table 4). Position accuracy increases from 66.8 to
+72.2 and 76.7, respectively. LingoQA accuracy also rises
+from 67.0 to 67.6 and 68.6.
+7
+
+
+Table 3.
+LingoQA and NAVSIM 3DQA results (%, higher
+is better).
+Qwen3-VL [2] rows use the Instruct models.
+In-
+ternVL3.5 [43] and Qwen3-VL in the upper block have no task-
+specific fine-tuning.
+∗marks the fine-tuned baseline. We train
+the geometry-grounded GeoVLDrive backbone with the same data
+and schedule. See supplementary Sec. A.3 for Overall and Ta-
+bles S8–S9 for per-class accuracies. Position accuracy uses L2 ≤
+1 m. Size accuracy requires all three errors to be within 0.5 m.
+LingoQA
+NAVSIM 3DQA
+Method
+Judge
+Overall Cat. Mot. Pos. Dim.
+Qwen3-VL-2B
+44.0
+34.2
+80.3 38.5
+6.1
+10.1
+Qwen3-VL-8B
+54.8
+54.4
+82.3 50.7
+9.4
+68.7
+InternVL3.5-2B
+53.8
+29.9
+66.9 27.3
+5.0
+8.4
+InternVL3.5-8B
+51.4
+45.1
+67.0 33.5
+7.4
+62.5
+Qwen3-VL-2B∗
+67.0
+84.6
+97.9 85.8 66.8 87.8
+GeoVLDrive
+68.6
+89.2
+98.0 91.0 76.7 89.1
+Table 4. Geometry injection and spatial alignment. Geo. adds
+StreamVGGT geometry injection. UVPos adds normalized (u, v)
+positional encoding.
+The baseline is Qwen3-VL-2B-Instruct∗.
+Metrics follow Table 3 (%, higher is better).
+LingoQA
+NAVSIM 3DQA
+Configuration
+Judge
+Overall Cat. Mot. Pos. Dim.
+Baseline∗
+67.0
+84.6
+97.9 85.8 66.8 87.8
++ Geo.
+67.6
+87.5
+97.9 90.1 72.2 88.4
++ Geo. + UVPos
+68.6
+89.2
+98.0 91.0 76.7 89.1
+Table 5. Geometry-grounded latent CoT ablations on NAVSIM
+v1. All configurations use the same action-expert architecture.
+(a) World, Motion, Meta, and Geo. enable future geometry, key-
+agent motion, meta action, and geometry injection. (b) We com-
+pare the directed mask in Fig. 3 with a variant that allows bidi-
+rectional attention between the same latent CoT groups. Directed
+repeats the full-model result from (a). Bold marks the highest val-
+ues within each subtable, including ties.
+(a) Latent groups and geometry injection
+World Motion Meta Geo. NC DAC TTC Comf. EP PDMS
+98.2 97.3 93.6
+99.9
+87.0
+90.1
+✓
+98.4 97.7 93.8 100.0 87.0
+90.5
+✓
+✓
+98.8 97.5 95.3
+99.9
+86.1
+90.7
+✓
+✓
+✓
+99.0 97.8 95.7
+99.9
+86.0
+91.0
+✓
+✓
+✓
+✓
+98.7 98.0 95.3 100.0 88.1
+91.8
+(b) Attention configurations
+Bidirectional
+98.5 97.4 94.8
+99.9
+87.1
+90.8
+Directed (ours)
+98.7 98.0 95.3 100.0 88.1
+91.8
+Geometry-grounded latent CoT.
+With the same action-
+expert architecture, adding World, Motion, and Meta to
+the pre-aligned backbone raises PDMS from 90.1 to 90.5,
+Table 6. Trajectory scoring on NAVSIM v1. The MLP reads
+max-pooled action states, following iPad [12]. For score tokens,
+Scene enables direct scene attention and Cross enables attention
+among score tokens across proposals. Checkmarks indicate en-
+abled paths, blanks indicate disabled paths, and – means inappli-
+cable. Higher scores are better.
+Scorer
+Scene Cross NC DAC TTC Comf. EP PDMS
+MLP
+–
+–
+98.4 97.4 94.3
+99.9 86.4
+90.2
+Score tokens
+98.5 97.4 93.9
+99.9 87.0
+90.4
+Score tokens
+✓
+98.6 97.7 94.2 100.0 87.2
+90.8
+Score tokens
+✓
+✓
+98.7 98.0 95.3 100.0 88.1
+91.8
+90.7, and 91.0, respectively (Table 5(a)).
+NC and TTC
+rise from 98.2 to 99.0 and 93.6 to 95.7, respectively. With
+all three latent groups enabled, adding geometry injection
+raises PDMS from 91.0 to 91.8. The largest change is in
+ego progress (+2.1 points), with changes of +0.2 in DAC,
+−0.3 in NC, and −0.4 in TTC. Directed cross-group at-
+tention yields 91.8 PDMS, compared with 90.8 for bidirec-
+tional attention (Table 5(b)).
+Proposal scoring.
+With all other settings fixed, Table 6
+compares an iPad-style MLP readout of max-pooled ac-
+tion states [12] with three score-token variants. PDMS rises
+from 90.2 (MLP) to 90.4 (action-only tokens), 90.8 (scene-
+aware tokens), and 91.8 (cross-proposal attention). Cross-
+proposal attention improves NC, DAC, TTC, and EP over
+scene-aware scoring alone. These results support incorpo-
+rating interactions among candidates when evaluating tra-
+jectory proposals.
+5. Conclusion
+GeoVLDrive combines multi-layer geometry injection with
+latent-state supervision for future scene geometry, key-
+agent motion, and meta action. The action expert uses these
+states and multi-depth scene features to generate and score
+trajectory proposals. The latent CoT and geometry injec-
+tion raise NAVSIM v1 PDMS from 90.1 to 91.8, and the
+full model reaches 90.9 EPDMS on NAVSIM v2 with one
+front camera and supervised training only. Scene-grounded,
+interacting score tokens add 1.6 PDMS over an MLP read-
+out. Geometry injection improves box-conditioned metric
+localization and motion recognition on NAVSIM 3DQA.
+Limitations and future work.
+GeoVLDrive uses a single
+front camera and models at most one key agent per scene.
+Future geometry is supervised over 2 s, while key-agent mo-
+tion and planning extend to 4 s. Training targets follow the
+recorded future. We evaluate with NAVSIM’s non-reactive
+pseudo-simulation.
+Future work includes surround-view
+8
+
+
+input, multi-agent interactions, longer geometry horizons,
+multimodal futures, and closed-loop evaluation.
+LLM Usage Statement
+The authors used OpenAI Codex and Anthropic Claude to
+polish the manuscript. OpenAI Codex also assisted with
+cleaning the training data. We used OpenAI GPT to check
+and correct textual CoT annotations against the structured
+scene annotations. Human annotators reviewed a sample of
+the revised texts.
+References
+[1] Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, Antoine
+Miech, Iain Barr, Yana Hasson, Karel Lenc, Arthur Mensch,
+Katie Millican, Malcolm Reynolds, et al. Flamingo: A visual
+language model for few-shot learning. In Adv. Neural Inf.
+Process. Syst. (NeurIPS), 2022.
+[2] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui
+Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao,
+Chunjiang Ge, et al.
+Qwen3-VL technical report.
+arXiv
+preprint arXiv:2511.21631, 2025.
+[3] Wei Cao, Marcel Hallgarten, Tianyu Li, Daniel Dauner,
+Xunjiang Gu, Caojun Wang, Yakov Miron, Marco Aiello,
+Hongyang Li, Igor Gilitschenski, Boris Ivanovic, Marco
+Pavone, Andreas Geiger, and Kashyap Chitta.
+Pseudo-
+simulation for autonomous driving.
+In Proc. Conf. Robot
+Learn. (CoRL), pages 4709–4722, 2025.
+[4] Yuntao Chen, Yuqi Wang, and Zhaoxiang Zhang.
+Driv-
+ingGPT: Unifying driving world modeling and planning
+with multi-modal autoregressive transformers.
+In Proc.
+IEEE/CVF Int. Conf. Comput. Vis. (ICCV), 2025.
+[5] Jeffrey Cheng and Benjamin Van Durme. Compressed chain
+of thought: Efficient reasoning through dense representa-
+tions. arXiv preprint arXiv:2412.13171, 2024.
+[6] Kashyap Chitta, Aditya Prakash, Bernhard Jaeger, Zehao Yu,
+Katrin Renz, and Andreas Geiger.
+TransFuser: Imitation
+with transformer-based sensor fusion for autonomous driv-
+ing. IEEE Trans. Pattern Anal. Mach. Intell., 2023.
+[7] Daniel Dauner, Marcel Hallgarten, Tianyu Li, Xinshuo
+Weng, Zhiyu Huang, Zetong Yang, Hongyang Li, Igor
+Gilitschenski, Boris Ivanovic, Marco Pavone, Andreas
+Geiger, and Kashyap Chitta.
+NAVSIM: Data-driven non-
+reactive autonomous vehicle simulation and benchmarking.
+In Adv. Neural Inf. Process. Syst. (NeurIPS) Datasets and
+Benchmarks Track, 2024.
+[8] Renju Feng, Ning Xi, Duanfeng Chu, Rukang Wang, Zejian
+Deng, Anzheng Wang, Liping Lu, Jinxiang Wang, and Yan-
+jun Huang. ARTEMIS: Autoregressive end-to-end trajectory
+planning with mixture of experts for autonomous driving.
+arXiv preprint arXiv:2504.19580, 2025.
+[9] Haoyu Fu, Diankun Zhang, Zongchuang Zhao, Jianfeng Cui,
+Dingkang Liang, Chong Zhang, Dingyuan Zhang, Hongwei
+Xie, Bing Wang, and Xiang Bai. ORION: A holistic end-to-
+end autonomous driving framework by vision-language in-
+structed action generation.
+In Proc. IEEE/CVF Int. Conf.
+Comput. Vis. (ICCV), pages 24823–24834, 2025.
+[10] Shenyuan Gao, Jiazhi Yang, Li Chen, Kashyap Chitta, Yi-
+hang Qiu, Andreas Geiger, Jun Zhang, and Hongyang Li.
+Vista: A generalizable driving world model with high fi-
+delity and versatile controllability. In Adv. Neural Inf. Pro-
+cess. Syst. (NeurIPS), 2024.
+[11] Xingtai Gui, Meijie Zhang, Tianyi Yan, Wencheng Han, Jia-
+hao Gong, Feiyang Tan, Chengzhong Xu, and Jianbing Shen.
+Bridging scene generation and planning: Driving with world
+model via unifying vision and motion representation. arXiv
+preprint arXiv:2603.14948, 2026.
+[12] Ke Guo, Haochen Liu, Xiaojun Wu, Jia Pan, and Chen Lv.
+iPad: Iterative proposal-centric end-to-end autonomous driv-
+ing. arXiv preprint arXiv:2505.15111, 2025.
+[13] Xianda Guo, Ruijun Zhang, Yiqun Duan, Yuhang He, Dujun
+Nie, Wenke Huang, Chenming Zhang, Shuai Liu, Hao Zhao,
+and Long Chen.
+SURDS: Benchmarking spatial under-
+standing and reasoning in driving scenarios with vision lan-
+guage models. In Adv. Neural Inf. Process. Syst. (NeurIPS)
+Datasets and Benchmarks Track, 2025.
+[14] Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhit-
+ing Hu, Jason Weston, and Yuandong Tian. Training large
+language models to reason in a continuous latent space. In
+Proc. Conf. Lang. Model. (COLM), 2025.
+[15] Shengchao Hu, Li Chen, Penghao Wu, Hongyang Li, Junchi
+Yan, and Dacheng Tao. ST-P3: End-to-end vision-based au-
+tonomous driving via spatial-temporal feature learning. In
+Proc. Eur. Conf. Comput. Vis. (ECCV), pages 533–549, 2022.
+[16] Yihan Hu, Jiazhi Yang, Li Chen, Keyu Li, Chonghao Sima,
+Xizhou Zhu, Siqi Chai, Senyao Du, Tianwei Lin, Wenhai
+Wang, Lewei Lu, Xiaosong Jia, Qiang Liu, Jifeng Dai, Yu
+Qiao, and Hongyang Li. Planning-oriented autonomous driv-
+ing. In Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recog-
+nit. (CVPR), pages 17853–17862, 2023.
+[17] Minqing Huang, Yujiao Xiang, Zihan Liang, Jiajie Huang,
+Jingqi Wang, Yuheng Zhou, Zhi Xu, Feiyang Tan, Hangning
+Zhou, Mu Yang, and Gong Che. CoWorld-VLA: Thinking in
+a multi-expert world model for autonomous driving. arXiv
+preprint arXiv:2605.10426, 2026.
+[18] Jyh-Jing Hwang, Runsheng Xu, Hubert Lin, Wei-Chih Hung,
+Jingwei Ji, Kristy Choi, Di Huang, Tong He, Paul Coving-
+ton, Benjamin Sapp, et al. EMMA: End-to-end multimodal
+model for autonomous driving. Trans. Mach. Learn. Res.
+(TMLR), 2025.
+[19] Feiyang Jia, Lin Liu, Ziying Song, Caiyan Jia, Hangjun
+Ye, Xiaoshuai Hao, and Long Chen.
+DriveWorld-VLA:
+Unified latent-space world modeling with vision-language-
+action for autonomous driving. In Proc. Int. Conf. Mach.
+Learn. (ICML), 2026.
+[20] Bo Jiang, Shaoyu Chen, Qing Xu, Bencheng Liao, Jiajie
+Chen, Helong Zhou, Qian Zhang, Wenyu Liu, Chang Huang,
+and Xinggang Wang. VAD: Vectorized scene representation
+for efficient autonomous driving. In Proc. IEEE/CVF Int.
+Conf. Comput. Vis. (ICCV), pages 8340–8350, 2023.
+[21] Bo Jiang, Shaoyu Chen, Hao Gao, Bencheng Liao, Qian
+Zhang, Wenyu Liu, and Xinggang Wang.
+VADv2: End-
+to-end vectorized autonomous driving via probabilistic plan-
+ning. In Proc. Int. Conf. Learn. Represent. (ICLR), 2026.
+9
+
+
+[22] Jingyu Li, Junjie Wu, Dongnan Hu, Xiangkai Huang, Bin
+Sun, Zhihui Hao, Xianpeng Lang, Xiatian Zhu, and Li
+Zhang. SGDrive: Scene-to-goal hierarchical world cognition
+for autonomous driving. In Proc. IEEE/CVF Conf. Comput.
+Vis. Pattern Recognit. (CVPR), 2026.
+[23] Kailin Li, Zhenxin Li, Shiyi Lan, Yuan Xie, Zhizhong
+Zhang, Jiayi Liu, Zuxuan Wu, Zhiding Yu, and Jose M.
+Alvarez.
+Hydra-MDP++:
+Advancing end-to-end driv-
+ing via expert-guided hydra-distillation.
+arXiv preprint
+arXiv:2503.12820, 2025.
+[24] Yingyan Li, Lue Fan, Jiawei He, Yuqi Wang, Yuntao Chen,
+Zhaoxiang Zhang, and Tieniu Tan. Enhancing end-to-end
+autonomous driving with latent world model. In Proc. Int.
+Conf. Learn. Represent. (ICLR), 2025.
+[25] Yingyan Li, Yuqi Wang, Yang Liu, Jiawei He, Lue Fan, and
+Zhaoxiang Zhang. End-to-end driving with online trajectory
+evaluation via BEV world model. In Proc. IEEE/CVF Int.
+Conf. Comput. Vis. (ICCV), pages 27137–27146, 2025.
+[26] Yingyan Li, Shuyao Shang, Weisong Liu, Bing Zhan,
+Haochen Wang, Yuqi Wang, Yuntao Chen, Xiaoman Wang,
+Yasong An, Chufeng Tang, et al.
+DriveVLA-W0: World
+models amplify data scaling law in autonomous driving. In
+Proc. Int. Conf. Learn. Represent. (ICLR), 2026.
+[27] Zhenxin Li, Kailin Li, Shihao Wang, Shiyi Lan, Zhiding Yu,
+Yishen Ji, Zhiqi Li, Ziyue Zhu, Jan Kautz, Zuxuan Wu, et al.
+Hydra-MDP: End-to-end multimodal planning with multi-
+target hydra-distillation. arXiv preprint arXiv:2406.06978,
+2024.
+[28] Bencheng Liao, Shaoyu Chen, Haoran Yin, Bo Jiang,
+Cheng Wang, Sixu Yan, Xinbang Zhang, Xiangyu Li, Ying
+Zhang, Qian Zhang, et al. DiffusionDrive: Truncated dif-
+fusion model for end-to-end autonomous driving. In Proc.
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR),
+2025.
+[29] Yushan Liu, Tianxiong Lv, Bohua Wang, Hangqi Fan,
+Chenxu Zhao, He Zheng, Xuchang Zhong, Yifan Xie, Con-
+gyang Zhao, Zhihao Liao, Leigang Luo, Yang Cai, Xiao-
+Ping Zhang, and Wenbo Ding.
+PerceptDrive:
+Percep-
+tion prior world-action modeling with adaptive expert rout-
+ing for end-to-end autonomous driving.
+arXiv preprint
+arXiv:2607.20175, 2026.
+[30] Zhe Liu, Runhui Huang, Rui Yang, Siming Yan, Zining
+Wang, Lu Hou, Di Lin, Xiang Bai, and Hengshuang Zhao.
+DrivePI: Spatial-aware 4D MLLM for unified autonomous
+driving understanding, perception, prediction and planning.
+In Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.
+(CVPR), 2026.
+[31] Jinghui Lu, Jiayi Guan, Zhijian Huang, Jinlong Li, Guang
+Li, Lingdong Kong, Yingyan Li, Han Wang, Shaoqing Xu,
+Yuechen Luo, et al. OneVL: One-step latent reasoning and
+planning with vision-language explanation. arXiv preprint
+arXiv:2604.18486, 2026.
+[32] Yuechen Luo, Fang Li, Shaoqing Xu, Zhiyi Lai, Lei Yang,
+Qimao Chen, Ziang Luo, Zixun Xie, Shengyin Jiang, Ji-
+axin Liu, Long Chen, Bing Wang, and Zhi-Xin Yang. Ada-
+ThinkDrive: Adaptive thinking via reinforcement learning
+for autonomous driving. arXiv preprint arXiv:2509.13769,
+2025.
+[33] Yuechen Luo, Fang Li, Shaoqing Xu, Yang Ji, Zehan Zhang,
+Bing Wang, Yuannan Shen, Jianwei Cui, Long Chen, Guang
+Chen, Hangjun Ye, Zhi-Xin Yang, and Fuxi Wen.
+LaST-
+VLA: Thinking in latent spatio-temporal space for vision-
+language-action in autonomous driving.
+arXiv preprint
+arXiv:2603.01928, 2026.
+[34] Ana-Maria Marcu, Long Chen, Jan Hünermann, Alice Karn-
+sund, Benoit Hanotte, Prajwal Chidananda, Saurabh Nair,
+Vijay Badrinarayanan, Alex Kendall, Jamie Shotton, Elahe
+Arani, and Oleg Sinavski.
+LingoQA: Visual question an-
+swering for autonomous driving. In Proc. Eur. Conf. Com-
+put. Vis. (ECCV), 2024.
+[35] Qihang Peng, Xuesong Chen, Chenye Yang, Shaoshuai Shi,
+and Hongsheng Li. ColaVLA: Leveraging cognitive latent
+reasoning for hierarchical parallel trajectory planning in au-
+tonomous driving. In Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit. (CVPR), 2026.
+[36] Shuyao Shang, Bing Zhan, Yunfei Yan, Yuqi Wang, Yingyan
+Li, Yasong An, Xiaoman Wang, Jierui Liu, Lu Hou, Lue
+Fan, Zhaoxiang Zhang, and Tieniu Tan. DynVLA: Learning
+world dynamics for action reasoning in autonomous driving.
+arXiv preprint arXiv:2603.11041, 2026.
+[37] Zhenyi Shen, Hanqi Yan, Linhai Zhang, Zhanghao Hu, Yali
+Du, and Yulan He. CODI: Compressing chain-of-thought
+into continuous space via self-distillation. In Proc. Conf. Em-
+pir. Methods Nat. Lang. Process. (EMNLP), pages 677–693,
+2025.
+[38] Chonghao Sima, Katrin Renz, Kashyap Chitta, Li Chen,
+Hanxue Zhang, Chengen Xie, Jens Beißwenger, Ping Luo,
+Andreas Geiger, and Hongyang Li. DriveLM: Driving with
+graph visual question answering. In Proc. Eur. Conf. Com-
+put. Vis. (ECCV), 2024.
+[39] Shuhan Tan, Kashyap Chitta, Yuxiao Chen, Ran Tian,
+Yurong You, Yan Wang, Wenjie Luo, Yulong Cao, Philipp
+Krähenbühl, Marco Pavone, and Boris Ivanovic.
+La-
+tent chain-of-thought world modeling for end-to-end au-
+tonomous driving. In Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit. (CVPR), 2026.
+[40] Xiaoyu Tian, Junru Gu, Bailin Li, Yicheng Liu, Yang Wang,
+Zhiyong Zhao, Kun Zhan, Peng Jia, Xianpeng Lang, and
+Hang Zhao. DriveVLM: The convergence of autonomous
+driving and large vision-language models.
+In Proc. Conf.
+Robot Learn. (CoRL), pages 4698–4726, 2025.
+[41] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea
+Vedaldi, Christian Rupprecht, and David Novotny. VGGT:
+Visual geometry grounded transformer. In Proc. IEEE/CVF
+Conf. Comput. Vis. Pattern Recognit. (CVPR), pages 5294–
+5306, 2025.
+[42] Jie Wang, Guang Li, Zhijian Huang, Chenxu Dang, Hangjun
+Ye, Yahong Han, and Long Chen. VGGDrive: Empowering
+vision-language models with cross-view geometric ground-
+ing for autonomous driving. In Proc. IEEE/CVF Conf. Com-
+put. Vis. Pattern Recognit. (CVPR), 2026.
+[43] Weiyun Wang, Zhangwei Gao, Lixin Gu, Hengjun Pu, Long
+Cui, Xingguang Wei, Zhaoyang Liu, Linglin Jing, Shenglong
+Ye, Jie Shao, et al. InternVL3.5: Advancing open-source
+multimodal models in versatility, reasoning, and efficiency.
+arXiv preprint arXiv:2508.18265, 2025.
+10
+
+
+[44] Xiaofeng Wang, Zheng Zhu, Guan Huang, Xinze Chen, Ji-
+agang Zhu, and Jiwen Lu.
+DriveDreamer: Towards real-
+world-driven world models for autonomous driving. In Proc.
+Eur. Conf. Comput. Vis. (ECCV), pages 55–72, 2024.
+[45] Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+Bosma, Brian Ichter, Fei Xia, Ed H. Chi, Quoc V. Le, and
+Denny Zhou. Chain-of-thought prompting elicits reasoning
+in large language models. In Adv. Neural Inf. Process. Syst.
+(NeurIPS), 2022.
+[46] Xilin Wei, Xiaoran Liu, Yuhang Zang, Xiaoyi Dong, Yuhang
+Cao, Jiaqi Wang, Xipeng Qiu, and Dahua Lin. SIM-CoT: Su-
+pervised implicit chain-of-thought. In Proc. Int. Conf. Learn.
+Represent. (ICLR), 2026.
+[47] Jin Yao, Dhruva Dixith Kurra, Tom Lampo, Zezhou Cheng,
+Danhua Guo, and Burhan Yaman. VLGA: Vision-language-
+geometry-action models for autonomous driving.
+arXiv
+preprint arXiv:2606.12396, 2026.
+[48] Shuang Zeng, Xinyuan Chang, Mengwei Xie, Xinran Liu,
+Yifan Bai, Zheng Pan, Mu Xu, and Xing Wei.
+Future-
+SightDrive:
+Thinking visually with spatio-temporal CoT
+for autonomous driving. In Adv. Neural Inf. Process. Syst.
+(NeurIPS), 2025.
+[49] Songyan Zhang, Jinyuan Tian, Hanbing Li, Daqi Liu, Hao
+Chen, Wenhui Huang, Fang Li, Guang Chen, Hangjun Ye,
+Long Chen, Kuiyuan Yang, and Chen Lv.
+GeoWorldAD:
+Geometry world action model for autonomous driving. arXiv
+preprint arXiv:2607.17521, 2026.
+[50] Zhida Zhao, Talas Fu, Yifan Wang, Lijun Wang, and
+Huchuan Lu. From forecasting to planning: Policy world
+model for collaborative state-action prediction. In Adv. Neu-
+ral Inf. Process. Syst. (NeurIPS), 2025.
+[51] Wenzhao Zheng, Weiliang Chen, Yuanhui Huang, Borui
+Zhang, Yueqi Duan, and Jiwen Lu.
+OccWorld: Learning
+a 3D occupancy world model for autonomous driving. In
+Proc. Eur. Conf. Comput. Vis. (ECCV), 2024.
+[52] Xingcheng Zhou, Xuyuan Han, Feng Yang, Yunpu Ma,
+Volker Tresp, and Alois Knoll. OpenDriveVLA: Towards
+end-to-end autonomous driving with large vision language
+action model. In Proc. AAAI Conf. Artif. Intell., 2026.
+[53] Yang Zhou, Xiaofeng Wang, Hao Shao, Letian Wang,
+Guosheng Zhao, Jiangnan Shao, Jiagang Zhu, Tingdong
+Yu, Zheng Zhu, Guan Huang, and Steven L. Waslander.
+DriveDreamer-Policy: A geometry-grounded world-action
+model for unified generation and planning. arXiv preprint
+arXiv:2604.01765, 2026.
+[54] Zewei Zhou, Tianhui Cai, Seth Z. Zhao, Yun Zhang, Zhiyu
+Huang, Bolei Zhou, and Jiaqi Ma.
+AutoVLA: A vision-
+language-action model for end-to-end autonomous driving
+with adaptive reasoning and reinforcement fine-tuning. In
+Adv. Neural Inf. Process. Syst. (NeurIPS), 2025.
+[55] Dong Zhuo, Wenzhao Zheng, Jiahe Guo, Yuqi Wu, Jie Zhou,
+and Jiwen Lu. Streaming visual geometry transformer. In
+Proc. Int. Conf. Learn. Represent. (ICLR), 2026.
+[56] Sicheng Zuo, Zixun Xie, Wenzhao Zheng, Shaoqing Xu,
+Fang Li, Hanbing Li, Long Chen, Zhi-Xin Yang, and Ji-
+wen Lu. DVGT-2: Vision-geometry-action model for au-
+tonomous driving at scale. arXiv preprint arXiv:2604.00813,
+2026.
+11
+
+
+GeoVLDrive: Geometry-Grounded Vision-Language
+Reasoning for Autonomous Driving
+Supplementary Material
+A
+NAVSIM 3DQA
+A.1
+Dataset Construction
+Data sources and object grounding.
+We construct questions from NAVSIM front-camera observations, camera
+calibration, annotated 3D boxes, instance tracks, and HD maps. Target objects are selected independently of the
+latent-chain annotations. Each cuboid is projected by clipping its twelve edges at a 0.1 m near plane, sampling nine
+points per retained edge, and applying camera distortion and intrinsics. The projected convex hull is clipped to the
+image, and its axis-aligned box is normalized to [0, 1000]2 to identify the target in the text prompt. Model inputs
+contain unannotated images; the box overlays in Fig. S1 are used only for visualization.
+Visibility filtering.
+Candidate objects must belong to a supported class, have positive box dimensions, and lie ahead
+of the ego vehicle within a planar distance d =
+q
+c2x + c2y ≤80 m, where (cx, cy) is the box center in the current
+ego frame. Let P and P ′ be the projected hull before and after image clipping, with widths w and w′. Horizontal
+truncation Th = 1 −w′/w and area truncation Ta = 1 −|P ′|/|P| must each be at most 0.5; |P| denotes polygon area.
+We approximate occlusion using overlaps with objects more than 0.05 m closer in camera depth:
+Oi =
+S
+j: zj<zi−0.05(P ′
+i ∩P ′
+j)
+
+|P ′
+i|
+≤0.5,
+(S1)
+where zi is the camera-depth coordinate of object i. At a reference resolution of 280 × 518 (height × width), the
+minimum box short sides are 10, 12, and 16 pixels and the minimum areas are 160, 250, and 400 pixels squared for
+d ≤40 m, 40 < d ≤60 m, and 60 < d ≤80 m, respectively. Both thresholds must be met.
+Motion annotation.
+Vehicle, pedestrian, and bicycle tracks are transformed to the ego frame at the anchor time. For
+an object center in homogeneous coordinates,
+¯p(0)
+i (t) = Tego(0)←global Tglobal←ego(t) ¯p(t)
+i (t),
+(S2)
+where T denotes a rigid coordinate transformation. This removes ego motion, so stationary refers to motion relative
+to the ground. Each motion label requires at least three valid track states, including the anchor, spanning at least one
+second. We fit a linear trajectory to three states and a quadratic trajectory to four or more, using its derivative at
+the anchor to estimate velocity. Fits with residuals above 0.8 m or direction discrepancies above 40◦relative to the
+annotated velocity are marked ambiguous; insufficient evidence is marked unavailable. These observations remain
+eligible for other question types.
+Motion classification combines lane overlap, centerline distance, and local road direction (Table S1). Cut-in and
+cut-out labels require confirmation from annotations up to 2 s into the future; other boundary cases, except crossing,
+may also use this evidence. The logged future ego trajectory is excluded from label construction. Model observations
+are restricted to the four front-camera frames at [−1.5, −1.0, −0.5, 0] s.
+Event grouping and object selection.
+Cut-in and cut-out observations are grouped by scene, track, and label, with
+temporal gaps above 1.25 s defining separate events. Each event contributes one motion question, selected by anno-
+tation confidence, visibility, transition stage, and salience. Other frames of the same event remain eligible for other
+question types. Each frame retains at most five objects, prioritizing up to two event anchors, the two most salient can-
+didates, and the nearest eligible object. Remaining slots promote category and spatial coverage, prioritizing vulnerable
+road users and traffic-control objects over vehicles, followed by fine-grained category diversity. Spatial bins partition
+longitudinal position cx at [20, 40, 60] m and lateral position cy at [−6, −2, 2, 6] m. The salience score is
+Si = log(1 + Ai) −0.0125 di −1.5 Oi −Ta,i −0.5 Th,i,
+(S3)
+12
+
+
+Table S1: Motion categories and annotation criteria. The angle θ measures the difference between the object’s
+direction of travel and the local road tangent. Cut-in and cut-out additionally require the direction of travel to be
+within 55◦of the ego forward direction.
+Class
+Annotation criteria
+stationary
+Low ground speed and small recent displacement; selected low-speed cases additionally
+use future displacement and terminal speed for confirmation.
+same direction
+Motion aligned with the local road tangent (θ ≤40◦).
+oncoming
+Motion opposing the local road tangent (θ ≥140◦).
+crossing
+Lateral motion at or through the ego road corridor (55◦≤θ ≤125◦). Pedestrian
+annotation also uses road-surface and crosswalk occupancy.
+cut-in
+Vehicle or bicycle entering the ego lane over the observed history, confirmed by future
+lane occupancy and motion direction.
+cut-out
+Vehicle or bicycle leaving the ego lane over the observed history, with the same
+future-confirmation criteria.
+where Ai is the box area at the reference resolution. Ties are resolved deterministically using a stable hash. Coverage-
+based selection excludes candidates dominated by a same-category object that is at least four times larger in projected
+area, closer, and no more occluded or truncated.
+Question generation.
+We derive the four tasks in Table S2 from structured annotations. Prompts specify coordinates
+and units. A stable hash determines the order of multiple-choice options. The coarse categories are vehicle, vulnerable
+road user (pedestrian or bicycle), traffic-control or work-zone object (cone, barrier, or construction-zone sign), and
+other static object. Category questions identify the target by its box; other tasks also provide its class. Every selected
+object contributes category and position questions. Vehicles additionally contribute dimension questions, and objects
+with valid motion labels contribute motion questions, yielding at most twenty questions per frame. Numerical answers
+are rounded to one decimal place. Evaluation follows Appendix A.3.
+Table S2: NAVSIM 3DQA tasks and outputs. Positions use the current ego frame; all numerical outputs are in
+meters. The tasks exclude vertical position and object yaw. Accuracy criteria are defined in Appendix A.3.
+Task
+Eligible objects
+Output
+Evaluation
+Coarse category
+All selected objects
+Category label
+Accuracy
+Ground-plane position
+All selected objects
+[x, y]
+Axis / L2 accuracy
+Vehicle dimensions
+Vehicles
+[ℓ, w, h]
+Component / joint
+accuracy
+Motion behavior
+Vehicles, pedestrians, and
+bicycles with valid labels
+Motion label
+Accuracy
+A.2
+Dataset Statistics
+NAVSIM 3DQA contains 1,281,855 QA pairs: 1,117,204 for training and 164,651 for validation. Of the 85,070
+training and 18,179 validation source anchors, 80,161 and 14,467 yield eligible questions. The two splits contain
+333,920 and 48,958 object observations, covering 89,533 and 12,792 distinct tracks, respectively. An object observa-
+tion denotes one object at one anchor frame. The source split is preserved, with no overlap in scene, frame, track, or
+log-segment identifiers.
+Figure S2 summarizes the dataset composition. Stationary and same-direction labels account for 86.89% of motion
+questions; cut-in and cut-out contribute 524 (0.19%). Ambiguous observations represent 2.6% of labeled or ambiguous
+candidates, and unavailable observations represent 8.5% of all dynamic candidates. Automated audits verified that
+each frame retains its two most salient and nearest eligible objects; the largest projected box is retained in over 99.5%
+of frames. A stratified visual audit of 40 validation frames found no visibility, projection, or scene-consistency issues.
+13
+
+
+ (a) Pedestrian 
+ Prompt 
+ <image> <image>
+<image> <image>
+Front views, oldest
+first: -1.5,-1.0,-0.5,0 s
+(current). Normalized
+boxes [x1,y1,x2,y2]
+in [0,1000] refer to
+the current frame;
+origin: top-left.
+Current ego frame: x
+forward, y left (m).
+ Target box 
+ [65, 539, 270, 1000] 
+ 
+Front-view image 
+ Category 
+ Multiple choice 
+ What category does the 
+target belong to? 
+ A. traffic control or 
+work-zone object 
+ B.  vehicle 
+ C. vulnerable road user 
+ D. other static object 
+ Motion 
+ Multiple choice 
+ How does it move relative 
+to the ego route? 
+ A. Oncoming 
+ B.  Crossing 
+ C.  Cut-out 
+ D. Same-direction 
+ E.  Stationary 
+ F.  Cut-in 
+ Position 
+ Open-ended 
+ What is its ego-frame position [x, y] (m)? 
+ GT  [6.0, 2.0] 
+ (b) Bicycle 
+ Prompt 
+ <image> <image>
+<image> <image>
+Front views, oldest
+first: -1.5,-1.0,-0.5,0 s
+(current). Normalized
+boxes [x1,y1,x2,y2]
+in [0,1000] refer to
+the current frame;
+origin: top-left.
+Current ego frame: x
+forward, y left (m).
+ Target box 
+ [788, 483, 1000, 1000] 
+ 
+Front-view image 
+ Category 
+ Multiple choice 
+ What category does the 
+target belong to? 
+ A. traffic control or 
+work-zone object 
+ B.  vulnerable road user 
+ C.  other static object 
+ D. vehicle 
+ Motion 
+ Multiple choice 
+ How does it move relative 
+to the ego route? 
+ A. Cut-in 
+ B.  Oncoming 
+ C.  Crossing 
+ D. Same-direction 
+ E.  Stationary 
+ F.  Cut-out 
+ Position 
+ Open-ended 
+ What is its ego-frame position [x, y] (m)? 
+ GT  [6.4, -2.8] 
+ (c) Vehicle 
+ Prompt 
+ <image> <image>
+<image> <image>
+Front views, oldest
+first: -1.5,-1.0,-0.5,0 s
+(current). Normalized
+boxes [x1,y1,x2,y2]
+in [0,1000] refer to
+the current frame;
+origin: top-left.
+Current ego frame: x
+forward, y left (m).
+ Target box 
+ [388, 514, 612, 853] 
+ 
+Front-view image 
+ Category 
+ Multiple choice 
+ What category does the 
+target belong to? 
+ A. vehicle 
+ B.  other static object 
+ C.  traffic control or 
+work-zone object 
+ D. vulnerable road user 
+ Motion 
+ Multiple choice 
+ How does it move relative 
+to the ego route? 
+ A. Oncoming 
+ B.  Stationary 
+ C.  Same-direction 
+ D. Cut-out 
+ E.  Crossing 
+ F.  Cut-in 
+ Position 
+ Open-ended 
+ What is its ego-frame 
+position [x, y] (m)? 
+ GT  [11.0, 0.0] 
+ Dimensions 
+ Open-ended 
+ What are its length, width 
+and height (m)? 
+ GT  [4.8, 1.9, 1.6] 
+ (d) Vehicle 
+ Prompt 
+ <image> <image>
+<image> <image>
+Front views, oldest
+first: -1.5,-1.0,-0.5,0 s
+(current). Normalized
+boxes [x1,y1,x2,y2]
+in [0,1000] refer to
+the current frame;
+origin: top-left.
+Current ego frame: x
+forward, y left (m).
+ Target box 
+ [352, 479, 646, 693] 
+ 
+Front-view image 
+ Category 
+ Multiple choice 
+ What category does the 
+target belong to? 
+ A. other static object 
+ B.  vehicle 
+ C.  traffic control or 
+work-zone object 
+ D. vulnerable road user 
+ Motion 
+ Multiple choice 
+ How does it move relative 
+to the ego route? 
+ A. Cut-in 
+ B.  Crossing 
+ C.  Oncoming 
+ D. Stationary 
+ E.  Same-direction 
+ F.  Cut-out 
+ Position 
+ Open-ended 
+ What is its ego-frame 
+position [x, y] (m)? 
+ GT  [15.0, 0.3] 
+ Dimensions 
+ Open-ended 
+ What are its length, width 
+and height (m)? 
+ GT  [4.8, 1.9, 1.6] 
+Figure S1: NAVSIM 3DQA examples. Each row shows the shared prompt, target box, current front view, and
+questions. Only the current frame is shown; the three history frames are omitted. Boxes and ego coordinates refer to
+the current frame. Colors distinguish question types. Options retain their original order; correct answers are outlined
+and checked. Numerical answers are labeled GT (ground truth). The prompt and questions are abbreviated for display.
+14
+
+
+ Train: 1,117,204 QA pairs   |   Val: 164,651 QA pairs 
+ Train 
+ Val 
+ (a) Question types 
+ 1,281,855 QA pairs 
+ 0 
+ 
+200k 
+ 
+400k 
+ 
+QA pairs 
+ Coarse category 
+ 382,878 
+ Position (x, y) 
+ 382,878 
+ Vehicle dimensions 
+ 245,876 
+ Motion behaviour 
+ 270,223 
+ (b) Object categories 
+ 382,878 object observations 
+ 0 
+ 
+150k 
+ 
+300k 
+ 
+Object observations 
+ Vehicle 
+ 245,876 
+ Other static object 
+ 60,506 
+ Vulnerable road user 
+ 50,540 
+ Traffic control / work-zone 
+ 25,956 
+ (c) Motion behaviours 
+ 270,223 motion QA pairs 
+ 0 
+ 
+75k 
+ 
+150k 
+ 
+Motion QA pairs 
+ Stationary 
+ 131,947 
+ Same direction 
+ 102,855 
+ Oncoming 
+ 25,880 
+ Crossing 
+ 9,017 
+ Cut-in 
+ 148 
+ Cut-out 
+ 376 
+Figure S2: NAVSIM 3DQA composition. Distributions of question types, object categories, and motion behaviors.
+Stacked bars show training (lavender) and validation (pale yellow) counts; labels report their sum. Object counts refer
+to object–anchor observations. All axes use a linear scale.
+A.3
+Evaluation Protocol
+Task scores.
+Responses are parsed deterministically, with parsing failures counted as incorrect. Category and motion
+accuracy are computed after mapping responses to semantic labels. Tables S8 and S9 report validation accuracy by
+object category and motion class, respectively. Bold marks the highest accuracy in each column, including ties.
+A position answer is correct when both coordinate errors are within the distance-dependent tolerance: 0.5 m for
+d ≤30 m, 1 m for 30 < d ≤60 m, and 2 m for d > 60 m. Dimension accuracy averages the correctness of length,
+width, and height, each with an absolute error tolerance of 0.5 m. Each task is averaged over its eligible questions. For
+task accuracies Acat, Amotion, Aaxis
+pos , and Acomponent
+dim
+in [0, 1], the aggregate is
+Overall = 100
+4
+ Acat + Amotion + Aaxis
+pos + Acomponent
+dim
+
+.
+(S4)
+Reported position and dimension diagnostics.
+In the NAVSIM 3DQA results table in the main paper, Position
+reports the fraction of answers with ground-plane error ∥ˆp −p∥2 ≤1 m, while Dimensions requires all three com-
+ponent errors to be at most 0.5 m. Overall uses the adaptive per-axis position accuracy and per-component dimension
+accuracy defined above, so it is not the arithmetic mean of the four displayed columns.
+A.4
+Comparison with SURDS
+NAVSIM 3DQA complements SURDS [13] by emphasizing metric geometry and temporal motion. SURDS evaluates
+orientation, depth ranges, pixel localization, and pairwise spatial relations from individual nuScenes images, using
+categorical correctness and a centerness-based localization score. NAVSIM 3DQA uses four consecutive front views
+and a normalized 2D box to specify the queried object. It adds numerical estimation of ground-plane position and
+vehicle dimensions in meters, together with temporal motion classification.
+The geometric diagnostics assess physical location and scale. Position accuracy at L2 ≤1 m jointly constrains
+longitudinal and lateral errors in the ego frame; joint dimension accuracy requires length, width, and height all to
+be within 0.5 m of their targets. These criteria distinguish metric accuracy from correct depth-range or relative-order
+predictions, which can remain correct despite substantial coordinate errors. Estimating physical dimensions further
+probes object scale, which image-plane localization alone does not measure. Both tasks require numerical answers
+without candidate values supplied in the question.
+Motion classification extends the evaluation to temporal observations, with labels derived from ego-motion-
+compensated tracks and local road geometry. Categories such as stationary, crossing, and cut-in are therefore defined
+15
+
+
+by object motion relative to the ground and the road rather than by apparent image motion. Together, the tasks pro-
+vide complementary diagnostics of metric spatial grounding and temporal motion understanding relevant to planning,
+alongside SURDS’s orientation and multi-object relation tests.
+B
+Implementation and Training Details
+B.1
+Architecture and Latent Interface
+Backbone configuration.
+StreamVGGT features from layers [4, 11, 17, 23] are injected into Qwen3-VL layers
+[6, 13, 20, 26], respectively. The VLM and geometry streams use image resolutions of 416 × 672 and 280 × 518
+(height × width), with a 20×37 patch grid in the geometry stream. Features across the selected geometry layers differ
+in representation depth while sharing the same spatial resolution.
+Latent token interface.
+The observed visual and language prefix is followed by an ego-state token, future-geometry
+tokens, key-agent motion tokens, and meta-action tokens. Group-specific embeddings replace the reserved-token
+embeddings at these positions in the VLM input sequence. With δ = 0.5 s, future geometry uses K = 4 horizons and
+32 tokens per horizon (128 in total). Agent motion uses ten tokens for category, current position, and eight current-
+relative future offsets. Two tokens encode longitudinal and lateral meta actions. Future-geometry and future-motion
+tokens receive sinusoidal encodings of their prediction times, with attention governed by the latent CoT mask in Sec. 3
+of the main paper. Textual CoT targets follow the latent block during training. At inference, planning uses the latent
+states without autoregressive text generation.
+Coordinate frames.
+Agent positions and ego trajectories are expressed in meters in the ego frame at the observation
+time, with x forward and y left. Future agent annotations are transformed to this fixed frame before computing the
+current-relative position offsets ∆pj = pj −p0, where p0 is the agent’s current position.
+Action expert.
+The expert comprises four refinement stages, each containing four independently parameterized
+attention blocks conditioned on features from different depths. The corresponding Qwen3-VL readout indices are
+[8, 16, 22, −1] (zero-based), with −1 selecting the final hidden state. It maintains R = 64 proposals, each represented
+by J = 8 action tokens and one score token. Reasoning, action, and score states are propagated between blocks, while
+scene features are supplied at each depth. Action queries incorporate ego-state and meta-action context. VLM features
+and latent states are detached before the expert’s trainable projections, blocking expert gradients from updating the
+VLM while allowing refinement within the expert.
+B.2
+Supervision and Loss Definitions
+Future geometry.
+We project recorded future LiDAR points into the front-camera image plane to obtain sparse
+depth targets. Let Vk denote the valid target pixels at horizon k. For a depth map d, define
+sk(d) = max
+P
+i∈Vk |di|
+|Vk| + ϵ , ϵ
+
+,
+ϵ = 10−8,
+˜zk =
+zk
+sk(zk),
+˜ˆzk =
+ˆzk
+sk(ˆzk).
+Target and predicted maps are thus normalized independently for each sample and horizon. For the per-pixel error
+ek,i = |˜ˆzk,i −˜zk,i|, the regression and confidence terms of the future-geometry objective are
+L(k)
+depth =
+1
+|Vk|
+X
+i∈Vk
+ek,i,
+L(k)
+conf =
+1
+|Vk|
+X
+i∈Vk
+(ck,iek,i −α log ck,i) ,
+(S5)
+where ck,i > 0 is predicted confidence and α = 0.2 controls its regularization. Gradient consistency averages four
+scales with subsampling strides [1, 2, 4, 8]. At each scale, we sum the absolute horizontal and vertical finite differences
+of the signed normalized depth residual, retaining only pairs with valid depths at both endpoints and clipping each
+difference at 100. The sum is normalized by the total number of valid pixels across the batch at that scale. Depth and
+confidence losses average over all valid pixels pooled across the batch at each horizon, after per-sample normalization.
+The gradient term is not confidence-weighted.
+16
+
+
+Key-agent motion.
+Category supervision uses cross-entropy, including the none class. Let SL1 denote Smooth L1
+with mean reduction. Position supervision averages the current-position, offset, and reconstructed-position losses:
+LSmoothL1 = 1
+3
+h
+SL1(ˆp0, p0) + SL1(d
+∆p1:J, ∆p1:J) + SL1(ˆp0:J, p0:J)
+i
+.
+(S6)
+For consecutive-step displacements vj = pj −pj−1 and ˆvj = ˆpj −ˆpj−1, the direction term is
+Lcos = 1
+J
+J
+X
+j=1
+wj
+ 
+1 −
+ˆv⊤
+j vj
+max(∥ˆvj∥2, ϵ) max(∥vj∥2, ϵ)
+!
+,
+wj = min
+∥vj∥2
+η
+, 1
+
+.
+(S7)
+Here η = 0.25 m downweights nearly stationary targets, and ϵ = 10−6 stabilizes normalization. Position and direction
+losses are averaged over valid annotated tracks; samples labeled none contribute only to classification. The direction
+loss uses consecutive-step displacements, whereas position regression uses current-relative offsets.
+Meta actions and textual CoT.
+Longitudinal and lateral meta-action predictions use the cross-entropy objectives
+defined in Sec. 3 of the main paper. Textual CoT is supervised by autoregressive cross-entropy Lcot on the annotated
+response tokens. Each geometry, motion, or maneuver loss uses only samples labeled for that task.
+Trajectory and score supervision.
+Trajectory regression uses the stage-discounted winner-takes-all objective in
+Sec. 3 of the main paper. Following iPad [12], we obtain scoring targets by simulating each final-stage proposal in its
+corresponding NAVSIM scene [7]:
+qr = NCr DACr
+5 EPr + 5 TTCr + 2 Comfr
+12
+.
+(S8)
+Metric definitions are given in Table S5. For final proposal logits ar, binary cross-entropy uses these simulator-derived
+scores qr ∈[0, 1] as soft targets:
+Lscore = −1
+R
+R
+X
+r=1
+[qr log σ(ar) + (1 −qr) log(1 −σ(ar))] ,
+(S9)
+where σ is the sigmoid function.
+Auxiliary supervision.
+The expert’s auxiliary agent loss Laux
+agent combines category cross-entropy and the position
+terms in Eq. (S6), excluding the direction term. Its auxiliary meta-action loss Laux
+meta uses the same maneuver labels as
+the backbone classifiers. Both objectives supervise the expert’s final refined states.
+B.3
+Training Schedule
+Table S3 summarizes the reference four-phase configuration. The geometry encoder remains frozen throughout train-
+ing, while the VLM receives language and latent-CoT supervision during joint action training. Outside Qwen and the
+action expert, the Heads group comprises the trainable adapters, latent-token modules, and prediction heads.
+Table S3: Four-phase training configuration. Batch/GPU and Global denote per-GPU and total batch sizes, with
+gradient accumulation of one. A dash marks an inactive action expert.
+Learning rate
+Batch configuration
+Phase
+Epochs
+Qwen
+Action expert Heads Batch/GPU GPUs Global
+Alignment
+3
+frozen
+–
+10−4
+2
+32
+64
+Forecasting
+5
+frozen
+–
+10−4
+4
+80
+320
+Chain
+10
+5×10−5
+–
+10−4
+3
+80
+240
+Action
+30
+2×10−5
+10−4
+10−4
+2
+64
+128
+17
+
+
+B.4
+NAVSIM-WM-CoT
+Annotation structure.
+We construct route-grounded supervision for NAVSIM using future 3D annotations and HD-
+map information. NAVSIM-WM-CoT associates observed scenes with future depth, key-agent tracks, longitudinal
+and lateral meta actions, and textual reasoning annotations. Table S4 summarizes the temporal object-QA and chain
+annotation sets before phase-specific sampling. Future observations are used only to construct supervision targets.
+Table S4: NAVSIM-WM-CoT annotation sets. Counts precede phase-specific sampling.
+Annotation set
+Train
+Validation
+Supervision
+Temporal object QA
+176,506
+25,316
+Language answers, future geometry,
+and agent motion
+Chain
+85,070
+18,179
+Key agent, track, meta actions, and
+textual rationale
+Key-agent annotations.
+For each scene, we select at most one key agent from front-camera-visible objects with
+complete future tracks and verified spatiotemporal interaction with the ego route. Agent labels describe realized
+behavior based on future ground truth and map-based spatial relations. The decision_causal flag identifies
+agents whose behavior provides evidence supporting the recorded ego action. The selected agent is labeled as vehicle,
+pedestrian, cyclist, or other; none denotes the absence of a selected agent. A valid motion target comprises the
+current position and eight future positions sampled at 0.5 s intervals in the current ego frame. Future offsets follow the
+coordinate convention in Appendix B.1. Regression requires a valid track, while category supervision includes none.
+The validation annotations contain 5,087 scenes with a selected agent and 13,092 without one. The none label refers
+only to agent selection and does not exclude other planning constraints.
+Meta-action labels.
+Lateral meta-action labels are refined using the original decision, navigation command, route
+geometry, and future ego trajectory, while preserving the original longitudinal label and eight-point ego trajectory.
+Longitudinal labels are maintain speed, accelerate, decelerate, stop, and reverse. Lateral labels are keep lane, turn
+left, turn right, change left, change right, nudge left, and nudge right. These labels supervise both the backbone
+meta-action tokens and the expert’s auxiliary meta-action readouts.
+Textual CoT.
+We generated initial textual CoT annotations from templates using route-control information, the ego-
+action rationale, and the selected key agent when present. Other agents provided scene context. GPT checked the
+drafts against the structured scene annotations and proposed corrections. Human annotators reviewed a sample of the
+revised annotations.
+B.5
+Evaluation Settings
+NAVSIM planning metrics.
+Planning is evaluated using PDMS on NAVSIM v1 and EPDMS on NAVSIM v2 [3, 7].
+Table S5 defines the metric abbreviations.
+We report scores on a 0–100 scale. NAVSIM v1 evaluates four-second ego rollouts against non-reactive traffic
+replayed from logs. PDMS combines collision and drivable-area terms with weighted progress, time-to-collision, and
+comfort scores, as in Eq. (S8). NAVSIM v2 adds further compliance and comfort criteria. We compute per-scene
+scores before dataset-level aggregation.
+LingoQA.
+We use Lingo-Judge accuracy under the LingoQA evaluation protocol [34]. The fine-tuned Qwen3-VL
+baseline and GeoVLDrive share the training data and schedule specified in the main comparison.
+Intermediate prediction quality.
+We evaluate future depth, key-agent motion, and meta action decoded from the
+final model’s latent states on the NAVSIM-WM-CoT validation split listed in Table S4. In Table S6, category accuracy
+evaluates the key-agent type. Trajectory ADE averages Euclidean position errors across future prediction steps, and
+FDE measures the endpoint error at 4 s. Joint meta-action accuracy requires both longitudinal and lateral predictions
+to be correct. For each sample and future frame, we align the predicted depth to the target as d′
+pred = dpred ¯dgt/ ¯dpred,
+18
+
+
+Table S5: NAVSIM metric abbreviations. Definitions follow the benchmark protocols [3, 7]. Higher is better.
+Abbreviation
+Metric
+Reported in
+NC
+No at-fault collisions
+v1, v2
+DAC
+Drivable-area compliance
+v1, v2
+TTC
+Time-to-collision within bound
+v1, v2
+EP
+Ego progress
+v1, v2
+Comf.
+Comfort
+v1
+DDC
+Driving-direction compliance
+v2
+TLC
+Traffic-light compliance
+v2
+LK
+Lane keeping
+v2
+HC
+History comfort
+v2
+EC
+Extended comfort
+v2
+where both means use the same valid depth pixels. Table S7 reports absolute relative error (AbsRel) and the fraction
+of valid pixels satisfying max(d′
+pred/dgt, dgt/d′
+pred) < 1.25.
+Table S6: Key-agent motion and meta-action predictions on the NAVSIM-WM-CoT validation split. Category
+and meta-action accuracies are percentages. Trajectory errors are in meters.
+Key-agent motion
+Meta action
+Category
+acc. (%) ↑
+ADE
+(m) ↓
+FDE@4s
+(m) ↓
+Longitudinal
+acc. (%) ↑
+Lateral
+acc. (%) ↑
+Joint
+acc. (%) ↑
+98.4
+0.12
+0.17
+91.5
+96.2
+90.1
+Table S7: Scale-aligned future depth on the NAVSIM-WM-CoT validation split. Each horizon has equal weight
+in the mean.
+Metric
+0.5 s
+1.0 s
+1.5 s
+2.0 s
+Mean
+AbsRel ↓
+0.0577
+0.0607
+0.0638
+0.0678
+0.0625
+δ < 1.25 ↑
+0.9456
+0.9425
+0.9394
+0.9351
+0.9407
+Table S8: Object category accuracy on NAVSIM 3DQA validation questions (%). ∗marks the fine-tuned baseline.
+Model
+Vehicle
+Vulnerable
+road user
+Traffic control/
+work zone
+Other static
+object
+Overall
+Qwen3-VL-2B∗
+99.79
+97.89
+89.94
+93.06
+97.87
+GeoVLDrive
+99.83
+98.08
+90.81
+93.06
+98.00
+Table S9: Motion accuracy on NAVSIM 3DQA validation questions (%). Overall includes all motion questions.
+Model
+Stationary
+Same-direction
+Oncoming
+Crossing
+Cut-in
+Cut-out
+Overall
+Qwen3-VL-2B∗
+91.23
+83.87
+73.17
+63.91
+0.00
+0.00
+85.77
+GeoVLDrive
+96.08
+90.00
+78.10
+66.67
+40.00
+25.81
+90.99
+C
+Reasoning and Planning Visualizations
+C.1
+Latent CoT, Textual CoT, and Action Predictions
+Figure S3 presents model inference on six selected scenes from the NAVSIM val split. The language model generates
+the displayed text for illustration. The motion head separately predicts key-agent positions from the latent states, so
+19
+
+
+the two distance estimates can differ. Future depth and meta actions are also decoded from latent states. The action
+expert predicts the ego trajectory. Positions and trajectories use the current ego frame.
+For visualization, each depth prediction is normalized by its mean magnitude over the displayed valid pixels and
+rescaled to the mean valid GT depth. The masked row uses GT-valid pixels; the full prediction row uses pixels with
+finite, positive predicted depth.
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (a)  Right turn at a green light 
+ 2a15ef91bb2d51a9 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  accelerate, turn right 
+ Key-agent position 
+ Pred  vehicle (9.5, 1.8) m 
+ GT  vehicle (9.6, 1.9) m 
+ CoT cause 
+ Traffic light is  green , the ego vehicle 
+ accelerates and turns right to follow the 
+ route. 
+Figure S3: GeoVLDrive inference on NAVSIM val. Panel (a) of six selected scenes. Depth rows show ground truth
+(GT), predictions at GT-valid pixels, and full predictions. Depth horizons span 0.5–2.0 s; trajectories cover 4 s. Both
+prediction rows are normalized and rescaled to the mean valid GT depth for display.
+20
+
+
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (b)  Deceleration at a red light 
+ 77a02d0e39975d6a 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  decelerate, keep lane 
+ Key-agent position 
+ Pred  vehicle (17.5, 1.3) m 
+ GT  vehicle (17.5, 1.3) m 
+ CoT cause 
+ Traffic light is  red , the ego vehicle slows 
+ down and keeps its lane to follow the 
+ traffic control. 
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (c)  Left turn at a green light 
+ 018faa8deaa95e7a 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  accelerate, turn left 
+ Key-agent position 
+ Pred  vehicle (15.7, 4.7) m 
+ GT  vehicle (15.7, 4.6) m 
+ CoT cause 
+ Traffic light is  green , the ego vehicle 
+ accelerates and turns left to follow the 
+ route. 
+Figure S3 (continued): Panels (b)–(c).
+21
+
+
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (d)  Deceleration without a key agent 
+ 8f160df1d11a5205 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  decelerate, keep lane 
+ Key-agent position 
+ Pred  none 
+ GT  none 
+ CoT cause 
+ The ego vehicle slows down and keeps its 
+ lane. 
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (e)  Stationary vehicle ahead 
+ 2dfc8f49438757fd 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  decelerate, keep lane 
+ Key-agent position 
+ Pred  vehicle (18.4, 0.3) m 
+ GT  vehicle (18.5, 0.3) m 
+ CoT cause 
+ A vehicle located 18.3 meters ahead is 
+ stationary, the ego vehicle slows down 
+ and keeps its lane to keep a safe distance 
+ from the vehicle. 
+Figure S3 (continued): Panels (d)–(e).
+22
+
+
+ Ego GT 
+ Action Pred 
+ Agent GT 
+ Agent Pred 
+ Trajectory horizon: 4 s 
+ GT-aligned depth (m)  0 
+ 60 
+ Invalid depth 
+ (f)  Slowing vehicle ahead 
+ 3ac8a6ccda8b58db 
+ Current front view 
+ Bird's-eye view 
+ 
+t + 0.5 s 
+ 
+t + 1.0 s 
+ 
+t + 1.5 s 
+ 
+t + 2.0 s 
+ 
+GT 
+ 
+Pred with 
+GT mask 
+ 
+Pred 
+ Meta action 
+ Pred/GT  decelerate, keep lane 
+ Key-agent position 
+ Pred  vehicle (17.5, 0.5) m 
+ GT  vehicle (17.7, 0.5) m 
+ CoT cause 
+ A vehicle located 17.3 meters ahead and 
+ 0.5 meters to the left is slowing down, the 
+ ego vehicle slows down and keeps its lane 
+ to keep a safe distance from the vehicle. 
+Figure S3 (continued): Panel (f).
+C.2
+Representative Planning Cases
+Figure S4 compares planned trajectories from GeoVLDrive and GeoWorldAD [49] in six selected scenes, grouped by
+the metric each scene illustrates: collision avoidance, drivable-area compliance, time-to-collision, and ego progress.
+(a) Collision avoidance.
+Figure S4: Qualitative planning comparisons. Panel (a) of six selected examples. Each panel pairs a front-camera
+observation with a bird’s-eye view of GeoWorldAD (red) and GeoVLDrive (green) trajectories.
+23
+
+
+(b) Collision avoidance.
+(c) Drivable-area compliance.
+(d) Drivable-area compliance.
+Figure S4 (continued): Panels (b)–(d).
+24
+
+
+(e) Time-to-collision.
+(f) Ego progress.
+Figure S4 (continued): Panels (e)–(f). The color convention is shared with panel (a).
+25

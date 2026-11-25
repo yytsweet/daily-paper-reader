@@ -1,0 +1,3798 @@
+Hi3R-VLA: Grounding Semantics and Actions in 3D
+Shizhe Chen, Paul Pacaud, Cordelia Schmid
+Inria, ´Ecole normale sup´erieure, CNRS, PSL Research University
+https://cshizhe.github.io/projects/hi3r_vla.html
+Vision
+Multi-view
+RGB-D images
+Language
+“Grasp the watering
+can and apply water to
+the plant .”
+Explicit 3D Geometry
+a common geometric reference for 
+vision, language and action
+Action
+Spatial anchors
++
+Low-level control
+commands
+2D patch
+features
+Multi-
+view
+fusion
++
+Spatially
+aligned
+visual
+features
+Anchor
+trajectory
+textual
+feature
+State of the Art Across Benchmarks
+DexJoco
+DexSuite
+Real Robot
+RoboCasa
+RLBench
+RoboTwin2
+Hi3R-VLA (Ours)
+π0.5
+Prior best
+x
+y
+z
+hand joint pose
+arm joint pose
+base velocity 
+Figure 1. Hi3R-VLA grounds heterogeneous modalities - vision, language, and action - in explicit 3D geometry. Multi-view visual
+features are spatially aligned and fused into point representations, while language conditioning highlights task-relevant semantics. For
+action generation, 3D spatial anchors connect action predictions with observed points in a shared coordinate frame, enabling spatially
+grounded action-to-point interactions. Hi3R-VLA achieves state-of-the-art performance across diverse robotic manipulation benchmarks,
+despite having over 10× fewer trainable parameters than larger competing models.
+Abstract
+While recent vision-language-action (VLA) models in-
+creasingly incorporate 3D geometry, how to effectively ex-
+ploit it for precise and generalizable action prediction re-
+mains a central challenge. We introduce Hi3R-VLA, a 3D
+policy that grounds heterogeneous modalities - vision, lan-
+guage, and action - in explicit 3D geometry for robotic ma-
+nipulation. Our model integrates spatially-aligned visual
+features and language conditioning into point cloud rep-
+resentations, enriching scene geometry with fine-grained,
+task-relevant semantics.
+It then anchors low-level con-
+trol commands in the same 3D coordinate frame and uses
+3D-RoPE enhanced action-to-point attention over coarse-
+to-fine point features to model geometric relationships be-
+tween action targets and observed points.
+Our analysis
+demonstrates the importance of semantic fusion within 3D
+and spatial alignment between observations and actions.
+With fewer than 250M trainable parameters, Hi3R-VLA
+achieves state-of-the-art performance on RoboCasa, RL-
+Bench, RoboTwin2, DexJoCo and DexSuite across diverse
+manipulation tasks and embodiments, from single-arm and
+dual-arm grippers to dexterous hands. Real-robot evalu-
+ations further demonstrate its effectiveness in the physical
+world. The model, code and dataset are publicly released.
+1. Introduction
+Language-guided robotic manipulation [4, 20, 24] requires
+both understanding task-relevant semantics and reasoning
+about physical geometry to generate precise actions. Recent
+vision-language-action (VLA) [4, 24] models have demon-
+strated promising capabilities across diverse manipulation
+tasks, but their predominantly 2D visual representations do
+not well capture metric 3D structure. This has motivated the
+development of 3D VLAs [9, 53, 55] that incorporate ex-
+plicit geometric observations, such as point clouds, to sup-
+port robot action generation.
+Existing 3D policies differ in how they represent geome-
+try and combine it with vision and language for action pre-
+diction. Some only associate pretrained 2D visual features
+with 3D coordinates [15, 28, 66], while others explicitly en-
+code point clouds with dedicated 3D backbones [51, 64, 73]
+or fuse the resulting geometric features with visual repre-
+sentations [9, 13]. The resulting features can be integrated
+1
+arXiv:2611.31535v1  [cs.RO]  23 Nov 2026
+
+
+into a shared VLM backbone [13, 68] or fed into a sepa-
+rate action expert [55]. PointACT [9] compares these ar-
+chitectures and highlights the benefits of an action expert
+with multi-scale point features.
+Despite these advances,
+it remains unclear which design choices are most critical
+for mapping explicit geometry into effective action learn-
+ing, and how well they apply across manipulation tasks and
+embodiments, from single-arm grippers to bimanual dex-
+terous hands. These questions motivate our investigation:
+What makes explicit 3D geometry effective for action pre-
+diction, and how robust are these design choices across dif-
+ferent manipulation settings?
+We introduce Hi3R-VLA, a 3D-based policy that
+grounds heterogeneous modalities—vision, language, and
+action—in explicit 3D geometry, as illustrated in Figure 1.
+Our key idea is to use 3D point representations as a com-
+mon geometric reference for multimodal perception and
+action generation.
+On the perception side, we integrate
+spatially-aligned image features and language conditioning
+into point representations, enriching scene geometry with
+fine-grained, task-relevant semantics. On the action side,
+a flow-matching action expert attends to these multimodal
+point representations in a coarse-to-fine manner. However,
+action representations, such as joint configurations or rel-
+ative motion commands, may not be directly aligned with
+the 3D geometry of the observed scene. To bridge this gap,
+we introduce spatial anchors that augment the original ac-
+tion representations with 3D end-effector positions. These
+anchors lie in the scene coordinate frame, allowing 3D ro-
+tary positional encoding (RoPE) [54] in action-to-point at-
+tention to capture relative spatial relationships between ac-
+tion targets and observed points. Additionally, we investi-
+gate the benefits of pretraining Hi3R-VLA on a large-scale
+real-robot dataset DROID [29].
+We extensively evaluate Hi3R-VLA on multiple ma-
+nipulation benchmarks, including RoboCasa24 [47], RL-
+Bench [26], RoboTwin2 [10], DexJoCo [59], and Dex-
+Suite [22], which cover diverse tasks and embodiments,
+from single-arm and dual-arm manipulators to dexterous
+hands.
+Hi3R-VLA achieves state-of-the-art performance
+across benchmarks with over 10× fewer trainable param-
+eters than state-of-the-art methods such as π0.5 [24], even
+without pretraining on large-scale real-robot data. Exten-
+sive ablations show that spatial anchors and 3D positional
+encoding are critical for precise action prediction by align-
+ing actions with observed geometry, while fusing visual and
+language features into the point backbone provides gains
+beyond multimodal conditioning in the action expert.
+Our contributions are summarized as follows:
+• We introduce Hi3R-VLA, a 3D-based policy that uses
+explicit geometric representations to connect multimodal
+perception with spatially grounded action generation.
+• We investigate key design choices in Hi3R-VLA, includ-
+ing multimodal fusion, spatially grounded action predic-
+tion, and pretraining, providing empirical insights for
+building effective 3D policies.
+• Hi3R-VLA achieves state-of-the-art performance across
+diverse simulation benchmarks and real-world manipula-
+tion tasks with fewer than 250M trainable parameters.
+2. Related Work
+Vision-language robotic manipulation. Vision-language-
+action (VLA) models such as RT-2 [6], OpenVLA [31],
+π [24, 25] and GR00T [4], have advanced generalist manip-
+ulation by fine-tuning pretrained vision-language models
+(VLMs) [2, 3] on large-scale robot demonstrations. More
+recent world-action models (WAMs) [33, 70] further show
+benefits from future state prediction and video pretraining
+for robot control. To better understand the design choices
+underlying these models, several works [32, 62, 65] exam-
+ine visual representations, architectures, fine-tuning strate-
+gies, and training data. While these studies provide valuable
+guidance for image- and video-based policies, our work ex-
+amines how explicit 3D geometry can support policy learn-
+ing, a question that remains comparatively underexplored.
+Geometric priors for visual policies. A growing body of
+work incorporates geometric knowledge into visual policies
+to improve spatial understanding and manipulation. Spa-
+tialVLA [53] and SPEAR-1 [48] augment visual represen-
+tations with pretrained depth estimators, while E0.5 [56]
+adopts geometric foundation models like VGGT [60] as
+policy backbones. Other approaches solely introduce ge-
+ometric supervision during training.
+SpatialForcing [37]
+aligns intermediate visual features with VGGT representa-
+tions; Pri4R [30] uses dense 3D point tracking as the aux-
+iliary loss; and SA-WAM [17] incorporates geometry into
+WAMs through joint RGB, depth, and action prediction.
+To better connect the observation and action space, some
+works first predict 3D intermediate representations such as
+3D object pose [45], camera-frame SE(3) end-effector tra-
+jectory [11, 45] or 3D scene flows [61], then condition an
+action expert on the resulting latent features.
+However,
+this formulation does not align multi-view visual observa-
+tions, and requires large-scale 3D pretraining [45, 61]. Our
+approach directly encodes metric point clouds aggregated
+from multiple views and uses spatial anchors to align action
+tokens with scene points in a common coordinate frame,
+enabling data- and compute-efficient action prediction.
+3D-based robotic manipulation. The prevalence of 3D
+sensors has encouraged explicit 3D policy learning. Exist-
+ing 3D-based policies differ in how they represent scene ge-
+ometry and incorporate it into action prediction. Rendering-
+based methods [18, 19, 41] project point clouds into virtual
+views, allowing to reuse pretrained image models. Depth-
+or point-map-based methods [27, 35] represent geometry on
+RGB-aligned 2D grids, facilitating image-based encoding
+2
+
+
+ Image Encoder
+ Point Encoder
+Language instruction
+ Text Encoder
+AdaLN
+ML
+M4
+M3
+M2
+M1
+Point cloud
+Stage L
+Stage 4
+Stage 3
+Stage 2
+Stage 1
+s
+ã1
+⋯
+ãH
+v1
+v2
+⋯
+vH
+AdaLN
+Cross-Attention
+(3D RoPE)
+Cross-Attention
+Self-Attention
+(3D RoPE)
+time t
+Point Mℓ
+[Image; Text]
+⋯
+Point–Pixel Projection
+Multi-view 
+RGB-D images
+ Geometry-aware Flow-Matching Action Expert
+⋯
+Decoder Block
+Action token
+x
+y
+z
+Spatial anchors
++
+Low-level control
+commands
+(joints, gripper, …)
+Figure 2. Hi3R-VLA architecture. Multi-view image features are spatially aligned and fused with hierarchical point representations,
+while language features provide semantic conditioning through adaptive layer normalization. A flow-matching action expert attends to
+image and text tokens, as well as multi-scale point features in a coarse-to-fine manner, to predict action chunks. We augment the original
+action representations with spatial anchors encoding 3D end-effector positions, enabling 3D RoPE in both action self-attention and action-
+to-point attention to capture relative spatial relationships.
+and fusion. Another family constructs 3D feature clouds
+by lifting image features to 3D with their corresponding 3D
+coordinates [15, 16, 28, 66] and enhances action prediction
+via 3D rotary position embeddings [54]. Due to improve-
+ments in 3D point encoders [51, 64, 73], more recent meth-
+ods directly encode point clouds [8, 14, 58, 72] and inject
+them into VLAs. Some feed point features into the VLM
+backbone [13, 68], whereas others [36, 39, 55] incorporate
+them into the action expert. PointACT [9] compares these
+two architectures and shows the benefits of a separate ac-
+tion expert conditioned on multi-scale point features. Point-
+WAM [49] extends point-based modeling to cascaded world
+action models for dexterous manipulation. In this work, we
+introduce Hi3R-VLA, which improves spatially grounded
+multimodal perception and action generation, and demon-
+strate its effectiveness across diverse manipulation bench-
+marks and robot embodiments.
+3. Method
+3.1. Hi3R-VLA Architecture
+We consider language-guided robotic manipulation, where
+a policy predicts a sequence of robot actions from visual
+observations, 3D scene geometry, and a natural language
+instruction. At each timestep t, the robot receives a point
+cloud Pt, RGB images It = {Iv
+t }V
+v=1 from V camera
+views, a proprioceptive state st, and a language instruc-
+tion L. We construct Pt from calibrated RGB-D cameras,
+establishing spatial correspondences between scene points
+and image pixels. The goal is to predict an action chunk
+At = (at, . . . , at+H−1) of horizon H.
+As illustrated in Figure 2, Hi3R-VLA consists of multi-
+modal encoders and a geometry-aware action expert.
+Image and text encoders. We use frozen SigLIP2 [57] en-
+coders to extract visual and language features. Each camera
+view is encoded independently into a spatial feature map
+Vv
+t . We flatten and concatenate these maps across views to
+form a visual token sequence Vt ∈RNV ×dV . The text en-
+coder produces language embeddings T ∈RNT ×dT . These
+features support both multimodal fusion within the point en-
+coder and direct conditioning of the action expert.
+Multimodal point encoder. We use a multimodal point en-
+coder EP built on Point Transformer v3 (PTv3) [64, 73].
+Given the point cloud Pt, it integrates spatially aligned vi-
+sual features Vt and language conditioning T to produce
+task-conditioned point representations at multiple scales:
+{Mℓ}L
+ℓ=1 = EP (Pt, Vt, T).
+(1)
+The backbone follows a hierarchical encoder-decoder archi-
+tecture: the encoder progressively aggregates local geomet-
+ric information, while the decoder recovers finer spatial de-
+tail through upsampling and skip connections. We collect
+representations from L decoder stages, where
+Mℓ= {(pℓ
+i, f ℓ
+i )}Nℓ
+i=1,
+pℓ
+i ∈R3,
+f ℓ
+i ∈Rdℓ.
+(2)
+Here, pℓ
+i and f ℓ
+i denote the 3D coordinates and multimodal
+features of point i at scale ℓ. The representations range from
+the coarsest scale M1 to the finest scale ML.
+Geometry-aware action expert.
+We use a conditional
+flow-matching action expert that transforms sampled noise
+into an action chunk.
+It attends to the multi-scale point
+representations in a coarse-to-fine manner, with image and
+language features providing complementary conditioning.
+3
+
+
+Spatial anchors connect action tokens to scene geometry
+in a shared coordinate frame, enabling spatially grounded
+action-to-point attention.
+We next detail the multimodal point encoder and the
+geometry-aware action expert.
+3.2. Grounding Multimodal Semantics in 3D
+Point clouds provide explicit metric geometry, but their
+sparsity limits the fine-grained appearance. We therefore
+fuse spatially-aligned image features into point represen-
+tations to incorporate richer visual information from pre-
+trained image encoders. We further introduce language con-
+ditioning to emphasize geometry relevant to the task goal.
+Point-image fusion.
+We associate image features with
+scene points using calibrated camera parameters. For each
+point pi and camera view v, we extract its visual feature
+as gv
+i = Bilinear(Vv, projv(pi)), where projv maps 3D
+coordinates to image coordinates and Bilinear samples the
+corresponding feature map. We retain projections that sat-
+isfy image-boundary and depth-consistency constraints, av-
+erage their features across valid views as the per point image
+feature gi. Unlike PointWorld [23] which only concatenates
+gi with point features at the encoder input, we inject aligned
+visual features at every encoder stage. We propagate these
+features to coarser scales by average pooling over the cor-
+responding point downsampling groups and fuse them with
+the point features at each stage. This enables visual seman-
+tic information to be incorporated into geometric represen-
+tations at different spatial resolutions.
+Point-text fusion. We condition the point cloud backbone
+on language to emphasize task-relevant scene geometry.
+Learnable queries are first used to aggregate the language
+token embeddings into a global representation cT through
+attentive pooling. We then modulate point features using
+adaptive layer normalization (AdaLN) [50]:
+AdaLN(f ℓ
+i ; cT ) = (1 + γℓ) ⊙LN(f ℓ
+i ) + βℓ,
+(3)
+where (γℓ, βℓ) = MLPℓ(cT ) are layer-specific scale and
+shift parameters shared across points. This enables efficient
+task-dependent modulation of point features.
+The resulting hierarchical features {Mℓ}L
+ℓ=1 encode ge-
+ometry, visual appearance, and task-relevant semantics at
+multiple spatial scales for subsequent action generation.
+3.3. Grounding Action Generation in 3D
+We employ a transformer-based flow-matching action ex-
+pert, predicting the velocity field that transforms sampled
+noise into an action chunk given multimodal inputs.
+Coarse-to-fine multimodal conditioning. Each decoder
+block in the action expert combines action-token self-
+attention with cross-attention to point, image, and language
+features. To exploit hierarchical point representations effi-
+ciently, we organize the decoder blocks into groups that at-
+tend to progressively finer point features, from M1 to ML.
+This coarse-to-fine schedule first captures broad scene con-
+text and then incorporates local geometric detail. Direct
+conditioning on image and language embeddings provides
+complementary semantic information.
+Spatial anchors for 3D positional encoding. Precise ma-
+nipulation requires reasoning about the relative geometry
+between action targets and observed scene points. How-
+ever, robot actions may be expressed as joint configurations
+or relative motion commands, which do not directly specify
+positions in the scene’s 3D coordinate frame. We therefore
+augment action representations with spatial anchors, typi-
+cally the corresponding end-effector positions expressed in
+the same coordinate frame as the point cloud. These an-
+chors provide a geometric reference for attention while re-
+taining robot-specific action parameterization.
+We use spatial anchors to apply 3D rotary positional
+encoding (3D RoPE) [15, 54] to action self-attention and
+action-to-point cross-attention. The anchors and points are
+expressed in metres in a shared coordinate frame.
+The
+rotary transformation R(·) partitions feature dimensions
+among the three spatial axes and rotates each feature pair ac-
+cording to its assigned frequency and the coordinate along
+that axis. Specifically, for coordinate u, the m-th feature
+pair is transformed by
+Rm(u) =
+cos(ωmu)
+−sin(ωmu)
+sin(ωmu)
+cos(ωmu)
+
+, ωm = ωmaxθ−2m/dr,
+(4)
+where dr is the rotary dimension per axis and m
+∈
+{0, . . . , dr/2 −1}. The full transformation combines these
+rotations across all feature pairs and spatial axes.
+For an action query qi with current noisy anchor xi and
+a point key kj at pj, the resulting attention score is
+sij =
+ R(xi)qi
+⊤ R(pj)kj
+
+√
+d
+= q⊤
+i R(pj −xi)kj
+√
+d
+, (5)
+where d is the attention head dimension. This makes at-
+tention explicitly sensitive to relative spatial displacement.
+Action self-attention follows the same formulation, replac-
+ing pj with the spatial anchor of the key action token. The
+frequency spectrum controls the spatial sensitivity of the en-
+coding: a displacement ∆u induces a rotation of ωm∆u.
+Higher frequencies provide greater sensitivity to small dis-
+placements, while lower frequencies vary more slowly over
+larger distances. The maximum frequency ωmax sets the
+finest spatial scale, while the base θ controls how far the fre-
+quencies spread toward coarser scales, allowing the encod-
+ing to capture relative geometry at multiple spatial scales.
+3.4. Training and Inference
+Flow-matching action learning.
+We train the action ex-
+pert using conditional flow matching. Given a ground-truth
+4
+
+
+No
+anchor
+Auxiliary
+anchor
+Executable
+anchor
+50
+55
+60
+65
+70
+Success rate (%)
+52.2±0.6
+61.4±1.8
+66.1±1.0
+(a) Spatial anchor.
+No
+pos. enc.
+Fourier
+pos. enc.
+3D RoPE
+(insensitive)
+3D RoPE
+(sensitive)
+55.4±0.8
+57.5±0.8
+59.2±0.5
+66.1±1.0
+(b) 3D position encoding.
+Coarsest
+Finest
+Coarse-to-Fine
+62.6±0.9
+63.5±1.1
+66.1±1.0
+(c) Point features.
+Figure 3. Ablation of the geometry-aware action expert on RoboCasa24. Results are reported as mean success rates over three seeds.
+action chunk At, we sample Gaussian noise ϵ ∼N(0, I)
+and a flow timestep τ ∈[0, 1], and construct the interpolated
+actions Aτ
+t = (1 −τ)ϵ + τAt. Conditioned on the obser-
+vations Ot = (Pt, It, st, L), including the point cloud, im-
+ages, robot state, and language instruction, the model pre-
+dicts a velocity field vθ by minimizing
+LFM = Eτ,ϵ
+h
+∥vθ(Aτ
+t , τ, Ot) −(At −ϵ)∥2
+2
+i
+.
+(6)
+During inference, we generate an action chunk by solving
+the ODE dAτ
+t /dτ = vθ(Aτ
+t , τ, Ot), starting from Gaussian
+noise at τ = 0 and integrating to τ = 1.
+Implementation Details. We use L = 5 stages in the point
+encoder. The action expert assigns 3 decoder blocks per
+stage, containing 15 blocks in total, each with a hidden
+size of 512 and 8 attention heads. For 3D RoPE, we set
+ωmax = 50 rad/m and θ = 100, which with dr = 20 gives
+frequencies from 50 to 0.79 rad/m, i.e., wavelengths from
+12.6 cm to 7.9 m. We initialize the point encoder from the
+self-supervised Utonia PTv3 backbone [73] and fine-tune it
+during training. The SigLIP2 [57] image and text encoders
+remain frozen except for their final projection layers, result-
+ing in fewer than 250M trainable parameters overall. We
+train with the AdamW optimizer, using a learning rate of
+10−4 and a cosine schedule. Training uses a global batch
+size of 128 on 2 NVIDIA H100 GPUs. At inference, actions
+are generated with 10 Euler integration steps. Section A of
+the supplementary material provides more details.
+Pretraining on DROID. To improve generalization, we
+pretrain Hi3R-VLA on DROID [29], a real-world dataset
+of teleoperated robot demonstrations of a single-arm grip-
+per. Since the original DROID dataset lacks depth images
+and contains noise in camera calibration and language an-
+notations, we construct an RGB-D version using 3D recon-
+structions from PointWorld [23] and curated language an-
+notations from RoboInter [38], including 35.2k demonstra-
+tions with 25.4k distinct instructions. Each frame has two
+calibrated external RGB-D views and a wrist-camera RGB
+image. Further details are presented in Section B of the sup-
+plementary material.
+4. Ablation Studies
+This section performs controlled ablations of Hi3R-VLA to
+identify key design choices for effective 3D policy learning.
+Experimental setup. We use RoboCasa24 [47] as our pri-
+mary ablation benchmark, which comprises 24 tasks span-
+ning diverse manipulation skills and testing generalization
+across environments and objects.
+We train a multi-task
+policy for ∼60k iterations, using 50 human teleoperation
+demonstrations per task.
+Following prior work [33], we
+evaluate each task over 50 episodes per seed across three
+random seeds and report the mean success rate and standard
+deviation across seeds. All ablations in this section are con-
+ducted without DROID pretraining. Additional ablations
+on the dexterous manipulation benchmark DexJoCo [59]
+and the benefits of DROID pretraining are presented in Sec-
+tion D and E, respectively, in the supplementary material.
+4.1. How to Ground Actions in 3D Geometry?
+To isolate the contribution of 3D geometry, we remove the
+image encoder and condition the action expert solely on
+point cloud and language features in this subsection.
+Spatial anchors. We compare three variants to investigate
+how spatial anchors affect action prediction.
+• Executable anchor: Absolute end-effector positions are
+predicted, followed by the remaining control command.
+The absolute action is used in 3D RoPE and action exe-
+cution. Since RoboCasa24 uses delta control, predicted
+absolute positions from executable anchors are converted
+into positional deltas and combined with other control
+commands like gripper openness for execution.
+• Auxiliary anchor: The control action is augmented with a
+prefix whose training target is the next end-effector posi-
+tion. The anchor is only used for 3D RoPE, whereas the
+robot executes the predicted low-level commands.
+• No anchor: Only native control commands are predicted,
+and therefore action-side 3D RoPE is omitted.
+As shown in Figure 3a, the auxiliary anchor improves
+the success rate by 9.2 points over the no-anchor variant,
+demonstrating the benefits of explicitly grounding actions
+5
+
+
+Table 1. Ablation of multimodal fusion in point encoder and con-
+ditioning in action expert on RoboCasa24.
+Point-text
+Point-image
+Action-image
+SR (%)
+fusion
+fusion
+condition
+×
+×
+×
+57.6±0.8
+Cross-attn
+×
+×
+63.1±1.4
+AdaLN
+×
+×
+66.1±1.0
+AdaLN
+Input
+×
+69.3±0.6
+All stages
+×
+71.9±0.9
+×
+✓
+67.9±0.2
+All stages
+✓
+72.3±0.6
+in the 3D scene, even when the spatial anchors are not di-
+rectly executed. Executable anchors further improve perfor-
+mance, suggesting that directly predicting action targets in
+the same coordinate frame as scene geometry enables more
+effective spatially grounded action generation.
+3D positional encoding. We investigate how different 3D
+positional encoding strategies affect spatial interactions be-
+tween action queries and scene points:
+• 3D RoPE, which encodes relative spatial relationships in
+Eq. (5). We examine the effect of its frequency parame-
+ters in Eq. (4), which control the sensitivity of the encod-
+ing to spatial displacements. The insensitive version uses
+ωmax = 1, θ = 10 following Utonia [73].
+• Fourier features,
+which map coordinates to multi-
+frequency sinusoidal features, followed by an MLP that
+projects them into positional embeddings added to the
+corresponding features.
+• No positional encoding, which does not explicitly incor-
+porate 3D coordinates into the action expert’s attention.
+Figure 3b shows that 3D RoPE outperforms Fourier features
+and the no-encoding baseline, highlighting the importance
+of explicitly modeling relative spatial relationships between
+actions and scene geometry. Furthermore, 3D RoPE (sen-
+sitive), which uses higher frequencies to better distinguish
+nearby positions, achieves significantly better performance
+than the insensitive variant, suggesting that fine-grained
+spatial discrimination is crucial for precise action genera-
+tion.
+Multi-scale point features. We compare conditioning the
+action expert on a single feature scale against a coarse-
+to-fine strategy that progressively incorporates finer-scale
+features across decoder blocks.
+As shown in Figure 3c,
+fine-grained features slightly outperform coarse features,
+while coarse-to-fine conditioning achieves the best perfor-
+mance. This suggests that combining global scene context
+with fine-grained geometric details benefits action predic-
+tion while keeping attention costs manageable.
+Table 2. Performance on the RoboCasa24 benchmark. Model size
+is the number of trainable parameters.
+Model
+Model
+size
+Training demos
+per task
+Average
+SR (%)
+2D-based policies
+GR00T-N1 [4]
+2.2B
+300
+49.6
+π0 [5]
+3.1B
+300
+62.5
+GR00T-N1.5 [4]
+2.7B
+300
+64.1
+Video Policy [44]
+>1.5B
+300
+66.0
+GR00T-N1.5 + HAMLET [34]
+>2.7B
+300
+66.4
+π0.5 [24]
+3.2B
+50
+52.9
+Cosmos Policy [33]
+2B
+50
+67.1
+3D-aware policies
+FP3 [68]
+1.3B
+50
+42.9±0.7
+π0.5 + Pri4R [30]
+>3.2B
+50
+57.0
+π0.5 + GeoVLA [55]
+>3.2B
+50
+57.4±1.4
+π0.5 + PointVLA [36]
+>3.2B
+50
+58.0±0.7
+π0.5 + SeeR-VLA [35]
+>3.2B
+50
+61.5±1.2
+SA-WAM [17]
+2B
+50
+76.6±0.5
+Hi3R-VLA (Ours)
+0.25B
+50
+78.8±0.8
+4.2. How to Integrate Vision, Language and 3D?
+We explore where and how to integrate heterogeneous
+modalities into the point encoder and action expert.
+Point-text fusion. In Table 1 (upper block), we investigate
+whether incorporating language into point representations
+provides additional benefits beyond direct language condi-
+tioning in the action expert. We compare three variants: no
+point-text fusion, fusion with a pooled text embedding via
+AdaLN, and token-level fusion through cross-attention. In-
+corporating language into point representations consistently
+improves policy performance, even when the action expert
+already has access to language, demonstrating the neces-
+sity of learning task-relevant 3D representations. In addi-
+tion, AdaLN outperforms token-level cross-attention with
+lower computational overhead. We hypothesize that the in-
+structions primarily specify task goals and provide limited
+fine-grained object descriptions, so a global instruction em-
+bedding may capture the task semantics needed to modu-
+late 3D point features. A related observation is reported
+in DiT [50], where AdaLN outperforms cross-attention for
+class-conditional image generation.
+Image-point fusion. Table 1 also examines whether and
+where to fuse spatially aligned image features into the point
+encoder. Image-point fusion substantially improves perfor-
+mance, with multi-stage fusion (+5.8) outperforming input-
+only fusion (+3.2) compared to the non-fusion baseline.
+This demonstrates the benefits of integrating visual seman-
+tics with explicit 3D geometry before action generation.
+Action-level image conditioning. We further evaluate di-
+rect image conditioning in the action expert in Table 1.
+It improves the success rate by 1.8 points without image-
+point fusion, but provides only a marginal gain of 0.4 points
+with multi-stage fusion. This suggests that spatially-aligned
+image-point fusion is more effective than action-level image
+6
+
+
+0
+20
+40
+60
+80
+100
+ManipLLM [43] (7B)
+OpenVLA [31] (7B)
+π0 [5] (3.1B)
+CogACT [42] (7B)
+Act3D [15] (1.7M)
+EO-1 [52] (3B)
+HybridVLA [46] (7B)
+π0.5 [24] (3.2B)
+PointACT [9] (0.3B)
+Hi3R-VLA (0.25B)
+77.4±0.4
+90.6±0.3
+38.0
+41.0
+55.0
+60.0
+73.2
+74.0
+64.5
+82.3
+2D-based
+3D-based
+Ours
+Figure 4. Performance on the RLBench-10Task benchmark.
+Table 3. Performance on the RoboTwin2 benchmark (50 tasks).
+Method
+Size
+clean→
+clean
+clean→
+randomized
+Avg
+2D-based policies
+Fast-WAM [71]
+6B
+77.8
+1.9
+39.8
+Xiaomi-Robotics-0 [7]
+4.7B
+62.9
+18.2
+40.5
+ABot-M0 [69]
+4.2B
+57.4
+30.4
+43.9
+X-VLA [75]
+0.9B
+68.0
+20.9
+44.5
+Cosmos3-Nano [1]
+16B
+77.1
+22.5
+49.8
+LingBot-VA [40]
+5.3B
+80.7
+34.6
+57.7
+π0.5 [24]
+3.2B
+70.7
+46.0
+58.3
+3D-aware policies
+X-WAM [21]
+>5B
+70.0
+25.8
+47.9
+SpatialForcing [37]
+3.2B
+77.2
+26.7
+52.0
+4D-WAM [67]
+5.3B
+81.5
+41.8
+61.6
+Hi3R-VLA (Ours)
+0.25B
+90.1
+50.5
+70.3
+conditioning alone. Nevertheless, direct image conditioning
+does not require explicit spatial alignment obtained from
+RGB-D cameras, making it valuable when geometric infor-
+mation is unavailable or inaccurate. For instance, the wrist
+camera in DROID [29] provide useful visual information
+but lack reliable depth for image-point fusion. We therefore
+retain direct image conditioning in our final model.
+5. Comparison with State of the Art
+We evaluate Hi3R-VLA on five robotic manipulation
+benchmarks covering diverse tasks and robot embodiments,
+ranging from single-arm to bimanual coordination and
+high-DoF dexterous control, as well as real robots. Hi3R-
+VLA is first pretrained on DROID and then fine-tuned on
+each benchmark. Benchmark descriptions and detailed re-
+sults are provided in Section C and F, respectively, in the
+supplementary material.
+RoboCasa24.
+Following the experimental setup in Sec-
+tion 4, we compare Hi3R-VLA with state-of-the-art meth-
+ods on RoboCasa24 [47]. As shown in Table 2, Hi3R-VLA
+significantly outperforms CosmosPolicy [33], the strongest
+2D baseline by 11.7 points. Our model also performs bet-
+Table 4. Performance on DexJoCo (10 tasks) with Allegro hands.
+Method
+Size
+Single-arm
+Bimanual
+All
+2D-based policies
+DP-T [12]
+0.1B
+38.3±2.3
+20.0±2.3
+31.0±1.7
+π0.5 [24]
+3.2B
+70.3±2.2
+19.5±3.3
+50.0±1.9
+GR00T N1.6 [4]
+3B
+66.8±2.3
+43.0±2.7
+57.3±1.8
+FastWAM [71]
+6B
+59.1±1.8
+43.5±2.4
+52.9±1.5
+3D-based policies
+PointACT [9]
+0.3B
+43.1±2.6
+19.5±2.4
+33.7±1.8
+PointWAM [49]
+1.2B
+82.2±1.5
+49.1±2.8
+69.0±2.0
+Hi3R-VLA (Ours)
+0.25B
+86.2±2.7
+64.0±2.4
+77.3±1.4
+ter than SA-WAM [17], a 3D-enhanced method built upon
+CosmosPolicy, using around 10× fewer trainable parame-
+ters and substantially less pretraining data.
+RLBench. We follow the RLBench [26] 10-task evalua-
+tion protocol [9], which comprises 10 tabletop single-arm
+manipulation tasks.
+Unlike benchmarks that predict mi-
+crostep control commands, RLBench uses keystep actions,
+requiring the policy to predict precise end-effector targets
+over larger spatial displacements. The test scenes introduce
+novel object placements and distractors. We train a single
+multi-task policy on 100 demonstrations per task for 42k
+iterations, and evaluate 100 episodes per task across three
+random seeds. As shown in Figure 4, Hi3R-VLA achieves
+an average success rate over 90%, outperforming the pre-
+vious best method [9], by 8 points. These results highlight
+the advantages of Hi3R-VLA for long-range keystep action
+prediction and spatial generalization.
+RoboTwin2. RoboTwin2 [10] evaluates bimanual robotic
+manipulation across 50 tasks, including object rearrange-
+ment, tool use, and coordinated dual-arm actions. Follow-
+ing the official benchmark protocol, we train a single multi-
+task policy on 50 clean demonstrations per task for 90k iter-
+ations and evaluate it in both clean and randomized environ-
+ments with 100 episodes per task. The latter introduces vari-
+ations in background, lighting, table height, distractor ob-
+jects, and unseen instructions. To accommodate bimanual
+manipulation, we introduce arm-specific embeddings to dis-
+tinguish left and right arms, doubling the number of action
+tokens while retaining the same action expert architecture.
+As shown in Table 3, Hi3R-VLA substantially outperforms
+prior methods in clean environments and also improves un-
+der the randomized setup, demonstrating the effectiveness
+of our model for coordinated bimanual manipulation. We
+leave pretraining on larger and more diverse datasets to fu-
+ture work to further improve generalization to randomized
+environments.
+DexJoCo. To evaluate whether Hi3R-VLA generalizes be-
+yond conventional gripper-based manipulation, we consider
+DexJoCo [59], a challenging benchmark featuring high-
+DoF Allegro dexterous hands. Its tasks require fine-grained
+finger control, tool manipulation, and coordinated interac-
+7
+
+
+Figure 5. Real-robot results. We compare π0.5 and Hi3R-VLA on five real-world tasks, with 10 testing trials per task. The full bar length
+is the partial-success score; the solid segment is the number of fully successful trials. Hi3R-VLA outperforms π0.5 on every task in both
+partial and full success, with particularly large gains on precise manipulation tasks such as Place toasts in toaster and Prepare coffee.
+Table 5. Performance on the DexSuite benchmark, grouped by
+end-effector (number of tasks in parentheses).
+Method
+Size
+Gripper (5) Allegro (9) Avg (14)
+Single-task policies
+ACT [74]
+62M
+53.2±1.9
+48.9±1.5
+50.4±1.2
+DP [12]
+79M
+42.8±2.5
+44.3±2.5
+43.8±1.8
+Multi-task multi-robot policies
+π0 [5]
+3.1B
+68.3±2.8
+70.1±1.4
+69.4±0.9
+π0.5 [24]
+3.2B
+62.7±2.3
+64.7±1.6
+64.0±3.1
+Hi3R-VLA (Ours) 0.25B
+87.7±2.4
+85.1±2.2
+86.0±2.7
+tions between two dexterous hands.
+Following [49], we
+evaluate on 10 tasks, including 6 single-arm and 4 biman-
+ual tasks, using the provided human demonstrations to train
+a single multi-task policy for 40k iterations.
+We evalu-
+ate 50 episodes per task across three random seeds.
+As
+shown in Table 4, Hi3R-VLA achieves 77.3% average suc-
+cess, outperforming PointWAM [49] which is pretrained on
+large-scale human videos. The improvement is more signif-
+icant on bimanual dexterous tasks, highlighting the effec-
+tiveness of Hi3R-VLA to high-dimensional control spaces.
+DexSuite.
+We further evaluate on DexSuite [22], a re-
+cent benchmark that covers diverse robot arms, parallel-
+jaw grippers, and dexterous hands.
+Unlike benchmarks
+with a fixed robot embodiment, DexSuite enables evalu-
+ation across different manipulation platforms and action
+spaces. We train a unified multi-task policy covering 3 em-
+bodiments and 14 task-embodiment pairs with 50 demon-
+strations each. No embodiment-specific prompts or param-
+eters are introduced.
+We evaluate 50 episodes per task-
+embodiment pair across three random seeds, following the
+official evaluation protocol. Results in Table 5 show that
+our model achieves 86% average success, demonstrating a
+unified 3D policy across different robot embodiments and
+manipulation complexities.
+Real-world Experiments. For real robot evaluation, we
+use a 6-DoF UR5 robotic arm with a Weiss WSG50 grip-
+per and UMI-style parallel jaws. The robot operates over a
+1m × 1m tabletop workspace observed by a fixed Orbbec
+Figure 6. Qualitative comparison on Prepare coffee. π0.5 fail-
+ures are shown with their frequency over 10 trials, while Hi3R-
+VLA completes the full task for 3 out of 10 trials.
+Femto Mega RGB-D camera.
+Observations include an
+posed RGB-D image and a 7D absolute joint state. Actions
+are specified as 7D joint state, and we use forward kinemat-
+ics to obtain the end-effector pose as auxiliary anchor. We
+collect 50 human teleoperation demonstrations for 5 tasks
+and train a single multi-task policy fine-tuned from the pre-
+trained DROID checkpoint. We evaluate on 10 test episodes
+per task, with randomized initial object placements and dis-
+tractors in each episode. Further details of the real robot
+setup are presented in the supplementary material.
+We compare Hi3R-VLA against π0.5 [24] under the
+same fine-tuning and evaluation protocol. Results in Fig-
+ure 5 demonstrate that Hi3R-VLA can be effectively de-
+ployed on physical robots, despite imperfect depth mea-
+surements and real-world control uncertainties. Hi3R-VLA
+achieves particularly strong performance on tasks requiring
+precise manipulation like Prepare coffee. Figure 6 shows
+qualitative comparisons between Hi3R-VLA and π0.5.
+6. Conclusion
+We present Hi3R-VLA, a geometry-grounded 3D policy
+that unifies heterogeneous vision, language, and action
+representations in a shared 3D space.
+It integrates spa-
+tially aligned visual and language features into hierarchical
+point representations, while spatial anchors and 3D posi-
+tional encoding bridge scene geometry and action genera-
+tion. Extensive experiments across diverse robotic manip-
+8
+
+
+ulation benchmarks demonstrate strong performance with
+a compact model. Our ablations highlight the importance
+of aligning action targets with scene geometry, integrating
+multi-modalities into 3D representations, and leveraging
+robot pretraining, providing practical insights into the de-
+sign of effective and efficient 3D-based manipulation poli-
+cies. Limitation and future work are discussed in Section I
+of the supplementary material.
+Acknowledgments
+This work was granted access to HPC resources of IDRIS
+under the allocation AD011014846R2 and A0211018228
+made by GENCI. It was funded in part by the French
+government under management of Agence Nationale de la
+Recherche as part of the “France 2030” program, reference
+ANR-23-IACL-0008 (PR[AI]RIE-PSAI projet), the ANR
+project 3D-GEM (ANR-25-CE23-7777-01), and the Paris
+ˆIle-de-France R´egion in the frame of the DIM AI4IDF.
+Cordelia Schmid would like to acknowledge the support by
+the K¨orber European Science Prize.
+LLM Usage Statement
+We used generative AI tools, primarily GPT and Claude,
+to assist with code development and implementation,
+experimental data processing and visualization,
+liter-
+ature search, and manuscript polishing.
+All research
+ideas, methodological designs, experimental protocols,
+and scientific conclusions were developed by the au-
+thors.
+All AI-assisted code, analyses, and manuscript
+content were reviewed and verified by the authors.
+The
+authors take full responsibility for the final content
+of this work, including all text, claims, results, and
+artifacts produced with the assistance of generative AI.
+References
+[1] Niket Agarwal, Arslan Ali, Jon Allen, Martin Antolini, Ade-
+line Aubame, Alisson Azzolini, Junjie Bai, Maciej Bala, Yo-
+gesh Balaji, Josh Bapst, et al. Cosmos 3: Omnimodal world
+models for physical ai.
+arXiv preprint arXiv:2606.02800,
+2026. 7
+[2] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui
+Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao,
+Chunjiang Ge, et al.
+Qwen3-vl technical report.
+arXiv
+preprint arXiv:2511.21631, 2025. 2
+[3] Lucas Beyer, Andreas Steiner, Andr´e Susano Pinto, Alexan-
+der Kolesnikov, Xiao Wang, Daniel Salz, Maxim Neumann,
+Ibrahim Alabdulmohsin, Michael Tschannen, Emanuele
+Bugliarello, et al. Paligemma: A versatile 3b vlm for trans-
+fer. arXiv preprint arXiv:2407.07726, 2024. 2
+[4] Johan Bjorck, Fernando Casta˜neda, Nikita Cherniadev,
+Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Dieter Fox,
+Fengyuan Hu, Spencer Huang, et al. Gr00t n1: An open
+foundation model for generalist humanoid robots.
+arXiv
+preprint arXiv:2503.14734, 2025. 1, 2, 6, 7, 11
+[5] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 6, 7, 8, 4, 11
+[6] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding,
+Danny Driess, Avinava Dubey, Chelsea Finn, et al. Rt-2:
+Vision-language-action models transfer web knowledge to
+robotic control. arXiv preprint arXiv:2307.15818, 2023. 2
+[7] Rui Cai, Jun Guo, Xinze He, Piaopiao Jin, Jie Li, Bingxuan
+Lin, Futeng Liu, Wei Liu, Fei Ma, Kun Ma, et al. Xiaomi-
+robotics-0: An open-sourced vision-language-action model
+with real-time execution. arXiv preprint arXiv:2602.12684,
+2026. 7
+[8] Shizhe Chen, Ricardo Garcia, Cordelia Schmid, and Ivan
+Laptev.
+Polarnet:
+3d point clouds for language-guided
+robotic manipulation. CoRL, 2023. 3
+[9] Shizhe Chen, Paul Pacaud, and Cordelia Schmid. PointACT:
+Vision-language-action models with multi-scale point-action
+interaction. RSS, 2026. 1, 2, 3, 7, 6, 11
+[10] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge,
+Zhenyu Gu, et al.
+Robotwin 2.0: A scalable data gen-
+erator and benchmark with strong domain randomization
+for robust bimanual robotic manipulation.
+arXiv preprint
+arXiv:2506.18088, 2025. 2, 7, 6
+[11] Xinzhe Chen, Sihua Ren, Liqi Huang, Haowen Sun,
+Mingyang Li, Xingyu Chen, Zeyang Liu, and Xuguang Lan.
+Oasis: Observation-action space alignment via se (3) trajec-
+tory prediction for robotic manipulation. NeurIPS, 2026. 2
+[12] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun
+Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song.
+Diffusion policy: Visuomotor policy learning via action dif-
+fusion. The International Journal of Robotics Research, 44
+(10-11):1684–1704, 2025. 7, 8, 11
+[13] Xianzhe Fan, Shengliang Deng, Xiaoyang Wu, Yuxiang Lu,
+Zhuoling Li, Mi Yan, Yujia Zhang, Zhizheng Zhang, He
+Wang, and Hengshuang Zhao. Any3d-vla: Enhancing vla
+robustness via diverse point clouds. ICML, 2026. 1, 2, 3
+[14] Ricardo Garcia, Shizhe Chen, and Cordelia Schmid.
+To-
+wards generalizable vision-language robotic manipulation:
+A benchmark and llm-guided 3d policy. In 2025 IEEE In-
+ternational Conference on Robotics and Automation (ICRA),
+pages 8996–9002. IEEE, 2025. 3
+[15] Theophile Gervet, Zhou Xian, Nikolaos Gkanatsios, and Ka-
+terina Fragkiadaki. Act3d: 3d feature field transformers for
+multi-task robotic manipulation. CoRL, 2023. 1, 3, 4, 7, 11
+[16] Nikolaos Gkanatsios, Jiahe Xu, Matthew Bronars, Arsalan
+Mousavian, Tsung-Wei Ke, and Katerina Fragkiadaki. 3d
+flowmatch actor: Unified 3d policy for single-and dual-arm
+manipulation. IROS, 2026. 3
+[17] Javier Alejandro Lopetegui Gonzalez, Paul Pacaud, and
+Cordelia Schmid. Spatially aware world action model via
+geometric latent diffusion. arXiv preprint arXiv:2609.02531,
+2026. 2, 6, 7, 10
+9
+
+
+[18] Ankit Goyal, Jie Xu, Yijie Guo, Valts Blukis, Yu-Wei Chao,
+and Dieter Fox. Rvt: Robotic view transformer for 3d object
+manipulation. In Conference on Robot Learning, pages 694–
+710. PMLR, 2023. 2
+[19] Ankit Goyal, Valts Blukis, Jie Xu, Yijie Guo, Yu-Wei Chao,
+and Dieter Fox. Rvt-2: Learning precise manipulation from
+few demonstrations. RSS, 2024. 2
+[20] Pierre-Louis Guhur, Shizhe Chen, Ricardo Garcia Pinel,
+Makarand Tapaswi, Ivan Laptev, and Cordelia Schmid.
+Instruction-driven history-aware policies for robotic manip-
+ulations. In Conference on Robot Learning, pages 175–187.
+PMLR, 2023. 1
+[21] Jun Guo, Qiwei Li, Peiyan Li, Zilong Chen, Nan Sun,
+Yifei Su, Heyun Wang, Yuan Zhang, Xinghang Li, and
+Huaping Liu.
+Unified 4d world action modeling from
+video priors with asynchronous denoising. arXiv preprint
+arXiv:2604.26694, 2026. 7
+[22] Anas Houssaini, Hugo He, Junming Shi, Amin Abyaneh,
+Ricardo
+Chahine,
+Shuo
+Wen,
+Mohamad
+H
+Danesh,
+Charles-´Etienne Fr´echette, Mariana Sosa Guzman, Mathias
+Desrochers, et al. Dexsuite: An all-in-one framework for
+dexterous manipulation across arms, hands, and tasks. arXiv
+preprint arXiv:2610.37799, 2026. 2, 8, 6
+[23] Wenlong Huang, Yu-Wei Chao, Arsalan Mousavian, Ming-
+Yu Liu, Dieter Fox, Kaichun Mo, and Li Fei-Fei. Pointworld:
+Scaling 3d world models for in-the-wild robotic manipula-
+tion. arXiv preprint arXiv:2601.03782, 2026. 4, 5, 2
+[24] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. RSS, 2025. 1, 2, 6, 7, 8, 11, 12
+[25] Physical Intelligence, Bo Ai, Ali Amin, Raichelle Aniceto,
+Ashwin Balakrishna, Greg Balke, Kevin Black, George
+Bokinsky, Shihao Cao, Thomas Charbonnier, et al. π0.7: a
+steerable generalist robotic foundation model with emergent
+capabilities. arXiv preprint arXiv:2604.15483, 2026. 2
+[26] Stephen James, Zicong Ma, David Rovick Arrojo, and An-
+drew J Davison. Rlbench: The robot learning benchmark &
+learning environment. IEEE Robotics and Automation Let-
+ters, 5(2):3019–3026, 2020. 2, 7, 6
+[27] Xiaogang Jia, Qian Wang, Anrui Wang, Han Wang, Bal´azs
+Gyenes, Emiliyan Gospodinov, Xinkai Jiang, Ge Li, Hongyi
+Zhou, Weiran Liao, et al.
+Pointmappolicy:
+Structured
+point cloud processing for multi-modal imitation learning.
+NeurIPS, 38:160188–160216, 2025. 2
+[28] Tsung-Wei Ke, Nikolaos Gkanatsios, and Katerina Fragki-
+adaki. 3d diffuser actor: Policy diffusion with 3d scene rep-
+resentations. CoRL, 2024. 1, 3
+[29] Alexander Khazatsky,
+Karl Pertsch,
+Suraj Nair,
+Ash-
+win Balakrishna, Sudeep Dasari, Siddharth Karamcheti,
+Soroush Nasiriany, Mohan Kumar Srirama, Lawrence Yun-
+liang Chen, Kirsty Ellis, et al.
+Droid:
+A large-scale
+in-the-wild robot manipulation dataset.
+arXiv preprint
+arXiv:2403.12945, 2024. 2, 5, 7, 9
+[30] Jisoo Kim, Jungbin Cho, Sanghyeok Chu, Ananya Bal, Jin-
+hyung Kim, Gunhee Lee, Sihaeng Lee, Seung Hwan Kim,
+Bohyung Han, Hyunmin Lee, et al. Pri4r: Learning world
+dynamics for vision-language-action models with privileged
+4d representation. arXiv preprint arXiv:2603.01549, 2026.
+2, 6
+[31] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan
+Foster, Grace Lam, Pannag Sanketi, et al.
+Openvla: An
+open-source vision-language-action model. arXiv preprint
+arXiv:2406.09246, 2024. 2, 7, 11
+[32] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. arXiv preprint arXiv:2502.19645, 2025. 2
+[33] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin,
+Yunhao Ge, Grace Lam, Percy Liang, Shuran Song, Ming-
+Yu Liu, Chelsea Finn, et al.
+Cosmos policy: Fine-tuning
+video models for visuomotor control and planning. arXiv
+preprint arXiv:2601.16163, 2026. 2, 5, 6, 7, 10
+[34] Myungkyu Koo, Daewon Choi, Taeyoung Kim, Kyungmin
+Lee, Changyeon Kim, Younggyo Seo, and Jinwoo Shin.
+Hamlet: Switch your vision-language-action model into a
+history-aware policy. In International Conference on Learn-
+ing Representations, pages 101537–101558, 2026. 6
+[35] Byungkun Lee, Dongyoon Hwang, Dongjin Kim, Hojoon
+Lee, Minho Park, and Jaegul Choo. See like a robot: Robot-
+centric pointmaps for vision-language-action models. arXiv
+preprint arXiv:2607.11498, 2026. 2, 6
+[36] Chengmeng Li, Junjie Wen, Yaxin Peng, Yan Peng, and
+Yichen Zhu. Pointvla: Injecting the 3d world into vision-
+language-action models.
+IEEE Robotics and Automation
+Letters, 11(3):2506–2513, 2026. 3, 6
+[37] Fuhao Li, Wenxuan Song, Han Zhao, Jingbo Wang, Pengxi-
+ang Ding, Donglin Wang, Long Zeng, and Haoang Li. Spa-
+tial forcing: Implicit spatial representation alignment for
+vision-language-action model. In International Conference
+on Learning Representations, pages 132324–132345, 2026.
+2, 7
+[38] Hao Li, Ziqin Wang, Zi-han Ding, Shuai Yang, Yilun Chen,
+Yang Tian, Xiaolin Hu, Tai Wang, Dahua Lin, Feng Zhao, Si
+Liu, and Jiangmiao Pang. Robointer: A holistic intermedi-
+ate representation suite towards robotic manipulation. arXiv
+preprint arXiv:2602.09973, 2026. 5
+[39] Haoxuan Li, Sixu Yan, Lianghui Zhu, Xuanlai Tang, Shikang
+Wang, and Xinggang Wang.
+Bridge3d: Enabling vision-
+language-action models to see and act in 3d. arXiv preprint
+arXiv:2609.24525, 2026. 3
+[40] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin
+Wang, Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing
+Zhu, et al. Causal world modeling for robot control. arXiv
+preprint arXiv:2601.21998, 2026. 7
+[41] Peiyan Li, Yixiang Chen, Hongtao Wu, Xiao Ma, Xiangnan
+Wu, Yan Huang, Liang Wang, Tao Kong, and Tieniu Tan.
+Bridgevla: Input-output alignment for efficient 3d manipu-
+lation learning with vision-language models. NeurIPS, 38:
+63635–63673, 2025. 2
+[42] Qixiu Li, Yaobo Liang, Zeyu Wang, Lin Luo, Xi Chen,
+Mozheng Liao, Fangyun Wei, Yu Deng, Sicheng Xu,
+Yizhong Zhang, et al.
+Cogact:
+A foundational vision-
+language-action model for synergizing cognition and action
+10
+
+
+in robotic manipulation. arXiv preprint arXiv:2411.19650,
+2024. 7, 11
+[43] Xiaoqi Li, Mingxu Zhang, Yiran Geng, Haoran Geng, Yux-
+ing Long, Yan Shen, Renrui Zhang, Jiaming Liu, and Hao
+Dong.
+Manipllm: Embodied multimodal large language
+model for object-centric robotic manipulation.
+In 2024
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 18061–18070. IEEE, 2024. 7,
+11
+[44] Junbang Liang, Pavel Tokmakov, Ruoshi Liu, Sruthi Sud-
+hakar, Paarth Shah, Rares Ambrus, and Carl Vondrick.
+Video generators are robot policies.
+arXiv preprint
+arXiv:2508.00795, 2025. 6
+[45] Haitao Lin, Hanyang Yu, Jingshun Huang, He Zhang,
+Yonggen Ling, Ping Tan, Xiangyang Xue, and Yanwei
+Fu.
+Universal pose pretraining for generalizable vision-
+language-action policies. RSS, 2026. 2
+[46] Jiaming Liu, Hao Chen, Pengju An, Zhuoyang Liu, Ren-
+rui Zhang, Chenyang Gu, Xiaoqi Li, Ziyu Guo, Sixiang
+Chen, Mengzhen Liu, et al. Hybridvla: Collaborative diffu-
+sion and autoregression in a unified vision-language-action
+model. arXiv preprint arXiv:2503.10631, 2025. 7, 6, 11
+[47] Soroush Nasiriany, Abhiram Maddukuri, Lance Zhang,
+Adeet Parikh, Aaron Lo, Abhishek Joshi, Ajay Man-
+dlekar, and Yuke Zhu.
+Robocasa:
+Large-scale simula-
+tion of everyday tasks for generalist robots. arXiv preprint
+arXiv:2406.02523, 2024. 2, 5, 7, 6
+[48] Nikolay Nikolov, Giuliano Albanese, Sombit Dey, Aleksan-
+dar Yanev, Luc Van Gool, Jan-Nico Zaech, and Danda Pani
+Paudel. Spear-1: Scaling beyond robot demonstrations via
+3d understanding. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+35124–35134, 2026. 2
+[49] Chunghyun Park, Beomjun Kim, Seungcheol Park, Heese-
+ung Kwon, Yashu Shukla, Seunghoon Sim, Jinwoo Shin, and
+Minsu Cho. Pointwam: 3d world action modeling for dexter-
+ous robotic manipulation. arXiv preprint arXiv:2610.02840,
+2026. 3, 7, 8, 11
+[50] William Peebles and Saining Xie. Scalable diffusion models
+with transformers. In ICCV, pages 4172–4182. IEEE, 2023.
+4, 6
+[51] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pages 652–660,
+2017. 1, 3
+[52] Delin Qu, Haoming Song, Qizhi Chen, Zhaoqing Chen, Xi-
+anqiang Gao, Dong Wang, Xinyi Ye, Qi Lv, Modi Shi,
+Guanghui Ren, et al.
+Eo-1: An open unified embodied
+foundation model for general robot control. arXiv preprint
+arXiv:2508.21112, 2025. 7, 11
+[53] Delin Qu, Haoming Song, Qizhi Chen, Yuanqi Yao, Xinyi
+Ye, Yan Ding, Zhigang Wang, JiaYuan Gu, Bin Zhao, Dong
+Wang, et al. Spatialvla: Exploring spatial representations for
+visual-language-action model. RSS, 2025. 1, 2
+[54] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen
+Bo, and Yunfeng Liu. Roformer: Enhanced transformer with
+rotary position embedding. Neurocomputing, 568:127063,
+2024. 2, 3, 4
+[55] Lin Sun, Bin Xie, Yingfei Liu, Hao Shi, Tiancai Wang, and
+Jiale Cao. Geovla: Empowering 3d representations in vision-
+language-action models. IROS, 2026. 1, 2, 3, 6
+[56] Era AI Lab Team, Jianhao Lai, Zhihao Zhan, Zhiquan Liao,
+Qichang Li, Shubin Chen, Zhiyuan Liu, Hongsen Lei, Jian-
+man Lin, Xiaoxin Lin, et al.
+E0. 5: From reconstructive
+to future-predictive 3d foundations for robotic world-action
+modeling. arXiv preprint arXiv:2610.36011, 2026. 2
+[57] Michael Tschannen, Alexey Gritsenko, Xiao Wang, Muham-
+mad
+Ferjad
+Naeem,
+Ibrahim
+Alabdulmohsin,
+Nikhil
+Parthasarathy, Talfan Evans, Lucas Beyer, Ye Xia, Basil
+Mustafa, et al. Siglip 2: Multilingual vision-language en-
+coders with improved semantic understanding, localization,
+and dense features. arXiv preprint arXiv:2502.14786, 2025.
+3, 5, 1
+[58] Chenxi Wang, Hongjie Fang, Hao-Shu Fang, and Cewu Lu.
+Rise: 3d perception makes real-world robot imitation simple
+and effective. In IROS, pages 2870–2877. IEEE, 2024. 3
+[59] Hanwen Wang, Weizhi Zhao, Xiangyu Wang, Siyuan Huang,
+He Lin, Boyuan Zheng, Rongtao Xu, Gang Wang, Yao Mu,
+He Wang, et al. Dexjoco: A benchmark and toolkit for task-
+oriented dexterous manipulation on mujoco. arXiv preprint
+arXiv:2605.16257, 2026. 2, 5, 7, 6
+[60] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea
+Vedaldi, Christian Rupprecht, and David Novotny.
+Vggt:
+Visual geometry grounded transformer. In 2025 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5294–5306. IEEE, 2025. 2
+[61] Xinkai Wang, Chenyi Wang, Yifu Xu, Mingzhe Ye, Fucheng
+Zhang, Jialin Tian, Xinyu Zhan, Lifeng Zhu, Cewu Lu, and
+Lixin Yang. Lamp: Learning vision-language-action policy
+with 3d scene flow as la tent m otion p rior. In ECCV, pages
+227–244. Springer, 2026. 2
+[62] Yuran Wang, Siqiao Huang, Mingleyang Li, Chenhao Zhang,
+Jiaqi Liang, Weiyang Jin, Yue Chen, Xuemin Chi, Dong-
+hao Zhou, Qize Yu, et al.
+Openwam: An open, modular
+exploration towards systematic world-action model pretrain-
+ing. arXiv preprint arXiv:2609.07398, 2026. 2
+[63] Bowen Wen, Matthew Trepte, Joseph Aribido, Jan Kautz,
+Orazio Gallo, and Stan Birchfield. Foundationstereo: Zero-
+shot stereo matching. arXiv, 2025. 5
+[64] Xiaoyang Wu, Li Jiang, Peng-Shuai Wang, Zhijian Liu, Xi-
+hui Liu, Yu Qiao, Wanli Ouyang, Tong He, and Hengshuang
+Zhao. Point transformer v3: Simpler, faster, stronger. In
+2024 IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 4840–4851. IEEE, 2024. 1,
+3
+[65] Xiao-Ming Wu, Bin Fan, Kang Liao, Jian-Jian Jiang, Runze
+Yang, Yihang Luo, Zhonghua Wu, Wei-Shi Zheng, and
+Chen Change Loy. Vlanext: Recipes for building strong vla
+models. In Forty-third International Conference on Machine
+Learning, 2026. 2
+[66] Ziyin Xiong, Nikos Gkanatsios, Moritz Reuss, and Katerina
+Fragkiadaki. Geomvla: Unifying scene, motion, and action
+in 3d. arXiv preprint arXiv:2609.13812, 2026. 1, 3
+11
+
+
+[67] Lishan Yang, Wenxuan Song, Xi Wang, Pingyue Sheng,
+Zheng Fang, Ziyang Zhou, Junjie He, Haodong Yan, Jiayi
+Chen, Nan Sun, et al.
+4d-wam: Infusing spatiotemporal
+awareness into world action models through trajectory fields.
+arXiv preprint arXiv:2608.08023, 2026. 7, 12
+[68] Rujia Yang, Geng Chen, Chuan Wen, and Yang Gao. Fp3:
+A 3d foundation policy for robotic manipulation. In 2026
+IEEE International Conference on Robotics and Automation
+(ICRA), pages 3720–3727. IEEE, 2026. 2, 3, 6
+[69] Yandan Yang, Shuang Zeng, Tong Lin, Xinyuan Chang,
+Dekang Qi, Junjin Xiao, Haoyun Liu, Ronghan Chen, Yuzhi
+Chen, Dongjie Huo, et al.
+Abot-m0:
+Vla foundation
+model for robotic manipulation with action manifold learn-
+ing. arXiv preprint arXiv:2602.11236, 2026. 7
+[70] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan
+Gao,
+Sihyun
+Yu,
+George
+Kurian,
+Suneel
+Indupuru,
+You Liang Tan, Chuning Zhu, Jiannan Xiang, et al. World
+action models are zero-shot policies.
+arXiv preprint
+arXiv:2602.15922, 2026. 2
+[71] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+Fast-wam: Do world action models need test-time future
+imagination?
+arXiv preprint arXiv:2603.16666, 2026. 7,
+11
+[72] Yanjie Ze, Gu Zhang, Kangning Zhang, Chenyuan Hu,
+Muhan Wang, and Huazhe Xu. 3d diffusion policy: Gen-
+eralizable visuomotor policy learning via simple 3d repre-
+sentations. RSS, 2024. 3
+[73] Yujia Zhang, Xiaoyang Wu, Yunhan Yang, Xianzhe Fan,
+Han Li, Yuechen Zhang, Zehao Huang, Naiyan Wang, and
+Hengshuang Zhao. Utonia: Toward one encoder for all point
+clouds. arXiv preprint arXiv:2603.03283, 2026. 1, 3, 5, 6, 9
+[74] Tony Z Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. arXiv preprint arXiv:2304.13705, 2023.
+8
+[75] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu,
+Xirui Kang, Yuchun Feng, Yinan Zheng, Jiayin Zou, Yilun
+Chen, Jia Zeng, et al.
+X-vla: Soft-prompted transformer
+as scalable cross-embodiment vision-language-action model.
+In International Conference on Learning Representations,
+pages 60580–60606, 2026. 7
+12
+
+
+Hi3R-VLA: Grounding Semantics and Actions in 3D
+Supplementary Material
+The supplementary material is organized as follows. We
+first present model and implementation details in Section A,
+the DROID dataset and pretraining setup in Section B, and
+downstream benchmark setups in Section C. We then pro-
+vide ablation studies on DexJoCo in Section D, the effects
+of pretraining in Section E, per-task results across bench-
+marks in Section F, and real-robot experiments in Sec-
+tion G. Finally, we present qualitative results in Section H,
+and discuss limitations and future work in Section I.
+A. Implementation Details
+A.1. Model Architecture and Configuration
+We provide additional implementation details of Hi3R-
+VLA, including the multimodal point encoder and the flow-
+matching action expert.
+Overview. Given V calibrated RGB-D views, a proprio-
+ceptive state st, and a language instruction L, Hi3R-VLA
+first lifts the views into a point cloud Pt expressed in a cen-
+tered metric frame (Section A.2). The multimodal point en-
+coder EP then encodes Pt with a hierarchical Point Trans-
+former V3 (PTv3) [64] initialized from Utonia [73], inject-
+ing multi-view SigLIP2 [57] image features at every en-
+coder stage and conditioning every point block on the in-
+struction (Section A.3). Finally, a flow-matching action ex-
+pert predicts the action chunk At by attending to the multi-
+scale point representations {Mℓ}L
+ℓ=1 and to the image and
+language tokens (Section A.5), using spatial anchors and
+3D RoPE to relate actions and points in metric space (Sec-
+tion A.4). The encoders run once per observation, and their
+outputs are reused for all flow integration steps. The model
+configuration is summarized in Table 6 and the training hy-
+perparameters in Table 7.
+Point transformer architecture.
+The PTv3 encoder
+has L = 5 stages, indexed by s ∈{0, . . . , 4} from
+fine to coarse, with (3, 3, 3, 12, 3) transformer blocks,
+(54, 108, 216, 432, 576) channels, and (3, 6, 12, 24, 32) at-
+tention heads (head dimension 18). Consecutive stages are
+connected by grid pooling with stride 2, so the cell size
+grows from the 1 cm input grid to 2, 4, 8, and 16 cm.
+Grid pooling uses max pooling over the projected fea-
+tures and averages the coordinates of the points merged
+into each cell. Each block consists of a sparse convolu-
+tional conditional positional encoding, serialized patch self-
+attention, and an MLP, each with a pre-LayerNorm resid-
+ual connection. Patch attention uses a patch size of 1024
+points grouped by one of the four serializations (z-order,
+Hilbert, and their transposed variants), which are randomly
+permuted during training.
+It also applies the 3D RoPE
+Table 6. Model configuration of Hi3R-VLA.
+Component
+Configuration
+Point input
+≤4096 points, 1 cm voxels
+Point encoder
+PTv3, Utonia init.
+Point encoder stages L
+5, grid-pooling stride 2
+Encoder blocks per stage
+(3, 3, 3, 12, 3)
+Point feature dim. dℓ
+54–576, projected to 512
+Image encoder
+SigLIP2-So400m/16 (frozen)
+Text encoder
+SigLIP2-So400m (frozen)
+Image/text dim. dV , dT
+512
+Point-image fusion
+5 stages
+Point-text fusion
+AdaLN, 24 blocks
+Action expert hidden size
+512
+Action expert blocks
+15 (3 per scale)
+Attention heads
+8 (head dimension d = 64)
+Action chunk horizon H
+32 by default
+RoPE ωmax, θ, dr
+50 rad/m, 100, 20
+Flow integration steps
+10 (Euler)
+Trainable parameters
+< 250M
+of Utonia with base 10 and maximum frequency 1 rad/m.
+The encoder is initialized from the released Utonia check-
+point [73]. Since this checkpoint expects 9 input channels,
+we keep the first 6 columns of its input stem to consume the
+(x, y, z, r, g, b) values of each point.
+We denote the point features of encoder stage s as h(s)
+i .
+The multi-scale representations start from the encoder bot-
+tleneck, f 1
+i = h(4)
+i , and a lightweight, newly initialized de-
+coder recovers the four finer scales through grid unpooling
+and skip connections:
+f ℓ
+i = ϕskip
+ℓ
+ h(L−ℓ)
+i
+
++ ϕup
+ℓ
+ f ℓ−1
+πℓ(i)
+
+,
+ℓ∈{2, . . . , L},
+(7)
+where πℓ(i) is the parent cell of point i at the coarser scale,
+and ϕ is a Linear-LayerNorm-GELU projection. The de-
+coder contains no transformer blocks, as adding them yields
+similar performance but increases training cost in our early
+experiments. The resulting representations M1, . . . , M5
+have dℓ= 576, 432, 216, 108, 108 channels. The coordi-
+nate pℓ
+i of each point is the centroid of its cell at scale ℓ.
+Before the action expert, each f ℓ
+i is mapped to the hidden
+size 512 by a scale-specific LayerNorm and linear layer.
+A.2. Point Cloud Preprocessing
+Depth back-projection and coordinate transformation.
+Each view v provides an RGB image Iv
+t , a metric depth
+map Zv
+t , intrinsics Kv, and a world-to-camera transform
+Ev ∈SE(3), where the extrinsics of wrist cameras are up-
+1
+
+
+dated at every frame. The images are first resized to the
+benchmark resolution (typically 256 × 256), using bilin-
+ear interpolation for RGB and nearest-neighbor interpola-
+tion for depth, and the intrinsics are updated accordingly.
+Photometric augmentation (brightness, contrast, and satu-
+ration jitter of 0.2) is applied before reconstruction, so that
+the point colors remain consistent with the image features.
+A pixel u = (u, u′) with valid depth z = Zv
+t (u) is lifted to
+the world frame as
+
+p
+1
+
+= (Ev)−1
+
+(Kv)−1[zu, zu′, z]⊤
+1
+
+,
+(8)
+and inherits the RGB value of the same pixel. A depth value
+is valid only if it is finite and lies within a camera-specific
+range [zmin, zmax], and invalid pixels are not lifted. Cam-
+eras without depth, such as the wrist camera of DROID [29],
+contribute no points but are still used as image inputs. The
+world frame is the robot base frame or the world frame of
+each benchmark.
+Workspace boundaries and voxelization. Background re-
+gions such as the floor, walls, and distant clutter are re-
+moved with a workspace box. The box is chosen per bench-
+mark to contain the reachable range of the end-effector.
+The cropped points are voxelized with a voxel size of 1 cm,
+where points sharing the voxel index ⌊p/0.01⌋are merged
+by averaging their coordinates and colors.
+Point sampling and normalization. We remove isolated
+points, which mostly come from flying pixels at depth dis-
+continuities, by discarding points with fewer than 2 neigh-
+bors within a radius of 2.5 cm. This test is skipped if it
+would leave fewer than 128 points. At most 4096 points are
+then kept by uniform random sampling. The points are then
+centered on their mean µ =
+1
+N
+PN
+i=1 pi, which defines the
+point frame
+˜p = G p,
+G =
+ I
+−µ
+0⊤
+1
+
+.
+(9)
+Colors are mapped to [−1, 1]. The same transform G is
+applied to the end-effector positions in the robot state and
+in absolute actions, while delta actions are unchanged. As
+a result, points, states, and actions share one metric coor-
+dinate frame. The camera pose with respect to this frame,
+EvG−1, is used to project points back into the images. The
+same pipeline is applied at inference. Rotations in states and
+actions are converted to the 6D representation, and state and
+action vectors are normalized to zero mean and unit vari-
+ance with per-benchmark statistics.
+A.3. Multimodal Point Encoder
+Multi-view image feature extraction and projection.
+Each view is letterboxed to the default SigLIP2 resolution of
+256 × 256 by an aspect-preserving resize and zero padding,
+normalized to [−1, 1], and encoded by the frozen SigLIP2-
+So400m/16 vision tower without its pooling head.
+This
+yields a 16 × 16 grid of 1152-dimensional patch features
+Uv
+t after the final LayerNorm of the tower. A trainable pro-
+jection maps them to the feature map
+Vv
+t = LNout
+ WV LN(Uv
+t )
+
+∈R16×16×dV ,
+(10)
+where dV = 512, and the LayerNorms and the linear layer
+WV are applied to each patch. The vision tower is shared
+by all views, and the number of views can differ across sam-
+ples and datasets.
+Visibility handling and multi-view feature aggregation.
+For a point ˜pi and a view v, projv first computes the
+camera-frame position EvG−1˜pi with depth zv
+i and its
+pixel location uv
+i using Kv. It then maps uv
+i to the letter-
+boxed image and to continuous patch-grid coordinates with
+the pixel-center convention, i.e., a letterboxed pixel coordi-
+nate c maps to (c + 0.5)/16 −0.5 along each axis. The pair
+is visible, νv
+i = 1, if and only if zv
+i > 0, uv
+i falls inside the
+image, the depth at the nearest pixel is valid, and the point
+is not occluded:
+ zv
+i −Zv
+t (⌊uv
+i ⌉)
+ ≤ϵabs + ϵrel zv
+i ,
+(11)
+where ⌊·⌉rounds to the nearest pixel, ϵabs = 2 cm, and
+ϵrel = 0.02. The nearest-pixel depth lookup avoids mixing
+foreground and background depth values at object bound-
+aries. The image feature of each point is the average of the
+bilinearly sampled features gv
+i = Bilinear(Vv
+t , projv(˜pi))
+over its visible views:
+gi =
+PV
+v=1 νv
+i gv
+i
+max
+ 1, PV
+v=1 νv
+i
+ ∈RdV .
+(12)
+This average is invariant to the camera order and sup-
+ports any number of views without view-specific parame-
+ters. Points that are not visible in any view receive gi = 0,
+which is rare because every point is reconstructed from one
+of the views.
+Image-point fusion at different PTv3 stages. The image
+features are carried as a separate per-point attribute instead
+of only being concatenated to the PTv3 input as in [23]. At
+the input resolution, they are added after the stem:
+h(0)
+i
+= Stem(˜pi, rgbi) + W0 LN
+ g(0)
+i
+
+,
+(13)
+where g(0)
+i
+= gi. At each grid pooling s ∈{1, . . . , 4},
+the image features are averaged over the set Cs(j) of points
+merged into cell j, using the same cluster assignment as
+PTv3, and added to the pooled point features before the
+transformer blocks of stage s:
+g(s)
+j
+=
+1
+|Cs(j)|
+X
+i∈Cs(j)
+g(s−1)
+i
+,
+h(s)
+j
+= Pools
+ h(s−1)
+j + Ws LN
+ g(s)
+j
+
+.
+(14)
+2
+
+
+We use average rather than max pooling for the image fea-
+tures because they describe the average appearance and se-
+mantics of a cell. Each Ws ∈Rds×dV is a bias-free linear
+layer initialized to zero, where ds is the channel width of
+stage s. Hence, the point encoder exactly reproduces the
+pretrained Utonia encoder at initialization, and image in-
+formation is introduced gradually during training. We do
+not inject image features into the decoder, which receives
+image-conditioned features through the skip connections in
+Equation (7).
+Language conditioning in PTv3. Instructions are lower-
+cased, tokenized, and padded to the 64-token context of the
+SigLIP2 text tower, following SigLIP pretraining. The text
+transformer is frozen, while its final LayerNorm and a new
+linear layer that maps 1152 to dT = 512 dimensions are
+trained. We keep the tokens up to the end-of-sequence to-
+ken together with the last context position, which SigLIP
+uses as its pooled embedding, giving the language embed-
+dings T = [w1; . . . ; wNT ] ∈RNT ×dT . Padding tokens are
+masked in all attention operations.
+The global language representation cT is obtained by
+multi-head attentive pooling with 8 heads, each with its own
+learnable query qh ∈R64:
+αh,n = softmax
+n
+q⊤
+h kh,n
+√
+64
+
+,
+cT = Wc
+h P
+n α1,nwn; . . . ; P
+n α8,nwn
+i
+,
+(15)
+where kh,n is the h-th head of Wk LN(wn), and padding
+tokens receive zero weight. Each head pools the full, un-
+projected token embeddings wn, and the linear layer Wc
+fuses the 8 concatenated head outputs into cT ∈R512. The
+vector cT modulates both pre-normalization layers, before
+self-attention and before the MLP, of all 24 encoder blocks:
+AdaLN(hi; cT ) = (1 + γ) ⊙LN(hi) + β,
+[γ; β] = Wada SiLU(cT ),
+(16)
+where LN keeps its pretrained affine parameters and Wada,
+separate for each normalization layer, is initialized to zero.
+Therefore, the pretrained PTv3 is also preserved at initial-
+ization. The same cT is shared by all points of a sample and
+by all stages.
+A.4. Spatial Anchors and 3D RoPE
+Each action token is assigned a spatial anchor xi ∈R3 in
+the point frame of Equation (9), and each point token at
+scale ℓuses its coordinate pℓ
+j.
+Spatial anchors for different action spaces. The anchor of
+the state token of each arm is its current end-effector posi-
+tion. The anchors of the action tokens depend on the action
+space.
+• Executable anchors.
+When actions are absolute end-
+effector poses, as in RLBench, the first three action di-
+mensions are the target end-effector position. This posi-
+tion directly serves as the anchor of the action token. For
+dexterous hands, the anchor is the end-effector position
+of the arm, and the hand joint targets are additional action
+dimensions.
+• Auxiliary anchors.
+When actions are relative end-
+effector motions, as in RoboCasa, the action itself spec-
+ifies no position in the scene. We therefore prepend to
+each delta action ∆at+j the absolute end-effector po-
+sition yt+j+1 of the next state, which is the position
+reached after executing the action:
+ˆat+j =
+
+yt+j+1; ∆at+j
+
+.
+(17)
+At the end of an episode, the last position is repeated.
+The prefix is predicted jointly with the delta action by the
+same flow-matching objective, serves only as the anchor,
+and is discarded at execution time.
+In both cases, the anchor of an action token is read from
+the first three dimensions of its noisy action. The anchors
+are thus computed from the current sample Aτ
+t rather than
+from ground truth, which makes them available at inference.
+During integration, they move from noise toward the pre-
+dicted trajectory as τ →1.
+Coordinate normalization. The flow-matching inputs and
+targets are normalized, whereas the anchors must be metric.
+We therefore denormalize only the positions used for 3D
+RoPE:
+xk,j = σa ⊙
+
+aτ
+t+j,k
+
+1:3 + µa,
+xk,s = σs ⊙
+
+st,k
+
+1:3 + µs,
+(18)
+where (µa, σa) and (µs, σs) are the per-benchmark statis-
+tics of the action and state positions, respectively. Auxiliary
+anchors use the state statistics. Since points, states, and ac-
+tions are expressed in the same centered frame, the offsets
+between anchors and points are physical displacements in
+meters, which are consistent across datasets.
+3D RoPE formulation and frequency parameters. With
+head dimension d = 64, we use dr = 20 rotary dimensions
+per axis, i.e., dr/2 = 10 feature pairs per axis. The remain-
+ing d −3dr = 4 dimensions are not rotated. The rotation of
+a position x = (x1, x2, x3) is block diagonal,
+R(x) =
+3
+M
+a=1
+dr/2−1
+M
+m=0
+Rm(xa) ⊕Id−3dr,
+(19)
+where Rm is the 2 × 2 rotation with frequency ωm =
+ωmaxθ−2m/dr defined in the main paper, ωmax = 50 rad/m,
+and θ = 100.
+These values give frequencies from 50
+to 0.79 rad/m, i.e., wavelengths 2π/ωm from 12.6 cm to
+7.9 m. The maximum frequency sets the finest resolved off-
+set, as a displacement of 2 cm, twice the voxel size, rotates
+3
+
+
+the fastest feature pair by one radian. The base is chosen
+such that the slowest frequency ωmin = ωmaxθ−(dr−2)/dr
+does not wrap around within the workspace.
+Its phase
+remains unambiguous for offsets up to π/ωmin ≈4 m,
+which covers workspaces of about 2 m.
+Since all ro-
+tations in Equation (19) commute and are orthogonal,
+the attention score depends only on the relative position,
+(R(xi)qi)⊤(R(pj)kj) = q⊤
+i R(pj −xi)kj.
+Application to attention. 3D RoPE is applied in two atten-
+tion layers of every action expert block.
+• Action self-attention. The queries and keys of the state
+and action tokens are both rotated by their anchors, so the
+interaction among actions and robot states, depends on
+their relative displacement. The temporal order of the ac-
+tion tokens is encoded separately by the trajectory-index
+embedding and is not used in RoPE.
+• Action-to-point cross-attention. The queries are rotated
+by the action anchors and the keys by the point coordi-
+nates pℓ(b)
+j
+of the scale read by block b. Each action token
+thus attends to points according to their offset from its in-
+tended end-effector position. The values are not rotated.
+The language and image tokens have no 3D position, so
+their cross-attention uses no positional encoding. The ro-
+tated point keys depend only on the observation and are
+computed once, whereas the query rotations are recomputed
+at every integration step from the updated anchors.
+A.5. Flow-Matching Action Expert
+Action representation. For a robot with K ≤2 arms, each
+action at+j in the chunk At contains one vector per arm,
+consisting of the end-effector position, a 6D rotation, and
+the gripper or dexterous-hand joint targets. To train dif-
+ferent embodiments with one model, action and state vec-
+tors are zero-padded to 32 and 64 dimensions, respectively.
+Padded dimensions, padded timesteps beyond the episode
+end, and padded arms are excluded from the loss and from
+attention.
+Action tokens. For each arm k, the action expert operates
+on one state token followed by H action tokens:
+zk,s = Wsst,k + earm
+k
++ cτ,
+zk,j = Waaτ
+t+j,k + etraj
+j
++ earm
+k
++ cτ,
+(20)
+where j ∈{0, . . . , H −1}, aτ
+t+j,k is the noisy action of
+arm k in Aτ
+t , etraj
+j
+is a learned trajectory-index embedding,
+and earm
+k
+is a learned arm embedding used only for biman-
+ual robots. The flow-time embedding cτ is computed by
+a Linear–SiLU–Linear MLP from sinusoidal features of τ,
+following π0 [5]. The token sequences of all arms are con-
+catenated so that the arms attend to each other.
+Blocks. Each of the 15 blocks updates the action tokens Z,
+Table 7. Training hyperparameters of Hi3R-VLA.
+Hyperparameter
+Value
+Optimizer
+AdamW, β = (0.9, 0.999)
+Learning rate
+10−4
+Weight decay
+0.05
+Learning rate schedule
+3% warmup, cosine to 10−8
+Gradient clipping
+global norm 3.0
+Global batch size
+128 (2× H100)
+Training iterations
+40k–100k
+Mixed precision
+bf16 (action expert in fp32)
+Dropout
+0.1
+Flow time distribution
+τ = 1 −u, u ∼Beta(1.5, 1)
+Points per sample
+≤4096
+Color jitter
+0.2
+while the point, image, and language features remain fixed:
+Z ←Z + SelfAttn
+ LN(Z)
+
+,
+(21)
+Z ←Z + CrossAttn
+ LN(Z), LN([T; Vt])
+
+,
+(22)
+Z ←Z + CrossAttn
+ LN(Z), LN(Mℓ(b))
+
+,
+(23)
+Z ←Z + FFN
+ (1 + γτ) ⊙LN(Z) + βτ
+
+,
+(24)
+where Mℓ(b) is the projected point representation read by
+block b.
+The FFN is modulated by the flow time with
+[γτ; βτ] = Wτcτ, where Wτ is initialized to zero. The
+language and image tokens share one cross-attention, while
+the point tokens use a separate cross-attention module. The
+self-attention and the point cross-attention use 3D RoPE
+(Section A.4). The FFN has an expansion ratio of 4, and
+dropout of 0.1 is applied in attention and FFN layers. The
+blocks attend to the point scales in contiguous groups of
+three, from M1 in blocks 1–3 to M5 in blocks 13–15. We
+do not concatenate all scales into one memory, since the
+finest scale would dominate the number of tokens. After the
+last block, the state tokens are discarded, and a linear head
+predicts the velocity of each action token. The keys and val-
+ues of the language, image, and point tokens are computed
+once per observation and reused for all integration steps.
+Flow-matching objective. The flow matching loss is com-
+puted on normalized actions and averaged over valid en-
+tries. With the predicted velocity ˆU = vθ(Aτ
+t , τ, Ot) and
+the target velocity U = At −ϵ, the loss is
+LFM = 1
+|Ω|
+X
+(j,k)∈Ω
+X
+c∈Dk
+  ˆUj,k,c −Uj,k,c
+2,
+(25)
+where Ωis the set of valid timestep-arm pairs and Dk is the
+set of valid action dimensions of arm k. The flow time is
+sampled as τ = 1 −u with u ∼Beta(1.5, 1), which places
+more samples in the noise-dominated part of the path. At
+inference, we start from A0
+t ∼N(0, I) and integrate with
+10 Euler steps, Aτ+∆
+t
+= Aτ
+t + ∆vθ(Aτ
+t , τ, Ot) with ∆=
+4
+
+
+0.1. Padded action dimensions are reset to zero after every
+step.
+A.6. Training Details
+Table 7 lists the training hyperparameters. We optimize all
+trainable parameters with AdamW using a single learning
+rate. Weight decay is not applied to biases and normaliza-
+tion parameters. The learning rate is linearly warmed up
+over the first 3% of the iterations and then follows a co-
+sine decay. We use bf16 mixed precision for the frozen
+SigLIP2 encoders and for the linear and attention layers of
+PTv3, whose sparse convolutions run in float32. The point
+projections, the action expert, and the loss are computed in
+float32, except for the attention kernels, which use bf16 in-
+puts. Models are trained with a global batch size of 128 on
+2 NVIDIA H100 GPUs for 40k to 100k iterations depend-
+ing on the benchmark, which takes less than 1 second per
+iteration. Hence, it takes around 8 hours to 1 day for each
+experiment on downstream benchmarks.
+B. DROID Pretraining
+We use real-world demonstrations from DROID [29]
+dataset to pretrain Hi3R-VLA.
+Sources and selection.
+DROID [29] is released with-
+out depth maps and with noisy camera extrinsics.
+We
+take the per-frame stereo depth, estimated with Foundation-
+Stereo [63], and the optimized extrinsics of the two exterior
+cameras from PointWorld [23], and the RGB videos, robot
+states, commanded actions and language instructions from
+RoboInter [38]. Of the 76.5k successful DROID demonstra-
+tions, 35,811 have PointWorld depth and calibration. We
+discard 573 of them whose instruction does not describe a
+task (e.g., “no action”), which leaves 35,238 demonstrations
+(Table 8). Figure 7 shows some examples in the cleaned
+dataset.
+Observations and actions. Each frame provides two exte-
+rior RGB-D views at 320×180 resolution with their intrin-
+sics and extrinsics, and a wrist RGB view without depth.
+The extrinsics map the robot base frame to each camera, so
+point clouds, states and actions share the base frame. At
+training time, we back-project the pixels of both exterior
+views whose depth lies in [0.2, 3.0] m, which gives close
+to 100k points per frame before downsampling. The state
+is the 8-D end-effector pose, i.e. position, quaternion and
+gripper opening. The action is the end-effector pose com-
+manded by the teleoperation controller. We keep the native
+15 Hz rate of DROID.
+Pretraining configuration.
+DROID pretraining follows
+the training details in Section A.6, except that we use 4
+NVIDIA H100 GPUs with a global batch size of 256 and
+train for 2 epochs (∼79k iterations).
+Table 8. Statistics of the DROID pretraining dataset.
+Demonstrations
+35,238
+Frames
+10.1M (187 hours at 15 Hz)
+Episode length
+median 14.7 s
+Distinct instructions
+25,387
+Cameras
+2 exterior RGB-D, 1 wrist RGB
+State / action
+8-D end-effector pose and gripper
+C. Robotic Manipulation Benchmarks
+Table 9 summarizes the robot embodiments, observations,
+action spaces, training data, and evaluation protocols of the
+simulation benchmarks. All benchmarks are converted to a
+common RGB-D format, from which point clouds are re-
+constructed online as described in Section A.2. Demonstra-
+tions whose replay in the simulator fails to reach the task
+success are discarded. For simplicity, the table reports the
+original number of demonstrations before filtering.
+C.1. RoboCasa24
+Benchmark and tasks. RoboCasa [47] is a large-scale sim-
+ulation framework of household kitchens built on robosuite
+and MuJoCo. We use its 24 atomic tasks, which cover pick-
+and-place between the counter, cabinets, sink, microwave,
+and stove (8 tasks), opening and closing single and double
+doors (4) and drawers (2), turning the sink faucet on or off
+and turning the spout (3), turning the stove on or off (2),
+the coffee machine (3), and the microwave buttons (2). The
+robot is a Franka Panda arm mounted on an Omron mo-
+bile base and controlled by an operational-space controller
+at 20 Hz.
+Demonstrations. We train on the original human demon-
+strations, using 50 demonstrations per task and 1,200 in to-
+tal. Since the released demonstrations contain no depth, we
+replay every demonstration in the simulator and re-render
+RGB-D observations at 256 × 256. The 73 demonstrations
+whose replay does not succeed are discarded, leaving 1,127
+demonstrations. One policy is trained on all 24 tasks.
+Observations and actions. The policy observes the left
+and right agent-view cameras and the eye-in-hand camera.
+The original actions are delta commands of the end-effector
+pose, together with gripper, mobile-base, torso, and mode
+commands, expressed in the frame of the mobile base. We
+convert each delta command to an absolute end-effector
+goal by applying the scaled translation and rotation to the
+end-effector pose before the action, and keep the other com-
+mands unchanged. At evaluation time, the predicted abso-
+lute goals are converted back to delta commands relative to
+the current end-effector pose, and are executed by the orig-
+inal controller.
+Evaluation. Following Cosmos Policy [33], each task is
+evaluated on 50 episodes, where every block of 10 episodes
+5
+
+
+Exterior camera 1
+Exterior camera 2
+Fused point cloud
+RGB
+Depth
+RGB
+Depth
+novel view, robot base frame
+“Move the mug to the right”
+“Put the brown packaging into the sink”
+“Open the bottom drawer of the beige file cabinet”
+Depth
+0.2 m
+≥2 m
+no depth
+end-effector trajectory (light: start, dark: end)
+current position
+Figure 7. Samples of the DROID pretraining data. For each demonstration, we show the RGB image and depth map of the two exterior
+cameras, and the point cloud obtained by back-projecting both views into the robot base frame, rendered from a novel viewpoint. The
+orange curve is the end-effector trajectory of the episode, from light (start) to dark (end), and the dot is the current end-effector position.
+Table 9. Per-benchmark configurations. All cameras provide RGB-D: Images are 256 × 256, except for RoboTwin 2.0 (240 × 320). We
+convert the actions of each benchmark to absolute targets in the world frame, with the end-effector (EEF) pose given as position and 6D
+rotation, so that the EEF positions serve as executable spatial anchors except on RoboTwin 2.0.
+Benchmark
+Embodiment
+Cameras
+Action per arm
+Training data
+Evaluation
+RLBench [26]
+Franka Panda, parallel
+gripper
+front
+next keyframe EEF
+pose, gripper
+10 tasks × 100
+demos
+3 seeds × 100
+episodes per task
+RoboCasa [47]
+Franka Panda on an
+Omron mobile base
+left / right
+agentview, wrist
+EEF pose, gripper,
+mobile base
+24 tasks × 50
+human demos
+3 seeds × 50 episodes
+per task
+RoboTwin 2.0 [10]
+Aloha-AgileX, two
+6-DoF arms with
+grippers
+head, left / right
+wrist
+EEF pose (auxiliary
+anchor), gripper,
+arm joints
+50 tasks × 50 clean
+demos
+100 episodes per task,
+clean and randomized
+DexJoCo [59]
+Franka Panda, 16-DoF
+Allegro hand
+front, right
+ego-view, wrist
+EEF pose, 16-DoF
+hand joints
+6 tasks × 100
+demos
+3 seeds × 50 episodes
+per task
+two Franka Panda arms,
+two Allegro hands
+ego-view, left /
+right wrist
+EEF pose, 16-DoF
+hand joints
+4 bimanual tasks ×
+100 demos
+3 seeds × 50 episodes
+per task
+DexSuite [22]
+Franka Panda, Allegro
+hand, UMI or Robotiq
+gripper
+front, wrist
+EEF pose, hand
+joints or gripper
+14
+task-embodiment
+pairs × 50 demos
+3 seeds × 50 episodes
+per task
+uses one of five kitchen layout and style combinations, and
+we report the mean success rate over 3 random seeds. The
+episode horizon follows the task, ranging from 300 to 1,000
+control steps, and an episode succeeds once the task success
+condition is met. The policy predicts chunks of 32 actions
+and executes the first 16 before replanning.
+C.2. RLBench
+Tasks and demonstrations. RLBench [26] is a simulation
+benchmark built on CoppeliaSim, in which a Franka Panda
+arm with a parallel gripper performs tabletop tasks. We fol-
+low the 10-task setting [9, 46], which contains close box,
+close laptop lid, toilet seat down, sweep to dustpan, close
+6
+
+
+fridge, phone on base, take umbrella out of umbrella stand,
+take frame off hanger, stack wine, and water plants. Each
+task is trained with 100 demonstrations, and one policy is
+trained on all tasks.
+Keyframes. As is common for RLBench, the policy pre-
+dicts keyframe actions instead of dense trajectories.
+A
+frame is a keyframe if the gripper opens or closes, if the
+joint velocities are close to zero, or if it is the last frame of
+the demonstration. Each training sample pairs the observa-
+tion at a keyframe with the end-effector pose and gripper
+state of the next keyframes.
+Observations and actions. We only use the front RGB-D
+camera. At evaluation time, each predicted pose is reached
+with a motion planner, followed by the gripper action.
+Evaluation. Each task is evaluated on 100 episodes for 3
+times with newly sampled scene initializations. An episode
+succeeds if the task is completed within 25 keyframe steps,
+and failures of the motion planner are counted as failed
+episodes. We use a chunk size of H = 2 and replan at
+each keyframe.
+C.3. DexJoCo
+Benchmark and embodiment.
+DexJoCo [59] is a Mu-
+JoCo benchmark of task-oriented dexterous manipulation,
+in which each arm is a Franka Panda equipped with a 16-
+DoF Allegro hand. We use 6 single-arm tasks, namely click
+mouse, fold glasses, hammer nail, pick bucket, pinch tongs,
+and water plant, and 4 bimanual tasks, namely assembly,
+Hanoi, microwave cooking, and photograph.
+We follow
+PointWAM [49] and exclude the bimanual unlock-iPad task,
+since 42 of its 100 demonstrations fail to replay.
+Demonstrations.
+Each task provides 100 teleoperated
+demonstrations. We replay each demonstration in the simu-
+lator to render RGB-D observations at 256 × 256, and dis-
+card the demonstrations whose replay fails. One policy is
+trained on all single-arm and bimanual tasks, and the two
+arms of bimanual tasks are distinguished by the learned arm
+embedding (Section A.5).
+Observations and actions. Single-arm tasks use the front,
+right ego-view, and wrist cameras, and bimanual tasks use
+the ego-view and the two wrist cameras.
+The action of
+each arm consists of the absolute end-effector pose and the
+16 absolute joint targets of the hand, which are native to
+DexJoCo, and is expressed in the frame of the robot base.
+The predicted actions are directly executed by the simulator
+controllers.
+Evaluation. Each task is evaluated on 50 episodes with ran-
+domized object placements, and we report the mean success
+rate over 3 random seeds. The episode horizon ranges from
+1,000 to 1,500 steps depending on the task. The policy pre-
+dicts chunks of 32 actions and executes the first 16 before
+replanning.
+C.4. RoboTwin 2.0
+Benchmark and tasks. RoboTwin 2.0 [10] is a SAPIEN
+benchmark of 50 bimanual tabletop tasks performed by the
+Aloha-AgileX robot, which has two 6-DoF arms with par-
+allel grippers.
+Demonstrations. We train one policy on the official clean
+demonstrations, with 50 demonstrations per task and 2,500
+in total. Since the released data contain no depth, we rebuild
+each scene from its seed, replay the recorded joint and grip-
+per targets, and render RGB-D observations at the native
+resolution of 240 × 320. The 92 demonstrations whose re-
+play does not succeed are discarded, leaving 2,408 demon-
+strations.
+Observations and actions. The policy observes the static
+head camera and the two wrist cameras. The action of each
+arm contains the absolute end-effector pose as the auxil-
+iary anchor, the gripper opening, and the 6 joint targets of
+the next frame, expressed in the simulator world frame. At
+evaluation time, the predicted joint and gripper targets are
+executed by the joint-position controller of the benchmark.
+Evaluation. Following the official protocol, each task is
+evaluated on 100 episodes in two settings. The clean set-
+ting matches the training distribution with seen instructions,
+while the randomized setting adds cluttered distractors,
+random background textures, lighting changes, and table-
+height variations, together with unseen instructions. Eval-
+uation seeds for which the expert planner fails are skipped,
+and the episode horizon follows the task-specific step limit
+of the benchmark. The policy predicts chunks of 32 actions
+and executes the first 16 before replanning.
+D. Ablation Studies on DexJoCo
+In this section, we extend the ablation studies on Robo-
+Casa24 in Section 4 to DexJoCo.
+Unlike RoboCasa24,
+which focuses on single-arm manipulation with a paral-
+lel gripper, DexJoCo includes both single-arm and biman-
+ual dexterous manipulation with Allegro hands. However,
+DexJoCo exhibits less variation in evaluation, as the scene
+layouts and object instances remain fixed across episodes.
+D.1. How to Ground Actions in 3D Geometry?
+To isolate the contribution of 3D geometry, we remove the
+image encoder and condition the action expert solely on
+point cloud and language features in this subsection.
+Spatial anchors. We compare three action representations:
+no anchor, auxiliary anchor, and executable anchor. With-
+out an anchor, the action expert predicts delta end-effector
+(EEF) poses and hand joint commands without action-side
+3D positional encoding. The auxiliary anchor additionally
+introduces an absolute EEF pose as a prefix to the action
+sequence for spatial encoding, while retaining delta EEF
+pose and hand joints for execution. The executable anchor
+7
+
+
+No
+anchor
+Auxiliary
+anchor
+Executable
+anchor
+60
+63
+66
+69
+72
+Success rate (%)
+62.9±2.2
+67.7±2.4
+67.6±0.9
+(a) Spatial anchor.
+No
+pos. enc.
+Fourier
+pos. enc.
+3D RoPE
+(insensitive)
+3D RoPE
+(sensitive)
+65.2±2.1
+64.1±1.6
+64.4±0.7
+67.6±0.9
+(b) 3D position encoding.
+Coarsest
+Finest
+Coarse-to-Fine
+64.5±1.7
+65.2±2.4
+67.6±0.9
+(c) Point features.
+Figure 8. Ablation of the geometry-aware action expert on DexJoCo. Results are reported as mean success rates over three seeds.
+directly predicts the absolute EEF pose as part of the exe-
+cutable action, alongside hand joint commands.
+As shown in Figure 8a, both spatial anchors improve suc-
+cess rates by more than 3 points over the no-anchor base-
+line. The auxiliary and executable anchors achieve com-
+parable averaged performance, although the executable an-
+chor exhibits lower variance. This may be because dexter-
+ous manipulation relies more heavily on hand joint control,
+reducing the differences between the two anchor represen-
+tations. Nevertheless, both variants demonstrate the benefits
+of explicitly grounding actions in 3D geometry.
+3D positional encoding. We investigate how different posi-
+tional encoding strategies affect spatial interactions between
+action queries and scene points, comparing no positional
+encoding, Fourier features, 3D RoPE (insensitive), and 3D
+RoPE (sensitive). As shown in Figure 8b, 3D RoPE out-
+performs both Fourier features and the no-encoding base-
+line. The sensitive variant performs better than the insen-
+sitive variant, highlighting the importance of selecting ap-
+propriate RoPE frequencies to capture fine-grained spatial
+relationships.
+Multi-scale point features. We compare conditioning the
+action expert on a single feature scale with a coarse-to-fine
+strategy that progressively incorporates finer-scale features
+across decoder blocks. As shown in Figure 8c, fine-scale
+features outperform coarse-scale features, while coarse-to-
+fine conditioning achieves the best performance, confirm-
+ing the benefits of progressively refining spatial information
+during action generation.
+All these ablations reveal trends consistent with Robo-
+Casa24, demonstrating that our geometry-aware action ex-
+pert generalizes across substantially different robot embod-
+iments and manipulation tasks.
+D.2. How to Integrate Vision, Language and 3D?
+We further investigate how to integrate visual and language
+features into the 3D point encoder and action expert.
+Point-text fusion.
+In Table 10 (upper block), we com-
+pare three strategies for incorporating language into point
+Point-text
+Point-image
+Action-image
+SR (%)
+fusion
+fusion
+condition
+×
+×
+×
+68.2±4.2
+Cross-attn
+×
+×
+68.3±2.7
+AdaLN
+×
+×
+67.6±0.9
+AdaLN
+Input
+×
+68.4±1.9
+All stages
+×
+69.8±0.6
+×
+✓
+72.1±1.6
+All stages
+✓
+75.1±2.5
+Table 10. Ablation of multimodal fusion in point encoder and con-
+ditioning in action expert on DexJoCo.
+representations: no fusion, token-level cross-attention, and
+pooled text conditioning via AdaLN. Unlike RoboCasa24,
+DexJoCo contains only 10 tasks with distinct objects across
+tasks, making language conditioning less critical for distin-
+guishing task-relevant objects. Hence, the point-text fusion
+has a negligible effect on performance.
+Image-point fusion. We examine whether and where to
+incorporate spatially aligned image features into the point
+encoder. As shown in Table 10, multi-stage fusion outper-
+forms both input-only fusion and no fusion, consistent with
+the results on RoboCasa24. This supports the benefits of
+integrating visual appearance with explicit 3D geometry.
+Action-level image conditioning. We further evaluate di-
+rect image conditioning in the action expert in Table 10.
+Unlike RoboCasa24, direct image conditioning provides
+larger gains on DexJoCo, while remaining complementary
+to image-point fusion.
+E. Ablation: How Does Pretraining Help?
+We study how pretraining affects policy performance and
+learning efficiency. Unless otherwise specified, all follow-
+ing ablations are conducted on RoboCasa24.
+Pretraining strategies. We compare training from scratch,
+8
+
+
+From scratch
+PTv3 SSL
+pretrain
+DROID
+pretrain
+70
+72
+74
+76
+78
+80
+Success rate (%)
+71.9±0.1
+72.3±0.6
+78.8±0.8
+(a) Pretraining effect.
+0
+20k
+40k
+60k
+80k
+100k
+120k
+Training iterations
+0.1
+1
+10
+Training loss
+From scratch
+PTv3 SSL pretrain
+DROID pretrain
+(b) Training loss.
+5
+10
+25
+50
+# Training demonstrations
+30
+40
+50
+60
+70
+80
+Success rate (%)
+35.7±0.8
+50.8±0.7
+61.2±0.2
+72.3±0.6
+54.3±1.3
+65.8±1.4
+75.1±1.4
+78.8±0.8
+w/o pretraining
+w/ pretraining
+(c) Data efficiency.
+Figure 9. Effect of pretraining for Hi3R-VLA on RoboCasa24. (a) Mean success rate of Hi3R-VLA without pretraining, with only
+pretrained point encoder, and pretrained on DROID dataset. (b) Training loss against iterations; each dot marks the end of a run. (c)
+Performance of using different demonstrations w/ and w/o pretraining on DROID.
+Table 11. Effect of DROID pretraining across robotic manipula-
+tion benchmarks. RoboTwin2 results are reported as clean→clean
+/ clean→randomized, where the latter evaluates generalization to
+unseen scenes. Gains are measured in percentage points (pp).
+Benchmark
+Pretrain
+SR (%)
+Gain (pp)
+RoboCasa24
+×
+72.3±0.6
+–
+✓
+78.8±0.8
++6.5
+RoboTwin2
+×
+86.2 / 33.4
+–
+✓
+90.1 / 50.5
++3.9 / +17.1
+DexJoCo
+×
+75.1±2.5
+–
+✓
+77.3±1.4
++2.2
+initializing the point encoder with self-supervised PTv3
+pretraining [73], and further pretraining the policy on real-
+robot dataset DROID [29]. Given their different optimiza-
+tion speeds, we use different training budgets: 50, 25, 12
+epochs, corresponding to approximately 120k, 60k, and 30k
+iterations, respectively. We report the final performance of
+each model and compare their training dynamics in Fig-
+ure 9a and 9b.
+As shown in Figure 9b, the pretrained
+point encoder achieves faster optimization than training
+from scratch. However, the improvement in success rate is
+modest, from 71.9% to 72.3% (Figure 9a). This suggests
+that generic geometric pretraining alone provides limited
+benefits for downstream action prediction. DROID pretrain-
+ing substantially improves the success rate to 78.8%, out-
+performing PTv3 self-supervised pretraining by 6.5 points.
+It also achieves this improvement with substantially fewer
+fine-tuning iterations, indicating both faster adaptation and
+better downstream performance.
+Effect of DROID pretraining across benchmarks.
+As
+shown in Table 11, DROID pretraining consistently im-
+proves performance across all three benchmarks.
+The
+gains on standard evaluation settings are largest on Robo-
+Casa24, followed by RoboTwin2 (clean) and DexJoCo, po-
+tentially reflecting differences in embodiment similarity be-
+tween the pretraining and downstream datasets.
+Robo-
+Casa24 shares the same robot embodiment as DROID,
+while RoboTwin2 uses different robotic arms but is still
+gripper-based manipulation, and DexJoCo employs dexter-
+ous robotic hands. Moreover, the gains are much more sig-
+nificant on RoboTwin2 under randomized conditions, with
+an improvement of 17.1 points. This suggests that pretrain-
+ing on diverse real-world robot data is especially benefi-
+cial for generalization to unseen scenarios, while providing
+more moderate gains in clean environments where training
+and evaluation distributions are more closely aligned.
+Data efficiency after pretraining. We evaluate the effect
+of DROID pretraining on RoboCasa24 using 5, 10, 25, and
+50 demonstrations per task. Pretraining consistently im-
+proves success rates, with larger gains when downstream
+data are scarce: 18.6 points with 5 demonstrations, com-
+pared with 6.5 points with 50 demonstrations.
+In addi-
+tion, the pretrained model achieves 54.3% success with only
+5 demonstrations per task, exceeding the 50.8% achieved
+without pretraining using twice as many demonstrations.
+These results show that DROID pretraining reduces the
+amount of task-specific demonstration data needed for ef-
+fective adaptation.
+F. Additional Quantitative Results
+F.1. Per-Task Results on RoboCasa24
+Table 12 reports per-task results on the 24 RoboCasa
+kitchen tasks. Hi3R-VLA achieves the highest average suc-
+cess rate. The gains are most pronounced on tasks that re-
+quire precise object manipulation such as door/drawer and
+coffee categories. However, there is still room for improve-
+ment, especially on pick-and-place tasks. These tasks in-
+volve a large variety of object instances and categories. We
+expect larger-scale pretraining to benefit such cases.
+F.2. Per-Task Results on RLBench
+Table 13 compares Hi3R-VLA with state-of-the-art 2D- and
+3D-based policies on each RLBench 10 tasks. The largest
+gains come from tasks that require precise 3D placement or
+contact-rich motion such as water plants and wine at rack.
+Its main weakness is the frame off hanger task, where the
+9
+
+
+Table 12. Per-task success rates (%) on RoboCasa (24 kitchen
+tasks, 50 demonstrations per task). Hi3R-VLA reports mean and
+standard deviation over 3 seeds with 50 episodes each. Baseline
+numbers are taken from [17]. Best results are in bold.
+Task
+Cosmos-
+Policy[33]
+SA-WAM
+[17]
+Hi3R-VLA
+(Ours)
+Pick-and-place (8)
+PnPCounterToCab
+55.3
+68.0
+64.0±10.0
+PnPCabToCounter
+30.0
+50.0
+66.0±6.9
+PnPCounterToSink
+58.3
+79.0
+74.0±12.0
+PnPSinkToCounter
+75.3
+85.3
+79.3±2.3
+PnPCounterToMicrowave
+35.3
+44.0
+38.0±7.2
+PnPMicrowaveToCounter
+31.3
+56.0
+54.0±2.0
+PnPCounterToStove
+61.3
+84.7
+82.0±2.0
+PnPStoveToCounter
+67.3
+81.0
+76.7±3.1
+Doors / drawers (6)
+OpenSingleDoor
+82.7
+74.7
+94.7±1.1
+CloseSingleDoor
+95.3
+97.0
+100.0±0.0
+OpenDoubleDoor
+91.3
+99.3
+100.0±0.0
+CloseDoubleDoor
+88.0
+94.0
+97.3±1.1
+OpenDrawer
+90.7
+90.7
+88.0±5.3
+CloseDrawer
+98.7
+99.3
+99.3±1.1
+Turn / toggle (7)
+TurnOnStove
+54.3
+62.0
+74.7±4.2
+TurnOffStove
+20.7
+28.7
+24.0±2.0
+TurnOnSinkFaucet
+62.7
+87.0
+88.7±3.1
+TurnOffSinkFaucet
+76.0
+95.3
+89.3±6.4
+TurnSinkSpout
+76.0
+77.3
+80.0±4.0
+TurnOnMicrowave
+75.3
+92.0
+96.0±3.5
+TurnOffMicrowave
+99.3
+100.0
+99.3±1.1
+Coffee (3)
+CoffeeSetupMug
+34.7
+30.0
+54.7±4.6
+CoffeeServeMug
+52.7
+65.3
+76.7±3.1
+CoffeePressButton
+97.3
+98.7
+95.3±5.0
+Category averages
+Pick-and-place (8)
+51.8
+68.5
+66.8±2.4
+Doors / drawers (6)
+91.1
+92.5
+96.6±0.9
+Turn / toggle (7)
+66.3
+77.5
+78.9±1.4
+Coffee (3)
+61.6
+64.7
+75.6±2.5
+Avg (24)
+67.1
+76.6
+78.8±0.8
+hanging frame is easily movable upon contact, making ma-
+nipulation particularly challenging.
+F.3. Per-Task Results on DexJoCo
+As shown in Table 14, Hi3R-VLA achieves the best aver-
+age success rate of 77.3%, outperforming the state-of-the-
+art method PointWAM by 8.3 points with fewer parameters.
+The improvement, however, is not uniform across embodi-
+ments: on single-arm tasks, where strong baselines already
+approach saturation, Hi3R-VLA gains a modest 4 points
+on average, whereas on bimanual tasks the gap widens to
+around 15 points. The largest gains appear on tasks that
+demand precise contact and tight coordination, such as as-
+sembly, hanoi, photograph and pinch tongs, suggesting that
+Hi3R-VLA is particularly beneficial when fine-grained spa-
+tial reasoning is required.
+F.4. Per-Task Results on RoboTwin2
+Table 15 breaks down the results over the 50 RoboTwin2
+tasks.
+In the clean→clean setting, Hi3R-VLA achieves
+the best or tied-best success rate on 42 of 50 tasks.
+The largest gains appear on tasks that demand pre-
+cise spatial reasoning about object pose and placement,
+such as move stapler pad (+42 over the best baseline),
+place fan (+30) and blocks ranking size (+29), suggesting
+that explicit 3D representations help resolve fine-grained
+geometric relations that are ambiguous from 2D fea-
+tures alone. Under clean→randomized evaluation, Hi3R-
+VLA still obtains the highest average and its advantage
+is most pronounced on placement and stacking tasks,
+e.g., stack blocks two (+45), place object stand (+39) and
+blocks ranking rgb (+26), where geometric cues remain in-
+formative despite changes in background, lighting and clut-
+ter. However, the gain is less uniform than in the clean
+setting: Hi3R-VLA is best on 23 tasks and falls behind
+on several contact-rich or articulated-object tasks such as
+lift pot and open microwave.
+Since all models are fine-
+tuned only on clean demonstrations, this indicates that out-
+of-distribution distractors and visual shifts remain chal-
+lenging, and we expect training with randomized data or
+stronger pretraining to further close this gap.
+G. Real-World Experiments
+6-DoF UR5 arm
++ WSG50 gripper
+RGB camera
+Orbbec Femto Mega
+Figure 10. UR5 arm with a WSG50 gripper, observed by a fixed
+Orbbec Femto Mega RGB-D camera, with the task objects and
+distractors.
+10
+
+
+Table 13. Per-task performance on the RLBench-10Task benchmark. Size denotes the trainable parameters.
+Model
+Size
+Close
+box
+Close
+laptop lid
+Toilet
+seat down
+Sweep
+to dustpan
+Close
+fridge
+Phone
+on base
+Umbrella
+out
+Frame
+off hanger
+Wine at
+rack
+Water
+plants
+Mean
+2D-based policies
+ManipLLM [43]
+7B
+50
+80
+40
+20
+80
+35
+10
+25
+15
+20
+38
+OpenVLA [31]
+7B
+65
+40
+75
+60
+80
+20
+35
+15
+10
+10
+41
+π0 [5]
+3.1B
+90
+60
+100
+30
+90
+25
+35
+75
+5
+45
+55
+CogACT [42]
+7B
+80
+85
+90
+65
+90
+50
+60
+35
+25
+25
+60
+HybridVLA [46]
+7B
+85
+95
+100
+90
+100
+50
+50
+70
+50
+50
+74
+EO1 [52]
+3B
+97
+99
+100
+95
+83
+46
+76
+40
+61
+35
+73.2
+π0.5 [24]
+3.2B
+98.3±0.6
+96.0±2.0
+98.0±2.0
+85.3±0.6
+91.7±2.1
+67.0±2.0
+83.3±0.6
+49.7±5.5
+69.7±4.6
+35.3±7.1
+77.4±0.4
+3D-based policies
+ACT3D [15]
+1.7M
+94
+62
+99
+80
+87
+53
+97
+31
+31
+11
+64.5
+PointACT [9]
+0.3B
+91
+99
+96
+59
+81
+99
+99
+69
+90
+40
+82.3
+Hi3R-VLA (Ours)
+0.25B
+96.0±2.0
+98.7±0.6
+98.3±1.5
+86.7±6.1
+98.0±1.0
+96.0±1.0
+98.7±0.6
+65.0±4.6
+95.0±2.6
+74.0±3.0
+90.6±0.3
+Table 14. Performance on the DexJoCo benchmark for dexterous manipulation. A single policy is trained across all ten tasks. We report
+mean success rates (%) with standard deviations over three seeds. /B denotes bimanual tasks. All baseline results are taken from [49].
+Task
+2D-based policies
+3D-based policies
+DP-T [12]
+π0.5 [24]
+GR00T N1.6 [4]
+FastWAM [71]
+PointACT [9]
+PointWAM [49]
+Hi3R-VLA (Ours)
+hammer nail
+58.7±5.0
+86.7±3.1
+82.0±6.0
+43.3±1.9
+16.0±8.0
+85.3±2.3
+92.7±3.1
+click mouse
+38.7±3.1
+80.7±3.1
+67.3±7.6
+77.3±3.4
+37.3±3.1
+97.3±2.3
+92.7±4.2
+pick bucket
+55.3±7.6
+83.3±8.1
+88.7±3.1
+81.3±6.6
+74.7±7.6
+98.0±2.0
+94.7±3.1
+pinch tongs
+6.0±5.3
+45.3±6.1
+28.0±4.0
+47.3±6.6
+26.7±4.2
+52.0±5.3
+72.7±12.1
+fold glasses
+11.3±5.0
+42.0±6.0
+52.0±8.0
+62.7±3.8
+20.7±7.6
+74.0±5.3
+76.0±9.2
+water plant
+60.0±6.9
+84.0±4.0
+82.7±3.1
+42.7±0.9
+83.3±6.4
+86.7±3.1
+88.7±1.1
+hanoi /B
+8.0±2.0
+6.0±0.0
+34.0±5.3
+42.0±5.9
+10.0±2.0
+50.0±9.2
+65.3±6.4
+assembly /B
+1.3±2.3
+3.3±2.3
+6.0±4.0
+2.7±1.9
+2.0±0.0
+9.3±4.6
+34.7±2.3
+microwave /B
+42.7±6.4
+39.3±13.0
+78.7±3.1
+88.7±4.1
+54.0±8.7
+84.0±4.0
+83.3±3.1
+photograph /B
+28.0±6.0
+29.3±1.2
+53.3±8.1
+40.7±6.2
+12.0±3.5
+53.3±1.2
+72.7±5.8
+avg.
+31.0±1.7
+50.0±1.9
+57.3±1.8
+52.9±1.5
+33.7±1.8
+69.0±2.0
+77.3±1.4
+G.1. Robot Setup
+We use a 6-DoF UR5 robotic arm with a Weiss WSG50
+gripper and UMI-style parallel jaws. The action loop runs
+at 15 Hz.
+The robot operates over a 1 m×1 m tabletop
+workspace observed by a fixed Orbbec Femto Mega RGB-D
+camera, see Figure 10. Observations include a single-view
+RGB-D image and robot proprioceptive state (6-DoF robot
+joint angles and 1D gripper openness). Actions are repre-
+sented in the same 7D joint space.
+G.2. Data Collection and Training
+Data Collection.
+We design 5 tasks as shown in Sec-
+tion G.3.
+For each task, a human teleoperator collects
+50 expert demonstrations using a Meta Quest mask along
+with its hand controller. Training demonstrations are post-
+processed to remove idle frames.
+Training. We use forward kinematics of the UR5 arm to
+compute the end-effector pose in the robot base frame and
+transform the observed point cloud into the same coordi-
+nate frame. The computed end-effector pose serves as the
+auxiliary spatial anchor in Hi3R-VLA. We fine-tune Hi3R-
+VLA from the DROID-pretrained checkpoint on all col-
+lected demonstrations for 10 epochs (approximately 20k it-
+erations), with a batch size of 128. All other training con-
+figurations follow Table 7.
+G.3. Evaluation Protocol and Results
+We manually measure the full task success rate and partial
+credit for each task. Partial credit is awarded for each com-
+pleted subtask, such as a successful grasp or placement. An
+episode counts as a full success only when every subtask is
+completed in the correct order.
+• place toasts in toaster:
+place the two toasts in the
+toaster, then turn on the toaster. Partial credit: 0.2 for
+grasp; 0.2 for placement; 0.2 for turning on the toaster.
+• stack 3 cubes: stack the pink cube on the yellow cube,
+then the green cube on the pink cube. Partial credit: 0.25
+per grasp and 0.25 per placement for each of the two
+cubes; −0.25 for wrong order.
+• hang green mug onto hanger: pick the green mug and
+hang it on the wooden hanger.
+Partial credit: 0.5 for
+grasp; 0.5 for placement.
+11
+
+
+Table 15. Per-task success rates (%) on RoboTwin2 (100 trials per task). All models are trained on 50 clean demonstrations per task.
+Baseline results are from the RoboTwin2 leaderboard. Best result per task and setting in bold.
+Task
+clean→clean
+clean→randomized
+Task
+clean→clean
+clean→randomized
+π0.5
+[24]
+4D-WAM
+[67]
+Hi3R
+(Ours)
+π0.5
+[24]
+4D-WAM
+[67]
+Hi3R
+(Ours)
+π0.5
+[24]
+4D-WAM
+[67]
+Hi3R
+(Ours)
+π0.5
+[24]
+4D-WAM
+[67]
+Hi3R
+(Ours)
+adjust bottle
+99
+80
+98
+77
+36
+34
+place can basket
+56
+83
+84
+10
+51
+55
+beat block hammer
+93
+92
+90
+23
+28
+41
+place cans plasticbox
+31
+94
+97
+73
+48
+83
+blocks ranking rgb
+72
+88
+99
+44
+10
+70
+place container plate
+92
+93
+99
+72
+82
+92
+blocks ranking size
+45
+54
+83
+21
+8
+49
+place dual shoes
+70
+66
+84
+45
+19
+43
+click alarmclock
+65
+100
+100
+50
+70
+85
+place empty cup
+96
+99
+100
+80
+70
+83
+click bell
+31
+98
+100
+35
+77
+92
+place fan
+66
+48
+96
+26
+17
+34
+dump bin bigbin
+92
+86
+95
+84
+57
+51
+place mouse pad
+34
+54
+73
+31
+9
+23
+grab roller
+99
+100
+100
+97
+68
+77
+place object basket
+70
+75
+91
+29
+40
+57
+handover block
+30
+79
+98
+12
+25
+20
+place object scale
+78
+79
+97
+38
+24
+44
+handover mic
+98
+85
+98
+6
+13
+12
+place object stand
+85
+87
+98
+47
+42
+86
+hanging mug
+17
+70
+49
+14
+10
+19
+place phone stand
+65
+84
+92
+37
+21
+56
+lift pot
+98
+88
+98
+35
+9
+2
+place shoe
+82
+83
+98
+50
+52
+78
+move can pot
+60
+94
+92
+10
+17
+37
+press stapler
+79
+76
+90
+63
+61
+43
+move pillbottle pad
+46
+89
+100
+32
+22
+30
+put bottles dustbin
+78
+68
+88
+50
+19
+19
+move playingcard away
+84
+82
+98
+65
+35
+43
+put object cabinet
+39
+69
+45
+22
+47
+35
+move stapler pad
+20
+43
+85
+18
+12
+12
+rotate qrcode
+90
+79
+95
+21
+67
+37
+open laptop
+93
+85
+95
+68
+82
+53
+scan object
+49
+73
+80
+40
+53
+21
+open microwave
+86
+68
+89
+59
+12
+27
+shake bottle
+100
+98
+100
+100
+72
+82
+pick diverse bottles
+66
+77
+89
+42
+44
+50
+shake bottle horizontally
+99
+98
+100
+100
+70
+87
+pick dual bottles
+72
+92
+94
+57
+67
+49
+stack blocks three
+77
+95
+82
+25
+82
+31
+place a2b left
+71
+71
+81
+49
+19
+35
+stack blocks two
+91
+100
+100
+43
+34
+88
+place a2b right
+68
+62
+69
+39
+42
+37
+stack bowls three
+81
+82
+93
+52
+27
+60
+place bread basket
+63
+87
+92
+60
+77
+76
+stack bowls two
+94
+94
+99
+70
+81
+80
+place bread skillet
+76
+82
+91
+47
+69
+47
+stamp seal
+53
+74
+71
+21
+10
+30
+place burger fries
+82
+86
+98
+86
+72
+98
+turn switch
+52
+86
+71
+25
+11
+30
+Average
+70.7
+81.5
+90.1
+46.0
+41.8
+50.5
+• sweep paper into dustpan: grasp the brush and sweep
+the paper crumples into the dustpan. Partial credit: 0.5
+for grasp; 0.25 once one crumple is inside the dustpan;
+0.25 once all crumples are inside.
+• prepare coffee: pick the cup and place it on the coffee
+tray, then pick the coffee pod and place it in the coffee
+machine, finally close the coffee machine. Partial credit:
+0.2 per grasp; 0.2 per placement; 0.1 for precisely align-
+ing the pod with the hole; 0.1 for closing the machine.
+H. Qualitative Results
+We present successful and failed real-robot rollouts of
+Hi3R-VLA on the UR5 in Figure 11 and Figure 12, respec-
+tively. More examples are in the supplementary video.
+We observe three main challenges underlying the fail-
+ures: (1) Noisy and incomplete point clouds. Depth noise
+and partial observations can lead to inaccurate scene geome-
+try, as illustrated by the noisy mug point cloud in Figure 13.
+More reliable depth sensing and multi-view observations
+could mitigate this issue. (2) Limited failure recovery. For
+the sweeping task, the demonstrations contain only single-
+attempt executions.
+As a result, when the robot fails to
+sweep all paper crumples in one attempt, it struggles to per-
+form corrective actions. Training on recovery demonstra-
+tions or using reinforcement learning could improve robust-
+ness to such failures. (3) Object orientation understanding.
+While Hi3R-VLA improves spatial precision, it does not
+explicitly model object orientation, which can lead to incor-
+rect grasping or manipulation poses as shown in the prepare
+coffee failed example. Training on more diverse data with
+greater variation in object poses could improve orientation
+understanding and manipulation robustness.
+I. Limitations and Future Work
+Our approach relies on calibrated RGB-D cameras, and
+thus noisy depth estimates and calibration may affect per-
+formance.
+Due to limited computational resources, we
+only pretrain on a subset of DROID and adopt a relatively
+lightweight training setup.
+Scaling up pretraining data,
+training configuration, and model size could further im-
+prove performance, given the promising results achieved
+with our current setup.
+Beyond scaling, future directions include integrating our
+policy into agentic systems for long-horizon manipulation,
+improving control through reinforcement learning, extend-
+ing the shared 3D representation to additional modalities
+such as tactile sensing, and incorporating world modeling
+to predict future scene dynamics.
+12
+
+
+t = 0.0s
+t = 6.6s
+t = 13.2s
+t = 19.7s
+t = 26.3s
+t = 0.0s
+t = 5.5s
+t = 10.9s
+t = 16.3s
+t = 21.8s
+t = 0.0s
+t = 15.6s
+t = 31.2s
+t = 46.7s
+t = 62.3s
+t = 0.0s
+t = 11.0s
+t = 22.0s
+t = 33.0s
+t = 44.0s
+t = 0.0s
+t = 13.9s
+t = 27.7s
+t = 41.5s
+t = 55.4s
+start
+Hi3R rollout progress
+end
+hang green mug
+“Pick the green mug and hang it on the wooden hanger”
+sweep paper into dustpan
+“Sweep paper crumples into dustpan”
+stack 3 cubes
+“Stack the pink cube on the yellow cube, then stack the green cube on the pink cube”
+place toasts in toaster
+“Place the two toasts in the toaster, then turn on the toaster”
+prepare coffee
+“Pick the cup and place it on the coffee tray, then pick the coffee pod and place it in the coffee machine,
+finally close the coffee machine”
+shorter-horizon
+longer-horizon
+Figure 11. Qualitative success examples. Successful rollouts of Hi3R on our UR5 robotic arm across the five manipulation tasks.
+13
+
+
+t = 0.0s
+t = 12.0s
+t = 18.0s
+t = 24.4s
+t = 26.0s
+t = 0.0s
+t = 10.2s
+t = 15.3s
+t = 20.4s
+t = 45.8s
+t = 0.0s
+t = 15.5s
+t = 30.9s
+t = 46.4s
+t = 50.4s
+t = 0.0s
+t = 8.0s
+t = 15.0s
+t = 21.9s
+t = 26.0s
+t = 0.0s
+t = 20.0s
+t = 36.5s
+t = 47.0s
+t = 49.0s
+start
+Hi3R rollout progress
+end
+hang green mug
+“Pick the green mug and hang it on the wooden hanger”
+failure: imprecise insertion of the handle into the spoke
+sweep paper into dustpan
+“Sweep paper crumples into dustpan”
+failure: two crumples go in, one is left outside the dustpan
+stack 3 cubes
+“Stack the pink cube on the yellow cube, then stack the green cube on the pink cube”
+failure: the tower topples when placing the green cube
+prepare coffee
+“Pick the cup and place it on the coffee tray, then pick the coffee pod and place it in the coffee machine,
+finally close the coffee machine”
+failure: imprecise cup placement, the cup falls off the tray
+failure: pod inserted with the wrong orientation, stuck at the hole entrance
+shorter-horizon
+longer-horizon
+Figure 12. Qualitative failure examples. Failed rollouts of Hi3R on our UR5 robotic arm across four manipulation tasks.
+14
+
+
+Figure 13. Noisy point clouds for the hang green mug onto hanger task in the real world.
+15

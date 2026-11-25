@@ -1,0 +1,472 @@
+Title: FN-Prune: Training-Free Expert Pruning with Finite RMSNorm Perturbations
+
+URL Source: https://arxiv.org/pdf/2611.31747v1
+
+Published Time: Wed, 25 Nov 2026 01:46:21 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# FN-Prune: Training-Free Expert Pruning with Finite RMSNorm Perturbations 
+
+Zeyan Li 1 Jianfeng Xu 1
+
+## Abstract 
+
+Expert pruning reduces the memory footprint of mixture-of-experts language models, but retaining model quality depends on which experts are re-moved. Frequency- and magnitude-based scores measure the expert in isolation and overlook how normalization consumes its contribution: sub-tracting one expert changes both the direction of the residual stream and the scale applied to what remains. We propose FN-Prune, a training-free criterion that compares the next RMSNorm outputs before and after subtracting each router-weighted expert contribution, holding original routes and weights fixed. Squared differences are averaged over all calibration tokens in one pass; low-scoring experts are physically deleted at uniform per-layer ratios, and inference reroutes among survivors. At 50% expert removal, FN-Prune achieves lower WikiText-2 perplexity than the best published methods on Qwen3, ERNIE, and OLMoE, including a 32% reduction on OL-MoE. At the same budget, GSM8K accuracy im-proves over the best published methods by 7.5
+
+and 7.0 percentage points on Qwen3 and ERNIE, respectively, while multiple-choice gains remain task-dependent. 
+
+## 1. Introduction 
+
+Sparse mixture-of-experts (MoE) language models activate only a few experts per token, decoupling parameter count from per-token compute (Lepikhin et al., 2021; Fedus et al., 2022; Du et al., 2022; Dai et al., 2024; Jiang et al., 2024; DeepSeek-AI, 2024; Muennighoff et al., 2024; Yang et al., 2024). The sparsity does not remove the weights of inactive experts from the model, and physical expert pruning ad-dresses that memory cost: removing half of Qwen3’s routed experts reduces its materialized parameter-plus-buffer foot-
+
+> 1
+
+Shanghai Jiao Tong University, Shanghai, China. Correspon-dence to: Zeyan Li <zeyan0823@sjtu.edu.cn>. 
+
+Proceedings of the 43 rd International Conference on Machine Learning , Seoul, South Korea. PMLR 306, 2027. Copyright 2027 by the author(s). Router E1 E2 EK  
+
+> +RMSNorm Conventional scores (expert alone)
+> usage frequency router confidence output magnitude …
+> with the expert contribution subtracted
+> RMSNorm before RMSNorm
+> (scale and correlated)
+> after RMSNorm
+> (rescaled)
+
+Figure 1. Scoring an expert by what the network reads. FN-Prune occludes one router-weighted contribution under fixed rout-ing and compares the next RMSNorm output before and after; aligned contributions are largely absorbed by the renormalized scale. 
+
+print from 56 .87 to 29 .86 GiB. The difficult decision is which experts to remove while retaining useful behavior without recovery training. Any such decision implicitly ranks experts by how much their removal would cost the model. Existing rankings esti-mate that cost from the expert alone: usage frequency counts selections (Lu et al., 2024b; Zhou et al., 2022; Wang et al., 2025), gate mass weights them, and output norms describe what the expert computes (Li et al., 2024; Omi et al., 2025). A rarely selected expert can carry substantial gate mass, and a frequently selected one can produce small outputs—but all of these signals are measured upstream of the opera-tion that actually consumes the contribution. In the blocks studied here, that consumer is normalization: each expert output is added to a residual stream that the next RMSNorm rescales. Removing one contribution therefore changes both the direction of that stream and the scale applied to ev-erything left in it, even when the other contributions are unchanged. A contribution aligned with the residual mostly changes a magnitude that normalization absorbs; an equally large contribution in another direction changes where the model looks (Fig. 1). The cost of removing an expert is thus contextual—jointly determined by its contribution and the residual state that contribution enters—and is not readable from the contribution’s own frequency or magnitude. Motivated by these observations, we propose FN-Prune 
+
+(Finite RMSNorm-Perturbation Pruning), which measures this cost directly. Holding the checkpoint’s original routes and weights fixed, we subtract one expert’s native, router-weighted contribution and average the squared change in the next RMSNorm output over the complete calibration 1arXiv:2611.31747v1 [cs.AI] 24 Nov 2026 FN-Prune: Finite RMSNorm Perturbations 
+
+corpus: 
+
+Sℓ(i) = Et∼D 
+
+[∥∥Φ( rt) − Φ(rt − ci(t))∥ ∥2]
+
+, (1) where Φ is the input RMSNorm of the following block or the final RMSNorm after the last block, rt is the residual-stream state entering that normalization, and ci(t) is expert 
+
+i’s weighted contribution under the checkpoint’s unmodified routing. Evaluating both normalized states, rather than a local derivative, retains the finite change in scale after sub-traction. Averaging over the whole population rather than only selected tokens makes the score the product of how often an expert is used and how much its removal disturbs the normalized state when it is used. Both states come from the same unmodified forward pass, so one calibration pass produces every score; low-scoring experts are then phys-ically deleted under exact uniform per-layer quotas, and inference reroutes among the survivors. Two evaluations connect the score to the resulting models. A matched-quota control first isolates the ranking itself: deleting instead the least frequently selected experts under identical quotas and an identical deletion procedure, FN-Prune lowers WikiText-2 perplexity at 50% removal from 
+
+49 .14 to 32 .48 on OLMoE, with smaller but consistent gains on Qwen3 and ERNIE—so the improvement is attributable to which experts leave, not to how many or how. A portfolio comparison then locates the method among ten published compression systems covering deletion, non-uniform allo-cation, novice replacement, merging, and recovery training: at 50% removal, FN-Prune attains the lowest WikiText-2 perplexity on every family, including a 32% reduction rela-tive to the best published method on OLMoE, and improves GSM8K over the strongest published method by 7.5 and 7.0
+
+percentage points on Qwen3 and ERNIE. In summary, our contributions are: 1. We propose FN-Prune , a training-free pruning crite-rion and procedure: experts are scored by the popula-tion expected squared change of the next RMSNorm output under fixed routing, all scores accumulate in one forward pass, and low-scoring experts are physically deleted under exact uniform per-layer quotas. 2. We prove a decomposition of the finite perturbation into a removed-content term and an induced scale cor-rection, making explicit why equal-magnitude contri-butions can have very different removal costs. 3. We demonstrate that the proposed method performs well : at 50% removal, FN-Prune attains the lowest WikiText-2 perplexity among ten published compres-sion systems on every model family while roughly halv-ing the materialized footprint, and a matched-quota fre-quency control attributes the gain to the ranking itself rather than to allocation or deletion mechanics. 
+
+## 2. Related Work 
+
+Compressing mixture-of-experts models clusters along three axes: the signal for ranking experts, the reuse of retained capacity, and the allocation of removals across layers. The subsections follow this order; mixed-precision and dynamic pruning target complementary costs (Huang et al., 2025a). 
+
+2.1. Ranking Experts for Removal 
+
+How often an expert is selected predicts removal damage well enough that frequency pruning yields smooth quality curves at moderate keep ratios (Lu et al., 2024b), and router probabilities and gate activations refine the same participa-tion signal (Zhou et al., 2022; Wang et al., 2025). A second family looks at what the expert computes: weighting out-put norms by router gates targets MoE-layer reconstruction error (Lasby et al., 2026), and similarity between experts in-dicates which ones can be consolidated (Li et al., 2024; Omi et al., 2025). Both families, however, measure the expert in isolation—its participation statistics or the magnitude of its output. The criterion of this paper instead scores the change that a removal induces in the normalized state the next block actually reads, which brings the residual context and the recomputed scale into the ranking. A more recent line is explicitly residual-aware: each cali-bration token is weighted by how much the routed block changes the residual direction, and experts are scored under that weighting in one pass from a small in-domain cali-bration set (Dong et al., 2025). That token-level weight is shared by every expert the token selects, whereas the fi-nite comparison used here is specific to the expert whose contribution is removed and is averaged over the complete calibration corpus. Removal decisions have also borrowed from reconstruction-based dense pruning (Frantar et al., 2022) and from subset search, whether by evolutionary optimization over deletion plans (Liu et al., 2024) or by marginal-contribution estimation through Monte Carlo coali-tion evaluation with early truncation and router-guided sam-pling (Huang et al., 2025b); the latter’s preservation guaran-tee assumes additive utility and bounded estimation error, and all of these routes require repeated evaluations or proxy objectives, while both states scored here come from a sin-gle fixed-routing forward pass. Selection can also protect specific capabilities, safety in particular (Lai et al., 2025; Kim et al., 2025); parallel work characterizes expert roles through task, semantic, and geometric lenses (Olson et al., 2025; Herbst et al., 2026; Ternovtsii & Bilak, 2026; Ye et al., 2026). 
+
+2.2. Reusing and Retraining Capacity 
+
+Rather than deleting experts, one can reuse their capac-ity. Merging consolidates similar experts (Li et al., 2024), 2FN-Prune: Finite RMSNorm Perturbations 
+
+absorption transfers routing mass between them (Aquino-Michaels, 2026), and related operations preserve pairwise similarity during pruning (Omi et al., 2025) or expose redun-dancy through specialization (Guo et al., 2025). Replacing experts by learned constant modules (Zhang et al., 2026) and adjusting merged models with recovery training change what the retained parameters compute rather than which pa-rameters remain. We compare these operations at matched routed-expert budgets, while the matched-quota frequency control isolates what the ranking alone contributes. 
+
+2.3. Distributing Removals across Layers 
+
+How many experts each layer can spare is independent of which ones. In dense-model pruning, reconstruction-optimal updates (Frantar & Alistarh, 2023), activation-weighted magnitude (Sun et al., 2023), and structured group pruning (Ma et al., 2023) operate under shared ratios, whereas allocation by outlier structure (Yin et al., 2024), by heavy-tailed weight statistics (Lu et al., 2024a), or learned jointly with width and depth (Xia et al., 2023) redistributes them. MoE models behave the same way in our prelimi-nary measurements: reallocating matched removals changes perplexity substantially (Section 4.3). 
+
+## 3. FN-Prune 
+
+3.1. Method Overview 
+
+FN-Prune ranks experts by the change their removal would induce at the next RMSNorm. For the same token and na-tive routing, we subtract one expert’s weighted contribution from the residual and evaluate RMSNorm at both states. Av-eraging the squared differences over the calibration corpus gives one score per expert. Removals use exact uniform per-layer quotas (Figure 2). 
+
+3.2. Finite Normalization Score 
+
+Consider a pretrained MoE with layers ℓ ∈ [L], Nℓ routed experts per layer, and top-kℓ selection. Shared always-on experts, where present, are retained. Vectors lie in Rd;
+
+⊙ denotes elementwise multiplication, and ⟨· , ·⟩ and ∥ · ∥ 
+
+are the Euclidean inner product and norm. We write [n] = 
+
+{1, . . . , n } and omit ℓ on quantities defined within one layer. For token t, native routing selects Kℓ(t) and assigns weights 
+
+wi(t), including the checkpoint’s own selected-weight renor-malization policy. If xt is the expert input and fi the expert function, the routed output is 
+
+yℓ(t) = ∑
+
+> i∈K ℓ(t)
+
+wi(t) fi(xt), (2) Let ht denote the residual before adding that routed output, including any shared-expert output. The next normalization reads 
+
+rt = ht + yℓ(t), Φ( r) = γ ⊙ r
+
+√ 1 
+
+> d
+
+∥r∥2 + ϵ, (3) Here Φ is the following block’s input RMSNorm, or the final RMSNorm after the last MoE block; γ ∈ Rd is its gain and ϵ > 0 its normalization constant. The contribution to be tested is 
+
+ci(t) = 
+
+{
+
+wi(t)fi(xt), i ∈ K ℓ(t),
+
+0, i / ∈ K ℓ(t). (4) Calibration uses the complete WikiText-2 training split, to-kenized and packed at context length 2,048 , retaining the final, possibly partial chunk. During scoring, the unmodi-fied checkpoint runs in evaluation mode on the fixed, fully packed calibration stream; we preserve its native selection rule, routing weights, and any correction bias (a learned per-expert routing offset in ERNIE’s gate). The population 
+
+Dℓ contains every non-padding calibration token processed by layer ℓ.
+
+Population score With routes and weights fixed, remov-ing ci(t) changes the normalized residual from Φ( rt) to 
+
+Φ( rt − ci(t)) . FN-Prune averages the squared norm of this finite change: 
+
+Sℓ(i) = 1
+
+|D ℓ|
+
+∑
+
+> t∈D ℓ
+
+∥∥Φ( rt) − Φ(rt − ci(t))∥ ∥2, (5) The denominator is the layer’s entire calibration population, 
+
+Tℓ = |D ℓ|, not the number of tokens routed to expert i.Because unselected tokens contribute zero, the score equals the expert’s selection frequency times its conditional mean squared perturbation when selected. The implementation checks per-layer token coverage and ∑ 
+
+> i
+
+count ℓ(i) = Tℓkℓ,evaluates the two RMSNorm outputs and their squared dif-ference in float32, and accumulates expert sums in float64. 
+
+Finite normalization effect The finite comparison in-cludes more than the removed vector’s magnitude. Sub-traction can also change the normalization scale applied to the remaining residual. The following identity separates those two effects. 
+
+Proposition 1 (Consumer-side decomposition) . For any 
+
+r, c ∈ Rd, writing v = 1 
+
+> d
+
+∥r∥2 + ϵ and v′ = 1 
+
+> d
+
+∥r − c∥2 + ϵ,
+
+Φ( r)−Φ( r−c) = γ⊙
+
+[
+
+c
+
+√v′ − r 2⟨r, c ⟩ − ∥ c∥2
+
+d(√v + √v′)√v√v′
+
+]
+
+.
+
+(6) The proof is given in Appendix A. Before channelwise gain reweighting, the first term is a scaled removed contribution 3FN-Prune: Finite RMSNorm Perturbations   
+
+> Figure 2. FN-Prune pipeline. One native-routing calibration pass scores every expert; each layer deletes its lowest-scoring experts up to its quota, and inference reroutes among the survivors (Algorithm 1).
+
+and the second is parallel to the original residual. This ra-dial correction is caused by the scale change; its coefficient vanishes when 2⟨r, c ⟩ = ∥c∥2. The gain γ reweights both terms. Equal contribution norms can therefore yield differ-ent normalized perturbations, depending on their relation to the residual. A local derivative describes the infinitesimal version of the same comparison: 
+
+JΦ(r)[ c] = γ ⊙
+
+c − r ⟨r, c ⟩/d  
+
+> 1
+> d
+
+∥r∥2 + ϵ
+
+√ 1 
+
+> d
+
+∥r∥2 + ϵ, (7) This exact derivative serves as a local control, compared against the finite difference, routed energy, and a scale-only alternative in Section 4.3. 
+
+3.3. Expert Selection and Physical Pruning 
+
+For budget b ∈ { 0.25 , 0.5}, each layer removes the same fraction of its routed experts. The quota and selected set are 
+
+qℓ = ⌊Nℓ b⌋, Rℓ = arg min 
+
+> R⊆ [Nℓ]
+> |R| =qℓ
+
+∑
+
+> i∈R
+
+Sℓ(i), (8) Ties are broken by expert index. For the evaluated archi-tectures and budgets, Nℓb is an integer and qℓ ≤ Nℓ − kℓ:the realized global count is exactly ∑ 
+
+> ℓ
+
+Nℓb, and every layer retains enough experts for native top-kℓ selection. Deletion changes the materialized model, not just a mask. We remove the selected expert modules, slice the cor-responding router-projection rows, update routed-expert counts, and slice any matching correction-bias entries in ERNIE. Shared experts are unchanged. Releasing removed weights lowers the parameter-plus-buffer footprint. Algo-
+
+Algorithm 1 FN-Prune: one-pass scoring and physical dele-tion 
+
+Require: Pretrained MoE; complete calibration stream D;budget b.
+
+Ensure: Physically pruned model; deletion record {R ℓ}. 
+
+> 1:
+
+Instrument the routers, experts, and next-layer RM-SNorms.  
+
+> 2:
+
+for each batch of D with padding excluded do  
+
+> 3:
+
+Record native Kℓ(t), routing weights wi(t), expert outputs, and rt. 
+
+> 4:
+
+For each selected (ℓ, i, t ): evaluate the squared map difference (the summand of Eq. 5) in float32 and accumulate in float64.  
+
+> 5:
+
+end for  
+
+> 6:
+
+Verify per-layer population, top-k coverage, and finite-ness.  
+
+> 7:
+
+for ℓ = 1 , . . . , L do  
+
+> 8:
+
+Divide each expert’s sum by the verified token count 
+
+Tℓ. 
+
+> 9:
+
+Set qℓ = ⌊Nℓb⌋. Select the qℓ lowest means for Rℓ,breaking ties by expert index.  
+
+> 10:
+
+end for  
+
+> 11:
+
+Remove the selected experts, their router rows and any correction-bias entries. Update the expert counts.  
+
+> 12:
+
+return pruned model, {R ℓ}.rithm 1 gives the full procedure, including the coverage checks and deterministic tie rule. 
+
+3.4. Native Rerouting and Computational Cost 
+
+The scoring intervention removes one contribution while keeping the original routes and weights fixed. A physi-cally pruned model instead selects top-kℓ experts from the survivors and applies its native weight policy. Even be-4FN-Prune: Finite RMSNorm Perturbations 
+
+fore accounting for a newly selected expert, renormaliz-ing the original survivors differs from simply subtracting 
+
+ci(t). To isolate survivor renormalization, consider a se-lected expert i for a token whose selected weights sum to one, with wi(t) < 1; remove i while holding the selected set at Kℓ(t) \ { i} and rescale the surviving weights to sum to one. 
+
+Proposition 2 (Survivor renormalization) . Under this con-struction, the change in the residual stream is 
+
+∆rt = wi(t) yℓ(t) − ci(t)1 − wi(t)= wi(t)1 − wi(t)
+
+(yℓ(t) − fi(xt)),
+
+(9) 
+
+whereas the fixed-routing subtraction in Eq. 5 changes the residual by −ci(t).
+
+The proof is given in Appendix A. Equation 9 isolates sur-vivor rescaling, and deployment additionally refills the top-k
+
+set. 
+
+One-pass accumulation Both states required by the score are available from the unmodified calibration forward: the residual entering the next RMSNorm and the selected ex-pert’s weighted output. 
+
+Proposition 3 (One-pass accumulation) . With native rout-ing fixed over the complete processed calibration popula-tion, Sℓ(i) is the mean squared norm of Eq. 6 and can be accumulated in one forward pass over D. Evaluating the difference from the cached pair (rt, c i(t)) takes O(d) arith-metic per selected token–expert pair. The accumulators use 
+
+O(∑ 
+
+> ℓ
+
+Nℓ) float64 scalars. 
+
+The proof is given in Appendix A. An OLMoE-1B-7B diag-nostic compares each calibration prefix with the complete-pass ranking. The median layer reaches a Spearman rank correlation of 0.99 after about 0.23 M input tokens, and all sixteen layers sustain at least 0.99 from about 1.49 M tokens through the end of the 2.44 M-token pass. The deployed score is computed over the complete calibration popula-tion. 
+
+## 4. Experiments 
+
+Our evaluation is organized around four questions: • RQ1: Published baselines. How does FN-Prune com-pare with published compression methods at matched budgets? • RQ2: Design choices. Which scoring, aggregation and allocation choices matter, and does the selected score beat routing frequency under matched deletion? • RQ3: Capability retention. Which downstream capa-bilities are retained after pruning? • RQ4: Physical efficiency. Do physical deletions re-duce model size and improve throughput? 
+
+4.1. Experimental Setup Models and budgets We study Qwen3-30B-A3B (Yang et al., 2025a), ERNIE-4.5-21B-A3B-PT (Baidu ERNIE Team, 2025), and OLMoE-1B-7B-0924 (Muennighoff et al., 2024). Their routed-expert pools contain 48 × 128 = 6 ,144 ,
+
+27 × 64 = 1 ,728 , and 16 × 64 = 1 ,024 slots, respectively. The target reductions are 1,536 , 432 , and 256 routed-expert slots at 25% , and 3,072 , 864 , and 512 at 50% . ERNIE’s shared experts are preserved. All methods match the num-ber of routed-expert slots while retaining their native com-pression operation: deletion, novice replacement, merging, or merging with recovery training. For novice replacement, the budget counts experts replaced by constant modules. FN-Prune scores with the checkpoint’s native selection rule, routing weights and correction bias, then applies that policy to the surviving experts after deletion. 
+
+Calibration and development Calibration uses the com-plete WikiText-2 raw training split; development, where needed, uses the complete validation split; and token-weighted perplexity uses the complete test split (Merity et al., 2017). Tokenized streams are packed at context length 
+
+2,048 , retaining the final, possibly partial chunk. Search and recovery methods use their published search or training stages. 
+
+Task evaluation We report zero-shot accuracy on MMLU (Hendrycks et al., 2021) and WinoGrande (Sak-aguchi et al., 2020), and zero-shot accuracy with character-normalized continuation scores on OpenBookQA (Mihaylov et al., 2018). GSM8K (Cobbe et al., 2021) uses five-shot greedy decoding and exact match with the evaluator’s 
+
+strict-match answer filter. The three-task mean is the equal-weight mean of MMLU, OpenBookQA, and Wino-Grande accuracy; perplexity and GSM8K are reported sepa-rately. Qwen3 reasoning is disabled and no chat template is applied. Every configuration uses seed 0 and BF16 infer-ence, with one run on each complete benchmark population (MMLU 14 ,042 ; OpenBookQA 500 ; WinoGrande 1,267 ;GSM8K 1,319 ; WikiText-2 test 4,358 source rows). All win counts refer to these five metrics across the six model– budget cells ( 30 conditions). 
+
+4.2. RQ1: Comparison with Published Baselines 
+
+The matched ranking control is frequency deletion: it counts how many calibration tokens select each expert and removes the least frequent experts using exactly the same uniform per-layer quotas and physical-deletion pro-5FN-Prune: Finite RMSNorm Perturbations 
+
+Table 1. Per-task results for FN-Prune (shaded) and the ten published methods; each metric pairs the 25% and 50% removal budgets, with the full model as unpruned reference. 
+
+MMLU OBQA WinoG. WT2 PPL GSM8K Method 25% 50% 25% 50% 25% 50% 25% 50% 25% 50% 
+
+Qwen3-30B-A3B 
+
+Full model 77.85 45.20 70.48 9.14 88.40 M-SMoE (2024) 72.87 46.44 44.80 40.00 70.64 68.03 9.25 11.49 82.64 51.18 MC-SMoE (2024) 72.88 46.22 45.20 39.80 71.19 69.30 9.21 10.35 82.64 55.57 OWL-to-MoE (2024) 74.19 55.95 43.20 40.20 69.93 68.90 9.31 10.60 81.80 26.23 NAEE (2024b) 74.65 47.12 44.00 36.60 70.96 67.40 9.35 12.81 82.94 62.02 EEP-Prune (2024) 75.03 60.32 43.80 42.20 70.56 67.56 9.32 10.64 82.71 56.10 AlphaPruning-to-MoE (2024a) 65.05 23.48 37.40 25.20 64.25 51.07 18.17 149.52 6.52 0.00 HC-SMoE (2025) 63.73 41.16 38.00 27.00 64.40 56.43 13.92 32.78 86.81 59.59 MoE Pathfinder (2025b) 73.62 61.05 44.20 40.80 69.53 67.96 9.23 10.50 87.41 44.12 REAP-Prune (2026) 40.33 23.14 32.20 26.80 57.22 51.46 20.58 60.99 79.23 21.91 MoNE (2026) 74.41 40.52 45.40 31.80 70.32 62.04 9.36 17.77 79.98 49.81 FN-Prune 74.43 61.43 44.60 41.40 71.35 66.46 9.43 10.15 81.65 69.52 
+
+ERNIE-4.5-21B-A3B-PT 
+
+Full model 73.87 46.40 71.74 7.26 78.39 M-SMoE (2024) 55.68 31.96 37.80 29.40 65.04 56.67 10.58 19.52 63.00 3.34 MC-SMoE (2024) 56.59 36.60 40.20 29.80 65.75 56.27 9.11 15.38 63.84 3.41 OWL-to-MoE (2024) 66.58 29.07 41.20 31.80 66.69 55.96 9.92 20.32 17.13 0.53 NAEE (2024b) 48.78 33.21 28.60 25.60 54.14 50.43 18.82 27.16 30.55 5.99 EEP-Prune (2024) 66.72 46.10 46.20 38.80 69.77 62.35 7.94 12.81 80.14 52.99 AlphaPruning-to-MoE (2024a) 53.70 36.02 40.00 26.40 66.30 48.38 11.32 21.19 77.71 30.86 HC-SMoE (2025) 62.67 48.28 41.40 32.40 68.75 59.59 10.88 17.66 66.11 26.38 MoE Pathfinder (2025b) 64.55 47.81 46.60 39.60 69.93 65.51 8.28 13.70 78.24 40.79 REAP-Prune (2026) 47.98 24.44 34.60 25.20 65.51 53.75 13.35 20.99 68.39 11.37 MoNE (2026) 53.91 32.20 37.00 29.40 67.48 56.20 11.82 19.99 80.14 36.32 FN-Prune 61.70 50.46 46.00 38.40 71.35 66.61 8.27 11.94 78.24 59.97 
+
+OLMoE-1B-7B-0924 
+
+Full model 50.39 45.40 68.67 15.41 8.11 M-SMoE (2024) 37.24 24.24 34.20 25.60 59.27 54.54 17.53 138.80 0.68 0.00 MC-SMoE (2024) 38.11 24.50 34.80 25.60 59.35 53.43 17.02 79.77 0.08 0.00 OWL-to-MoE (2024) 37.74 24.90 39.80 26.20 61.56 52.64 19.47 451.60 1.67 0.00 NAEE (2024b) 22.88 24.12 23.60 25.60 50.28 51.30 394.82 3778.51 0.00 0.00 EEP-Prune (2024) 35.38 23.16 39.60 30.60 61.56 52.88 13.42 53.50 2.73 0.68 
+
+AlphaPruning-to-MoE (2024a) 23.25 23.69 26.40 24.40 51.22 51.38 104.13 3768.09 0.30 0.00 HC-SMoE (2025) 37.10 26.36 36.00 27.60 63.54 54.78 29.30 197.20 1.82 0.00 MoE Pathfinder (2025b) 36.95 25.94 41.00 32.40 63.69 54.54 20.00 48.03 1.90 0.61 REAP-Prune (2026) 22.94 23.35 25.40 24.60 50.67 51.54 871.32 3595.99 0.00 0.00 MoNE (2026) 23.91 24.76 27.40 25.00 52.09 49.17 23.68 109.30 2.05 0.00 FN-Prune 40.69 25.34 42.80 33.40 65.27 53.20 16.19 32.48 3.49 0.30 
+
+All entries except WT2 perplexity are accuracies (%); lower WT2 perplexity is better. Bold and underlined: best and second-best compressed model per condition, full model excluded. OBQA = OpenBookQA; WinoG. = WinoGrande; WT2 = WikiText-2. 
+
+cedure as FN-Prune. The published comparison con-tains two allocation ports, OWL-to-MoE (Yin et al., 2024) and AlphaPruning-to-MoE (Lu et al., 2024a); four dele-tion methods, NAEE (Lu et al., 2024b), EEP-Prune (Liu et al., 2024), MoE Pathfinder (Yang et al., 2025b), and REAP-Prune (Lasby et al., 2026); MoNE novice replace-ment (Zhang et al., 2026); and M-SMoE, MC-SMoE (Li et al., 2024), and HC-SMoE (Chen et al., 2025) merging. Each method retains its compression operation at the same total routed-expert budget, although pure-deletion methods may distribute removals differently across layers. The fron-tier is the strongest published score in each family–budget– metric condition, and FN-Prune wins a condition only by strictly exceeding it; the unpruned checkpoints are refer-ences rather than competitors. Implementation adaptations are specified in Appendix B. Across the five metrics and six model–budget conditions (Table 1), the clearest shared outcome is lower perplexity at 
+
+50% removal on all three families, with the largest margin on OLMoE ( 32 .48 vs. 48 .03 , a 32% reduction). At 25% 
+
+removal the frontier retains the perplexity advantage; MC-SMoE leads on Qwen3, while FN-Prune has the stronger high-removal profile. Over the full portfolio, FN-Prune achieves 15 of 30 strict wins against the frontier; the per-family counts at 25% /50% 
+
+are 1/3 on Qwen3, 1/4 on ERNIE, and 4/2 on OLMoE. MoE Pathfinder and EEP-Prune lead the frontier most often (10 and 9 conditions), followed by MC-SMoE (5) and HC-SMoE (3). 6FN-Prune: Finite RMSNorm Perturbations Fin. Deriv. Energy Scale 10 30 100 300 1000 3000             
+
+> Validation perplexity (log scale)
+> 16.89
+> ⋆∙⋆
+> Δ260
+> Δ427
+> Δ509
+> Δ262
+> Fin. Deriv. Energy Scale 10 30 100 300 1000 3000
+> 33.26
+> ⋆∙
+> Δ2331
+> Δ3597
+> Δ3649
+> Δ2456
+> Fin. Deriv. Energy Scale 810 15 20 25
+> 8.46
+> ⋆∙
+> Δ0.40
+> Δ0.54
+> Δ5.24
+> Δ0.46
+> Fin. Deriv. Energy Scale 810 15 20 25
+> 12.31
+> ⋆∙
+> Δ4.27
+> Δ4.34
+> Δ8.33
+> Δ4.30
+
+OLMoE, 25% OLMoE, 50% ERNIE, 25% ERNIE, 50%       
+
+> Cond. / global Pop. / global Cond. / layer Pop. / layer FN-Prune choice best second-best
+
+Figure 3. Factorial ablation of score, aggregation, and allocation. Complete WikiText-2 validation perplexity after physical deletion, one panel per model–budget condition (logarithmic axes; lower is better). Bars within each statistic cross conditional or population aggregation with global or uniform-layer allocation; arrows mark the reduction from the population/global to the population/layer bar. Orange outline: the selected FN-Prune configuration; star and dot: best and second best per panel. Qwen3 was not evaluated in this grid. 
+
+4.3. RQ2: Ablation and Matched-Quota Ranking 
+
+We ablate the statistic, aggregation rule, and allocation pol-icy on complete WikiText-2 validation data. Sixteen deter-ministic configurations cross four statistics—routed energy 
+
+∥ci(t)∥2, the local derivative in Eq. 7, the finite difference in Eq. 5, and the scale-only control ∥γ ⊙ ci(t)∥2/v with 
+
+v = 1 
+
+> d
+
+∥rt∥2 + ϵ—with conditional averaging (selected to-kens only) or population averaging (all calibration tokens), and uniform-layer or global allocation; the global allocator retains per-layer top-k capacity, and every configuration is evaluated after physical deletion. The resulting grid (Fig-ure 3) covers OLMoE-1B-7B and ERNIE-4.5-21B at both budgets; Qwen3 was left out of this development step, and after selection the same configuration is applied unchanged to all six model–budget conditions. Allocation dominates the ablation: global quotas produce OLMoE perplexities above 2,300 at 50% removal, whereas the adopted layer allocation remains in the tens. Within layer allocation, finite difference with population averag-ing and uniform quotas achieves the lowest mean over the four displayed conditions. Conditional routed energy is stronger on ERNIE at both budgets, while the selected rule is strongest on OLMoE and gives the best overall mean. Preliminary OLMoE measurements show how strongly al-location alone moves perplexity: perturbing 30% of one layer’s routing decisions changes perplexity by several percent, most strongly in the deepest layers (Spearman 
+
+rs = 0 .576 , p = 0 .019 for correlation with depth); at a nom-inal 5% budget, uniform removal of 48 experts raises per-plexity from 11 .82 to 496 .85 , while the same 48 removals allocated non-uniformly attain 27 .98 . We therefore hold per-layer quotas fixed when isolating the ranking criterion. The matched-quota control tests whether changing which experts leave a layer improves the resulting model, without changing how many leave it. With the same uniform quotas and physical deletion as the frequency control, FN-Prune lowers WikiText-2 perplexity at 50% removal on all three families, most strongly on OLMoE ( 49 .14 to 32 .48 ). At 
+
+25% removal the ranking matters less: perplexity improves only on ERNIE ( 8.50 to 8.27 ). 
+
+4.4. RQ3: Downstream Capability Retention 
+
+Across the three decision tasks on a common percentage scale (Figure 4), perplexity and downstream retention favor different conditions: at 50% removal, FN-Prune improves GSM8K over the strongest published method by 7.50 per-centage points on Qwen3 and 6.98 on ERNIE. FN-Prune on OLMoE instead wins GSM8K at 25% removal, with absolute accuracies of 3.49% and 0.30% at the two budgets. Multiple-choice wins are similarly selective: WinoGrande on every family (both budgets on ERNIE), MMLU on Qwen3 and ERNIE at 50% , and OpenBookQA on OLMoE at both budgets. ERNIE moves from one win at 25% to four at 50% , while FN-Prune on Qwen3 wins only WinoGrande at 25% .To examine balance across decision tasks, we pair their equal-weight mean accuracy with the population standard deviation of their changes from the unpruned model; a model is non-dominated among the eleven compressed mod-els when no competitor is at least as good on both and strictly better on one. FN-Prune is non-dominated in four of six conditions—Qwen3 at 25% , ERNIE at 50% , and OLMoE at both budgets—and holds the highest three-task mean in three of them; EEP-Prune dominates at 25% on ERNIE and 
+
+50% on Qwen3. 7FN-Prune: Finite RMSNorm Perturbations 
+
+Figure 4. Per-task accuracy profiles (parallel coordinates). One polyline per method across the three decision tasks on a shared percent scale; one panel per family and removal budget. FN-Prune is bold orange; published baselines are thin lines colored by method group. Complete-population evaluations. 
+
+Table 2. Generation throughput (generated tokens/s) for the ten published methods and FN-Prune (shaded) at 25% and 50% removal; the full-model row is the unpruned reference.                                                                                        
+
+> Qwen3-30B-A3B ERNIE-4.5-21B-A3B-PT OLMoE-1B-7B-0924 Method 25% 50% 25% 50% 25% 50% Full model 291.84 2043.80 511.94 M-SMoE (2024) 345.45 484.71 2455.52 3307.64 239.24 960.00 MC-SMoE (2024) 339.42 455.09 2611.54 3275.09 676.92 977.37 OWL-to-MoE (2024) 352.20 495.26 2583.34 3211.66 619.82 495.17 NAEE (2024b) 334.32 508.25 2599.61 3216.63 700.14 1062.97
+> EEP-Prune (2024) 355.75 466.78 2421.61 3284.98 706.04 972.38 AlphaPruning-to-MoE (2024a) 373.10 897.46 2536.41 3298.94 353.49 451.34 HC-SMoE (2025) 371.26 562.43 2550.78 3265.20 351.35 934.16 MoE Pathfinder (2025b) 333.08 489.02 2458.61 3287.91 662.75 952.93 REAP-Prune (2026) 509.45 827.53 2424.30 3252.66 335.29 1059.64 MoNE (2026) 314.79 593.61 2212.84 2429.68 611.94 655.86 FN-Prune 346.87 481.74 2441.15 2909.16 630.98 910.19
+
+The unpruned references exceed the published frontier in 25 of 30 comparisons, the exceptions all at 25% removal; FN-Prune improves retention over the compressed alternatives and remains below the unpruned checkpoints. Its configura-tion was selected with WikiText-2 validation perplexity and no task labels (Section 4.3), an objective that aligns with the high-removal perplexity gains. 
+
+4.5. RQ4: Physical Size and Throughput 
+
+Generation throughput (Table 2) comes from one A100 profile per configuration over materialized models— reconstructed from shared checkpoints and compression recipes or adapters, not checkpoint-file sizes. Novice re-placement removes the corresponding full expert modules and adds at most 0.024 GiB of constants. At 50% removal the materialized footprint roughly halves on all three fami-lies, from 56 .87 to 29 .86 GiB on Qwen3. For FN-Prune, measured generation throughput rises from 
+
+25% to 50% removal on all three families (the shaded row in Table 2). Because batches and device conditions differ by family, the measurements support within-family trends; serving latency requires a dedicated deployment study. Pre-processing remains one complete calibration forward per family followed by per-layer sorting (Section 3.3). 
+
+## 5. Conclusion and Limitations 
+
+FN-Prune turns the finite normalized effect of removing one routed contribution into a one-pass criterion for physical expert deletion. At 50% removal, it improves WikiText-2 perplexity across all three families and GSM8K on Qwen3 and ERNIE relative to the strongest published methods. The task profiles locate its main benefit in aggressive language-model compression, with selective downstream retention. The current evidence covers one calibration corpus, seed 
+
+0, and the tested RMSNorm architectures; confirmatory evaluation on held-out tasks, alternative calibration domains, and multiple seeds would strengthen the conclusions. The local score fixes routing while deployment reroutes, leaving joint selection and decision-aware objectives as the main extensions. The throughput profiles support within-family trends, while serving latency and statistical significance require dedicated evaluation. 8FN-Prune: Finite RMSNorm Perturbations 
+
+## Impact Statement 
+
+Reducing model memory can make existing language mod-els more accessible, but it does not establish that their out-puts are more reliable. Our results show that pruning can im-prove perplexity relative to other compressed models while downstream retention remains task-dependent. Compressed models should therefore be evaluated on their intended tasks before deployment, especially where errors have consequen-tial effects. We do not assess safety, fairness, or real-world reliability, and the compression results should not be inter-preted as evidence for those properties. 
+
+## AI Disclosure Statement 
+
+Substantial assistance from generative AI tools was used in conducting this research and preparing this manuscript, including research ideation, experimental design, code gen-eration for the scoring, pruning, and evaluation pipelines, data analysis, and manuscript drafting. All reported results were produced by the deterministic, seed-fixed pipelines described in the paper under one frozen method version and were cross-checked against frozen experimental receipts. All scientific decisions and final claims were made by the authors, who remain fully responsible for the correctness, originality, and integrity of the content. 
+
+## References 
+
+Aquino-Michaels, K. Routing absorption in sparse atten-tion: Why random gates are hard to beat. arXiv preprint arXiv:2603.02227 , 2026. Baidu ERNIE Team. ERNIE 4.5 technical report. Technical report, Baidu, 2025. URL https: //ernie.baidu.com/blog/publication/ ERNIE_Technical_Report.pdf .Chen, I.-C., Liu, H.-S., Sun, W.-F., Chao, C.-H., Hsu, Y.-C., and Lee, C.-Y. Retraining-free merging of sparse MoE via hierarchical clustering. In Proceedings of the 42nd International Conference on Machine Learning , volume 267, pp. 8594–8620, 2025. arXiv:2410.08589. Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., Hesse, C., and Schulman, J. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 ,2021. Dai, D., Deng, C., Zhao, C., Xu, R. X., Gao, H., Chen, D., Li, J., Zeng, W., Yu, X., Wu, Y., et al. DeepSeekMoE: To-wards ultimate expert specialization in mixture-of-experts language models. arXiv preprint arXiv:2401.06066 ,2024. DeepSeek-AI. DeepSeek-V3 technical report. arXiv preprint arXiv:2412.19437 , 2024. Dong, Z., Peng, H., Liu, P., Zhao, W. X., Wu, D., Xiao, F., and Wang, Z. Domain-specific pruning of large mixture-of-experts models with few-shot demonstrations. In Advances in Neural Information Processing Systems (NeurIPS) , 2025. Du, N., Huang, Y., Dai, A. M., Tong, S., Lepikhin, D., Xu, Y., Krikun, M., Zhou, Y., Yu, A. W., Firat, O., et al. GLaM: Efficient scaling of language models with mixture-of-experts. In International Conference on Ma-chine Learning (ICML) , 2022. Fedus, W., Zoph, B., and Shazeer, N. Switch transformers: Scaling to trillion parameter models with simple and ef-ficient sparsity. Journal of Machine Learning Research ,23(120):1–39, 2022. Frantar, E. and Alistarh, D. SparseGPT: Massive language models can be accurately pruned in one-shot. arXiv preprint arXiv:2301.00774 , 2023. Frantar, E., Singh, S. P., and Alistarh, D. Optimal brain compression: A framework for accurate post-training quantization and pruning. In Advances in Neural Infor-mation Processing Systems (NeurIPS) , 2022. Guo, H., Lu, H., Nan, G., Chu, B., Zhuang, J., Yang, Y., Che, W., Cao, X., Leng, S., Cui, Q., and Jiang, X. Advancing expert specialization for better MoE. In Advances in Neural Information Processing Systems (NeurIPS) , 2025. Oral; arXiv:2505.22323. Hendrycks, D., Burns, C., Basart, S., Zou, A., Mazeika, M., Song, D., and Steinhardt, J. Measuring massive multitask language understanding. In International Conference on Learning Representations (ICLR) , 2021. arXiv:2009.03300. Herbst, J., Wermter, S., and Lee, J. H. The expert strikes back: Interpreting mixture-of-experts language models at expert level. In International Conference on Machine Learning (ICML) , 2026. arXiv:2604.02178. Huang, W., Liao, Y., Liu, J., He, R., Tan, H., Zhang, S., Li, H., Liu, S., and Qi, X. Mixture compressor for mixture-of-experts llms gains more. In International Conference on Learning Representations (ICLR) , 2025a. Huang, W., Zhang, Y., Zheng, X., Chao, F., Ji, R., and Cao, L. Discovering important experts for mixture-of-experts models pruning through a theoretical perspective. In Advances in Neural Information Processing Systems (NeurIPS) , 2025b. 9FN-Prune: Finite RMSNorm Perturbations 
+
+Jiang, A. Q., Sablayrolles, A., Roux, A., Mensch, A., Savary, B., Bamford, C., et al. Mixtral of experts. arXiv preprint arXiv:2401.04088 , 2024. Kim, J., Song, M., Shin, S., and Son, S. Defending MoE LLMs against harmful fine-tuning via safety routing align-ment. arXiv preprint arXiv:2509.22745 , 2025. Lai, Z., Liao, M., Wu, B., Xu, D., Zhao, Z., Yuan, Z., Fan, C., and Li, J. SAFEx: Analyzing vulnerabilities of MoE-based LLMs via stable safety-critical expert identification. In Advances in Neural Information Processing Systems (NeurIPS) , 2025. arXiv:2506.17368. Lasby, M., Lazarevich, I., Sinnadurai, N., Lie, S., Ioannou, Y., and Thangarasa, V. REAP the experts: Why pruning prevails for one-shot MoE compression. In International Conference on Learning Representations (ICLR) , 2026. arXiv:2510.13999. Lepikhin, D., Lee, H., Xu, Y., Chen, D., Firat, O., Huang, Y., Krikun, M., Shazeer, N., and Chen, Z. GShard: Scaling giant models with conditional computation and automatic sharding. In International Conference on Learning Rep-resentations (ICLR) , 2021. Li, P., Zhang, Z., Yadav, P., Sung, Y.-L., Cheng, Y., Bansal, M., and Chen, T. Merge, then compress: Demystify efficient SMoE with hints from its routing policy. In 
+
+International Conference on Learning Representations (ICLR) , 2024. Spotlight; arXiv:2310.01334. Liu, E., Zhu, J., Lin, Z., Ning, X., Blaschko, M. B., Yan, S., Dai, G., Yang, H., and Wang, Y. Efficient expert pruning for sparse mixture-of-experts language models: Enhanc-ing performance and reducing inference costs. arXiv preprint arXiv:2407.00945 , 2024. Lu, H., Zhou, Y., Liu, S., Wang, Z., Mahoney, M. W., and Yang, Y. AlphaPruning: Using heavy-tailed self regular-ization theory for improved layer-wise pruning of large language models. In Advances in Neural Information Pro-cessing Systems (NeurIPS) , 2024a. arXiv:2410.10912. Lu, X., Liu, Q., Xu, Y., Zhou, A., Huang, S., Zhang, B., Yan, J., and Li, H. Not all experts are equal: Efficient expert pruning and skipping for mixture-of-experts large language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguis-tics (Volume 1: Long Papers) , pp. 6159–6172, 2024b. arXiv:2402.14800. Ma, X., Fang, G., and Wang, X. LLM-Pruner: On the struc-tural pruning of large language models. arXiv preprint arXiv:2305.11627 , 2023. Merity, S., Xiong, C., Bradbury, J., and Socher, R. Pointer sentinel mixture models. In International Conference on Learning Representations (ICLR) , 2017. Mihaylov, T., Clark, P., Khot, T., and Sabharwal, A. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Proceedings of the Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2018. Muennighoff, N., Soldaini, L., Groeneveld, D., Lo, K., Mor-rison, J., Min, S., Shi, W., Walsh, P., Tafjord, O., Lambert, N., et al. OLMoE: Open mixture-of-experts language models. arXiv preprint arXiv:2409.02060 , 2024. Olson, M. L., Ratzlaff, N., Hinck, M., Luo, M., Yu, S., Xue, C., and Lal, V. Probing semantic routing in large mixture-of-expert models. In Findings of the Associa-tion for Computational Linguistics: EMNLP 2025 , 2025. arXiv:2502.10928. Omi, N., Sen, S., and Farhadi, A. Load balancing mixture of experts with similarity preserving routers. arXiv preprint arXiv:2506.14038 , 2025. Sakaguchi, K., Le Bras, R., Bhagavatula, C., and Choi, Y. WinoGrande: An adversarial Winograd schema challenge at scale. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pp. 8732–8740, 2020. doi: 10.1609/aaai.v34i05.6399. Sun, M., Liu, Z., Bair, A., and Kolter, J. Z. A simple and effective pruning approach for large language models. 
+
+arXiv preprint arXiv:2306.11695 , 2023. Ternovtsii, I. and Bilak, Y. Geometric routing enables causal expert control in mixture of experts. arXiv preprint arXiv:2604.14434 , 2026. Wang, Z., Zhu, J., and Chen, J. ReMoE: Fully differentiable mixture-of-experts with ReLU routing. In International Conference on Learning Representations (ICLR) , 2025. Xia, M., Gao, T., Zeng, Z., and Chen, D. Sheared LLaMA: Accelerating language model pre-training via structured pruning. arXiv preprint arXiv:2310.06694 , 2023. Yang, A., Yang, B., Hui, B., Zheng, B., Yu, B., Zhou, C., Li, C., Li, C., Liu, D., Huang, F., et al. Qwen2 technical report. arXiv preprint arXiv:2407.10671 , 2024. Yang, A., Li, A., Yang, B., et al. Qwen3 technical report. 
+
+arXiv preprint arXiv:2505.09388 , 2025a. Yang, X., Tian, Y., and Song, Y. MoE Pathfinder: Trajectory-driven expert pruning. arXiv preprint arXiv:2512.18425 ,2025b. Ye, C., Yuan, B., and Sharkey, L. Polysemantic experts, monosemantic paths: Routing as control in MoEs. arXiv preprint arXiv:2604.17837 , 2026. 10 FN-Prune: Finite RMSNorm Perturbations 
+
+Yin, L., Wu, Y., Zhang, Z., Hsieh, C.-Y., Wang, Y., Jia, Y., Li, G., Jaiswal, A., Pechenizkiy, M., Liang, Y., Bendersky, M., Wang, Z., and Liu, S. Outlier weighed layerwise spar-sity (OWL): A missing secret sauce for pruning LLMs to high sparsity. In International Conference on Machine Learning (ICML) , 2024. arXiv:2310.05175. Zhang, G., Han, Y., Lou, Y., Zhang, Y., Zhao, W., and You, Y. MoNE: Replacing redundant experts with lightweight novices for structured pruning of MoE. In International Conference on Learning Representations (ICLR) , 2026. Zhou, Y., Lei, T., Liu, H., Du, N., Huang, Y., Zhao, V. Y., Dai, A. M., Chen, Z., Le, Q. V., and Laudon, J. Mixture-of-experts with expert choice routing. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. 
+
+## A. Proofs 
+
+Consumer-side decomposition (Proposition 1). 
+
+Proof. Write r/ √v − (r − c)/√v′ = c/ √v′ + r(√v′ −√v)/(√v√v′). Substituting √v′ − √v = ( v′ − v)/(√v +√v′) and v′ − v = ( ∥c∥2 − 2⟨r, c ⟩)/d , then multiplying channelwise by γ, gives Eq. 6. 
+
+Survivor renormalization (Proposition 2). 
+
+Proof. The renormalized survivor output is y′ = ( yℓ −
+
+wifi)/(1 − wi). Hence ∆rt = y′ − yℓ = wi(yℓ − fi)/(1 −
+
+wi) = ( wiyℓ − ci)/(1 − wi) because ci = wifi.
+
+One-pass accumulation (Proposition 3). 
+
+Proof. Equation 6 is the finite difference in Eq. 5. Algo-rithm 1 observes and accumulates it for each selected pair 
+
+(rt, c i(t)) , while unselected pairs have ci(t) = 0 . Evaluat-ing kℓ differences per token costs O(kℓd) arithmetic, and one scalar accumulator per expert costs O(∑ 
+
+> ℓ
+
+Nℓ) stor-age. 
+
+## B. Baseline Implementations 
+
+The main table uses the ten published methods named in Section 4.2. NAEE uses the additive reconstruction proxy, while OWL uses its available direction-based allocation adaptation. EEP-Prune searches physical-deletion plans with population 20 for 40 iterations on complete valida-tion loss, and REAP-Prune collects its saliency with router-weight renormalization before physical deletion. MC-SMoE applies one epoch of last-hidden-state distilla-tion on the complete WikiText-2 training split, using rank-
+
+32 LoRA on retained routed experts; the other methods retain their stated deletion, replacement, or merging opera-tion. These adaptations affect the final compressed models, whereas the frequency control keeps FN-Prune’s uniform quotas and physical deletion fixed to isolate the ranking criterion. 11

@@ -1,0 +1,2864 @@
+KeyMemVLA: Subtask-Guided Key Memory for Long-Horizon Robotic
+Manipulation
+Yongwei Zhang1,2,*
+Tao Chen1,*
+Sicheng Ma2,3,*
+Yuanzhe Xing1
+Pengwei Zhang2,4,5
+Yongen Zhao2,6
+Yaoqing Hu2
+Zhikun She1,7,†
+Ce Hao2,†
+1Beihang University
+2Zhongguancun Academy
+3Nanjing University
+4Institute of Automation, Chinese Academy of Sciences
+5University of Chinese Academy of Sciences
+6Tianjin University
+7Fujian Key Laboratory of Financial Information Processing, Putian University
+*Equal contribution
+†Corresponding authors
+GitHub
+Project Page
+Abstract
+Memory-dependent long-horizon manipulation requires
+vision-language-action (VLA) policies to infer task progress
+and recall evidence absent from current observations. Un-
+der a limited memory budget, the challenge is to retain
+history that resolves stage ambiguity and supports subse-
+quent decisions. We present KeyMemVLA, a subtask-guided
+key memory framework based on progress indication and
+decision-evidence retention.
+A two-level annotation pro-
+cess selects subtasks satisfying either criterion and labels
+their final frames as keyframes to supervise online memory
+writes. A shared vision-language backbone jointly learns
+subtask, action, and keyframe prediction. At inference, the
+policy first predicts the current subtask from the instruction,
+visual context, and memory, then uses this semantic condi-
+tion to predict actions and future memory-write positions.
+Actual observations are retained at the selected times dur-
+ing execution. We introduce KMBench to evaluate active
+memory retention for decisions across subtasks. Evalua-
+tions on RMBench-M(n), RoboTwin-MeM, KMBench, and
+real-world manipulation tasks show higher average success
+rates than the compared baselines. Ablation studies and
+representation analysis support the roles of key memory and
+explicit task-progress semantics. These results highlight the
+value of coupling sparse key memory with online progress
+inference for history-dependent control.
+1. Introduction
+Vision-language-action (VLA) models transfer pretrained
+visual and linguistic knowledge to robot control, enabling
+general instruction following and manipulation [2, 14, 22,
+38, 43]. History-dependent long-horizon manipulation ad-
+ditionally requires information absent from the current ob-
+servation. In Find Heaviest (Fig. 1(a)), a robot weighs
+four boxes, returns each to its original position, and selects
+the heaviest.
+Similar workspace configurations recur af-
+ter each measurement, while the scale readouts disappear.
+The policy must distinguish which measurements have been
+completed and recall the evidence needed for comparison.
+These are two distinct demands on memory: inferring task
+progress from similar observations and recovering historical
+evidence to choose an action even when the stage is known.
+Existing approaches encode history through observa-
+tion sequences, hierarchical memories, or compact learned
+states [10, 19, 28, 30, 42]. Visual-memory methods pre-
+serve sampled video or selected perceptual evidence [24,
+25, 33, 35, 37], while memory-based planners and uni-
+fied VLAs use history for subtask reasoning [3, 21,
+26].
+Progress-aware retrieval, execution-state modeling,
+and completion checks further connect memory to task
+stages [4, 11, 17, 18, 39]. These advances expose a con-
+sequential trade-off: extended histories increase processing
+costs, while compression and sparse selection risk losing
+brief cues needed later. Under a finite budget, retained ob-
+servations should supply progress cues or decision evidence
+beyond what the existing context provides. The challenge
+we address is to make these task-dependent selection cri-
+teria explicit and coordinate memory retention with stage
+inference and action generation across subtasks.
+We present KeyMemVLA, a subtask-guided key mem-
+ory framework for history-dependent manipulation. Our in-
+sight is that memory value depends on what a subtask es-
+tablishes and what subsequent decisions require. We there-
+fore select history by two criteria: indicating task progress
+and preserving evidence required for current or subse-
+quent decisions. These criteria guide a two-level annota-
+1
+arXiv:2611.32081v1  [cs.RO]  24 Nov 2026
+
+
+(a) Need for memory
+Task: Find Heaviest
+Blue box
+Red box
+Readout disappears
+Which box
+was heaviest?
+Select the heaviest box
+(b) Keyframes at subtask ends
+Subtask frames
+Keyframe (subtask end)
+1,316 frames 
+ 4 keyframes
+→
+(c) Memory-conditioned policy
+Keyframe memory
+KeyMemVLA
+Ours
+Image
+Instruction
+VLA policy
+Actions
+VLA
+Memory-free
+Image
+Instruction
+VLA policy
+Actions
+(d) Evaluation
+Success rate (%)
+RMBench-M(n)
+0
+50
+100
+KeyMemVLA
+62.50
+EventVLA
+54.00
+π0.5
+5.50
++8.50 pp vs. EventVLA
+RoboTwin-MeM
+0
+50
+100
+KeyMemVLA
+92.63
+EventVLA
+75.20
+π0.5
+7.80
++17.43 pp vs. EventVLA
+Weigh lower-left
+t = 156
+Keyframe
+Weigh upper-left
+t = 437
+Keyframe
+Weigh lower-right
+t = 719
+Keyframe
+Weigh upper-right
+t = 1002
+Keyframe
+Select heaviest
+t = 1315
+Current subtask
+…
+Remember all four weights
+0
+50
+100
+KeyMemVLA
+68.88
+EventVLA
+47.13
+π0.5
+7.50
+KMBench
++21.75 pp vs. EventVLA
+0
+50
+100
+KeyMemVLA
+47.50
+MemER
+25.00
+π0.5
+2.50
+Real world
++22.50 pp vs. MemER
+Figure 1. Overview of KeyMemVLA. (a) In Find Heaviest, selecting the heaviest box requires tracking weighing progress and
+recalling scale readouts after they disappear. (b) Four keyframes at the ends of key subtasks preserve progress cues and measurement
+evidence from a 1,316-frame trajectory. (c) Keyframe memory and online current-subtask prediction complement the instruction and
+visual context for action generation. (d) RMBench-M(n) shows the w/o KPH variant jointly trained on all nine tasks; both KeyMemVLA
+and EventVLA are evaluated without keyframe memory. The remaining evaluations use the full KeyMemVLA policy.
+tion process that selects key subtasks and informative end
+frames, forming sparse, temporally ordered key memory
+(Fig. 1(b)). Building on EventVLA’s prediction of future
+memory-write positions [33], these annotations supervise a
+keyframe prediction head (KPH) that predicts when to re-
+tain actual observations during execution. A shared vision-
+language backbone is jointly trained for subtask, action, and
+keyframe prediction. At inference, it first predicts the cur-
+rent subtask from the instruction, observations, and mem-
+ory, then conditions action generation and keyframe predic-
+tion on that subtask (Fig. 1(c)).
+We
+evaluate
+KeyMemVLA
+against
+reactive
+and
+memory-based policies on RMBench [3],
+RoboTwin-
+MeM [33], and KMBench, our eight-task suite testing
+active memory retention for subsequent decisions.
+On
+RoboTwin-MeM and KMBench, KeyMemVLA achieves
+average task success rates of 92.63% and 68.88%, im-
+proving over the compared EventVLA results by 17.43
+and 21.75 percentage points, respectively. On RMBench,
+the variant without KPH outperforms EventVLA on
+M(n) tasks (Fig. 1(d)).
+Component ablations support
+the contributions of keyframe memory and online subtask
+prediction, while linear probes show improved decodability
+of temporal progress from the backbone representations
+used for action prediction. Real-world comparisons with
+π0.5 and MemER complement the simulation evaluation.
+Our contributions are threefold: (i) We develop subtask-
+guided key memory construction using progress indication
+and decision-evidence retention to select key subtasks and
+informative observations. (ii) We build a shared-backbone
+VLA policy coupling sparse key memory with online sub-
+task prediction, subtask-conditioned control, and learned
+memory updates. (iii) We provide multi-benchmark evalua-
+tion, including our newly introduced KMBench comprising
+eight tasks across four memory categories, with component
+ablations and representation analysis supporting the frame-
+work’s effectiveness and the roles of memory and explicit
+progress semantics.
+2. Related Work
+2.1. Memory-Augmented Robotic Manipulation
+Memory-augmented policies differ in how they represent
+and retain execution history. History-aware transformers
+2
+
+
+and recurrent policies encode observation–action sequences
+or latent states [10, 16, 30, 32].
+Hierarchical memory,
+state-space models, and test-time fast-weight updates pro-
+vide alternative mechanisms for maintaining long-term con-
+text [19, 28, 42]. Visual memories retain feature banks,
+compress past views into tokens, or preserve sampled video
+histories [9, 25, 31, 35].
+Sparse memory selects particular observations: KEMO
+uses kinematic events and visual filtering [37], EventVLA
+predicts future memory-write positions [33], and Keyframe-
+Chaining VLA retrieves selected frames according to exe-
+cution progress [4]. Other representations combine short-
+term video with long-term text [29], integrate visual and
+textual memory with control [21], or encode changes be-
+tween visual states [20]. These approaches vary in temporal
+coverage, retained perceptual detail, and the cost of main-
+taining history.
+2.2. Task Progress Modeling for Robot Control
+Task-progress modeling distinguishes execution phases that
+may share similar observations. Language-grounded plan-
+ning and reasoning connect task semantics to control [12,
+36]; memory-based planners additionally condition subtask
+selection on execution history [3, 26].
+Explicit progress
+models use different state representations:
+TaskAnchor
+learns a stage coordinate, ChainVLA carries execution con-
+text across policy queries, and TFP maintains a dynamically
+updated progress belief [11, 17, 18].
+Completion moni-
+toring supports stage transitions: EventSync verifies sub-
+goal completion before updating completed-subgoal his-
+tory [39]. Stage inference estimates the current execution
+phase, while completion verification establishes whether an
+operation has finished and its completion can be recorded.
+Mem-0 selects the next subtask using a separate planner
+triggered by subtask completion [3], whereas our policy re-
+estimates the current subtask at each decision cycle.
+2.3. Benchmarks for Memory-Dependent Manipu-
+lation
+Memory-focused benchmarks characterize different histor-
+ical dependencies. MemoryBench tests spatial and action-
+history recall [9], while MIKASA-Robo evaluates object,
+spatial, and sequential memory, as well as memory ca-
+pacity [5].
+RMBench organizes tasks by memory com-
+plexity [3], and RoboMME distinguishes temporal, spa-
+tial, object, and procedural memory [8].
+Interaction-
+centric suites examine transient evidence and historical se-
+quences: RoboTwin-MeM focuses on evidence acquired
+during interaction [33], while RoboMemArena covers com-
+posite manipulation and reports both task success and stage-
+level progress [15].
+Diagnostic extensions control infor-
+mation availability or interference: MIKASA-Robo-VLA
+combines hidden-cue tasks with reactive controls [6], and
+RoboMME-Interference inserts unrelated sessions into the
+supplied history [23].
+3. Method
+3.1. Overview
+We define key memory Mt as task-relevant information se-
+lectively retained from execution history.
+Selection fol-
+lows two criteria.
+Progress indication retains cues that
+distinguish task stages with similar current observations.
+Decision-evidence retention preserves information needed
+for current or later decisions, even when the stage is known.
+Let Ht denote the complete observation–action history
+and g the task instruction. Following EventVLA’s visual
+anchoring strategy [33], we group the initial observation,
+K sampled recent observations, and the current observation
+into visual anchors VAt = (o0, oτ1, . . . , oτK, ot), where
+τ1 < · · · < τK < t. The initial frame provides a sta-
+ble reference and recent frames capture local temporal con-
+text, paralleling the functions of Mem-0’s anchor and slid-
+ing memories [3]. In our implementation, current observa-
+tions include all camera views, whereas historical anchors
+and keyframes use only the main view. We aim to approxi-
+mate the full-history optimal policy π⋆with a policy ¯π con-
+ditioned on these anchors and key memory:
+π⋆( · | Ht, g) ≈¯π( · | VAt, Mt, g),
+C(Mt) ≤B,
+(1)
+where C(Mt) and B denote the key-memory cost and bud-
+get. Figure 2 summarizes how g, VAt, and Mt condition
+a shared vision-language backbone. The framework com-
+bines current-subtask prediction, subtask-conditioned ac-
+tion generation, and online memory updates to support de-
+cisions across task stages.
+3.2. Subtask-Guided Key Memory Construction
+We construct key memory at two levels: key-subtask se-
+lection and keyframe extraction. A subtask is selected if
+it satisfies at least one of the key memory selection cri-
+teria in Sec. 3.1: it provides an important cue to overall
+task progress, or it exposes evidence needed for current
+or later decisions. In Find Heaviest, weighing a box
+marks measurement progress and yields evidence for the
+final comparison. Returning it can be omitted from key-
+subtask selection because it adds neither necessary progress
+information nor comparison evidence.
+For each key subtask, only its last frame is labeled as a
+keyframe. Where needed, subtask boundaries are refined so
+that the final frame captures observable outcomes or tran-
+sient evidence.
+This frame marks a stage boundary and
+often preserves object attributes, spatial relations, or mea-
+surements needed later. For example, the keyframe selected
+at the end of weighing shows the box together with its
+3
+
+
+(a) KeyMemVLA
+Observations
+Visual Anchors
+Vision encoder
+Vision
+Task instruction
+“Weigh boxes
+and select the
+heaviest.”
+Tokenizer
+Language
+Key memory
+Vision encoder
+Memory
+Qwen3-VL
+Language
+Backbone
+ℓ
+(1) Subtask prediction
+Z
+SP head
+Weigh the last box.
+Subtask tokens
+Decoded text
+Subtask feedback
+(2) Action prediction
+Qt
+Action head
+At
+(3) Keyframe prediction
+KP head
+pt
+Select Δt
+Ot+Δt
+Memory update
+Ot
+Execute
+During execution
+(b) Keyframe prediction
+(c) Subtasks & memory across replans
+Observation tokens
+Ot
+LN
+Query tokens
+Qt
+LN
+Cross-attn.
+γt
+MLP
+Vision tokens
+Language tokens
+Query tokens
+Action chunk
+Replan i
+Replan i+1
+Current
+subtask
+Weigh upper-right.
+Return to upper-right.
+Visual
+memory
+pt
+Re-predicted at each replan
+Retained across replans
+Gate
+αt⊙γt
+Q′t
+t
+tlang
+Figure 2. KeyMemVLA framework. (a) A shared vision-language backbone supports subtask, action, and keyframe prediction. Dashed
+paths show subtask feedback and memory updates during online inference. (b) Cross-attention uses Qt as queries and visual features
+Ot from the current main-view image as keys and values. Gated residual fusion and an MLP head produce the keyframe scores pt. (c)
+Current-subtask text is re-predicted at each replan, while visual key memory is retained across replans.
+scale readout, recording progress and preserving evidence
+for later comparison (Fig. 1(b)). Let J index the selected
+key subtasks and ek denote the end time of subtask k. The
+keyframe timestamps are
+K = {ek | k ∈J }.
+(2)
+These annotations supervise online memory-write predic-
+tion (Sec. 3.3). We use a semi-automatic annotation pro-
+cess. An annotator first defines subtask segmentation and
+key subtask selection rules from representative demonstra-
+tions and encodes these rules in task-specific scripts. These
+scripts are then applied to annotate the remaining demon-
+strations, with the last frame of each key subtask labeled
+as a keyframe. Dataset-specific adaptations are detailed in
+Appendix A.1.
+We consider three key memory modes. ImageAndText
+retains both keyframe images and their associated key-
+subtask descriptions. Image retains only the images, while
+Text retains only the descriptions.
+These modes specify
+only the content of Mt; all retain visual anchors and online
+current-subtask prediction. The comparison of key memory
+modes favors Image (Sec. 4.4), which we use for the main
+method and primary experiments. Thus, Mt = (ot′)t′∈Kt,
+where Kt indexes past keyframes retained at time t, ordered
+chronologically. Here, we use C(Mt) = |Mt| ≤B in
+Eq. (1), where |Mt| is the number of retained keyframes.
+3.3. Policy Architecture and Training
+Figure 2(a) summarizes the policy architecture. Our Qwen-
+OFT policy uses Qwen3-VL [1] as its backbone and adopts
+action chunk prediction and continuous action regression
+from OFT [13]. Let Ct = (g, VAt, Mt) denote the input
+context and Zt the backbone hidden representations. Dur-
+ing training, only annotated keyframes strictly earlier than t
+enter Mt.
+The subtask prediction head (SPH) reuses the back-
+bone’s language generation head.
+During training, the
+annotated current-subtask text ℓt supervises SPH through
+teacher forcing; at inference, ℓt is predicted by SPH. The
+backbone then processes action-query tokens following ℓt,
+yielding their representations in Zt:
+Qt = F qry
+θ
+(Ct, ℓt),
+(3)
+The VLM prompt templates are provided in Appendix A.3.
+A shared MLP action head maps Qt to a chunk At
+of L continuous actions. For keyframe prediction, cross-
+attention uses Qt as queries and current main-view visual
+4
+
+
+embeddings Ot as keys and values. A learned sigmoid gate
+controls the residual contribution of the attended visual fea-
+tures to Qt. The keyframe prediction head (KPH) reads the
+fused queries Q′
+t to predict per-position scores pt, while the
+action head reads Qt (Fig. 2(b)). For j = 0, . . . , L −1,
+the score pt,j indicates whether to retain the observation at
+t + j. We supervise these scores with soft targets based on
+temporal proximity to annotated keyframes:
+yt,j =
+
+
+
+1 + cos(πdt,j/r)
+2
+,
+dt,j ≤r,
+0,
+dt,j > r,
+(4)
+where dt,j = mint′∈K |t + j −t′| is the temporal distance
+to the nearest annotated keyframe and r > 0 is the tempo-
+ral radius. We jointly optimize action regression, subtask
+prediction, and keyframe prediction using an L1 loss Lact,
+token cross-entropy Lsph, and binary cross-entropy Lkph:
+L = λactLact + λsphLsph + λkphLkph.
+(5)
+The weights λ balance the objectives. Module computa-
+tions, additional soft-target details, and loss definitions are
+provided in Appendix A.4.
+3.4. Online Inference
+Each episode starts with an empty key memory M0. At each
+decision cycle, inference uses the shared backbone in two
+stages (Fig. 2(a)). First, SPH generates the current subtask
+ˆℓt from Ct autoregressively. The predicted text is then fed
+back as the subtask response to obtain Qt, from which the
+action head and KPH predict At and pt, respectively.
+Based on the predicted keyframe scores, we select the
+highest-scoring future position in the action chunk if its
+score exceeds the write threshold. When execution reaches
+the selected time, the captured image is added to key mem-
+ory for subsequent decisions. Temporal filtering suppresses
+repeated writes from nearby keyframe predictions, keep-
+ing the memory sparse. Images are retained chronologi-
+cally, with the oldest entries evicted as needed to main-
+tain C(Mt) ≤B. Current-subtask text is re-predicted at
+each cycle, while visual key memory persists across cycles
+(Fig. 2(c)). Write filtering and execution details are pro-
+vided in Appendices A.4 and A.5.
+4. Experiments
+4.1. Simulation Experiments
+Evaluation on RMBench and the role of key memory.
+RMBench contains five M(1) and four M(n) tasks re-
+quiring one and multiple historical observations, respec-
+tively [3]. We compare two KeyMemVLA variants, each
+jointly trained on all nine tasks:
+one uses KPH and
+keyframe memory, while the other disables both.
+Both
+Table 1. RMBench success rates.
+Method
+M(1)
+M(n)
+Overall
+EventVLA (VA only) [33] 79.00% 54.00% 67.80%
+KeyMemVLA w/o KPH
+72.80% 62.50% 68.22%
+KeyMemVLA
+76.60%
+49.50% 64.56%
+Note. Both KeyMemVLA policies jointly train on all nine tasks
+and retain SPH. The w/o KPH variant disables keyframe pre-
+diction and memory; EventVLA uses VA only. Shaded bold and
+underlined values mark the best and second-best group averages.
+retain visual anchors and SPH. Each policy is evaluated
+over 100 trials per task. Keyframe annotations follow Ap-
+pendix A.1. Table 1 shows that enabling KPH and keyframe
+memory lowers overall success from 68.22% to 64.56%,
+with gains on some tasks and losses on others. For some
+tasks, visual anchors may already provide sufficient cues,
+making additional keyframes redundant.
+Without
+KPH,
+overall
+success
+is
+comparable
+to
+EventVLA (VA only), with higher success on all four M(n)
+tasks but a lower average success rate on M(1) tasks. Ex-
+plicit current-subtask prediction may help distinguish re-
+peated action stages, whereas EventVLA’s richer initial and
+recent multi-view context may benefit M(1) tasks. These
+observations suggest that the value of additional memory
+depends on the visual context already available and the
+task’s information requirements. Full results, visual-context
+settings, and task-level analysis are in Appendix B.3.1.
+Evaluation on RoboTwin-MeM and intermediate ev-
+idence
+retention.
+RoboTwin-MeM,
+introduced
+by
+EventVLA [33], comprises eight bimanual tasks requiring
+retention of visual evidence that appears during interaction
+and later becomes unavailable. We use the Image mode de-
+fined in Sec. 3.2, retaining keyframe images without associ-
+ated subtask descriptions. We evaluate KeyMemVLA over
+100 trials per task. SPH still predicts the current subtask to
+condition action generation. Key memory modes are com-
+pared in Sec. 4.4.
+Table 2 shows an average success rate of 92.63%, ex-
+ceeding the full EventVLA model (VA+KEM; reported
+75.20%) by 17.43 pp, with the best results on seven of
+eight tasks. For Pick the Unhidden Block, which
+requires recalling briefly revealed colors, success increases
+from 54% to 100%. These results support KeyMemVLA’s
+effectiveness on manipulation tasks requiring intermediate
+visual evidence for later decisions; component contribu-
+tions are examined in Sec. 4.3.
+KMBench design and evaluation. We examine what in-
+formation existing benchmarks require policies to remem-
+ber.
+On RMBench [3], our results suggest that initial
+observations and recent history already provide sufficient
+cues for many tasks (Appendix B.3.1). For example, the
+initial observation provides block colors and positions in
+5
+
+
+Table 2. Task success rates on RoboTwin-MeM.
+n = 1
+n = 2
+n = 3
+n = 4
+n = 5
+Method
+Rearrange
+Blocks Hard
+Put Back
+Block Hard
+Pick Objects
+in Order
+Pick the
+Unhidden Block
+Cover
+Blocks Hard
+Find Seal
+and Seal Stamp
+Reproduce
+Route
+Press Button
+Keyframe
+Average
+▼Non-Memory-Based Policies
+π0.5 [22]
+20%
+19%
+1%
+14%
+0%
+8%
+0%
+0%
+7.80%
+Qwen-OFT [13]
+3%
+26%
+0%
+0%
+0%
+0%
+0%
+1%
+3.80%
+▼Dual-System Memory-Based Vision-Language-Action Models
+MemER [26]
+32%
+4%
+12%
+2%
+0%
+26%
+3%
+5%
+10.50%
+Mem-0 [3]
+0%
+0%
+0%
+0%
+0%
+0%
+0%
+0%
+0.00%
+▼End-to-End Memory-Based Vision-Language-Action Models
+MemoryVLA [25]
+39%
+0%
+1%
+9%
+1%
+11%
+0%
+25%
+10.80%
+EventVLA [33]
+62%
+93%
+90%
+54%
+94%
+63%
+98%
+48%
+75.20%
+KeyMemVLA
+96%
+100%
+100%
+100%
+91%
+80%
+100%
+74%
+92.63%
+Note. Baselines follow EventVLA [33]; n denotes the maximum required keyframe count. Shaded bold and underlined entries denote the best and second-
+best distinct results, including ties.
+Cover Blocks. RoboTwin-MeM [33] tests memory for
+transient cues such as the colors revealed in Pick the
+Unhidden Block. However, four of its eight tasks ac-
+quire cues by lifting covers, with limited coverage of mea-
+surement comparison, calibration, and reasoning from pair-
+wise test feedback.
+We introduce KMBench to broaden
+memory evaluation through diverse task interactions.
+Figure 3 illustrates eight bimanual tasks organized
+around four memory requirements. Memory-guided selec-
+tion retains evidence associated with objects or locations
+for a later query. Multi-cue retention integrates associations
+acquired across exploration and execution stages. Count-
+ing memory tracks completed events whose totals are not
+visible in the current scene. Evidence reasoning combines
+earlier measurements or test feedback to support calibration
+and inference. For example, the evidence reasoning task
+Battery Charge evaluates whether feedback from dif-
+ferent battery pairs can be combined to identify the lowest-
+charge battery. Policies must actively retain task-relevant
+memory and its associations with objects, locations, or
+events to support subsequent decisions. Task definitions and
+memory requirements are detailed in Appendix B.1.
+We collect 50 demonstrations per task (400 total) and
+evaluate each method over 100 trials per task, reporting
+the equal-weight average success rate. Table 3 shows an
+average success rate of 68.88%, exceeding EventVLA’s
+47.13% by 21.75 pp, with the best results on six of eight
+tasks.
+The two counting tasks show the largest gains
+over EventVLA: Two-Bin Count improves from 35%
+to 97%, and Conveyor Color Count from 10% to
+57%.
+Battery Charge also improves from 67% to
+91%. These results support the framework’s effectiveness
+in tracking cumulative events and combining earlier test
+feedback for decisions across subtasks. Component abla-
+tions are reported in Sec. 4.3, with per-task results in Ap-
+pendix B.4.
+4.2. Real-World Experiments
+We evaluate on a Flexiv Rizon4s robot with a gripper
+across four tasks (Fig. 4).
+Find Block tests loca-
+tion recall after exploration; Sequential Grasp tests
+progress and order tracking when objects return to their ini-
+tial positions; Find Heaviest tests comparison of ear-
+lier weight readouts; and Press Button tests cumula-
+tive counting. Each task has 50 demonstrations (200 to-
+tal). We compare with the non-memory policy π0.5 [22]
+and memory-based MemER [26], using 10 trials per method
+and task. Camera configurations and success criteria are de-
+tailed in Appendix B.3.2.
+Table 4 shows an average success rate of 47.5%, com-
+pared with 25.0% for MemER and 2.5% for π0.5, with
+higher success on all four tasks.
+Find Block im-
+proves from 20% to 50% and Press Button from
+20% to 60% over MemER, supporting the framework’s
+use of retained exploration evidence and cumulative count
+tracking.
+We further compare inference efficiency on
+Sequential Grasp using a single NVIDIA A100 GPU
+(Appendix B.3.2). Compared with MemER, KeyMemVLA
+more than halves mean inference latency (640 ms vs.
+1432 ms) and reduces mean GPU memory usage (10.20 GiB
+vs. 17.05 GiB).
+4.3. Ablation and Representation Analysis
+Component ablations. We compare the full Image pol-
+icy with two separately trained variants on RoboTwin-MeM
+and KMBench. Removing KPH disables keyframe supervi-
+sion, prediction, writes, and inputs; removing SPH disables
+subtask supervision, prediction, and text conditioning. All
+variants retain visual anchors. Across RoboTwin-MeM and
+KMBench, removing KPH reduces the average success rate
+by 61.00 and 47.13 pp, respectively. The corresponding re-
+ductions without SPH are 30.50 and 5.13 pp (Table 5).
+At the task level, removing KPH lowers success on Put
+Back Block Hard from 100% to 38% on RoboTwin-
+6
+
+
+(a) Memory-guided selection
+Weight Rank
+Bin Color Query
+(b) Multi-cue retention
+Scan and Route
+Button Pair
+(c) Counting memory
+Two-Bin Count
+Conveyor Color Count
+(d) Evidence reasoning
+Calibrated Sort
+Battery Charge
+Annotated keyframe
+Figure 3. KMBench task overview. Eight tasks cover (a) memory-guided selection, (b) multi-cue retention, (c) counting memory, and (d)
+evidence reasoning. Each strip shows representative observations from one episode; cyan borders mark annotated keyframes.
+Table 3. Task success rates on KMBench.
+Memory-guided selection
+Multi-cue retention
+Counting memory
+Evidence reasoning
+Method
+Weight
+Rank
+Bin Color
+Query
+Scan and
+Route
+Button
+Pair
+Two-Bin
+Count
+Conveyor
+Color Count
+Calibrated
+Sort
+Battery
+Charge
+Average
+▼Non-Memory-Based Policies
+ACT [40]
+0%
+0%
+0%
+12%
+0%
+3%
+0%
+0%
+1.88%
+DP [7]
+0%
+0%
+0%
+0%
+8%
+0%
+0%
+0%
+1.00%
+π0.5 [22]
+10%
+3%
+3%
+4%
+24%
+1%
+1%
+14%
+7.50%
+▼Memory-Based Vision-Language-Action Models
+MemER [26]
+29%
+22%
+19%
+4%
+30%
+13%
+39%
+21%
+22.13%
+MemoryVLA [25]
+5%
+0%
+0%
+12%
+0%
+0%
+0%
+9%
+3.25%
+EventVLA [33]
+6%
+96%
+29%
+93%
+35%
+10%
+41%
+67%
+47.13%
+KeyMemVLA
+26%
+90%
+48%
+97%
+97%
+57%
+45%
+91%
+68.88%
+Note. Task order and categories follow Fig. 3. Shaded bold and underlined values denote the best and second-best distinct results per column, including
+ties.
+Table 4. Real-world task success rates.
+Method
+Find
+Block
+Sequential
+Grasp
+Find
+Heaviest
+Press
+Button
+Average
+π0.5 [22]
+0%
+0%
+0%
+10%
+2.5%
+MemER [26]
+20%
+40%
+20%
+20%
+25.0%
+KeyMemVLA
+50%
+50%
+30%
+60%
+47.5%
+Note. Each entry uses 10 trials; Average is computed over the four tasks.
+Shaded bold and underlined values denote the best and second-best results.
+MeM and on Bin Color Query from 90% to 0% on
+KMBench. These drops support the role of keyframe mem-
+ory in preserving earlier visual evidence to complement vi-
+sual anchors during subsequent decisions. SPH also im-
+proves the average success rate on both benchmarks. Re-
+moving SPH reduces success on Find Seal and Seal
+Stamp by 32 pp on RoboTwin-MeM. The drops on KM-
+Bench’s Scan and Route and Button Pair are 15
+and 14 pp, respectively (Appendix B.4). Explicit current-
+subtask prediction may help distinguish registration from
+delivery or exploration from final joint pressing, thereby
+guiding the policy to select actions appropriate to the cur-
+rent stage using retained evidence.
+Progress representation. The success-rate drop without
+SPH highlights the importance of explicit progress predic-
+tion in long-horizon manipulation.
+We therefore exam-
+ine whether the full SPH pipeline makes temporal progress
+more linearly decodable from action representations. On
+RoboTwin-MeM, we freeze the two VLA checkpoints and
+train a linear probe on each model’s averaged action query
+representations to predict normalized frame progress, us-
+ing paired visual contexts and fixed visible keyframes. We
+measure progress prediction accuracy using mean absolute
+error (MAE) between predicted and ground-truth progress.
+7
+
+
+(a) Find Block
+(b) Sequential Grasp
+(c) Find Heaviest
+initial reading
+(d) Press Button
+Annotated keyframe
+Figure 4.
+Real-world task overview.
+Representative observations from four tasks on the Flexiv Rizon4s: (a) Find Block, (b)
+Sequential Grasp, (c) Find Heaviest, and (d) Press Button. Blue borders mark annotated keyframes.
+Table 5. Component ablations on RoboTwin-MeM and KM-
+Bench.
+Model
+KPH
+SPH
+Success
+Drop (pp)
+RoboTwin-MeM
+KeyMemVLA
+✓
+✓
+92.63%
+—
+w/o KPH
+×
+✓
+31.63%
+61.00
+w/o SPH
+✓
+×
+62.13%
+30.50
+KMBench
+KeyMemVLA
+✓
+✓
+68.88%
+—
+w/o KPH
+×
+✓
+21.75%
+47.13
+w/o SPH
+✓
+×
+63.75%
+5.13
+Note. Success is averaged over eight tasks per benchmark; Drop is relative
+to the corresponding full model, in percentage points.
+Across eight tasks, linear probes evaluated on 80 episodes
+held out from probe training yield average test MAEs of
+0.115 without SPH and 0.088 with SPH, a 23.12% relative
+reduction. The probe with SPH has lower error on seven of
+eight tasks, supporting improved linear decodability of tem-
+poral progress under the full SPH pipeline. Figure 5 shows
+two example tasks; the complete protocol and per-task re-
+sults are in Appendix B.4.
+4.4. Key Memory Mode Analysis
+We retain online SPH and compare the three historical key
+memory modes in Sec. 3.2 on RoboTwin-MeM. All modes
+use visual anchors and KPH. Table 6 reports 92.63% suc-
+cess for Image, exceeding ImageAndText (72.25%) and Text
+(53.88%) by 20.38 and 38.75 pp, respectively.
+These differences may reflect both the information re-
+tained and how textual memory is updated. Subtask de-
+scriptions may omit object attributes and spatial relations
+that keyframes preserve for later decisions, limiting Text
+memory. In modes that store text, the description is pre-
+dicted when a write is planned and retained without a sepa-
+rate completion check. Unverified subtask descriptions may
+0
+0.5
+1
+0
+0.5
+1
+Predicted progress
+0
+0.5
+1
+Normalized time
+w/ SPH
+w/o SPH
+Reference (y=x)
+Press Button Keyframe
+Find Seal and Seal Stamp
+Figure 5. Linear probing of temporal progress. Average predic-
+tions for Press Button Keyframe and Find Seal and
+Seal Stamp, using 10 episodes per task held out from probe
+training. Shading denotes pointwise 95% confidence intervals; the
+dashed line y = x marks perfect agreement between predicted and
+ground-truth temporal progress.
+Table 6. Key memory modes on RoboTwin-MeM.
+Mode
+Keyframes
+Text history
+Success
+Image
+✓
+×
+92.63%
+ImageAndText
+✓
+✓
+72.25%
+Text
+×
+✓
+53.88%
+Note. Keyframes and Text history describe Mt; visual an-
+chors, KPH, and online SPH are common to all modes.
+Shaded bold and underlined values denote the best and
+second-best results.
+bias progress inference and subsequent action prediction or
+conflict with actual keyframes in ImageAndText. Comple-
+tion verification, as used in EventSync [39], could there-
+fore improve the reliability of textual key memory. Un-
+der the current update procedure, we use Image key mem-
+ory together with online current-subtask prediction. Ap-
+pendix B.5 details memory construction, visibility rules,
+and per-task results.
+8
+
+
+5. Conclusion
+We introduced KeyMemVLA, a subtask-guided framework
+that couples sparse key memory with online subtask pre-
+diction, action generation, and learned memory updates
+for long-horizon manipulation. We also introduced KM-
+Bench to evaluate active memory retention for subsequent
+decisions across diverse task interactions. Evaluations on
+RMBench-M(n), RoboTwin-MeM, KMBench, and four
+real-world tasks show higher average success than the com-
+pared baselines. Ablations support keyframe memory and
+the subtask prediction pipeline, while linear probes show
+improved temporal-progress decodability from the back-
+bone representations used for action prediction.
+LLM Usage Statement
+We used OpenAI Codex to assist with code debugging and
+bug fixes, language editing, manuscript consistency checks,
+figure layout revisions, and LaTeX preparation. The authors
+take full responsibility for the final manuscript, annotations,
+implementation, and experimental results.
+References
+[1] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui
+Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao,
+Chunjiang Ge, Wenbin Ge, Zhifang Guo, Qidong Huang,
+Jie Huang, Fei Huang, Binyuan Hui, Shutong Jiang, Zhao-
+hai Li, Mingsheng Li, Mei Li, Kaixin Li, Zicheng Lin, Jun-
+yang Lin, Xuejing Liu, Jiawei Liu, Chenglong Liu, Yang Liu,
+Dayiheng Liu, Shixuan Liu, Dunjie Lu, Ruilin Luo, Chenxu
+Lv, Rui Men, Lingchen Meng, Xuancheng Ren, Xingzhang
+Ren, Sibo Song, Yuchong Sun, Jun Tang, Jianhong Tu, Jian-
+qiang Wan, Peng Wang, Pengfei Wang, Qiuyue Wang, Yux-
+uan Wang, Tianbao Xie, Yiheng Xu, Haiyang Xu, Jin Xu,
+Zhibo Yang, Mingkun Yang, Jianxin Yang, An Yang, Bowen
+Yu, Fei Zhang, Hang Zhang, Xi Zhang, Bo Zheng, Humen
+Zhong, Jingren Zhou, Fan Zhou, Jing Zhou, Yuanzhi Zhu,
+and Ke Zhu. Qwen3-VL technical report. arXiv preprint
+arXiv:2511.21631, 2025. 4
+[2] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy
+Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak,
+Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell,
+Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-
+aoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna
+Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-
+language-action flow model for general robot control. In Pro-
+ceedings of Robotics: Science and Systems, 2025. 1
+[3] Tianxing Chen, Yuran Wang, Mingleyang Li, Yan Qin, Hao
+Shi, Zixuan Li, Yifan Hu, Yingsheng Zhang, Kaixuan Wang,
+Yue Chen, Hongcheng Wang, Junjie Wang, Tianhang Yang,
+Renjing Xu, Ruihai Wu, Yao Mu, Yaodong Yang, Hao Dong,
+and Ping Luo. RMBench: Memory-dependent robotic ma-
+nipulation benchmark with insights into policy design. arXiv
+preprint arXiv:2603.01229, 2026. 1, 2, 3, 5, 6
+[4] Yipeng Chen, Wentao Tan, Lei Zhu, Fengling Li, Jingjing
+Li, Guoli Yang, and Heng Tao Shen. Non-Markovian long-
+horizon robot manipulation via keyframe chaining.
+arXiv
+preprint arXiv:2603.01465, 2026. 1, 3
+[5] Egor Cherepanov, Nikita Kachaev, Alexey Kovalev, and
+Aleksandr Panov. Memory, benchmark & robots: A bench-
+mark for solving complex tasks with reinforcement learning.
+In International Conference on Learning Representations,
+pages 9759–9815, 2026. 3
+[6] Egor Cherepanov, Nikita Kachaev, Aleksandr I. Panov, and
+Alexey K. Kovalev.
+MIKASA-Robo-VLA: Benchmark-
+ing memory in VLA models for long-horizon manipulation.
+arXiv preprint arXiv:2610.00604, 2026. 3
+[7] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric
+Cousineau, Benjamin CM Burchfiel, and Shuran Song. Dif-
+fusion policy: Visuomotor policy learning via action dif-
+fusion. In Proceedings of Robotics: Science and Systems,
+2023. 7
+[8] Yinpei Dai, Hongze Fu, Jayjun Lee, Yuejiang Liu, Haoran
+Zhang, Jianing Yang, Chelsea Finn, Nima Fazeli, and Joyce
+Chai. RoboMME: Benchmarking and understanding mem-
+ory for robotic generalist policies.
+In Proceedings of the
+43rd International Conference on Machine Learning, pages
+22396–22450. PMLR, 2026. 3
+[9] Haoquan Fang, Markus Grotz, Wilbert Pumacay, Yi Ru
+Wang, Dieter Fox, Ranjay Krishna, and Jiafei Duan.
+SAM2Act: Integrating visual foundation model with a mem-
+ory architecture for robotic manipulation.
+In Proceedings
+of the 42nd International Conference on Machine Learning,
+pages 15925–15942. PMLR, 2025. 3
+[10] Pierre-Louis Guhur, Shizhe Chen, Ricardo Garcia Pinel,
+Makarand Tapaswi, Ivan Laptev, and Cordelia Schmid.
+Instruction-driven history-aware policies for robotic manip-
+ulations. In Proceedings of The 6th Conference on Robot
+Learning, pages 175–187. PMLR, 2023. 1, 3
+[11] Yuzhi Huang, Weijue Bu, Ziyi Xiong, Jie Wu, Fanding
+Huang, Jingyan Jiang, and Zhi Wang. ChainVLA: Chain-
+ing vision-language-action queries through a unified exe-
+cution state for long-horizon manipulation. arXiv preprint
+arXiv:2608.02326, 2026. 1, 3
+[12] Brian Ichter, Anthony Brohan, Yevgen Chebotar, Chelsea
+Finn, Karol Hausman, Alexander Herzog, Daniel Ho, Julian
+Ibarz, Alex Irpan, Eric Jang, Ryan Julian, Dmitry Kalash-
+nikov, Sergey Levine, Yao Lu, Carolina Parada, Kanishka
+Rao, Pierre Sermanet, Alexander T Toshev, Vincent Van-
+houcke, Fei Xia, Ted Xiao, Peng Xu, Mengyuan Yan, Noah
+Brown, Michael Ahn, Omar Cortes, Nicolas Sievers, Clay-
+ton Tan, Sichun Xu, Diego Reyes, Jarek Rettinghouse, Jor-
+nell Quiambao, Peter Pastor, Linda Luu, Kuang-Huei Lee,
+Yuheng Kuang, Sally Jesmonth, Nikhil J. Joshi, Kyle Jeffrey,
+Rosario Jauregui Ruano, Jasmine Hsu, Keerthana Gopalakr-
+ishnan, Byron David, Andy Zeng, and Chuyuan Kelly Fu.
+Do as i can, not as i say: Grounding language in robotic af-
+fordances. In Proceedings of The 6th Conference on Robot
+Learning, pages 287–318. PMLR, 2023. 3
+[13] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+9
+
+
+cess.
+In Proceedings of Robotics: Science and Systems,
+2025. 4, 6
+[14] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P
+Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn.
+OpenVLA: An
+open-source vision-language-action model. In Proceedings
+of The 8th Conference on Robot Learning, pages 2679–2713.
+PMLR, 2025. 1
+[15] Huashuo Lei, Wenxuan Song, Huarui Zhang, Jieyuan Pei,
+Jiayi Chen, Haodong Yan, Han Zhao, Pengxiang Ding,
+Zhipeng Zhang, Lida Huang, Donglin Wang, Yan Wang,
+and Haoang Li.
+RoboMemArena: A comprehensive and
+challenging robotic memory benchmark.
+arXiv preprint
+arXiv:2605.10921, 2026. 3
+[16] Xinghang Li, Minghuan Liu, Hanbo Zhang, Cunjun Yu, Jie
+Xu, Hongtao Wu, Chilam Cheang, Ya Jing, Weinan Zhang,
+Huaping Liu, Hang Li, and Tao Kong.
+Vision-language
+foundation models as effective robot imitators.
+In Inter-
+national Conference on Learning Representations, pages
+26703–26721, 2024. 3
+[17] Yushen Liang, Yue Peng, Baosheng Jin, Tianluo Zhang,
+Xinyu Zhang, Shuyi Zhou, Zhuoran Chen, Xinqi Liu,
+and Shenji Wan.
+TFP: Temporally conditioned memory-
+fusion policies for visuomotor learning.
+arXiv preprint
+arXiv:2607.08283, 2026. 1, 3
+[18] Hengyan Liu, Wenlve Zhou, Bo Yue, Yongyi Su, Ruixiang
+Wang, Zhanqi Zhang, Dekun Lu, Wei Gao, Xiaofen Xing,
+and Kui Jia.
+TaskAnchor: Grounding task state in reac-
+tive VLAs for long-horizon manipulation.
+arXiv preprint
+arXiv:2609.23580, 2026. 1, 3
+[19] Yize Liu, Huang Huang, Yining Hong, Zijian Du, Zhi Cao,
+Fei-Fei Li, and Jiajun Wu. T2Mem: Learning test-time mem-
+ory for robotics. arXiv preprint arXiv:2609.36720, 2026. 1,
+3
+[20] Yuheng Na, Zhide Zhong, Junjie He, Junfeng Li, Haodong
+Yan, Jiaan Wang, Jiaguan Zhu, Yangyang Zheng, Tianyu
+Huang, and Haoang Li.
+EvoMem-VLA: State-evolution
+memory for long-horizon robot manipulation. arXiv preprint
+arXiv:2610.05418, 2026. 3
+[21] Lars
+Osterberg,
+Maggie
+Wang,
+and
+Mac
+Schwager.
+UniMem: Unifying visual and textual memory in VLAs
+for non-Markovian tasks. arXiv preprint arXiv:2608.22869,
+2026. 1, 3
+[22] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Gal-
+liker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian
+Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin
+LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri,
+Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi,
+Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz,
+James Tanner, Quan Vuong, Homer Walke, Anna Walling,
+Haohuan Wang, Lili Yu, and Ury Zhilinsky.
+π0.5:
+a
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 1, 6, 7
+[23] Soumil Rathi.
+RoboMME-Interference:
+Benchmark-
+ing robot memory under interference.
+arXiv preprint
+arXiv:2606.22338, 2026. 3
+[24] Hao Shi, Weiye Li, Bin Xie, Yulin Wang, Renping Zhou,
+Tiancai Wang, Xiangyu Zhang, Ping Luo, and Gao Huang.
+MemoryVLA++: Temporal modeling via memory and imag-
+ination in vision-language-action models.
+arXiv preprint
+arXiv:2606.09827, 2026. 1
+[25] Hao Shi, Bin Xie, Yingfei Liu, Lin Sun, Fengrong Liu, Tian-
+cai Wang, Erjin Zhou, Haoqiang Fan, Xiangyu Zhang, and
+Gao Huang.
+MemoryVLA: Perceptual-cognitive memory
+in vision-language-action models for robotic manipulation.
+In International Conference on Learning Representations,
+pages 18567–18602, 2026. 1, 3, 6, 7
+[26] Ajay Sridhar, Jennifer Pan, Satvik Sharma, and Chelsea
+Finn. Scaling up memory for robotic control via experience
+retrieval. In International Conference on Learning Repre-
+sentations, pages 97142–97166, 2026. 1, 3, 6, 7
+[27] StarVLA Community. StarVLA: A lego-like codebase for
+vision-language-action model developing.
+arXiv preprint
+arXiv:2604.05014, 2026.
+[28] Liufan Tan, Jiale Li, and Gangshan Jing.
+MemoAct:
+Atkinson–Shiffrin-inspired hierarchical memory-augmented
+policy for robotic manipulation. IEEE Robotics and Automa-
+tion Letters, 11(9):10927–10934, 2026. 1, 3
+[29] Marcel Torne, Karl Pertsch, Homer Walke, Kyle Vedder,
+Suraj Nair, Brian Ichter, Allen Z. Ren, Haohuan Wang, Ji-
+aming Tang, Kyle Stachowicz, Karan Dhabalia, Michael
+Equi, Quan Vuong, Jost Tobias Springenberg, Sergey
+Levine, Chelsea Finn, and Danny Driess. MEM: Multi-scale
+embodied memory for vision language action models. arXiv
+preprint arXiv:2603.03596, 2026. 3
+[30] Pankhuri Vanjani, Mostafa Hatab, Can Mizrakli, Vaisakh
+Shaj, Zhuoyue Li, Moritz Reuss, and Rudolf Lioutikov.
+ReCAT: Remember, count, and time:
+Structured recur-
+rent memory for robot manipulation.
+arXiv preprint
+arXiv:2609.35200, 2026. 1, 3
+[31] Ziye Wang, Modi Shi, Chaojun Ni, Jiazhi Yang, Mengdi Li,
+Zhizhong Su, Tianwei Lin, and Hongyang Li. NativeMEM:
+Native memory compression for long-horizon robotic ma-
+nipulation. In Conference on Robot Learning, 2026. 3
+[32] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen,
+Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and Tao
+Kong. Unleashing large-scale video generative pre-training
+for visual robot manipulation. In International Conference
+on Learning Representations, pages 10641–10662, 2024. 3
+[33] Ganlin Yang, Zhangzheng Tu, Yuqiang Yang, Sitong Mao,
+Junyi Dong, Tianxing Chen, Jiaqi Peng, Jing Xiong, Jiafei
+Cao, Jifeng Dai, Wengang Zhou, Yao Mu, and Tai Wang.
+EventVLA: Event-driven visual evidence memory for long-
+horizon vision-language-action policies. In Conference on
+Robot Learning, 2026. 1, 2, 3, 5, 6, 7
+[34] Senqiao Yang, Chengyao Wang, Yuxin Chen, Zixuan Wang,
+Longxiang Tang, Haokun Gui, Jinhui Ye, Changsheng Lu,
+Xiaoyang Wu, Mingkang Zhu, Pengguang Chen, Shu Liu,
+Zhuotao Tian, Hengshuang Zhao, Bei Yu, and Jiaya Jia.
+Beyond data scaling: Representation-centric continued pre-
+10
+
+
+training for vision-language-action models. arXiv preprint
+arXiv:2608.27550, 2026.
+[35] Cheng Yin, Wang Xu, Junpeng Yang, Sikyuen Tam, Hanyu
+Liu, Yuan Yao, Xiangrui Zeng, Junbo Cui, Yequan Wang,
+Zhouping Yin, and Yankai Lin. SimpleMemVLA: A sim-
+ple but effective native-video memory for vision-language-
+action models. arXiv preprint arXiv:2609.05533, 2026. 1,
+3
+[36] Michał Zawalski, William Chen, Karl Pertsch, Oier Mees,
+Chelsea Finn, and Sergey Levine.
+Robotic control via
+embodied chain-of-thought reasoning.
+In Proceedings of
+The 8th Conference on Robot Learning, pages 3157–3181.
+PMLR, 2025. 3
+[37] Yihan Zeng, Minghao Ye, Yiyuan Chen, Yide Shentu,
+Philipp Wu, Zike Yan, and Zhongyu Li.
+KEMO: Event-
+driven keyframe memory for long-horizon robot manipula-
+tion with VLA policies. arXiv preprint arXiv:2606.23589,
+2026. 1, 3
+[38] Pengwei Zhang, Bin Xie, Xinpan Meng, Xinyu Guo, Ce
+Hao, Fang Deng, Long Cheng, and Tiancai Wang.
+Feel-
+ing the unexpected: ResTacVLA for contact-rich manip-
+ulation via residual tactile representation.
+arXiv preprint
+arXiv:2607.03387, 2026. 1
+[39] Jingjiao Zhao, Dong Jing, Mingyu Cao, Ruochuan Shi, Xi-
+ansheng Chen, Pengwei Wang, and Zhiwu Lu. EventSync:
+Event-driven memory updates for history-dependent manip-
+ulation. arXiv preprint arXiv:2610.27917, 2026. 1, 3, 8
+[40] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. In Proceedings of Robotics: Science and
+Systems, 2023. 7
+[41] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu,
+Xirui Kang, Yuchun Feng, Yinan Zheng, Jiayin Zou, Yilun
+Chen, Jia Zeng, Tai Wang, Ya-Qin Zhang, Jingjing Liu, and
+Xianyuan Zhan. X-VLA: Soft-prompted transformer as scal-
+able cross-embodiment vision-language-action model. In In-
+ternational Conference on Learning Representations, pages
+60580–60606, 2026.
+[42] Yulin Zhou, Yimeng Wang, Nengyu Wang, Shaojia Xing,
+Shiyun Tu,
+Xiang Li,
+Jingkai Zhang,
+Ningbo Jiang,
+Yuankai Lin, Hua Yang, Xiangrui Zeng, and Zhouping Yin.
+Chronos: A physics-informed full-history framework for
+non-Markovian long-horizon manipulation. arXiv preprint
+arXiv:2606.30318, 2026. 1, 3
+[43] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted
+Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker,
+Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong
+Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre
+Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S.
+Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor
+Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine,
+Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng
+Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi,
+Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog,
+Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu,
+Pete Florence, Chelsea Finn, Kumar Avinava Dubey, Danny
+Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi
+Chen, Yevgen Chebotar, Justice Carbajal, Noah Brown, An-
+thony Brohan, Montserrat Gonzalez Arenas, and Kehang
+Han.
+RT-2: Vision-language-action models transfer web
+knowledge to robotic control.
+In Proceedings of The 7th
+Conference on Robot Learning, pages 2165–2183. PMLR,
+2023. 1
+11
+
+
+KeyMemVLA: Subtask-Guided Key Memory for Long-Horizon Robotic
+Manipulation
+Supplementary Material
+A. Additional Method Details
+A.1. Script-Based Key-Subtask and Keyframe An-
+notation
+Section 3.2 outlines the semi-automatic annotation process.
+Here we specify interval constraints and dataset-specific
+adaptations. Rules use segment labels, frame boundaries,
+or interaction events; additional demonstrations are in-
+spected when target counts, exploration attempts, or exe-
+cution branches differ.
+KMBench and real-world tasks.
+For KMBench, col-
+lection scripts record basic action segments and their
+frame boundaries; task-specific rules merge adjacent seg-
+ments into coherent stages of an operation.
+For real-
+world demonstrations, boundaries are determined from col-
+lection records and video playback.
+Using zero-based
+frame indices, we denote an episode of length T by τ =
+((ot, at))T −1
+t=0 , with subtask annotations
+A(τ) = (si)N
+i=1,
+si = (ℓi, [bi, ei]),
+(6)
+where ℓi is a language description and [bi, ei] is an in-
+clusive frame interval. The intervals are contiguous, non-
+overlapping, and cover the episode:
+b1 = 0,
+eN = T −1,
+bi ≤ei,
+bi+1 = ei + 1
+(1 ≤i < N).
+(7)
+A subtask is selected when it provides an important progress
+cue or exposes evidence required for current or later deci-
+sions, following the two criteria in Sec. 3.2. Only the final
+frame of each selected subtask is marked as a keyframe,
+yielding K(τ) = {ei | i ∈J } as in Eq. 2. For example, the
+final frame of place the box on the scale and read its weight
+shows both the box and the scale readout. Returning the
+box is a subsequent subtask; once the box leaves the scale,
+the readout disappears. Retaining the measurement frame
+supports the later comparison and selection of boxes. Other
+subtask endpoints and the separately retained initial frame
+are excluded from K(τ).
+RMBench.
+RMBench already provides subtask annota-
+tions [3]. We inspect these annotations to determine which
+subtasks satisfy the key-memory criteria, then encode the
+selection rules in a task-specific script. The script applies
+the rules to other episodes of the same task and labels the
+last frame of each selected subtask as a keyframe.
+RoboTwin-MeM.
+RoboTwin-MeM provides both sub-
+task annotations and keyframes capturing visual evidence
+that appears during interaction and later becomes unavail-
+able [33]. Some keyframes precede their original subtask
+endpoints: there exist t∗∈Kgt and an enclosing subtask si
+such that bi ≤t∗< ei. We keep the provided keyframe set
+Kgt unchanged and revise the relevant subtask boundaries
+and descriptions. The revised annotations e
+A(τ) = (˜si)N ′
+i=1,
+with ˜si = (˜ℓi, [˜bi, ˜ei]), satisfy
+Kgt = {˜ei | i ∈e
+J },
+(8)
+where
+e
+J indexes revised key subtasks.
+Each original
+keyframe thus coincides with the endpoint of a revised
+key subtask, aligning the subtask decomposition with the
+terminal-frame rule while preserving the original keyframe
+timestamps. Non-key subtasks remain part of the execution
+annotations and SPH supervision.
+A.2. Sequential Sampling for Multi-Task Training
+The sampler balances tasks by repeating whole episodes
+and preserves temporal order within each batch slot. Train-
+ing uses annotated historical memory.
+Valid starting points.
+For an episode τ of T frames and
+action horizon L, a sample at t supervises actions over
+[t, t+L−1]. To ensure that the full action chunk lies within
+the episode, valid starting points satisfy 0 ≤t ≤tmax =
+T −L. For sampling interval ∆> 1, retain t = 0, draw
+u uniformly from {1, . . . , min(∆, tmax)} when tmax ≥1,
+and form
+S(0)
+τ
+= {0} ∪{u + j∆| j ∈Z≥0,
+u + j∆≤tmax}.
+(9)
+We also consider ttail = min(T −1 −∆, tmax) and add
+it if valid and absent, unless the preceding sample’s action
+chunk already covers the episode end. For ∆= 1, all valid
+starts are used. The final set Sτ is sorted chronologically.
+We set the sampling interval ∆= L, using 50 frames for
+simulation training and 30 frames for real-world training.
+Task balancing.
+Let Ed be the episodes of task d and
+nτ = |Sτ|. Task totals and the common target are
+Nd =
+X
+τ∈Ed
+nτ,
+Ntarget = max
+d
+Nd.
+(10)
+12
+
+
+We shuffle each task’s episodes,
+repeat its full list
+⌊Ntarget/Nd⌋times, and append whole episodes until its
+total reaches the target. The merged pool is shuffled before
+scheduling. Repeated episodes share their starting points
+within an epoch.
+Distributed batch slots.
+Episodes are assigned to the
+training process with the fewest accumulated samples, then
+sorted in descending order of nτ and assigned to its least-
+loaded batch slot. Each slot processes its episodes sequen-
+tially. For stream length nr,b on process r and slot b, all
+processes run
+Nbatch = max
+r,b nr,b
+(11)
+batches per epoch. Shorter streams cycle; empty slots reuse
+a nonempty stream. Episode identifiers and boundary flags
+support memory updates and resets.
+A.3. VLM Prompt Design
+All modes retain the task instruction, visual anchors, and
+current-subtask conditioning. They differ in the representa-
+tion of historical key-memory events (Table 7).
+Table 7.
+Inputs for the three key memory
+modes.
+Mode
+Visual
+anchors
+Historical
+images
+Historical
+text
+Image
+✓
+✓
+×
+ImageAndText
+✓
+✓
+✓
+Text
+✓
+×
+✓
+Note.
+Historical images and text correspond to se-
+lected key-memory events; all modes retain visual an-
+chors.
+Templates 1–3 show mode-specific inputs for m histor-
+ical key-memory events; Template 4 expands the shared
+<action prompt>.
+All templates enable SPH, KPH,
+and image-group prefixes. The backbone’s chat template
+supplies role delimiters. The Current subtask: field
+ends the user turn in Image mode and begins the assistant
+turn in the other modes, matching their training formats.
+For ImageAndText and Text, inference supplies Current
+subtask: as a fixed assistant prefix; the model gen-
+erates only the subtask continuation.
+The current sub-
+task is annotated during training and generated at infer-
+ence. The <q act> token repeats L times between the two
+<action> markers; the action head and KPH read these
+query positions. Memory construction and visibility are de-
+tailed in Appendix B.5.
+Template 1
+Image: keyframe images
+User: Temporal observation images:
+<temporal_observation_images>
+Past keyframe images:
+<keyframe_1> ... <keyframe_m>
+Instruction: <task_instruction>
+Current subtask:
+Assistant: <current_subtask>
+User: <action_prompt>
+Template 2
+ImageAndText: paired memory
+User: Temporal observation images:
+<temporal_observation_images>
+Past keyframe images:
+<keyframe_1> ... <keyframe_m>
+Key subtasks corresponding to keyframes:
+1. <key_subtask_1>
+...
+m. <key_subtask_m>
+Instruction: <task_instruction>
+Current subtask:
+Assistant: <current_subtask>
+User: <action_prompt>
+Template 3
+Text: subtask descriptions
+User: Temporal observation images:
+<temporal_observation_images>
+Past key subtasks:
+1. <key_subtask_1>
+...
+m. <key_subtask_m>
+Instruction: <task_instruction>
+Current subtask:
+Assistant: <current_subtask>
+User: <action_prompt>
+Template 4
+Shared action prompt
+Please predict the next <L> robot
+actions and estimate which future
+observation positions inside this
+chunk are key events:
+<action><q_act>...<q_act><action>.
+A.4. Model Architecture and Training Details
+Architecture and initialization.
+The implementation
+builds on EventVLA [33] and StarVLA’s QwenOFT
+framework [27].
+Simulation policies use Qwen3-VL-
+4B-Instruct; real-world policies use VLM weights from
+StarVLA/VLAct Qwen3 Pretrain [34]. SPH uses the back-
+bone’s language generation head. The action head and KPH
+are initialized separately.
+Hyperparameters.
+Tables 8–11 summarize the dataset-
+specific model, training, and key-memory settings.
+The
+13
+
+
+Table 8. RoboTwin-MeM hyperparameters.
+Configuration
+Value
+Network architecture and basic training
+Base VLM
+Qwen3-VL-4B-Instruct
+Image resolution
+256 × 256
+Action head
+Residual MLP (Qwen-OFT)
+Action horizon (L)
+50
+Optimizer
+AdamW
+Training steps
+100,000
+Warm-up steps
+5,000
+Base VLM / SPH learning rate
+1 × 10−5
+Action / KPH / connector LR
+1 × 10−4
+Per-device batch size
+4
+Gradient accumulation steps
+1
+Key memory and supervision
+Key memory mode
+Image
+Visual anchors
+o0, ot−30, ot−15, ot
+Training keyframe memory
+Annotated (teacher)
+Memory capacity (B)
+5
+Soft-target radius (r)
+8 steps
+Positive-class weight (β)
+7.0
+Loss weights (λact, λsph, λkph)
+(1.0, 1.0, 1.0)
+Table 9. RMBench hyperparameters (w/o KPH).
+Configuration
+Value
+Network architecture and basic training
+Base VLM
+Qwen3-VL-4B-Instruct
+Image resolution
+256 × 256
+Action head
+Residual MLP (Qwen-OFT)
+Action horizon (L)
+50
+Optimizer
+AdamW
+Training steps
+100,000
+Warm-up steps
+5,000
+Base VLM / SPH learning rate
+1 × 10−5
+Action head learning rate
+1 × 10−4
+Per-device batch size
+4
+Gradient accumulation steps
+1
+Subtask prediction and visual context
+Subtask prediction head (SPH)
+Enabled
+KPH and keyframe memory
+Disabled
+Visual anchors
+o0, ot−30, ot−15, ot
+Loss weights (λact, λsph)
+(1.0, 1.0)
+RMBench configuration describes the w/o KPH policy.
+Subtask prediction and action queries.
+The decision
+context is Ct = (g, VAt, Mt), and Zt denotes the shared
+backbone’s final hidden representations.
+SPH uses the
+backbone’s existing language generation head to predict
+the current subtask, including subtasks not selected for key
+Table 10. KMBench hyperparameters.
+Configuration
+Value
+Network architecture and basic training
+Base VLM
+Qwen3-VL-4B-Instruct
+Image resolution
+256 × 256
+Action head
+Residual MLP (Qwen-OFT)
+Action horizon (L)
+50
+Optimizer
+AdamW
+Training steps
+100,000
+Warm-up steps
+5,000
+Base VLM / SPH learning rate
+1 × 10−5
+Action / KPH / connector LR
+1 × 10−4
+Per-device batch size
+4
+Gradient accumulation steps
+1
+Key memory and supervision
+Key memory mode
+Image
+Visual anchors
+o0, ot−30, ot−15, ot
+Training keyframe memory
+Annotated (teacher)
+Memory capacity (B)
+6
+Soft-target radius (r)
+8 steps
+Positive-class weight (β)
+7.0
+Loss weights (λact, λsph, λkph)
+(1.0, 1.0, 1.0)
+Table 11. Real-world hyperparameters.
+Configuration
+Value
+Network architecture and basic training
+Base VLM
+Qwen3-VL-4B
+(VLAct-pretrained)
+Image resolution
+256 × 256
+Action head
+Residual MLP (Qwen-OFT)
+Action horizon (L)
+30
+Optimizer
+AdamW
+Training steps
+60,000
+Warm-up steps
+2,000
+Base VLM / SPH learning rate
+5 × 10−5
+Action / KPH / connector LR
+5 × 10−5
+Per-device batch size
+4
+Gradient accumulation steps
+1
+Key memory and supervision
+Key memory mode
+Image
+Visual anchors
+o0, ot−30, ot−15, ot
+Training keyframe memory
+Annotated (teacher)
+Memory capacity (B)
+5
+Soft-target radius (r)
+8 steps
+Positive-class weight (β)
+7.0
+Loss weights (λact, λsph, λkph)
+(1.0, 1.0, 1.0)
+memory. For a description ℓt containing Nt tokens wt,u,
+14
+
+
+the prediction factorizes as
+Pθ(ℓt | Ct) =
+Nt
+Y
+u=1
+Pθ(wt,u | Ct, wt,<u).
+(12)
+Training uses teacher forcing with annotated subtask to-
+kens, as described in Sec. 3.3. The action-query represen-
+tations Qt ∈RL×d follow Eq. (3), where L is the action
+horizon and d the backbone hidden dimension. They are
+taken from the action-query token positions in Zt.
+Action generation.
+A shared residual MLP maps each
+query row qt,j to a continuous action:
+at+j = hact(qt,j),
+j = 0, . . . , L −1,
+At = (at, . . . , at+L−1) ∈RL×da,
+(13)
+where da is the robot action dimension. All L actions are
+regressed together from Qt, conditioned on the subtask re-
+sponse, task instruction, and visual context.
+Keyframe prediction.
+KPH combines the action-query
+representations with visual-token embeddings Ot ∈Rnv×d
+from the current main-view image. As shown in Fig. 2(b),
+its connector applies independently normalized cross-
+attention and gated residual fusion:
+γt = CA(LNq(Qt), LNo(Ot)),
+αt = σ([Qt; γt]wg + bg),
+Q′
+t = Qt + αt ⊙γt,
+pt,j = σ
+ hkph(q′
+t,j)
+
+.
+(14)
+Here, CA is multi-head cross-attention, [ ; ] concatenates
+features, and σ is sigmoid. The per-query scalar gate is
+broadcast over feature dimensions.
+The MLP hkph uses
+layer normalization, a GELU hidden layer, and a scalar out-
+put. KPH reads Q′
+t; the action head reads Qt.
+Temporal soft targets.
+The soft targets follow Eq. (4).
+Distances use all trajectory annotations; an empty annota-
+tion set gives zero targets. Thus, a keyframe just outside the
+current action chunk can still contribute to its soft targets.
+Loss definitions.
+The three supervised losses are
+Lact = E
+∥at+j −a⋆
+t+j∥1
+da
+
+,
+Lsph = −E
+
+log Pθ(w⋆
+t,u | Ct, w⋆
+t,<u)
+
+,
+Lkph = −E[βyt,j log pt,j
++ (1 −yt,j) log(1 −pt,j)] .
+(15)
+Superscript ⋆denotes annotations, and wt,u is subtask token
+u; expectations average over examples and valid positions.
+The positive-class weight is β; Eq. 5 combines the objec-
+tives.
+Online write scheduling.
+The procedure in Sec. 3.4 se-
+lects the future peak j⋆= arg max1≤j<L pt,j. A write is
+armed only when pt,j⋆> η and the selected time lies within
+the executed action prefix. Temporal filtering suppresses
+nearby repeated write proposals. If replanning replaces the
+unexecuted portion of an action chunk, pending writes as-
+sociated with that portion are canceled. Write thresholds
+and memory capacities follow the dataset-specific configu-
+rations above.
+A.5. Real-World Inference and Execution
+To implement online inference and memory updates on the
+real robot, we use the StarVLA WebSocket interface [27]
+to connect a policy server running on one NVIDIA A100
+GPU with a client responsible for observation acquisition,
+action execution, and memory management. Visual anchors
+include the initial main-view image, historical main-view
+images at offsets −30 and −15, and current images from
+all three cameras; missing historical observations are re-
+placed with the initial image. At each policy query, the
+server first predicts the current subtask, followed by action
+and keyframe prediction. As specified in Table 11, the pol-
+icy predicts an action chunk of length 30, while the client
+executes at most 16 actions from each chunk.
+B. Benchmarks and Additional Experimental
+Details
+B.1. KMBench Task Definitions
+Section 4.1 outlines the four memory requirements. Here
+we specify task rules, evidence visibility, and conditions
+for the final decision.
+Table 12 summarizes the KM-
+Bench setup and evaluation protocol. Demonstration statis-
+tics are listed in Table 13; all demonstrations include sub-
+task and keyframe annotations. Three 320 × 240 camera
+streams, proprioceptive states, and actions are recorded syn-
+chronously at 15 Hz.
+Table 12. KMBench setup and evaluation protocol.
+Item
+Setting
+Simulation environment
+RoboTwin 2.0
+Task suite
+8 bimanual tasks
+Memory categories
+4
+Training demonstrations
+50 per task (400 total)
+Evaluation trials
+100 per method per task
+Per-task metric
+Task success rate (%)
+Overall metric
+Equal-weight average across eight
+tasks
+B.1.1. Memory-Guided Selection
+Weight Rank.
+Four boxes have randomized colors,
+weights, and positions. During weighing, a display spec-
+15
+
+
+Table 13. KMBench training demonstrations.
+Task
+Demonstrations
+Frames
+Weight Rank
+50
+70,596
+Bin Color Query
+50
+27,663
+Scan and Route
+50
+46,677
+Button Pair
+50
+23,693
+Two-Bin Count
+50
+39,137
+Conveyor Color Count
+50
+50,153
+Calibrated Sort
+50
+32,649
+Battery Charge
+50
+76,239
+Note. All datasets are sampled at 15 Hz.
+ifies a target rank ρ ∈{1, 2, 3, 4}. The goal is to release the
+ρ-th lightest box on the central pad. Demonstrations weigh
+all four boxes and return each to its original location; the
+readout disappears when the box leaves the scale. This se-
+quence requires tracking completed measurements and as-
+sociating earlier readouts with the corresponding boxes for
+comparison.
+Bin Color Query.
+The robot deposits three differ-
+ently colored blocks into the left, center, and right bins in
+that order. After each deposit, the block is removed before
+the next block is supplied. Once all three blocks have been
+deposited and removed, a display presents a target color.
+The robot then presses the button in front of the bin that
+received that color. Because the deposited blocks are no
+longer visible at query time, the policy must retain the color-
+to-bin associations established during the transfers.
+B.1.2. Multi-Cue Retention
+Scan and Route.
+The robot registers three items and
+delivers them to designated stations. The identifiers of the
+three stations are shown only in the initial frame. Releasing
+an item on its registration pad reveals its destination identi-
+fier; registration is confirmed after the readout remains vis-
+ible for one second, and the display then clears. All three
+registrations must be complete and the display clear before
+delivery begins. The robot then delivers and releases all
+three items at their assigned stations. Routing therefore re-
+quires retaining the station-identifier-to-location and item-
+to-destination associations, together with delivery progress.
+Button Pair.
+Each side of the workspace contains
+three candidate buttons, exactly one of which activates a
+light. The light turns off when the button is released. The
+goal is to activate both lights simultaneously by pressing
+the working button on each side. Demonstrations explore
+the two sides and undergo resets before the final joint press,
+requiring the working-button locations to be retained across
+resets.
+B.1.3. Counting Memory
+Two-Bin Count.
+The robot deposits a specified num-
+ber of orange blocks into each of two bins. The left and right
+target counts, each ranging from 1 to 3, are shown only in
+the initial frame. Deposited blocks are removed from the
+scene, while spare blocks are replenished on the table; the
+visible supply therefore does not reveal how many blocks
+each bin has received. A deposit is counted when a released
+block enters a bin. The policy must track completed de-
+posits separately for the two bins and leave surplus blocks
+on the table.
+Conveyor Color Count.
+Blocks of the displayed
+target color and distractor colors arrive in sequence. The
+robot transfers them to an output conveyor in arrival order,
+returning the operating arm home after each transfer. Only
+completed exits of target-color blocks count toward the dis-
+played target, which ranges from 2 to 5. Once this count is
+reached, the robot must finish the current transfer and arm
+return, then press the completion button without handling
+another block. Because exited blocks disappear, the policy
+must track target-color exits separately from the total num-
+ber of transfers.
+B.1.4. Evidence Reasoning
+Calibrated Sort.
+A measurement platform has an
+unknown additive offset that remains fixed within an
+episode. The robot first measures a reference block with
+a known true value of 10, then a test block. Each readout
+disappears when its object is removed. Given readouts rref
+and rtest, the calibrated test value is
+v = rtest −rref + 10.
+(16)
+After both valid readouts have been obtained and the dis-
+play has cleared, the test block must be released on the left,
+center, or right output pad depending on whether v is be-
+low, equal to, or above the displayed threshold. The test
+block can move directly from the measurement platform to
+its output pad. The decision combines the earlier reference
+readout with the test readout to remove their common off-
+set.
+Battery Charge.
+Four
+batteries
+have
+charges
+{1, 2, 2, 3}, with the charge assignment randomized across
+episodes. The robot must identify the lowest-charge battery
+and place it on the central pad. A tester reports the sum
+of the charges of two selected batteries through a colored
+light: red for a sum of 3, yellow for 4, and green for at
+least 5. The instruction specifies the charge multiset and
+light meanings; demonstrations use the lower-right battery
+as a fixed partner and test it with each of the other three.
+Changing the pair removes or overwrites the previous
+16
+
+
+feedback. The policy associates these responses with the
+tested batteries and combines them with the known charge
+multiset to identify the lowest-charge battery.
+B.2. Real-World Task Definitions
+Table 14 summarizes the real-world setup and evaluation
+protocol. Demonstration statistics are listed in Table 15; all
+datasets are sampled at 15 Hz. For Press Button, each
+target count has 10 demonstrations.
+Table 14. Real-world setup and evaluation protocol.
+Item
+Setting
+Robot platform
+Flexiv Rizon4s with Flexiv-GN01
+gripper
+Task suite
+4 real-world tasks
+Training demonstrations
+50 per task (200 total)
+Evaluation trials
+10 per method per task
+Per-task metrics
+Task success rate (TSR) and
+subtask success rate (SSR), in %
+Overall metric
+Equal-weight average TSR across
+four tasks
+Table 15. Real-world training demonstrations.
+Task
+Demonstrations
+Frames
+Find Block
+50
+33,660
+Sequential Grasp
+50
+40,004
+Find Heaviest
+50
+57,073
+Press Button
+50
+13,285
+Note. All datasets are sampled at 15 Hz.
+Find Block.
+A block is hidden beneath one of three in-
+verted cups. The robot must lift and inspect each cup from
+left to right, replacing it before moving to the next. After
+inspecting all three cups, it must move the cup covering the
+block forward, then grasp and lift the block. Replacing the
+cups conceals their contents again, so the final retrieval re-
+quires remembering which cup covered the block.
+Sequential Grasp.
+The robot must place a green
+cuboid, a red cylinder, and an orange cube on a desig-
+nated tabletop sticker in that order. Each object must be
+returned to its original position before the next is moved; af-
+ter all three placement-and-return cycles, the robot presses
+the completion button. Because each cycle restores the ob-
+ject layout, the policy must track completed cycles to select
+the next object and recognize when to finish.
+Find Heaviest.
+Three identical-looking blocks must
+be weighed from left to right, with each returned to its orig-
+inal position after its weight is read. The robot must then
+place the heaviest block on the scale. This requires associ-
+ating earlier weight readings with block locations and com-
+paring the measurements while tracking which blocks have
+been weighed.
+Press Button.
+A number displayed on paper specifies
+a target count N ∈{1, . . . , 5}. The robot must press the left
+button exactly N times, then press the right button once to
+finish. The policy must track cumulative left-button activa-
+tions across repeated presses and releases and use the target
+count to decide when to issue the final right-button press.
+Evaluation settings and results are provided in Ap-
+pendix B.3.2. Recorded task sequences are shown in Ap-
+pendix C.2.
+B.3. Additional Experimental Details
+B.3.1. RMBench Evaluation Details
+Table 16 reports nine-task results, with baselines from
+EventVLA [33]. Both KeyMemVLA policies are jointly
+trained on all nine tasks and retain SPH. Each policy is eval-
+uated over 100 trials per task. The full policy uses KPH and
+keyframe memory entries; w/o KPH removes keyframe in-
+puts, prediction, supervision, and writes. Both use the ini-
+tial observation and offsets −30, −15, and 0: historical ob-
+servations retain the main view, while current observations
+retain all three views. EventVLA retains all three views at
+every anchor.
+Task-level
+analysis.
+Under
+joint
+nine-task
+training,
+adding KPH and keyframe memory improves some RM-
+Bench tasks but lowers overall success.
+Initial and re-
+cent observations may already provide sufficient cues for
+many tasks, so additional keyframes may introduce redun-
+dancy and make relevant evidence harder to use. Without
+KPH, KeyMemVLA performs comparably to EventVLA
+(VA only) overall, with higher success on all four M(n)
+tasks but a lower average success rate on M(1) tasks. Ex-
+plicit current-subtask prediction may help track repeated
+stages, such as successive presses in Press Button,
+whereas EventVLA’s richer historical multi-view context
+may better support spatial decisions in M(1) tasks. These
+observations motivate KMBench’s focus on retaining evi-
+dence acquired during intermediate interactions for later de-
+cisions across subtasks.
+B.3.2. Real-World Evaluation Details
+Platform and Control.
+A Flexiv Rizon4s with a Flexiv-
+GN01 gripper uses left-main, right-auxiliary, and wrist
+RGB views. Cameras capture 640×480 images at 30 Hz, re-
+sized to 256 × 256. Each action comprises a 3D translation
+increment, a 6D rotation-increment representation, and an
+absolute gripper-width target. Translation increments use
+17
+
+
+Table 16. Per-task success rates on RMBench.
+M(1)
+M(n)
+Method
+Observe and
+Pickup
+Rearrange
+Blocks
+Put Back
+Block
+Swap
+Blocks
+Swap T
+Battery
+Try
+Blocks
+Ranking Try
+Cover
+Blocks
+Press
+Button
+Average
+▼Non-Memory-Based Policies
+ACT [40]
+1%
+29%
+0%
+2%
+2%
+19%
+0%
+0%
+0%
+5.90%
+DP [7]
+1%
+0%
+0%
+11%
+20%
+10%
+10%
+0%
+0%
+5.80%
+π0.5 [22]
+9%
+13%
+11%
+24%
+15%
+16%
+6%
+0%
+0%
+10.40%
+Qwen-OFT [13]
+0%
+0%
+0%
+0%
+0%
+14%
+37%
+0%
+0%
+5.60%
+X-VLA [41]
+9%
+13%
+18%
+16%
+3%
+26%
+1%
+2%
+0%
+9.80%
+▼Dual-System Memory-Based Vision-Language-Action Models
+MemER [26]
+7%
+17%
+0%
+14%
+7%
+27%
+0%
+6%
+0%
+8.70%
+Mem-0 [3]
+4%
+89%
+90%
+67%
+14%
+28%
+18%
+68%
+0%
+42.00%
+▼End-to-End Memory-Based Vision-Language-Action Models
+MemoryVLA (OpenVLA) [25]
+0%
+22%
+50%
+17%
+9%
+25%
+12%
+40%
+0%
+19.40%
+MemoryVLA (Qwen-OFT) [25]
+2%
+53%
+81%
+76%
+9%
+33%
+53%
+69%
+0%
+41.70%
+EventVLA (VA only) [33]
+21%
+96%
+95%
+96%
+87%
+35%
+81%
+97%
+3%
+67.80%
+KeyMemVLA w/o KPH
+22%
+89%
+76%
+91%
+86%
+42%
+100%
+100%
+8%
+68.22%
+KeyMemVLA
+28%
+84%
+100%
+80%
+91%
+36%
+66%
+70%
+26%
+64.56%
+Note. Baseline task rates and aggregate averages follow EventVLA [33]; its RMBench row uses VA only. Both KeyMemVLA policies jointly train on all
+nine tasks and retain SPH; w/o KPH removes keyframe prediction and memory. Shaded bold and underlined entries denote the best and second-best distinct
+results per column, including ties.
+the robot base frame; outputs are unnormalized using the
+checkpoint’s training statistics and converted into robot tar-
+gets. The nominal action rate is 15 Hz, with local interpola-
+tion at 100 Hz. Inference uses one NVIDIA A100 GPU and
+the procedure in Appendix A.5.
+Evaluation Protocol.
+KeyMemVLA, π0.5, and MemER
+are each jointly trained on all four real-world tasks. Each
+method is evaluated over 10 trials per task. For Press
+Button, each target count has two test trials, ordered from
+N = 1 to N = 5.
+Task and Subtask Success Rates.
+Let ci denote the num-
+ber of successfully completed subtasks in trial i, and Ki the
+number required. For R = 10 trials per task and method,
+task success rate (TSR) and subtask success rate (SSR) are
+TSR = 1
+R
+R
+X
+i=1
+1[ci = Ki],
+SSR =
+PR
+i=1 ci
+PR
+i=1 Ki
+.
+(17)
+Find Block has five subtasks: three cup inspections,
+moving the target cup, and lifting the block. Sequential
+Grasp has seven:
+three placement/return pairs and
+the completion-button activation. Find Heaviest has
+seven:
+three weighing/return pairs and the final place-
+ment of the heaviest block. For Press Button, the Ni
+left-button activations and final right-button activation give
+Ki = Ni + 1. The resulting required subtask counts Ki
+across the 10 trials are (2, 2, 3, 3, 4, 4, 5, 5, 6, 6). The SSR
+denominators are consequently 50, 70, 70, and 40 for the
+four tasks, respectively. The overall TSR is the unweighted
+average of the four task rates.
+Table 17 reports task and subtask success rates.
+Inference Efficiency.
+To complement the task-success
+evaluation in Sec. 4.2, we measure inference efficiency
+on Sequential Grasp using a single NVIDIA A100
+GPU. For each method (π0.5, MemER, and KeyMemVLA),
+we perform three complete inference runs, each comprising
+multiple action-chunk inference calls.
+Let nr denote the number of inference calls in run r, and
+let tr,i and mr,i denote the latency and GPU memory usage
+recorded for its i-th call. We first compute the arithmetic
+averages within each run:
+¯tr = 1
+nr
+nr
+X
+i=1
+tr,i,
+¯mr = 1
+nr
+nr
+X
+i=1
+mr,i.
+(18)
+The reported mean inference latency and mean GPU mem-
+ory usage are then obtained by averaging the three run-level
+results:
+¯t = 1
+3
+3
+X
+r=1
+¯tr,
+¯m = 1
+3
+3
+X
+r=1
+¯mr.
+(19)
+Each complete run therefore contributes equally to the re-
+ported means. Table 18 reports these averages together with
+device-wide GPU utilization.
+B.4. Ablation and Linear-Probe Details
+Policy ablations.
+All variants share data, initialization,
+training budget, visual anchors, and task instructions. Re-
+moving KPH removes keyframe supervision, prediction,
+writes, and inputs; removing SPH removes subtask supervi-
+sion, prediction, and text conditioning. Table 5 summarizes
+average success in the main paper; Tables 19 and 20 provide
+the corresponding per-task results on RoboTwin-MeM and
+KMBench.
+18
+
+
+Table 17. Real-world task success rate (TSR) and subtask success rate (SSR).
+Method
+Find Block
+Sequential Grasp
+Find Heaviest
+Press Button
+TSR
+SSR
+TSR
+SSR
+TSR
+SSR
+TSR
+SSR
+π0.5
+0.0%
+14.0%
+0.0%
+4.3%
+0.0%
+8.6%
+10.0%
+62.5%
+MemER
+20.0%
+40.0%
+40.0%
+88.6%
+20.0%
+60.0%
+20.0%
+45.0%
+KeyMemVLA
+50.0%
+68.0%
+50.0%
+70.0%
+30.0%
+61.4%
+60.0%
+90.0%
+Note. Each method uses 10 trials per task. SSR pools completed subtasks over all required subtasks. Shaded bold and underlined values mark the best and
+second-best results in each column.
+Table 18. Real-world inference efficiency on a single NVIDIA
+A100 GPU.
+Method
+Latency
+(ms)
+GPU memory
+(GiB)
+GPU util.
+π0.5
+276
+7.73
+28.5%
+MemER
+1432
+17.05
+32.4%
+KeyMemVLA
+640
+10.20
+61.8%
+Note. All values are means; utilization is measured for the whole GPU.
+Table 19. Per-task ablation success rates on RoboTwin-MeM.
+Task
+Full
+w/o KPH
+w/o SPH
+Cover Blocks Hard
+91%
+6%
+94%
+Find Seal and Seal Stamp
+80%
+69%
+48%
+Pick Objects in Order
+100%
+11%
+72%
+Pick the Unhidden Block
+100%
+27%
+43%
+Press Button Keyframe
+74%
+30%
+61%
+Put Back Block Hard
+100%
+38%
+100%
+Rearrange Blocks Hard
+96%
+72%
+52%
+Reproduce Route
+100%
+0%
+27%
+Average
+92.63%
+31.63%
+62.13%
+Note. Shaded bold and underlined values mark the best and second-best
+distinct results within each row, including ties.
+Table 20. Per-task ablation success rates on KMBench.
+Task
+Full
+w/o KPH
+w/o SPH
+Weight Rank
+26%
+35%
+19%
+Bin Color Query
+90%
+0%
+100%
+Scan and Route
+48%
+17%
+33%
+Button Pair
+97%
+17%
+83%
+Two-Bin Count
+97%
+38%
+76%
+Conveyor Color Count
+57%
+11%
+60%
+Calibrated Sort
+45%
+36%
+44%
+Battery Charge
+91%
+20%
+95%
+Average
+68.88%
+21.75%
+63.75%
+Note. Shaded bold and underlined values mark the best and second-best
+distinct results within each row, including ties.
+Frozen representations.
+The probes assess the linear de-
+codability of temporal progress from action-query represen-
+tations on RoboTwin-MeM. We freeze the final full-policy
+and w/o SPH checkpoints in evaluation mode, using paired
+instructions, current and initial observations, recent history,
+and fixed visible keyframes. Online memory writes are dis-
+abled. The full policy first predicts the current subtask and
+conditions its action-prediction pass on the predicted text;
+w/o SPH uses its native prompt without subtask text. We
+mean-pool the 50 action-query representations from each
+model’s action-prediction pass into h, taking features from
+the final decoder block before the final RMSNorm.
+Probe training.
+Each task contributes 40 probe-training
+and 10 probe-test episodes, giving 320/80 episodes across
+eight tasks. Training uses 64 preselected timesteps per tra-
+jectory, one randomly drawn per temporal interval; testing
+uses 128 uniformly spaced timesteps including both end-
+points. This yields 20,480 training and 10,240 test sam-
+ples per checkpoint. Episodes and sample times are paired
+across models.
+Targets are normalized frame progress,
+p = t/(T −1).
+Each checkpoint has one linear probe
+shared across tasks, with features standardized using train-
+ing statistics. For standardized features eh, the probe and
+objective are
+ˆpi = w⊤ehi + b,
+Lprobe =
+1
+Ntrain
+X
+i
+|ˆpi −pi|.
+(20)
+Both probes use Adam, learning rate 10−3, batch size 64,
+300 epochs, and seed 42. All 400 episodes were included in
+training both policies; the 320/80 split applies only to probe
+fitting and evaluation.
+Evaluation.
+Test MAE averages absolute errors equally
+over sampled times, episodes within each task, and fi-
+nally tasks, using raw predictions without clipping, smooth-
+ing, or monotonic constraints. Table 21 reports per-task
+MAEs and their equal-weight averages across the eight
+tasks. Relative reduction is computed from the unrounded
+averages of the eight task MAEs as r = (MAEw/o SPH −
+19
+
+
+MAEw/ SPH)/MAEw/o SPH × 100%. The relative reduc-
+tion is 23.12%.
+Table 21. Linear-probe test MAE by task on RoboTwin-MeM.
+Task
+w/o SPH
+MAE
+w/ SPH
+MAE
+Reduction
+Cover Blocks Hard
+0.09496
+0.08621
+9.21%
+Find Seal and Seal Stamp
+0.13256
+0.09550
+27.96%
+Pick Objects in Order
+0.10476
+0.09554
+8.80%
+Pick the Unhidden Block
+0.08758
+0.07261
+17.10%
+Press Button Keyframe
+0.20162
+0.06063
+69.93%
+Put Back Block Hard
+0.08616
+0.10324
+−19.82%
+Rearrange Blocks Hard
+0.09451
+0.08054
+14.78%
+Reproduce Route
+0.11649
+0.11199
+3.86%
+Average
+0.11483
+0.08828
+23.12%
+Note. Lower MAE is bold; reduction is relative to w/o SPH, with negative
+values indicating increased error. MAEs and reductions are rounded inde-
+pendently from unrounded predictions.
+B.5. Key Memory Mode Details
+The three modes use the same RoboTwin-MeM demon-
+strations, backbone, objectives, visual anchors, SPH, and
+KPH. Each is jointly trained on all eight tasks. Image stores
+keyframe images, Text stores key-subtask descriptions, and
+ImageAndText stores both (Appendix A.3).
+Training uses annotated key-subtask endpoints and their
+descriptions. At inference, the predicted current subtask is
+bound to a proposed write time. An accepted event commits
+the acquired image, the bound description, or both when ex-
+ecution reaches that time. Image–text pairs share a times-
+tamp and remain paired through eviction. Descriptions at
+distinct events are retained even when identical.
+Memory starts empty and retains at most five events in
+acquisition order, evicting the oldest when full. All modes
+use only events with t′ < t. Table 22 gives the per-task
+results and equal-weight averages.
+Table 22.
+Per-task success rates by key memory mode on
+RoboTwin-MeM.
+Task
+Image
+ImageAndText
+Text
+Cover Blocks Hard
+91%
+79%
+5%
+Find Seal and Seal Stamp
+80%
+60%
+35%
+Pick Objects in Order
+100%
+33%
+36%
+Pick the Unhidden Block
+100%
+100%
+26%
+Press Button Keyframe
+74%
+28%
+39%
+Put Back Block Hard
+100%
+100%
+100%
+Rearrange Blocks Hard
+96%
+95%
+90%
+Reproduce Route
+100%
+83%
+100%
+Average
+92.63%
+72.25%
+53.88%
+Note. Shaded bold and underlined values mark the best and second-best
+distinct results within each row, including ties.
+C. Task Rollouts
+We present recorded policy rollouts on KMBench and the
+real robot. Each panel contains 12 observations in chrono-
+logical order, read left to right across the top row and then
+the bottom row.
+C.1. KMBench Rollouts
+Figures 6–13 show main-view observations from one suc-
+cessful KeyMemVLA policy rollout per KMBench task.
+Task definitions are given in Appendix B.1. The selected
+observations show object grasps, transfers, and placements,
+together with initial task cues, key feedback, and final deci-
+sions.
+C.2. Real-World Rollouts
+Figures 14–17 show recorded executions of the four tasks
+defined in Appendix B.2. Aggregate success rates are re-
+ported in Table 17.
+20
+
+
+Weight Rank
+Figure 6. Weight Rank rollout. The displayed target rank is 2. The robot weighs the four boxes, returns them to their original locations,
+and places the second-lightest box, shown in green, on the central pad.
+Bin Color Query
+Figure 7. Bin Color Query rollout. The robot deposits the blue, green, and pink blocks into the left, middle, and right bins, respectively.
+After the blocks disappear into the bins, it answers the blue query by pressing the left button.
+Scan and Route
+Figure 8. Scan and Route rollout. The initial station identifiers are 2, 1, and 3 from left to right. Registration assigns the pink, blue, and
+green items to stations 2, 1, and 3, respectively. After the readouts clear, the robot delivers the items to the corresponding stations.
+21
+
+
+Button Pair
+Figure 9. Button Pair rollout. The robot tests candidates on each side and observes the light feedback. It releases the buttons and resets
+the arms after each side’s exploration, then simultaneously presses the middle button on each side. Both indicators light up in the last
+frame.
+Two-Bin Count
+Figure 10. Two-Bin Count rollout. The initial targets are three deposits into each bin. The robot fills the left bin first, then the right.
+Deposited blocks disappear and the stock is replenished, so the robot must track completed transfers. The last frame shows the final deposit.
+Conveyor Color Count
+Figure 11. Conveyor Color Count rollout. The target is two pink-block exits. The robot transfers a blue block followed by two pink
+blocks to the output conveyor. After the second pink block exits, it presses the completion button, leaving the next blue block on the input
+conveyor.
+22
+
+
+Calibrated Sort
+Figure 12. Calibrated Sort rollout. Reference and test readouts are 13 and 12, with a threshold of 11. Calibration gives v = 12−13+10 =
+9 < 11, so the test block is placed on the left pad. The readouts clear after object removal.
+Battery Charge
+Figure 13. Battery Charge rollout. The green battery remains in the right slot while the purple, red, and cyan batteries are tested in the left
+slot, producing yellow, red, and green feedback, respectively. The robot returns the tested batteries and places the lowest-charge battery,
+shown in red, on the central pad.
+Find Block
+Figure 14. Find Block rollout. Sequential cup inspection is followed by revisiting the cup covering the orange block, moving that cup,
+and grasping and lifting the block.
+23
+
+
+Sequential Grasp
+Figure 15. Sequential Grasp rollout. The sequence shows placement and return of the green, red, and orange objects in order, followed
+by the completion-button interaction.
+Find Heaviest
+Figure 16. Find Heaviest rollout. Successive weighing and return operations are followed by picking a previously weighed block and
+placing it on the scale.
+Press Button
+Figure 17. Press Button rollout. The visible target is N = 5. Repeated left-button interactions are interleaved with release motions,
+followed by the right-button interaction in the last frame.
+24
