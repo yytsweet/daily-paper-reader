@@ -1,0 +1,1846 @@
+Title: Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes
+
+URL Source: https://arxiv.org/pdf/2611.34402v1
+
+Published Time: Thu, 26 Nov 2026 03:10:36 GMT
+
+Number of Pages: 41
+
+Markdown Content:
+# Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Hoonki Lee * 1 Haechan Shin * 2 Hyuntaek Jung 2 Yeonu Choi 2 Sangyeob Kim 2
+
+## Abstract 
+
+Nested multi-precision quantization derives multi-ple precisions from a single checkpoint by reading only the leading bits of each weight, which makes it attractive for on-device deployment under vary-ing memory and energy budgets. However, exist-ing methods offer only integer bits, leaving large accuracy gaps between adjacent precisions and severe degradation at 2 bits. To address this, we propose Any-Rate, which serves 2–8 bits from one checkpoint, in half-bit steps over 2–4 bits. Any-Rate restricts some bit-planes to extended Hamming codewords in 8-weight blocks (0.5 bits per weight), shares one LUT per row across pre-cisions, and encodes all precisions jointly with a separate target for each, reducing the loss from sharing bit-planes. Across four LLMs, Any-Rate achieves state-of-the-art accuracy among multi-precision methods at 2 and 3 bits, keeping 69% of FP16 accuracy at 2 bits, and is within one point of the best at 4 bits. It decodes about as fast as existing kernels, and an LPDDR en-ergy model estimates up to 27% less energy at equal accuracy. Code is available at https: //github.com/hoonki2002/Any-Rate .
+
+## 1. Introduction 
+
+Deploying large language models (LLMs) on devices re-quires fitting them into memory and energy budgets that differ across devices and can change at runtime (Laskaridis et al., 2024). In practice, LLM inference is primarily memory-bound, so the bit width of the weights dominates la-tency and energy per token (Lin et al., 2024). To balance the efficiency gains of lower bit widths against their accuracy loss, runtime policies switch the precision during inference, across decoding steps (Chen et al., 2025a), layers (Kwon et al., 2025), or experts (Kim et al., 2026b). However, storing one model per precision level multiplies           
+
+> *Equal contribution 1Agency for Defense Development
+> 2Yonsei University. Correspondence to: Sangyeob Kim <sangyeob.kim@yonsei.ac.kr>.
+> Preprint. November 26, 2026.
+
+storage and requires reloading at every switch. Nested multi-precision quantization instead stores a single checkpoint, from which each precision, called a mode , reads only its first few bit-planes, as in Any-Precision LLM (AP) (Park et al., 2024), AnyBCQ (AB) (Park et al., 2026), and MatGPTQ (MG) (Kleinegger et al., 2026). Such checkpoints have two limits. First, every bit-plane costs one bit per weight, so between 2 and 4 bits, where accuracy changes the most, only the 2-, 3-, and 4-bit modes are available. Second, with error feedback, each mode compensates its own errors and moves toward a different target, but all modes must share their leading bit-planes, so each mode loses more accuracy than it would when quantized alone; we call this loss the 
+
+nesting cost . MG optimizes all modes jointly, but its single averaged target only moves this cost between modes. In practice, AP and AB degrade sharply at 2 bits, and MG loses accuracy at 4 bits once it includes a 2-bit mode. We propose Any-Rate, which serves 2–8-bit modes from one checkpoint, in half-bit steps over 2–4 bits. First, Any-Rate represents each bit-plane of a block of eight weights as a codeword of the extended Hamming [8 , 4, 4] code (Conway & Sloane, 1999). Such a coded (H) plane adds one index bit per weight but requires only 0.5 bits per weight. One unconstrained (U) plane and six H planes (UHHHHHH) together support the 2-, 2.5-, 3-, 3.5-, and 4-bit modes, which share a single lookup table (LUT), and residual planes add the 5–8-bit modes. Second, Any-Rate optimizes all modes jointly, like MG, but gives each mode its own error feedback and target, and selects the codewords of all H planes in a block jointly. Third, we analyze the benefits of these two design choices (Section 4). Coded planes provide more choices for important columns, and we prove that they beat scalar planes at 2 and 3 bits even when all columns are equally important. With error feedback, per-mode targets pay a smaller nesting cost than the averaged target of MG, and coded planes reduce it further. Across four LLMs, Any-Rate achieves state-of-the-art av-erage accuracy among multi-precision methods at 2 and 3 bits, keeping 69% of FP16 accuracy at 2 bits, and is within one point of the best at 4 bits (Section 5.2). Its 3.5-bit mode is already more accurate than AB and MG (2/3/4) at 4 bits. It decodes about as fast as existing kernels, and an LPDDR energy model estimates up to 27% less energy at the same accuracy (Section 5.3). 1arXiv:2611.34402v1 [cs.LG] 25 Nov 2026 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+## 2. Background and Motivation 
+
+2.1. Nested Multi-Precision Quantization 
+
+To mitigate substantial memory and computational de-mands during large language model (LLM) inference, post-training quantization (PTQ) reduces the precision of pretrained model weights. Scalar quantization oper-ates on individual weights, ranging from naive round-to-nearest (RTN) (Dettmers et al., 2022; Yao et al., 2022) to GPTQ (Frantar et al., 2023), which incorporates layer-wise reconstruction errors using calibration data. Be-yond scalar quantization, structured quantization jointly en-codes multiple weights, employing lattice-based codebooks (QuIP# (Tseng et al., 2024a)) or trellis coding (QTIP (Tseng et al., 2024b)). Nested multi-precision quantization targets multiple bit widths by sharing a common bit representation and recon-structs each mode by reading only the corresponding prefix of bit-planes. Any-Precision LLM (AP) (Park et al., 2024) hierarchically refines quantization clusters while preserv-ing bit prefixes and storing a lookup table (LUT) for each mode. MatQuant (Nair et al., 2025) jointly optimizes multi-ple bit widths by sharing the most significant bits (MSBs) of quantized integer representations. AnyBCQ (AB) (Park et al., 2026) progressively expands precision by representing weights as sums of binary bases with corresponding scale factors. Recently, MatGPTQ (MG) (Kleinegger et al., 2026) extends GPTQ’s Hessian-guided error feedback to nested multi-precision quantization by jointly minimizing a weighted sum of layer-wise reconstruction losses across multiple bit widths. MG propagates the weighted average of the quan-tization errors of all modes to the remaining unquantized weights. 
+
+2.2. Deployment-Driven Precision Requirements 
+
+In practical deployment scenarios, varying accuracy and latency requirements motivate dynamic precision selection during LLM inference: across decoding steps (Chen et al., 2025a), layers (Kwon et al., 2025), and experts (Kim et al., 2026b). However, the effectiveness of these policies is constrained by the available modes and the accuracy of each mode. In the 5–8-bit regime, quantized models approach full-precision performance, yielding diminishing accuracy gains despite the increased memory costs of higher bit widths. In contrast, accuracy degrades sharply in the 2–4-bit regime, where existing nested quantization methods either suffer severe degradation at 2 bits (AP, AB) or sacrifice higher-precision accuracy when jointly optimizing for the 2-bit mode (MG). Since existing methods rely on scalar bit-planes, each requiring one bit per weight, they support only integer-bit increments, further limiting usable rates in the low-bit regime. To address these limitations, we propose Any-Rate (AR) ,which introduces block-wise Hamming-coded bit-planes that support half-bit steps across the 2–4-bit regime, while maintaining competitive accuracy even at 2 bits through joint encoding. Detailed performance results across bit-width regimes are provided in Appendix A. 
+
+2.3. Optimization under Nesting Constraint 
+
+While AP and AB progressively construct nested represen-tations, MG aims to improve reconstruction quality across modes through Hessian-guided joint optimization. Specifi-cally, MG minimizes a weighted sum of layer-wise recon-struction losses and updates a single feedback-compensated target using the weighted average of quantization errors across modes. However, this shared target may differ from the targets obtained through per-mode error feedback. Even with per-mode error feedback, the shared-prefix structure imposes a nesting constraint , restricting the quantization choices available to individual modes. To quantify this penalty, we define the nesting cost as the excess reconstruc-tion loss relative to independently optimized quantization. To mitigate this cost, Any-Rate jointly optimizes reconstruc-tion losses across modes while maintaining per-mode targets. In Section 4, we analyze how error feedback contributes to nesting cost and how Any-Rate mitigates it through per-mode targets and coded bit-planes. 
+
+2.4. Energy Constraints in On-Device Inference 
+
+Existing nested methods (AP, AB, and MG) evaluate infer-ence efficiency through kernel latency and throughput, but not energy. Meanwhile, for deployment on low-precision accelerators (Lee et al., 2018; Sharify et al., 2018; Sharma et al., 2018; Chen et al., 2025b; Kim et al., 2025), particu-larly in battery-powered devices with limited energy bud-gets (Laskaridis et al., 2024), energy efficiency becomes a critical consideration. During small-batch autoregressive de-coding, the linear layers of the transformer perform primar-ily memory-bound matrix-vector multiplications (GEMVs) with limited weight reuse (Williams et al., 2009; Lin et al., 2024). Consequently, off-chip memory accesses contribute substantially to energy consumption (Horowitz, 2014; Moon et al., 2025). In this setting, fine-grained precision selection enables Any-Rate to reduce weight traffic at matched accuracy, while a single shared LUT limits metadata overhead across modes. In Section 5.3, we evaluate the resulting energy efficiency under an LPDDR-based energy model alongside GPU de-coding performance. 2Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+## 3. Method 
+
+3.1. Fine-Grained Rates via Coded Bit-Planes Bit-Planes and Modes. For a layer weight matrix W ∈
+
+Rr×c, its quantized representation assigns each weight a 
+
+b-bit index ι, where bits at the same position across indices form a bit-plane . Each bit-plane contributes one bit to the index, while its rate measures the number of stored bits read per weight, excluding metadata. We refer to each 
+
+mode by the total rate of the bit-planes used to reconstruct weights (e.g., 2-bit or 3-bit mode) and denote its quantized weight by bwm, with m indicating the mode. Following Any-Precision LLM (AP) (Park et al., 2024), bw(k), the weight reconstructed from the first k planes, is obtained from a row-wise lookup table (LUT): 
+
+bw(k) = Tk [ι ≫ (b − k)] , (1) where Tk is the row’s 2k-entry LUT containing potentially non-uniform reconstruction values, so that bwm = bw(k) for the mode that reads the first k planes. 
+
+Coded Bit-Planes and Ladder. In conventional scalar bit-plane representations, adding an unconstrained (U) plane increases the rate by one bit per weight since each weight’s index bit is stored independently. To enable half-bit steps, we instead group eight adjacent weights in a row into a 
+
+block and constrain the bits of a plane within each block to a codeword of the extended Hamming [8 , 4, 4] code (Con-way & Sloane, 1999), and we denote such a plane by H (Hamming-coded). Since each codeword can be specified by 4 bits per block, an H plane adds 1 index bit while in-creasing the rate by 0.5 bits per weight. At the same 2-bit rate, UU provides 4 values per weight, whereas UHH pro-vides 8 under block-wise coding constraints. We define a 
+
+layout as a sequence of U and H planes and a ladder as the collection of modes obtained from successive prefixes of the layout. Any-Rate adopts the UHHHHHH layout, where reading the first 3 to 7 planes yields the 2, 2.5, 3, 3.5, and 4-bit modes, respectively. We compare our chosen layout with the alternative configurations in Appendix E.2. 
+
+A Single Shared LUT. Although coded bit-planes reduce the index storage rate, storing a separate LUT for each mode incurs additional metadata overhead. For Llama-3.1-8B-Instruct, storing separate FP16 LUTs for the five modes spanning 2–4 bits would require about 0.8 bits per weight in metadata alone (Appendix D.4). Instead, Any-Rate employs a single LUT T with 2b entries per row and derives each Tk
+
+by averaging entries of T that share the same k-bit prefix. 
+
+Residual Correction. In the 5–8-bit regime, extending the coded ladder with additional planes would incur substantial metadata overhead due to the exponential growth of the shared LUT. Even with four additional U planes, the shared LUT alone would require about 3.2 bits per weight for Llama-3.1-8B-Instruct (Appendix D.5). We therefore fix the 2–4-bit ladder and encode the residual for the 5–8-bit modes using a separate 4-bit index ρ, consisting of four U planes (UUUU). The m-bit mode reconstructs each weight by adding an offset to the 4-bit reconstruction: 
+
+bwm = bw4 + δm [ρ ≫ (8 − m)] , m = 5 , . . . , 8, (2) where δm is a separate row-wise offset table for each mode, containing 2m−4 entries. 
+
+3.2. Joint Encoding with Per-Mode Targets Objective and Per-Mode Targets. Let cWm ∈ Rr×c de-note the weight matrix reconstructed at mode m, with quan-tization error Em = W − cWm. Following GPTQ (Frantar et al., 2023), we use calibration inputs X ∈ Rc×n and the input Gram matrix Γ = XX ⊤ to define the layer-wise reconstruction loss: 
+
+Llayer  
+
+> m
+
+= ∥EmX∥2 
+
+> F
+
+= tr( EmΓE⊤
+
+> m
+
+). (3) As in MatGPTQ (MG) (Kleinegger et al., 2026), we jointly minimize the error across modes, weighted by mode weights 
+
+λm:
+
+min 
+
+> ι,T
+
+X
+
+> m
+
+λm tr( EmΓE⊤
+
+> m
+
+). (4) During encoding, the error feedback updates the targets of the remaining unquantized columns using the quanti-zation error of each column and the Cholesky factor of 
+
+Γ−1. Whereas MG updates a single shared target using the weighted average of errors between modes, Any-Rate keeps a separate target τm for each mode, called per-mode targets ,and updates it with the errors of that mode. 
+
+Single-Mode Plane-Joint Encoding. Since U planes al-low independent bit selection for each weight, GPTQ-style encoding selects quantization indices column by column with error feedback. In contrast, weights cannot be en-coded independently with H planes, as the eight bits of an H plane within each block are constrained to a single codeword. Any-Rate therefore handles U and H planes dif-ferently, encoding U bits column by column while jointly selecting H-plane codewords block by block. While greed-ily encoding H-plane codewords in prefix order can limit subsequent reconstruction choices, we instead consider their joint combinations as candidates s = ( s1, . . . , s nH ), with one codeword from each H plane. For each candidate, the H-plane bits are fixed and the U-plane bits are optimized with error feedback, and the combination with the lowest recon-struction loss is selected—a procedure we call plane-joint encoding .3Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Multi-Mode Joint Encoding. Under the nesting con-straint, we extend plane-joint encoding across modes by evaluating each candidate using the weighted loss in Eq. (4). For a candidate s, let qm,i (s, u i) denote the reconstructed value at column i for mode m given the U-plane bit ui, and let ˜τm,i denote its feedback-compensated target, which in-cludes the errors of the preceding columns. The shared U bit is selected by 
+
+u∗ 
+
+> i
+
+= arg min 
+
+> ui∈{ 0,1}
+
+X
+
+> m
+
+λm (˜ τm,i − qm,i (s, u i)) 2 . (5) The resulting errors em,i = (˜ τm,i − qm,i (s, u ∗ 
+
+> i
+
+)) /R ii ,where R⊤R = Γ −1, are propagated separately for each mode. Each candidate is then evaluated by its weighted loss P 
+
+> m
+
+λm
+
+P 
+
+> i
+
+e2
+
+> m,i
+
+, and the lowest-loss candidate is selected. 
+
+Efficient Candidate Search. For the UHHHHHH layout used in Any-Rate, jointly selecting codewords across six H planes yields 16 6 ≈ 1.7 × 10 7 candidates per block, making exhaustive evaluation with error feedback computationally expensive. To reduce this cost, we exploit the prefix struc-ture of the ladder, where each mode’s reconstruction loss depends only on the planes it reads. At each H plane, partial candidates are extended by its 16 codewords and ranked using the approximate weighted losses of the modes com-pleted up to that plane, without within-block error feedback. Only the best B candidates are retained at each step. After processing all H planes, the top K candidates are evalu-ated with error feedback, and the lowest-loss candidate is selected and the errors of each mode are propagated to the remaining unquantized columns. Algorithm 1 summarizes the joint encoding procedure, where B denotes an eight-column block over which H-plane codewords are selected. We use B = K = 64 , with further details in Appendix E.3. 
+
+LUT and Residual Fitting. Since each mode LUT Tk is linear in the shared LUT T , optimizing Eq. (4) with fixed indices reduces to a weighted least-squares problem with a closed-form solution (Appendix D.4). Any-Rate therefore alternates between joint encoding of the indices and refitting 
+
+T , retaining the solution with the lowest reconstruction loss (Appendix D.3). After fixing the 2–4-bit ladder, the residual indices ρ are encoded column by column with per-mode er-ror feedback, while the offset tables δm are refitted using the mean residuals of their assigned weights (Appendix D.5). 
+
+3.3. Decoding and Storage Prefix Decoding. Any-Rate stores quantization indices plane by plane, allowing each mode to read only its required prefix. For H planes, the index bits can be recovered di-rectly from the stored 4-bit messages using XOR operations, without explicitly expanding the codewords (Appendix D.2). The mode LUT Tk is derived from the shared LUT T once 
+
+Algorithm 1 Joint encoding of one 8-column block (rows in parallel). 
+
+Require: per-mode targets τm, factor block RB,:, mode weights λm, beam width B, candidates K 
+
+> 1:
+
+S ← { ∅} 
+
+> 2:
+
+for each H plane p = 1 , . . . , n H do  
+
+> 3:
+
+extend S by the 16 codewords of plane p; keep the B
+
+best by the cost (no feedback) of the modes complete up to plane p 
+
+> 4:
+
+end for  
+
+> 5:
+
+for each of the K best s ∈ S do  
+
+> 6:
+
+for i = 1 , . . . , 8: ˜τm,i ← τm,i − P 
+
+> l<i
+
+em,l Rli ;choose the U-plane bit ui minimizing P 
+
+> m
+
+λm(˜ τm,i − qm,i )2; em,i ← (˜ τm,i − qm,i )/R ii  
+
+> 7:
+
+cost( s) ← P 
+
+> m
+
+λm
+
+P 
+
+> i
+
+e2 
+
+> m,i
+> 8:
+
+end for  
+
+> 9:
+
+take s∗ = arg min s cost( s); τm,> B ← τm,> B −
+
+em, B(s∗)RB,> B
+
+when switching modes, requiring neither requantization nor a separate checkpoint. For the 5–8-bit modes, decoding additionally reads the corresponding residual planes and applies the offsets in Eq. (2). 
+
+Storage Format. A U plane packs eight weights into one byte, whereas an H plane stores a 4-bit message per eight-weight block, requiring 1 and 0.5 bits per weight, respec-tively. The shared LUT T is stored using 8-bit entries with an FP16 offset and step per row, requiring 0.21 bits per weight for UHHHHHH on Llama-3.1-8B-Instruct. For the 5–8-bit modes, the four residual U planes are stored sep-arately from the ladder, while the offset tables δm require only 30 FP16 entries per row, or 0.09 bits per weight. The effective bits read per weight during decoding include both quantization codes and metadata, as detailed in Appendix H. 
+
+## 4. Analysis 
+
+We analyze the effects of Hamming-coded planes and per-mode targets. We first examine why coded planes improve single-mode quantization despite restricting admissible bit patterns, then investigate the gain from error feedback and the nesting cost across modes, and finally assess the net gain under nested quantization. To quantify these effects, we normalize the layer-wise reconstruction loss in Eq. (3) by the squared norm of the original layer output, which we call the relative proxy loss: 
+
+Lm = Llayer 
+
+> m
+
+∥W X ∥2
+
+> F
+
+= tr( EmΓE⊤
+
+> m
+
+)tr( W ΓW ⊤) . (6) We measure the gain of a method over its baseline in dB as G = 10 log 10 (Lbase /L method ), and report mean gains 4Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes importance  (a) free bits in a block                 
+
+> free U free H fi xed
+> UU
+> 12345678
+> column in the block UHH
+> 12345678
+> importance rank (1 = most)
+> 01234
+> gain over UU (dB)
+> 1.84
+> (b) gain per column
+
+Figure 1. Allocation gain of the coded plane (Qwen2.5-3B, 2-bit). (a) Free bits of UU and UHH in one block. (b) Gain of UHH over UU by in-block importance rank (mean; band: interquartile range); dashed: whole matrix. 
+
+over 246 linear-layer weight matrices of Qwen2.5-3B (Yang et al., 2024) (Appendix F.1). 
+
+4.1. Single-Mode Gain of the Coded Plane 
+
+An H plane represents the 8 bits of a block with a 4-bit message, restricting the admissible bit patterns from 
+
+28 = 256 to 24 = 16 . While this constraint limits in-dependent bit choices, structured coding schemes such as lattice and trellis codes can reduce distortion through higher-dimensional joint quantization, particularly at low rates where scalar quantization offers only a few reconstruction levels (Tseng et al., 2024a;b). To examine the structural benefit of Hamming-coded planes, we compare coded lay-outs against Lloyd–Max scalar quantization on Gaussian inputs in the low-bit regime, and find that coded layouts can achieve lower distortion than scalar quantization (Ap-pendix F.2). Coded planes can achieve additional gains by allocating representational freedom to more important columns. With error feedback, the reconstruction loss in Eq. (3) decom-poses for each row as 
+
+Lrow = X
+
+> j
+
+dj ε2 
+
+> j
+
+, dj = Γ jj −Γj,>j Γ−1 
+
+> >j,>j
+
+Γ>j,j , (7) where εj = ˜ τj − bwj is the quantization error relative to the feedback-compensated target ˜τj , and dj denotes the impor-tance of column j (Appendix F.1). Thus, quantization errors contribute differently to the reconstruction loss depending on column importance, and coded planes can concentrate representational freedom on important columns. Note that when Γ = I, error feedback vanishes and all columns have equal importance ( dj = 1 ), isolating the structural gain. The following theorem shows that uniform importance yields the worst-case distortion for coded quan-tization relative to scalar quantization under exchangeable columns. (a) no error feedback: one target                  
+
+> 2-bit 3-bit 01 10 010 011 100 101
+> τ2
+> τ3
+> τ2=τ3=w
+> enest =e*
+> (b) error feedback: a target per mode
+> 2-bit 3-bit 01 10 010 011 100 101 ̃
+> τ2̃
+> τ3̃
+> τ2≠̃ τ3
+> enest e*
+
+Figure 2. Nesting cost on a 2/3-bit ladder (circles: chosen points; 
+
+e∗ and enest : reconstruction errors under independent quantiza-tion and nested quantization with per-mode error feedback, respec-tively). (a) Without error feedback, both modes share one target, so enest = e∗. (b) With error feedback, the 3-bit target moves toward a child of another 2-bit point, so the nested choice has a larger error ( enest > e ∗). 
+
+Theorem 4.1 (Uniform importance is the worst case) . Sup-pose the eight columns of a block are exchangeable, the loss is weighted by a diagonal column importance d ∈ R8
+
+> >0
+
+,and both structures use one LUT per row. Let D∗
+
+> coded
+
+(d)
+
+and D∗
+
+> scalar
+
+(d) denote the optimal weighted distortions of a block, and let Dc and DLM denote the optimal per-column distortions of coded and Lloyd–Max scalar quantization under uniform importance. Then, for any d,
+
+D∗
+
+> coded
+
+(d) ≤ Dc
+
+X
+
+> j
+
+dj , D∗
+
+> scalar
+
+(d) = DLM 
+
+X
+
+> j
+
+dj . (8) 
+
+Hence, if Dc < D LM , the coded structure achieves lower distortion for every d.
+
+The proof follows from the concavity of the optimal weighted distortion and the transitive symmetry of the Ham-ming code, which together yield the bound via Jensen’s inequality. Although real matrices lie outside these assump-tions, on 246 weight matrices of Qwen2.5-3B, coded struc-tures achieve mean gains of 1.84, 1.69, and 1.31 dB at 2, 3, and 4 bits, outperforming scalar structures on 246, 242, and 210 matrices, respectively. At 2 bits per weight, UU assigns two independent index bits to each column, whereas UHH allows four suitable columns to independently select three index bits, while the remaining four select only their U bit. The measured gains are concentrated in columns with higher importance (Figure 1). The full proof and additional experimental results are provided in Appendix F.2. 
+
+4.2. Gain of Error Feedback and the Nesting Cost 
+
+Error feedback reduces reconstruction loss by compensating for earlier quantization errors in subsequent columns. As shown in Eq. (7), this reduces the effective error weights from Γjj to dj ≤ Γjj , where the former assumes uncorre-5Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                    
+
+> Table 1. Feedback gain and nesting cost (dB, mean over matrices). Scalar ladder: UUUU with mode weights 1-2-4. MG (2/3/4): MatGPTQ with its 2/3/4-bit recipe and mean propagation, against single-mode GPTQ; 1-1-1 is the baseline in our results. 2-bit 3-bit 4-bit Feedback gain 2.73 2.78 2.76 Nesting cost Scalar ladder, no feedback 0.12 0.23 −0.10
+> Scalar ladder, per-mode targets 0.78 0.97 1.51 MG (2/3/4), weights 1-1-1 0.54 1.43 5.45 MG (2/3/4), weights 1-2-4 1.61 0.96 2.73
+
+lated rounding errors without feedback. Assuming equal per-column error variances, the feedback gain is approxi-mated by 
+
+GFB ≈ 10 log 10 
+
+P 
+
+> j
+
+Γjj 
+
+P 
+
+> j
+
+dj
+
+. (9) Under this approximation, the feedback gain is independent of bit width, consistent with the measured gain of approx-imately 2.75 dB across all three bit widths (Table 1); the approximation overestimates the size but orders the matrices by their gain (Appendix F.3). However, extending error feedback to nested modes intro-duces a cost, even with per-mode targets. Since these tar-gets may favor incompatible reconstruction points under the nesting constraint, additional quantization error can arise (Figure 2). To compare shared and per-mode targets, we define the nesting cost of mode m as 
+
+cm = 10 log 10 
+
+Lnest 
+
+> m
+
+Lsingle 
+
+> m
+
+, (10) where Lnest  
+
+> m
+
+and Lsingle  
+
+> m
+
+denote the losses of nested and single-mode encoding. Any-Rate applies error feedback sep-arately to each mode, whereas MatGPTQ (MG) (Kleineg-ger et al., 2026) propagates the weighted mean of mode errors. Let ˜τm,j be the feedback-compensated target of mode m at column j, and define its weighted mean as 
+
+¯τj = P 
+
+> m
+
+λm ˜τm,j / P 
+
+> m
+
+λm.
+
+Proposition 4.2 (Cost of Mean Propagation) . (i) The loss under mean propagation upper-bounds that under per-mode optimization, given fixed targets and the same nesting con-straint. (ii) Assuming zero-mean quantization errors un-correlated with target offsets and with matching second moments, the expected excess loss of mean propagation is 
+
+∆j = dj
+
+P 
+
+> m
+
+λm
+
+X
+
+> m<m ′
+
+λmλm′ E (˜ τm,j − ˜τm′,j )2 . (11) Proposition 4.2 shows that the excess loss depends on the squared differences between per-mode targets. In the scalar ladder, replacing per-mode feedback with mean propagation                
+
+> Table 2. Decomposition of the coded ladder’s gain over the scalar ladder (dB, mean over matrices), using the same encoder and integer-mode weights. Matched total bits include LUT metadata (scalar loss interpolated to the total bits of the coded ladder). 2-bit 3-bit 4-bit Single-mode gain 1.84 1.69 1.31 Nesting cost saved 0.43 0.14 0.81 Nested gain, same rate 2.26 1.82 2.12 Nested gain, matched total bits 2.19 1.51 0.64
+
+increases the sum over modes of the relative excess loss 
+
+(Lnest  
+
+> m
+
+− Lsingle  
+
+> m
+
+)/L single  
+
+> m
+
+by a median factor of 1.41. The derivation and ablation results are detailed in Appendix F.3. Table 1 shows that the scalar ladder incurs negligible nest-ing cost without feedback, whereas its nesting cost in-creases with bit width under per-mode feedback. MG ex-hibits a particularly large nesting cost at 4 bits under equal mode weights. Assigning larger weights to higher-precision modes reduces the 4-bit cost but increases the 2-bit cost, shifting the cost between modes rather than eliminating it. Thus, the increasing nesting cost reduces the net benefit of error feedback at higher bit widths, despite its nearly con-stant single-mode gain. Further analysis and experimental results are provided in Appendix F.4. 
+
+4.3. Coded Planes Also Pay a Smaller Nesting Cost 
+
+Replacing the scalar ladder with the coded ladder affects both the single-mode gain and the nesting cost. We therefore decompose the resulting gain under nested encoding as 
+
+Gnest  
+
+> m
+
+= Gsingle  
+
+> m
+
++  cscalar  
+
+> m
+
+− ccoded 
+
+> m
+
+ , (12) where Gsingle  
+
+> m
+
+denotes the single-mode gain from Sec-tion 4.1, and the second term captures the reduction in nesting cost achieved by the coded structure. Table 2 shows that, with the same per-mode targets and mode weights, the coded ladder further reduces the nesting cost, particularly at 2 and 4 bits, so at the same rate its gain over the scalar lad-der is larger under nesting than in a single mode. While the single-mode gain accounts for most of the improvement at 2 bits, the reduction in nesting cost contributes more substan-tially at 4 bits. Block-level analysis attributes this reduction primarily to smaller squared gaps between the per-mode targets (Appendix F.4), the quantity that also sets the cost of mean propagation in Proposition 4.2, so the two design choices act on the nesting cost through the same quantity. However, the coded ladder retains a structural nesting cost even without feedback, as its reconstruction cells are not perfectly nested (Appendix F.4). The resulting gain remains positive across all three bit widths after accounting for LUT metadata, although it narrows at 4 bits due to the larger shared LUT. 6Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 2 2.5 3 3.5 4        
+
+> bits per weight (mode)
+> 11.25 1.5 23
+> PPL / FP16 PPL (geo. mean)
+> FP16
+> (a) WikiText-2 perplexity
+> 22.5 33.5 4
+> bits per weight (mode)
+> 50 60 70 80 90 100
+> Accuracy (% of FP16)
+> FP16
+> (b) mean of eight benchmarks
+> AP AB MG (2/3/4) MG (3/4/8) AR (ours) 68.9 82.7 90.6 95.0 97.5
+> AP AB MG (3/4/8) AR (ours) 04812
+> bits / weight  9.60 13.38 8.26 8.30
+> (c) storage, modes 2-8
+
+Figure 3. Results averaged over the four models. (a) WikiText-2 PPL relative to FP16 (geometric mean). (b) Mean accuracy of the eight benchmarks relative to FP16. (c) Storage of one checkpoint serving all modes from 2 to 8 bits (Llama-3.1-8B-Instruct); AR splits into the 2–4-bit ladder (dark) and the 5–8-bit residual (light). Baselines support integer bits only. 
+
+## 5. Experiments 
+
+5.1. Setup 
+
+We quantize all decoder linear layers of Qwen2.5-3B (base) (Yang et al., 2024), Gemma-3-4b-it (lan-guage model only) (Gemma Team, 2025), Llama-3.1-8B-Instruct (Grattafiori et al., 2024), and Phi-4 (14B) (Ab-din et al., 2024). We compare with Any-Precision LLM (AP) (Park et al., 2024), AnyBCQ (AB, 2–4 bits only) (Park et al., 2026), and MatGPTQ (MG) (Kleinegger et al., 2026) with its official 3/4/8-bit recipe, MG (3/4/8), and a 2/3/4-bit version, MG (2/3/4), all calibrated on C4 (Raffel et al., 2020). We report WikiText-2 (Merity et al., 2017) PPL and the mean accuracy (Avg.) over eight benchmarks: ARC-Challenge and ARC-Easy (Clark et al., 2018), Hel-laSwag (Zellers et al., 2019), PIQA (Bisk et al., 2020), WinoGrande (Sakaguchi et al., 2020), GSM8K (Cobbe et al., 2021), TriviaQA (Joshi et al., 2017), and NQ-open (Kwiatkowski et al., 2019). Appendix G gives the details. 
+
+5.2. Main Results 
+
+Figure 3 averages the four models (per-model values are in Appendix A). At 2 bits, Any-Rate reaches 69% of the FP16 accuracy and 1.8 times the FP16 PPL, ahead of every baseline on all four models. The half-bit modes fill the gaps between integer bit widths: at 3.5 bits, Any-Rate reaches 95% of the FP16 accuracy, higher than AB and MG (2/3/4) at 4 bits. At 3 bits, Any-Rate has the highest average accu-racy, and at 4 bits it is 0.7 points below MG (3/4/8). MG (3/4/8), however, provides no usable 2-bit mode, and MG (2/3/4), which also targets the 2-bit mode, drops to 93% at 4 bits, as the nesting cost of Section 4.2 predicts. At 6 and 8 bits, all methods, including Any-Rate, stay above 99.5% of FP16. Serving every mode from 2 to 8 bits takes 8.30 bits per weight, close to MG (3/4/8) (8.26), and serving only 2–4 bits reads just the ladder, 4.21 bits per weight. 
+
+5.3. Energy and Decoding Speed 
+
+In on-device inference, most of the decoding energy goes to reading weights from external DRAM. We estimate the en-ergy per token of Llama-3.1-8B-Instruct as the bits read per token times an LPDDR access energy of 3.7 pJ/bit (Moon et al., 2025), plus the compute energy at 88.36 TOPS/W (Qin et al., 2025) (Figure 4). At the same bit width, the energy of Any-Rate is close to AP and equal to or lower than MG and AB: the LUT is read once per row and adds almost no bits per weight, and the compute, including table lookups, is below 1% of the energy per token. The gap opens at equal accuracy. When each method uses its cheapest mode that reaches a target accuracy, Any-Rate needs 3–27% less energy than the baselines to reach 55–90% of the FP16 ac-curacy, because its 2-bit mode does not collapse, so low targets can be met at 2 bits, and its half-bit modes allow choosing the mode just above the target. Above 90%, it is close to 4-bit AP (Appendix H). We measure the batch-1 throughput on an RTX 5070 Ti (Table 3), replacing only the linear layers with the public kernel of each method and keeping the rest of the model the same. Any-Rate matches AP at 2 bits, stays within 3% of AP at 3 and 4 bits, and is faster than AB and than MG with its act_order permutation; the half-bit modes add one throughput point between each pair of integer bit widths. Appendix H gives the linear-layer GEMV times and the measurement details. 
+
+5.4. Ablation 
+
+To check whether the layer-loss results of Section 4 carry over to the whole model, we change only the ladder or the target rule on Qwen2.5-3B and measure the PPL (Table 4). The scalar ladder UUUU collapses to a 2-bit PPL of 78 7Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 2 2.5 3 3.5 4bits per weight (mode) 050 100 150 200 decode energy per token (mJ)        
+
+> 87 97 93 93 88 101 113 126 119 119 115 131 140 155 145 145 144
+> FP16 (16 bits): 448 mJ
+> (a) energy per token
+> 55% 75% 85% 90% accuracy target (% of FP16) 0510 15 20 25 30 energy saved by AR (%)  23 11 18 6920 815 27 15 20 10 27 15 310
+> (b) energy saved by AR at equal accuracy
+> AP AB MG (2/3/4) MG (3/4/8) AR (ours)
+
+Figure 4. Estimated decoding energy per token of Llama-3.1-8B-Instruct on an LPDDR-based accelerator. (a) Energy of each mode. (b) Energy AR saves at equal accuracy (mean of eight benchmarks); each method uses its cheapest mode that reaches the target. 
+
+Table 3. Decoding throughput (tokens/s) of Llama-3.1-8B-Instruct, batch 1, RTX 5070 Ti (16 GB). Higher is better. FP16 does not fit in memory. Method 2 2.5 3 3.5 4AP 141.6 – 124.1 – 107.6 
+
+AB 135.5 – 116.0 – 100.9 MG (2/3/4) 132.5 – 119.3 – 106.9 + act_order 123.7 – 112.1 – 101.0 AR (ours) 142.4 127.0 121.3 112.7 104.9 
+
+and is also 2.0 and 0.8 higher than Any-Rate at 3 and 4 bits. Coded planes provide both the single-mode gain of Section 4.1 and the smaller nesting cost of Section 4.3, at the price of 0.33 more bits per weight for the larger LUT of each row. Encoding with MG-style mean propagation instead of per-mode targets raises the PPL in every mode, most at 2 bits (by 1.8). Supporting the half-bit modes costs little: nearly zeroing their weights improves the 2-bit PPL by only 0.14 while worsening the 3- and 4-bit modes by 0.18 and 0.05 and the half-bit modes by 1.1 and 0.4. Appendix E covers the choice of layout, mode weights, and beam width. 
+
+Table 4. Ablation on Qwen2.5-3B, WikiText-2 PPL (FP16 8.03), same encoder and calibration. Scalar: ladder UUUU (weights 1-2-4); Mean prop.: MG-style mean propagation instead of per-mode targets; Half-bit off: half-bit mode weights nearly zero. b/w: bits per weight. b/w 2 2.5 3 3.5 4Scalar (UUUU) 4.06 78.46 – 11.32 – 9.25 Mean prop. 4.39 17.22 10.95 9.37 8.81 8.56 Half-bit off 4.39 15.27 11.90 9.47 9.11 8.50 AR (ours) 4.39 15.41 10.78 9.29 8.73 8.45 
+
+## 6. Discussion 
+
+Existing nested methods tend to collapse at their lowest mode, which narrows the range of precisions that can actu-ally be chosen; Any-Rate, by simply reading fewer planes, descends in half-bit steps down to 2 bits while keeping far higher accuracy than existing methods. The two mecha-nisms identified in the analysis, coded planes and per-mode targets, both keep modes readable by truncating a prefix. Both reduce the nesting cost: per-mode targets reduce it compared with the averaged target of MG (Section 4.2), and coded planes, which also move bits to important columns without a codebook, reduce it further, mainly by narrowing the gaps between the per-mode targets (Section 4.3). The same procedure applies unchanged to MoE, vision-language, diffusion, speech recognition, and video generation models (Appendices I and J). 
+
+## 7. Conclusion 
+
+We proposed Any-Rate, which serves 2–8 bits from a single checkpoint and provides 2–4 bits in half-bit steps. Any-Rate consists of a coded ladder, in which some bit-planes are grouped with a Hamming code (Conway & Sloane, 1999), and a joint encoding that keeps a separate target for each mode. It is more accurate than existing multi-precision methods at low bit widths, and our analysis traced this to the single-mode gain of coded planes and their smaller nesting cost. Our work has limitations. Apart from single-precision GPTQ (Appendix B), our comparison is limited to multi-precision methods, and our analysis relies on layer losses of a single model. At 4 bits, Any-Rate is slightly less accu-rate than the official recipe of MatGPTQ (Kleinegger et al., 2026). Its energy gains are estimates based on memory traf-fic, and measuring them on a dedicated accelerator is left for future work. 8Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+## Impact Statement 
+
+This paper aims to reduce the cost of running neural net-works on devices with limited memory and energy by serving several precisions from one checkpoint. This can broaden access to large models by running them on devices without a server, help privacy by keeping data on the device, and save both the storage of keeping one checkpoint per precision and the energy of decoding. On the other hand, output quality degrades in low-bit modes; in our experi-ments, responses sometimes contained wrong details, and generated images became blurred. All models and datasets used here are public. 
+
+## AI Use Statement 
+
+Large language models (LLMs) were used in the preparation of this paper as follows. Formatting: LLMs assisted in L ATEX formatting. Retrieval: LLMs helped locate related work, which the authors read and verified. Proofs: the theorems and proofs were formulated by the authors; LLMs were used to check the derivations, and the authors verified every step. 
+
+Code: LLMs assisted in writing the experiment code and preparing the code for public release; the authors reviewed the code and verified every reported number against the raw experimental results. 
+
+## Reproducibility Statement 
+
+All results in this paper can be reproduced with the code released at https://github.com/hoonki2002/ Any-Rate , which contains the Any-Rate encoding and evaluation code, the scripts that run every baseline with its authors’ public code, the analysis and kernel benchmarks, and a demo that switches the bit width during generation (Appendix K). For every reported benchmark value, the release also includes the per-question model outputs and grading. The checkpoints encoded with Any-Rate are also released on Hugging Face and can be run directly in any mode without re-encoding. 
+
+## References 
+
+Abdin, M., Aneja, J., Behl, H., Bubeck, S., Eldan, R., Gu-nasekar, S., Harrison, M., Hewett, R. J., Javaheripi, M., Kauffmann, P., Lee, J. R., Lee, Y. T., Li, Y., Liu, W., Mendes, C. C. T., Nguyen, A., Price, E., de Rosa, G., Saarikivi, O., Salim, A., Shah, S., Wang, X., Ward, R., Wu, Y., Yu, D., Zhang, C., and Zhang, Y. Phi-4 technical report. arXiv preprint arXiv:2412.08905 , 2024. Bisk, Y., Zellers, R., Le Bras, R., Gao, J., and Choi, Y. PIQA: Reasoning about physical commonsense in natural language. In AAAI Conference on Artificial Intelligence (AAAI) , pp. 7432–7439, 2020. Chen, H. M., Tan, F., Kouris, A., Lee, R., Fan, H., and Venieris, S. I. Progressive mixed-precision decoding for efficient LLM inference. In International Conference on Learning Representations (ICLR) , 2025a. Chen, J., Ge, C., Xie, E., Wu, Y., Yao, L., Ren, X., Wang, Z., Luo, P., Lu, H., and Li, Z. PixArt-Σ: Weak-to-strong training of diffusion transformer for 4K text-to-image generation. In European Conference on Computer Vision (ECCV) , pp. 74–91, 2024. Chen, Y., AbouElhamayed, A. F., Dai, X., Wang, Y., Andronic, M., Constantinides, G. A., and Abdelfattah, M. S. BitMoD: Bit-serial mixture-of-datatype LLM ac-celeration. In IEEE International Symposium on High-Performance Computer Architecture (HPCA) , pp. 1082– 1097, 2025b. Clark, P., Cowhey, I., Etzioni, O., Khot, T., Sabharwal, A., Schoenick, C., and Tafjord, O. Think you have solved question answering? Try ARC, the AI2 reasoning chal-lenge. arXiv preprint arXiv:1803.05457 , 2018. Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., Hesse, C., and Schulman, J. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 ,2021. Conway, J. H. and Sloane, N. J. A. Sphere Packings, Lattices and Groups . Springer, 3rd edition, 1999. Del Rio, M., Ha, P., McNamara, Q., Miller, C., and Chandra, S. Earnings-22: A practical benchmark for accents in the wild. arXiv preprint arXiv:2203.15591 , 2022. Dettmers, T., Lewis, M., Belkada, Y., and Zettlemoyer, L. LLM.int8(): 8-bit matrix multiplication for transformers at scale. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. Dong, P., Tan, Y., Liu, X., Luo, P., Liu, Y., Pang, D., Ma, S., Huang, X., Liu, S.-Y., Zhang, D., Lu, Z., Liang, L., Tsui, C.-Y., Tu, F., Zhao, L., and Cheng, K.-T. A 14.08-to-135.69Token/s ReRAM-on-logic stacked outlier-free large-language-model accelerator with block-clustered weight-compression and adaptive parallel-speculative-decoding. In IEEE International Solid-State Circuits Conference (ISSCC) , pp. 532–534, 2026. Frantar, E. and Alistarh, D. QMoE: Sub-1-bit compression of trillion parameter models. In Conference on Machine Learning and Systems (MLSys) , 2024. Frantar, E., Ashkboos, S., Hoefler, T., and Alistarh, D. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In International Conference on Learning Representations (ICLR) , 2023. 9Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Gao, L., Tow, J., Abbasi, B., Biderman, S., Black, S., DiPofi, A., Foster, C., Golding, L., Hsu, J., Le Noac’h, A., Li, H., McDonell, K., Muennighoff, N., Ociepa, C., Phang, J., Reynolds, L., Schoelkopf, H., Skowron, A., Sutawika, L., Tang, E., Thite, A., Wang, B., Wang, K., and Zou, A. The Language Model Evaluation Harness. Zenodo, 2024. Version 0.4.5. Gemma Team. Gemma 3 technical report. arXiv preprint arXiv:2503.19786 , 2025. Grattafiori, A., Dubey, A., Jauhri, A., et al. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Horowitz, M. Computing’s energy problem (and what we can do about it). In IEEE International Solid-State Cir-cuits Conference (ISSCC) , pp. 10–14, 2014. Huang, W., Liao, Y., Liu, J., He, R., Tan, H., Zhang, S., Li, H., Liu, S., and Qi, X. Mixture compressor for mixture-of-experts LLMs gains more. In International Conference on Learning Representations (ICLR) , 2025. Joshi, M., Choi, E., Weld, D. S., and Zettlemoyer, L. Trivi-aQA: A large scale distantly supervised challenge dataset for reading comprehension. In Annual Meeting of the As-sociation for Computational Linguistics (ACL) , pp. 1601– 1611, 2017. Kim, B., Lee, H., Kim, B., Ra, I., Kim, Y., Lee, Y., and Kim, S. CECAR: Cache & expert co-aware routing accelerates on-device inference of MoE LLMs. In Advances in Neu-ral Information Processing Systems (NeurIPS) , 2026a. Kim, J., Lee, H., Shin, S., Kim, H., Lee, D., and Kim, S. DPA-MoE: A runtime precision control framework for MoE inference. In Findings of the Association for Computational Linguistics: EMNLP 2026 , pp. 22761– 22778, 2026b. Kim, S., Lee, J., and Yoo, H.-J. Slim-Llama: A 4.69mW large-language-model processor with binary/ternary weights for billion-parameter Llama model. In IEEE International Solid-State Circuits Conference (ISSCC) ,pp. 421–423, 2025. Kim, Y. J., Fahim, R., and Awadalla, H. H. Mixture of quantized experts (MoQE): Complementary effect of low-bit quantization and robustness. arXiv preprint arXiv:2310.02410 , 2023. Kleinegger, M., Crnˇ cevi´ c, E., and Alistarh, D. MatGPTQ: Efficient and accurate inference over nested quantized models. arXiv preprint arXiv:2602.03537 , 2026. Kositwattanarerk, W. and Oggier, F. Connections between Construction D and related constructions of lattices. De-signs, Codes and Cryptography , 73(2):441–455, 2014. Kwiatkowski, T., Palomaki, J., Redfield, O., Collins, M., Parikh, A., Alberti, C., Epstein, D., Polosukhin, I., De-vlin, J., Lee, K., Toutanova, K., Jones, L., Kelcey, M., Chang, M.-W., Dai, A. M., Uszkoreit, J., Le, Q., and Petrov, S. Natural Questions: A benchmark for question answering research. Transactions of the Association for Computational Linguistics , 7:452–466, 2019. Kwon, S., Seo, S. H., Lee, J. W., and Park, Y. DP-LLM: Runtime model adaptation with dynamic layer-wise pre-cision assignment. In Advances in Neural Information Processing Systems (NeurIPS) , 2025. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with PagedAttention. In ACM Symposium on Operating Systems Principles (SOSP) , pp. 611–626, 2023. Laskaridis, S., Katevas, K., Minto, L., and Haddadi, H. MELTing point: Mobile evaluation of language trans-formers. In ACM International Conference on Mobile Computing and Networking (MobiCom) , pp. 890–907, 2024. Lee, J., Kim, C., Kang, S., Shin, D., Kim, S., and Yoo, H.-J. UNPU: A 50.6TOPS/W unified deep neural net-work accelerator with 1b-to-16b fully-variable weight bit-precision. In IEEE International Solid-State Circuits Conference (ISSCC) , pp. 218–220, 2018. Li, P., Jin, X., Tan, Z., Cheng, Y., and Chen, T. QuantMoE-Bench: Examining post-training quantization for mixture-of-experts. arXiv preprint arXiv:2406.08155 , 2024. Lin, J., Tang, J., Tang, H., Yang, S., Chen, W.-M., Wang, W.-C., Xiao, G., Dang, X., Gan, C., and Han, S. AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration. In Conference on Machine Learning and Systems (MLSys) , 2024. Lloyd, S. P. Least squares quantization in PCM. IEEE Trans-actions on Information Theory , 28(2):129–137, 1982. Merity, S., Xiong, C., Bradbury, J., and Socher, R. Pointer sentinel mixture models. In International Conference on Learning Representations (ICLR) , 2017. Moon, S., Li, M., Chen, G. K., Knag, P. C., Krishnamurthy, R. K., and Seok, M. T-REX: A 68-to-567 μs/Token 0.41-to-3.95 μJ/Token transformer accelerator with reduced external memory access and enhanced hardware utiliza-tion in 16nm FinFET. In IEEE International Solid-State Circuits Conference (ISSCC) , pp. 406–408, 2025. Nair, P. A., Datta, P., Dean, J., Jain, P., and Kusupati, A. Matryoshka quantization. In International Conference on Machine Learning (ICML) , pp. 45484–45506, 2025. 10 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Panayotov, V., Chen, G., Povey, D., and Khudanpur, S. Lib-rispeech: An ASR corpus based on public domain audio books. In IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) , pp. 5206–5210, 2015. Park, G., Bae, J., Kwon, B., Kim, B., Kwon, S. J., and Lee, D. AnyBCQ: Hardware efficient flexible binary-coded quantization for multi-precision LLMs. In International Conference on Learning Representations (ICLR) , 2026. Park, Y., Hyun, J., Cho, S., Sim, B., and Lee, J. W. Any-Precision LLM: Low-cost deployment of multiple, different-sized LLMs. In International Conference on Machine Learning (ICML) , pp. 39682–39701, 2024. Peebles, W. and Xie, S. Scalable diffusion models with transformers. In IEEE/CVF International Conference on Computer Vision (ICCV) , pp. 4195–4205, 2023. Qin, Y., Wang, Y., Wang, J., Lin, Z., Zhao, Y., Wei, S., Hu, Y., and Yin, S. An 88.36TOPS/W bit-level-weight-compressed large-language-model accelerator with cluster-aligned INT-FP-GEMM and bi-dimensional workflow reformulation. In IEEE International Solid-State Circuits Conference (ISSCC) , pp. 420–422, 2025. Radford, A., Kim, J. W., Xu, T., Brockman, G., McLeavey, C., and Sutskever, I. Robust speech recognition via large-scale weak supervision. In International Conference on Machine Learning (ICML) , pp. 28492–28518, 2023. Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., Zhou, Y., Li, W., and Liu, P. J. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research , 21 (140):1–67, 2020. Sakaguchi, K., Le Bras, R., Bhagavatula, C., and Choi, Y. WinoGrande: An adversarial Winograd schema challenge at scale. In AAAI Conference on Artificial Intelligence (AAAI) , pp. 8732–8740, 2020. Sharify, S., Lascorz, A. D., Siu, K., Judd, P., and Moshovos, A. Loom: Exploiting weight and activation precisions to accelerate convolutional neural networks. In Design Automation Conference (DAC) , 2018. Sharma, H., Park, J., Suda, N., Lai, L., Chau, B., Kim, J. K., Chandra, V., and Esmaeilzadeh, H. Bit Fusion: Bit-level dynamically composable architecture for accel-erating deep neural networks. In ACM/IEEE International Symposium on Computer Architecture (ISCA) , pp. 764– 775, 2018. Tseng, A., Chee, J., Sun, Q., Kuleshov, V., and De Sa, C. QuIP#: Even better LLM quantization with Hadamard incoherence and lattice codebooks. In International Con-ference on Machine Learning (ICML) , pp. 48630–48656, 2024a. Tseng, A., Sun, Q., Hou, D., and De Sa, C. QTIP: Quantization with trellises and incoherence processing. In Advances in Neural Information Processing Systems (NeurIPS) , 2024b. Williams, S., Waterman, A., and Patterson, D. Roofline: An insightful visual performance model for multicore architectures. Communications of the ACM , 52(4):65–76, 2009. Yang, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Li, C., Liu, D., Huang, F., Wei, H., Lin, H., Yang, J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Lin, J., Dang, K., Lu, K., Bao, K., Yang, K., Yu, L., Li, M., Xue, M., Zhang, P., Zhu, Q., Men, R., Lin, R., Li, T., Tang, T., Xia, T., Ren, X., Ren, X., Fan, Y., Su, Y., Zhang, Y., Wan, Y., Liu, Y., Cui, Z., Zhang, Z., and Qiu, Z. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 ,2025a. Yang, Z., Teng, J., Zheng, W., Ding, M., Huang, S., et al. CogVideoX: Text-to-video diffusion models with an ex-pert transformer. In International Conference on Learn-ing Representations (ICLR) , 2025b. Yao, Z., Yazdani Aminabadi, R., Zhang, M., Wu, X., Li, C., and He, Y. ZeroQuant: Efficient and affordable post-training quantization for large-scale transformers. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. Zellers, R., Holtzman, A., Bisk, Y., Farhadi, A., and Choi, Y. HellaSwag: Can a machine really finish your sentence? In Annual Meeting of the Association for Computational Linguistics (ACL) , pp. 4791–4800, 2019. Zhai, X., Mustafa, B., Kolesnikov, A., and Beyer, L. Sig-moid loss for language image pre-training. In IEEE/CVF International Conference on Computer Vision (ICCV) , pp. 11975–11986, 2023. 11 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+## A. Full Benchmark Results 2 3 4 6 820 30 40 50 60 
+
+> Mean of 8 benchmarks (%)  FP16 (60.65)
+
+Region of interest 
+
+Qwen2.5-3B 
+
+2 3 4 6 820 30 40 50 60 
+
+> FP16 (62.53)
+
+Region of interest 
+
+Gemma-3-4b-it 
+
+2 3 4 6 8
+
+Bit width (bits/weight) 
+
+20 30 40 50 60 70 
+
+> Mean of 8 benchmarks (%)  FP16 (68.87)
+
+Region of interest 
+
+Llama-3.1-8B-Instruct 
+
+2 3 4 6 8
+
+Bit width (bits/weight) 
+
+45 50 55 60 65 70 FP16 (69.49) 
+
+Phi-4 (14B) 
+
+(a) 2 –8 bits 
+
+AP AB MG (2/3/4) MG (3/4/8) AR (ours) 
+
+2 2.5 3 3.5 420 30 40 50 60 
+
+> Mean of 8 benchmarks (%)  FP16 (60.65)
+
+Qwen2.5-3B 
+
+2 2.5 3 3.5 420 30 40 50 60 
+
+> FP16 (62.53)
+
+Gemma-3-4b-it 
+
+2 2.5 3 3.5 4
+
+Bit width (bits/weight) 
+
+20 30 40 50 60 70 
+
+> Mean of 8 benchmarks (%)  FP16 (68.87)
+
+Llama-3.1-8B-Instruct 
+
+2 2.5 3 3.5 4
+
+Bit width (bits/weight) 
+
+45 50 55 60 65 70 FP16 (69.49) 
+
+Phi-4 (14B) 
+
+(b) Region of interest: 2 –4 bits 
+
+Figure 5. Mean accuracy over the eight benchmarks (%) versus bit width for the four models: (a) 2–8 bits, (b) 2–4 bits. MG (3/4/8) is shown dashed. 
+
+12 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Table 5. Qwen2.5-3B and Gemma-3-4b-it: WikiText-2 PPL and accuracy (%) on eight benchmarks; Avg. is their mean. Best per bit width in bold , second best underlined. MG (2/3/4): trained jointly for 2–4 bits; MG (3/4/8): official recipe. Bits Method PPL ARC-c ARC-e HellaSwag PIQA WinoGrande GSM8K TriviaQA NQ-open Avg. 
+
+Qwen2.5-3B 
+
+2AP >1000 22.01 37.84 29.97 57.24 50.99 1.97 0.20 0.00 25.03 AB 21.88 30.89 56.73 52.14 69.42 59.27 2.73 14.10 2.60 35.99 MG (2/3/4) 25.89 30.80 46.59 52.07 69.48 56.59 1.59 7.80 1.50 33.30 MG (3/4/8) >1000 23.89 26.89 26.93 50.38 52.01 0.15 0.00 0.00 22.53 AR (ours) 15.41 34.04 58.46 58.82 73.29 62.43 3.87 18.00 5.10 39.25 
+
+2.5 AR (ours) 10.78 40.61 66.29 66.32 74.92 66.14 24.56 30.80 10.00 47.46 
+
+3AP 10.75 44.71 71.34 68.48 76.22 66.46 40.86 34.10 9.30 51.43 AB 9.95 44.11 73.78 67.88 76.82 65.59 38.29 36.50 10.90 51.73 MG (2/3/4) 10.75 44.71 74.03 67.17 76.22 67.48 35.25 32.10 10.20 50.90 MG (3/4/8) 10.19 42.41 64.69 69.20 76.06 64.72 46.47 36.20 12.20 51.49 AR (ours) 9.29 42.06 66.46 69.60 76.17 68.59 49.58 39.00 12.60 53.01 
+
+3.5 AR (ours) 8.73 44.45 72.77 70.80 76.61 69.46 62.02 44.50 15.40 57.00 
+
+4AP 8.52 45.56 70.08 72.08 78.62 68.35 67.40 46.30 16.50 58.11 AB 8.71 48.72 76.43 71.07 77.86 68.35 66.87 46.70 15.80 58.97 MG (2/3/4) 9.58 46.50 74.71 68.97 77.15 68.51 52.62 39.50 11.50 54.93 MG (3/4/8) 8.45 48.04 75.13 72.53 78.73 67.64 70.05 46.60 17.60 59.54 
+
+AR (ours) 8.45 46.33 75.13 71.73 77.75 68.98 69.07 46.80 15.80 58.95 6AP 8.06 47.53 73.78 73.52 78.67 68.19 76.42 50.40 18.20 60.84 
+
+MG (3/4/8) 8.13 46.93 73.82 72.85 78.84 68.03 75.13 49.90 18.00 60.44 AR (ours) 8.19 47.70 75.63 73.22 78.89 68.19 73.39 49.50 17.60 60.52 8AP 8.03 47.18 72.77 73.58 78.84 68.43 75.36 50.10 18.30 60.57 MG (3/4/8) 8.11 47.18 74.16 72.96 78.89 67.48 75.21 50.00 18.70 60.57 AR (ours) 8.07 47.70 75.13 73.43 79.00 68.43 75.66 50.00 18.70 61.01 
+
+16 FP16 8.03 47.27 73.11 73.55 78.89 68.35 75.51 50.30 18.20 60.65 
+
+Gemma-3-4b-it 
+
+2AP 145.90 28.75 52.06 42.54 64.36 54.93 1.67 2.90 0.70 30.99 AB 69.26 26.79 44.44 42.01 64.96 54.22 1.82 8.20 1.90 30.54 MG (2/3/4) 41.35 27.22 45.92 46.64 66.16 53.35 1.67 8.60 2.70 31.53 MG (3/4/8) >1000 24.23 33.04 30.94 56.64 49.17 1.52 0.00 0.00 24.44 AR (ours) 27.04 37.88 64.10 57.33 70.89 59.04 8.11 20.70 6.20 40.53 
+
+2.5 AR (ours) 18.39 45.73 72.52 64.43 75.73 64.09 33.89 32.40 11.60 50.05 
+
+3AP 17.46 50.00 74.58 69.25 75.52 63.22 44.43 36.70 11.80 53.19 AB 18.90 41.64 64.81 63.50 74.97 62.67 19.48 33.20 11.20 46.44 MG (2/3/4) 15.47 46.33 71.68 67.31 76.55 66.14 35.71 37.00 12.30 51.63 MG (3/4/8) 18.10 47.78 73.61 69.16 76.17 64.33 52.08 41.10 12.80 54.63 AR (ours) 16.21 52.13 74.87 69.69 76.44 65.82 52.92 40.60 14.40 55.86 
+
+3.5 AR (ours) 16.48 54.10 76.26 71.13 77.97 66.85 62.70 43.20 16.20 58.55 
+
+4AP 15.90 56.23 78.75 73.59 77.31 66.30 71.19 45.70 15.60 60.58 AB 18.34 48.63 70.24 68.51 76.71 64.25 42.76 40.40 13.50 53.13 MG (2/3/4) 15.01 51.02 75.72 70.17 78.07 67.48 52.54 45.20 14.40 56.83 MG (3/4/8) 15.85 55.03 75.29 73.12 77.20 67.32 72.18 48.20 17.50 60.73 
+
+AR (ours) 16.16 55.03 76.85 71.94 78.13 68.75 68.23 46.00 17.80 60.34 6AP 16.08 57.42 78.16 73.96 76.99 69.38 77.10 49.50 18.40 62.61 
+
+MG (3/4/8) 14.88 55.20 77.44 74.21 77.26 69.14 75.06 50.00 18.60 62.11 AR (ours) 16.22 56.06 78.28 73.67 78.07 69.30 75.13 48.80 18.10 62.18 8AP 16.05 57.00 77.90 74.15 77.31 69.93 77.79 49.10 18.20 62.67 
+
+MG (3/4/8) 15.29 55.72 78.03 74.28 77.75 68.67 75.21 49.60 18.20 62.18 AR (ours) 16.17 57.00 78.37 74.12 77.37 69.46 76.57 49.60 18.70 62.65 16 FP16 16.07 57.08 77.95 74.13 76.99 69.38 77.41 49.00 18.30 62.53 
+
+13 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Table 6. Llama-3.1-8B-Instruct and Phi-4 (14B): WikiText-2 PPL and accuracy (%) on eight benchmarks; Avg. is their mean. Best per bit width in bold , second best underlined. MG (2/3/4): trained jointly for 2–4 bits; MG (3/4/8): official recipe. Bits Method PPL ARC-c ARC-e HellaSwag PIQA WinoGrande GSM8K TriviaQA NQ-open Avg. 
+
+Llama-3.1-8B-Instruct 
+
+2AP >1000 24.40 31.06 27.33 54.73 49.49 0.76 0.60 0.10 23.56 AB 18.95 37.80 61.78 62.45 72.58 59.12 3.41 21.20 6.70 40.63 MG (2/3/4) 23.71 30.97 52.69 56.35 68.28 60.62 3.34 18.30 3.50 36.76 MG (3/4/8) >1000 24.32 31.73 30.28 54.68 49.64 0.76 0.30 0.00 23.96 AR (ours) 18.00 37.12 62.08 61.44 72.47 63.14 6.07 20.50 5.80 41.08 
+
+2.5 AR (ours) 10.53 45.05 71.59 71.37 77.37 70.72 37.00 42.20 14.30 53.70 
+
+3AP 9.70 45.90 68.86 71.46 76.66 65.51 33.89 55.90 17.90 54.51 AB 8.99 51.45 76.77 74.66 78.62 69.30 51.02 57.20 21.40 60.05 MG (2/3/4) 9.81 50.68 77.19 74.08 78.51 71.43 46.10 52.30 17.20 58.44 MG (3/4/8) 8.72 50.51 76.30 75.46 77.69 72.85 49.36 58.30 20.90 60.17 AR (ours) 8.91 50.26 74.87 74.36 79.11 72.85 58.00 55.30 20.60 60.67 
+
+3.5 AR (ours) 8.18 51.62 78.24 76.30 80.20 73.01 66.03 64.20 24.10 64.21 
+
+4AP 7.62 53.75 76.94 78.13 79.33 72.53 68.84 70.40 26.80 65.84 AB 7.78 54.44 79.55 77.38 80.09 72.30 67.85 68.20 27.20 65.88 MG (2/3/4) 8.77 52.39 79.84 75.78 80.03 71.43 59.74 61.30 23.20 62.96 MG (3/4/8) 7.55 54.10 80.51 78.37 80.90 73.24 72.93 70.90 28.60 67.45 
+
+AR (ours) 7.82 53.75 79.50 77.44 80.03 74.11 70.66 69.20 25.60 66.29 6AP 7.24 55.12 79.88 79.22 80.74 74.27 75.21 74.50 29.80 68.59 MG (3/4/8) 7.31 55.63 79.59 78.76 81.23 73.88 75.97 74.00 30.60 68.71 
+
+AR (ours) 7.37 54.78 79.42 78.85 80.90 73.80 76.72 73.00 30.00 68.43 8AP 7.22 55.03 79.63 79.27 81.12 73.88 76.42 75.40 30.10 68.86 
+
+MG (3/4/8) 7.30 56.40 79.67 78.81 81.28 74.27 75.59 73.90 30.50 68.80 AR (ours) 7.26 54.52 78.62 79.23 81.23 74.35 75.13 74.50 30.30 68.49 16 FP16 7.21 55.20 79.59 79.26 80.96 73.88 76.50 75.30 30.30 68.87 
+
+Phi-4 (14B) 
+
+2AP 13.70 45.90 68.01 66.94 76.06 65.51 26.84 33.50 9.40 49.02 AB 9.69 49.83 71.93 73.00 79.33 72.30 53.75 41.60 14.40 57.02 MG (2/3/4) 9.43 51.19 72.98 72.95 78.35 68.03 61.03 45.30 13.90 57.97 MG (3/4/8) 13.82 45.14 68.43 63.72 74.21 63.38 38.67 30.40 8.50 49.06 AR (ours) 8.83 51.28 74.92 74.48 79.00 71.03 64.14 47.60 17.10 59.94 
+
+2.5 AR (ours) 7.50 55.89 76.60 78.40 80.36 74.82 79.61 58.20 22.80 65.83 
+
+3AP 7.16 54.69 73.78 80.40 80.96 74.27 86.28 63.70 24.00 67.26 AB 7.62 54.10 72.73 79.83 80.36 74.19 85.82 62.60 24.80 66.80 MG (2/3/4) 7.15 57.17 78.07 79.07 81.50 75.53 86.28 63.40 25.00 68.25 
+
+MG (3/4/8) 6.98 55.03 75.17 79.97 80.90 72.06 87.04 63.30 26.30 67.47 AR (ours) 6.97 55.29 75.51 79.80 81.07 75.77 85.60 64.20 25.70 67.87 3.5 AR (ours) 6.74 55.55 75.46 80.55 81.39 75.69 88.55 66.40 27.30 68.86 
+
+4AP 6.63 56.74 73.40 81.52 80.63 75.53 89.92 68.30 27.50 69.19 AB 7.32 54.95 73.99 81.22 80.52 74.59 89.39 66.00 28.80 68.68 MG (2/3/4) 6.88 59.13 78.79 80.16 82.48 76.64 87.11 64.80 26.70 69.48 MG (3/4/8) 6.56 56.40 74.37 81.40 81.39 75.06 89.16 68.30 28.70 69.35 AR (ours) 6.63 56.14 75.00 80.90 81.94 76.72 89.16 67.70 29.20 69.59 
+
+6AP 6.47 55.80 72.73 81.98 81.23 76.80 89.92 68.50 28.50 69.43 MG (3/4/8) 6.47 56.06 73.11 81.64 81.34 76.80 90.30 69.20 27.70 69.52 
+
+AR (ours) 6.49 55.63 73.65 81.84 80.90 76.24 89.23 67.50 29.20 69.28 8AP 6.46 55.89 72.81 81.97 81.07 76.48 89.69 68.90 28.20 69.37 MG (3/4/8) 6.46 56.23 73.06 81.68 81.01 76.48 89.84 69.10 27.80 69.40 
+
+AR (ours) 6.46 55.38 73.15 81.81 81.18 76.32 89.54 68.20 28.70 69.28 16 FP16 6.46 55.89 72.77 81.94 81.34 76.64 89.84 69.00 28.50 69.49 
+
+14 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                                                                                                                                                             
+
+> Table 7. Single-precision GPTQ: WikiText-2 PPL and accuracy (%) on eight benchmarks; Avg. is their mean. Each bit width is a separate model. Any-Rate and MG (2/3/4) are in Tables 5 and 6. Bits Method PPL ARC-c ARC-e HellaSwag PIQA WinoGrande GSM8K TriviaQA NQ-open Avg.
+> Qwen2.5-3B
+> 2GPTQ >1000 27.56 25.76 26.50 50.65 48.30 1.67 0.00 0.00 22.55 3GPTQ 10.33 41.13 64.44 69.34 76.12 62.75 32.15 29.90 10.20 48.25 4GPTQ 8.41 49.23 75.29 72.92 78.24 67.80 70.51 46.50 16.60 59.64 16 FP16 8.03 47.27 73.11 73.55 78.89 68.35 75.51 50.30 18.20 60.65
+> Gemma-3-4b-it
+> 2GPTQ >1000 22.44 27.61 27.80 50.92 51.46 0.68 0.10 0.00 22.63 3GPTQ 17.38 46.42 72.60 67.35 74.86 64.09 22.14 33.70 11.40 49.07 4GPTQ 17.03 56.66 77.82 73.02 77.42 67.64 70.66 46.90 15.90 60.75 16 FP16 16.07 57.08 77.95 74.13 76.99 69.38 77.41 49.00 18.30 62.53
+> Llama-3.1-8B-Instruct
+> 2GPTQ >1000 26.19 26.30 26.38 51.52 48.38 0.61 0.00 0.00 22.42 3GPTQ 9.42 43.69 68.64 74.98 75.90 70.48 43.06 48.00 16.40 55.14 4GPTQ 7.55 54.61 79.34 78.83 80.47 72.93 68.61 71.00 25.70 66.44 16 FP16 7.21 55.20 79.59 79.26 80.96 73.88 76.50 75.30 30.30 68.87
+> Phi-4 (14B)
+> 2GPTQ >1000 24.32 31.94 31.70 55.77 51.14 2.05 0.00 0.10 24.63 3GPTQ 7.19 54.27 70.83 79.62 80.79 71.27 84.61 59.80 23.20 65.55 4GPTQ 6.59 55.38 71.42 81.71 81.01 74.43 89.08 67.30 28.70 68.63 16 FP16 6.46 55.89 72.77 81.94 81.34 76.64 89.84 69.00 28.50 69.49
+
+## B. Comparison with Single-Precision Quantization 
+
+B.1. Storage and Precision Switching 
+
+This section compares Any-Rate with single-precision quantization, which quantizes a separate model for each bit width. To serve several precisions, a single-precision method must store one model per bit width, so its storage grows with the number of modes. With single-precision GPTQ, serving the 2–4-bit modes of Llama-3.1-8B-Instruct takes 9.8 bits per weight, and serving every integer mode from 2 to 8 bits takes 36.8 (Figure 6(c)). Any-Rate serves the 2–4-bit modes, including two half-bit modes, from its ladder at 4.21 bits per weight, and all nine modes from 2 to 8 bits from one checkpoint at 8.30, about a quarter of the single-precision cost. MG (2/3/4) also stores one checkpoint (4.26 bits per weight), but it serves only the three integer modes from 2 to 4 bits. The advantage extends to runtime, when the precision changes. Single-precision models share no data, so switching the precision discards the weights already held in memory or caches and reads the entire new model. All modes of Any-Rate read the same planes from the first one, so the planes already loaded are reused: a lower mode reads fewer of them, and a higher mode reads only the additional planes. Since each mode reads only its own planes, the memory traffic of decoding also scales with the selected precision (Appendix H). The remaining question is how much accuracy this costs. 
+
+B.2. Baselines 
+
+Since Any-Rate builds on the GPTQ framework, using the same Hessian-related Grams and its column-order error feedback, we take GPTQ (Frantar et al., 2023) as the single-precision baseline, and we add MG (2/3/4), which nests GPTQ across 2, 3, and 4 bits with MatGPTQ (Kleinegger et al., 2026). Single-precision GPTQ is thus the single-mode reference for both nested methods: the gap between MG (2/3/4) and GPTQ shows the nesting cost of a shared scalar grid, and the gap between Any-Rate and GPTQ the net effect of coded planes and per-mode targets (Section 4.2). GPTQ uses an asymmetric scale and zero point per group of 128 with act_order , which add 0.25 bits per weight and are included in the storage of Figure 6(c). GPTQ uses the same evaluation code as Any-Rate and quantizes each of the four models at 2, 3, and 4 bits, and MG (2/3/4) is the checkpoint of our main results. Table 7 lists the per-model results of GPTQ, and Tables 5 and 6 those of MG (2/3/4) and Any-Rate. 15 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 2 2.5 3 3.5 4    
+
+> bits per weight (mode)
+> 11.25 1.5 23
+> PPL / FP16 PPL (geo. mean)
+> FP16
+> (a) WikiText-2 perplexity
+> 22.5 33.5 4
+> bits per weight (mode)
+> 40 50 60 70 80 90 100
+> Accuracy (% of FP16)
+> FP16
+> (b) mean of eight benchmarks
+> GPTQ MG (2/3/4) AR (ours)
+> modes 2-4 modes 2-8 010 20 30 40
+> bits / weight
+> 9.8 36.8 4.3 n/a 4.2 8.3
+> (c) storage
+
+Figure 6. Any-Rate versus single-precision GPTQ and MG (2/3/4), averaged over the four models. (a) WikiText-2 PPL relative to FP16 (geometric mean). (b) Mean accuracy of the eight benchmarks relative to FP16. (c) Storage to serve the 2–4-bit and the 2–8-bit modes (Llama-3.1-8B-Instruct); GPTQ stores one model per bit width, and MG (2/3/4) supports only 2–4 bits. 
+
+B.3. Accuracy 
+
+In Figure 6(a, b), the two nested methods depart from single-precision GPTQ in opposite ways. MG (2/3/4) is above GPTQ at 2 and 3 bits on every model, but at 4 bits it falls below GPTQ on three of the four models, to 93% of the FP16 accuracy on average against 98% for GPTQ: this is the nesting cost of a shared scalar grid, which grows with the bit width (Section 4.2). Any-Rate is above both at 2 and 3 bits on average and is never more than 0.7 points below GPTQ at 4 bits, so its ladder avoids most of this cost. GPTQ collapses at 2 bits, whereas both nested methods keep usable accuracy there. The half-bit modes add further room: Any-Rate at 2.5 bits comes close to GPTQ at 3 bits, and at 3.5 bits it exceeds MG (2/3/4) at 4 bits on average. At 2 and 3 bits, the differences among the three methods are more pronounced in the generative tasks (GSM8K, TriviaQA, and NQ-open) than in the multiple-choice tasks. Any-Rate thus matches single-precision GPTQ at 4 bits and exceeds it below, while serving every mode from one checkpoint with about a quarter of the storage. 
+
+## C. Sample Problems 
+
+C.1. GSM8K, Phi-4 (idx: 177) 
+
+Question: Zaid spends 1/4 of his salary on rent, 1/3 on car fuel and donates half of the remaining amount to his favorite charity. He gives his daughter 200$ to use for her weekly expenses and 700$ to his wife to budget for groceries and other household goods. If Zaid earns 6000$ per month, how much money will he still have after all these expenses and donations? (gold: 350) 
+
+C.1.1. 2-BIT 
+
+AP: False 
+
+Zaid spends 6000/4 = <<6000/4=1500>>1500 on rent. He spends 6000/3 = <<6000/3= 2000>>2000 on car fuel. He donates 6000 - 1500 - 2000 = <<6000-1500-2000=2500>>2500 to his favorite charity. He gives his daughter 200 and his wife 700, so he spends 2500 + 700 = <<2500+700=3200>>3200 in total. So, he has 6000 - 1500 - 2000 - 2500 -3200 = <<6000-1500-2000-2500-3200=100>>100 left. #### 100 
+
+AB: False 
+
+Zaid spends 6000/4 = $<<6000/4=1500>>1500 on rent. He spends 6000/3 = $<<6000/3= 2000>>2000 on car fuel. So he has 6000 - 1500 - 2000 = $<<6000-1500-2000=2500>>2500 left. He gives his daughter 200$ and his wife 700$. So he has 2500 - 200 - 700 = $<<2500-200-700=1600>>1600 left. #### 1600 
+
+MG (2/3/4): False 
+
+Zaid spends 6000/4 = <<6000/4=1500>>1500$ on rent. He spends 6000/3 = <<6000/3= 2000>>2000$ on car fuel. He has 6000 - 1500 - 2000 = <<6000-1500-2000=2500>>2500$ left. He donates half of the remaining amount, so he donates 2500/2 = <<2500/2= 1250>>1250$. He gives his daughter 200$ and his wife 700$. So he has 2500 - 1250 -200 - 700 = <<2500-1250-200-700=450>>450$ left. #### 450 
+
+AR (ours): True 
+
+Zaid spends 6000/4 = $<<6000/4=1500>>1500 on rent. He spends 6000/3 = $<<6000/3= 2000>>2000 on car fuel. He has 6000 - 1500 - 2000 = $<<6000-1500-2000=2500>>2500 left. He donates 2500/2 = $<<2500/2=1250>>1250 to his favorite charity. He gives 200 + 700 = $<<200+700=900>>900 to his family. So he has 2500 - 1250 - 900 =$<<2500-1250-900=350>>350 left. #### 350 
+
+16 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+C.1.2. 2.5-BIT 
+
+AR (ours): True 
+
+Zaid spends 6000/4 = $<<6000/4=1500>>1500 on rent. He spends 6000/3 = $<<6000/3= 2000>>2000 on car fuel. He has 6000 - 1500 - 2000 = $<<6000-1500-2000=2500>>2500 left. He donates 2500/2 = $<<2500/2=1250>>1250 to his favorite charity. He has 2500 - 1250 = $<<2500-1250=1250>>1250 left. He gives his daughter 200$. He gives his wife 700$. He has 1250 - 200 - 700 = $<<1250-200-700=350>>350 left. #### 350 
+
+C.2. NQ-open, Phi-4 (idx: 949, 78, 162) 
+
+Table 8. NQ-open examples (Phi-4). Correct answers in blue, wrong in red; “–”: no such mode. Method 2-bit 2.5-bit 3-bit 3.5-bit 4-bit 
+
+Q: Who is the guy that jumped from space? (gold: Felix Baumgartner) 
+
+AP Chris Hadfield – Gary Powers – Felix Baumgartner AB Yevgeny Khar – Felix Baumgartner – Felix Baumgartner MG (2/3/4) Felix Baum – Felix Baumgartner – Felix Baumgartner AR (ours) Felix Baumgartner Felix Baumgartner Felix Baumgartner Felix Baumgartner Felix Baumgartner 
+
+Q: Who captained the first European ship to sail around the tip of Africa? (gold: Bartolomeu Dias) 
+
+AP Vasco da Gama – Bartolomeu Dias – Bartolomeu Dias AB Bartolomé de Léon – Bartolomeu Dias – Bartolomeu Dias MG (2/3/4) Vasco da Gama – Bartolomeu Dias – Bartolomeu Dias AR (ours) Bartolomeu Dias Bartolomeu Dias Bartolomeu Dias Bartolomeu Dias Bartolomeu Dias 
+
+Q: Who won the mens single ice skating 2018? (gold: Yuzuru Hanyu) 
+
+AP Yuzak – Yuzuru Hanyu – Yuzuru Hanyu AB Patrick Chan – Nathan Chen – Yuzuru Hanyu MG (2/3/4) Yuzuri – Yuzuru Hanyu – Yuzuru Hanyu AR (ours) Yuzuru Hanyu Yuzuru Hanyu Yuzuru Hanyu Yuzuru Hanyu Yuzuru Hanyu 
+
+## D. Method Details 
+
+D.1. Layer-wise Objective and Error Feedback 
+
+A linear layer computes W X , and its quantized version computes cW X . With E = W − cW , the layer-wise reconstruction loss in Eq. (3) is given by 
+
+∥EX ∥2 
+
+> F
+
+= tr  E Γ E⊤, Γ = XX ⊤, (13) where Γ is the Gram matrix of the inputs, proportional to the Hessian of the reconstruction loss, and is referred to as the Hessian following GPTQ (Frantar et al., 2023). The error is the sum of Er ΓE⊤ 
+
+> r
+
+over the rows Er of E, so the rows are independent: the encoder chooses the bits and the LUT of each row separately, and only Γ is shared across the matrix. Linear layers that take the same input within a decoder layer share Γ, so each decoder layer has four Hessians (q/k/v, o, gate/up, and down). We compute Γ from the inputs of the FP16 model. The calibration data pass through each FP16 layer, which accumulates Γ from its inputs, and after encoding, the input of the next layer is the output of the FP16 layer rather than of the quantized one. The quantization error of earlier layers therefore never enters the Γ of later layers, and each layer can be encoded independently. Appendix G describes the calibration data. As in GPTQ, we process the columns from left to right and pass the error of each processed column to the columns not yet processed (error feedback). The columns keep their original order (no act_order ). We damp Γ by adding 1% of its mean diagonal, after setting any zero diagonal entry to 1. With the upper-triangular Cholesky factor R of Γ−1 = R⊤R, the target and the error of column i are 
+
+˜τi = τi − X
+
+> l∈B (i), l<i
+
+el Rli , ei = ˜τi − qi
+
+Rii 
+
+, (14) where B(i) is the eight-column block that contains column i, τi is the target of column i, which already includes the errors of earlier blocks, and qi is the chosen quantized value; all quantities are per row. We process eight columns as a block and pass the errors of the block to the remaining columns at once when the block ends; Algorithm 1 gives the choice within a block. 17 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+D.2. Coded Planes and the Hamming Code 
+
+An unconstrained (U) plane stores one bit per weight. A coded plane groups eight consecutive columns of a row into a block and constrains the eight bits v = ( v0, . . . , v 7) that it holds in the block to be a codeword of a code C ⊂ { 0, 1}8. The plane is then specified by log 2 |C| bits per block, so its rate is log 2 |C| /8 bits per weight; a U plane corresponds to |C| = 256 . We use the extended Hamming [8 , 4, 4] code (Conway & Sloane, 1999), which is also the first-order Reed–Muller code RM(1,3), and call a plane with this code an H plane. Its 16 codewords are the binary linear combinations of 
+
+(1 , 1, 1, 1, 1, 1, 1, 1) , (0 , 1, 0, 1, 0, 1, 0, 1) , (0 , 0, 1, 1, 0, 0, 1, 1) , (0 , 0, 0, 0, 1, 1, 1, 1) . (15) Since only 16 of the 256 bit patterns are allowed, a 4-bit message (a0, . . . , a 3) per block suffices, and the rate is 0.5 bits per weight. The minimum distance is 4, so two distinct codewords differ in at least four columns; Section 4.1 and Appendix F.2 analyze the gain that this structure brings. The bit of column j ∈ { 0, . . . , 7} of the block, written in binary as 
+
+j = 4 j2 + 2 j1 + j0, is vj = a0 ⊕ j0a1 ⊕ j1a2 ⊕ j2a3, so decoding is an XOR of the message bits selected by the column position; a 16-entry codeword table gives the same result. Other codes such as the single-parity [8 , 7, 2] or the repetition 
+
+[8 , 1, 8] code fit the same scheme, but we use only the [8 , 4, 4] code, whose rate of exactly 0.5 gives the half-bit modes. A layout is the string of plane types starting from the most significant bit of the index. The rate of the mode that reads the first k planes is the sum of the rates of those planes (1 for U, 0.5 for H), so UHHHHHH has seven planes and a total rate of 4 bits; Table 9 lists the rate of each mode. In one block, UHHHHHH stores the 8 bits of the U plane and a 4-bit message for each of the six H planes, 32 bits in total or 4 bits per weight. In the file, a U plane packs the bits of eight columns into one byte, and an H plane packs the messages of two blocks into one byte; the released code documents the exact bit order. At the same rate, H planes increase the number of planes: two bits take two planes with U only but three with UHH, so the index is one bit longer, and both the LUT entries and the values a single weight can take double. In exchange, the bits of a block are restricted to codewords, so the encoder has to search over them (Appendix E.3).                    
+
+> Table 9. Rate of the mode that reads the first kplanes of UHHHHHH. Planes read k34567Planes UHH UHHH UHHHH UHHHHH UHHHHHH Rate (bits/weight) 22.5 33.5 4
+
+D.3. Encoding Procedure for a Matrix 
+
+Encoding a matrix takes the weights W , the Hessian Γ, a layout, a set of modes, and mode weights λm, and produces the index and the shared LUT. Since the rows are independent, every step runs on all rows in parallel, and the codewords and U bits are chosen per row. We first form the damped Cholesky factor R from Γ (Appendix D.1) and initialize the LUTs. The LUT of the lowest mode (three planes, eight entries) is obtained per row by k-means (Lloyd, 1982) weighted by the diagonal of Γ, and the LUT of each next mode splits every entry into two, shifted up and down by a quarter of the mean gap between adjacent entries; this follows the incremental upscaling of Any-Precision LLM (AP) (Park et al., 2024), but with a fixed shift instead of re-clustering. Because the two children average to their parent, the initial LUTs already satisfy the averaging relation between mode LUTs, and these LUTs only serve as a starting point for the refitting below. Encoding and LUT refitting then form one round, repeated Nref times. In a round, the target of every mode starts at W ,and the columns are processed from the left in blocks of eight; for each block, Algorithm 1 chooses the index and passes the errors to the targets of the remaining columns, with the LUT held fixed. Once the pass ends and the index is fixed, the shared LUT is refit by closed-form least squares (Appendix D.4), and the round’s objective is the λm-weighted sum of the relative proxy losses (Eq. (6)) of the modes reconstructed with the refit LUT. A new LUT changes the best index, so the next round encodes again with it. Since the objective does not always decrease from round to round, we keep the index and LUT of the round with the lowest objective. Appendix G lists the mode weights, Nref , the beam width B, the number of evaluated candidates K, and the damping. 
+
+D.4. Shared Look Up Table 
+
+The mode that reads the first k planes looks up its LUT Tk with the first k bits of the index (Eq. (1)). AP stores a separate LUT Tk for each mode, whereas Any-Rate stores only the LUT T of the top mode and derives the others from it by averaging. Let Wr ∈ Rc be the weights of a row (as a column vector), ι ∈ { 0, . . . , 2b − 1}c its index, and P ∈ { 0, 1}c×2b
+
+the one-hot matrix that marks the entry each weight points to, so that the top mode reconstructs P T . Mode m, which reads the first km
+
+planes, averages the 2b−km entries that share the same first km bits. With the block-diagonal averaging matrix Mm, whose entries are 1/2b−km between entries sharing the first km bits and 0 otherwise, mode m reconstructs P M mT . For a fixed 18 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                      
+
+> Table 10. Bits per weight of three ways to support the 5–8-bit modes (Llama-3.1-8B-Instruct, linear layers). Configuration bIndex planes Shared LUT Residual offsets Total Ladder only (2–4 bits) 74.00 0.21 –4.21 Ladder extended by four U planes (2–8 bits) 11 8.00 3.24 –11.24 Ladder + residual (2–8 bits) 78.00 0.21 0.09 8.30
+
+index, the objective of the row, X
+
+> m
+
+λm (Wr − P M mT )⊤Γ ( Wr − P M mT ), (16) is quadratic in T . With A = P ⊤ΓP and h = P ⊤ΓWr , its minimizer solves the normal equations 
+
+ X 
+
+> m
+
+λm M ⊤ 
+
+> m
+
+A M m
+
+
+
+T = X
+
+> m
+
+λm M ⊤ 
+
+> m
+
+h. (17) We add 10 −6 times the mean diagonal to the left-hand matrix to keep it nonsingular and solve the 2b × 2b systems of all rows at once. Because the errors of all modes enter one equation, the resulting T fits the low and high modes together. The LUT is stored in 8 bits. For each row, the minimum lo and the step s = (max T − min T )/255 are first rounded to FP16, and the codes are then set to round  (T − lo) /s  ∈ { 0, . . . , 255 }, so the stored file reproduces exactly the LUT the encoder used. The index choice of the next round and the objective of the current round are both computed with this 8-bit LUT, so the error of the 8-bit quantization is already accounted for in the encoding. The metadata of a row is 2b 8-bit codes and two FP16 values, 8 · 2b + 32 bits, or (8 · 2b + 32) /c bits per weight for c columns, whereas separate FP16 LUTs for every mode would take 16 P 
+
+> k
+
+2k/c . For UHHHHHH ( b = 7 , modes k = 3 , . . . , 7), this is 1056 against 3968 bits per row, or 0.26 against 0.97 bits per weight at c = 4096 : sharing roughly halves the cost, and 8-bit storage halves it again. On average over the linear layers of Llama-3.1-8B-Instruct, where c is 4096 or 14336, this is 0.21 against 0.78 bits per weight. 
+
+D.5. Residual Planes 
+
+The 4-bit mode of the ladder reconstructs bw4 from the index and the shared LUT. Each weight has a residual r = w − bw4
+
+and stores a separate 4-bit residual index ρ ∈ { 0, . . . , 15 }. The planes of the ladder are index bits into the shared LUT, whereas the four residual planes are index bits of an offset added to bw4. They start from the most significant bit, cost 1 bit per weight each, and carry no code, since above 4 bits the modes differ little in quality and half-bit steps are not needed. The 
+
+m-bit mode ( m = 5 , . . . , 8) looks up the offset table δm of size 2m−4 with the first m − 4 bits of ρ (Eq. (2)). We do not extend the ladder with more planes, because the shared LUT doubles with every plane: adding four U planes ( b = 11 ) also gives 8 bits per weight, but the 11-bit index makes the metadata grow to 8 · 211 + 32 = 16416 bits per row, or 3.24 bits per weight on Llama-3.1-8B-Instruct, whereas the residual needs only 30 offsets per row, or 0.09 bits per weight (Table 10). The residual is stored in a file separate from the ladder, so serving only the 2–4-bit modes does not need it. The residual index is chosen column by column from the left. Without a code, each column has only 16 candidates, so they are compared directly without a search, and columns are not grouped into blocks. Each of the four modes keeps its own target τm that receives its errors (per-mode targets), and at column j we choose 
+
+ρj = arg min 
+
+> ρ
+> 8
+
+X
+
+> m=5
+
+
+
+τm,j − bw4,j − δm
+
+ρ ≫ (8 − m)2
+
+, (18) after which each mode passes its error  τm,j − bwm,j 
+
+/R jj to the targets of the remaining columns (Appendix D.1). The offset tables are set as follows. With r95 the 95th percentile of |r| in the row, the centers of 2m−4 equal-width intervals of 
+
+[−r95 , r 95 ] initialize δm. After the index is chosen with these values, each entry of δm is replaced by the mean residual r of the weights assigned to it (kept if no weight is assigned), and the index is chosen once more. This refit uses plain means without Hessian weighting. Each residual plane packs eight columns per byte, and the 30 offsets are stored per row in FP16, which is 480 bits per row or 480 /c bits per weight. Table 11 lists the relative proxy loss of each mode. 
+
+## E. Encoder Design Choices 
+
+The encoder involves several choices: which planes are U and which are H (the layout), how the planes of a block are encoded together, the width of the candidate search, and the ratio of the mode weights. Encoding a full model and measuring its PPL takes hours, too long to try every combination. We therefore narrow the choices with the proxy loss of Appendix E.1, 19 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                                                 
+
+> Table 11. Relative proxy loss (%) of the residual modes (Qwen2.5-3B, mean over 252 matrices). Mode (bits) 45678Relative proxy loss (%) 0.422 0.358 0.131 0.059 0.035
+> Table 12. Relative proxy loss (w.r.t. UHHHHHH) and WikiText-2 PPL of each layout (Qwen2.5-3B). Bits/weight includes the LUT metadata. Best in bold, second best underlined; “–” means the layout has no such mode. Proxy loss WikiText-2 PPL Layout Bits/weight 22.5 33.5 422.5 33.5 4FP16 UUUU 4.06 1.510 –1.591 –1.741 78.46 –11.32 –9.25 8.03 UHHHHU 4.20 0.959 0.960 1.003 –1.131 15.08 10.77 9.39 –8.53 HHHHHHU 4.39 4.534 4.866 5.152 –6.376 >1000 >1000 423.22 –17.96 UUHHHH 4.20 1.614 1.229 1.113 1.076 1.070 123.38 14.45 9.85 8.97 8.57 UHHHHHH (ours) 4.39 1.000 1.000 1.000 1.000 1.000 15.41 10.78 9.29 8.73 8.45
+
+computed on real weight matrices, and check for a few settings that the order of the proxy losses matches the order of the PPL of fully encoded models. All comparisons in this section use Qwen2.5-3B and, except for Appendix E.5, which compares mode weights, our mode weights 1-1-2-3-4 (for the 2, 2.5, 3, 3.5, and 4-bit modes). 
+
+E.1. Proxy Loss 
+
+The proxy loss is the output error of a layer, Llayer  
+
+> m
+
+= tr( EmΓE⊤
+
+> m
+
+) (Eq. (3)). It is the layer-wise reconstruction error that GPTQ (Frantar et al., 2023) and its successors minimize, and for a ladder our encoder minimizes its mode-weighted sum, Eq. (4). Since the scale of weights and inputs varies across layers, we report the relative proxy loss Lm of Eq. (6), normalized by tr( W ΓW ⊤) of the original weights. Layouts support different modes, so their weighted objectives are not comparable, and we record each mode separately. Because the objective separates over rows, the costlier comparisons (Appendix E.4) estimate the relative proxy loss from 128 randomly chosen rows per matrix. The proxy reflects only the output error of one layer, not the accumulation of errors across layers or the nonlinearity between them, so it does not predict the PPL exactly; it does, however, order settings whose proxy losses differ substantially in the same way as the PPL (Appendix E.2), which is why we use it to compare settings here and in Section 4. 
+
+E.2. Layout 
+
+We measure the proxy loss on all 252 linear-layer matrices of Qwen2.5-3B (base), 36 layers × 7 projections. For each layer, the Hessian is computed from the calibration data (Appendix G), and every row of the matrix is encoded with beam width 64 to obtain the relative proxy loss of each mode. The mode weights are 1-1-2-3-4; modes that a layout does not support are dropped and the remaining weights are kept (e.g., 1-1-2-4 for UHHHHU and 1-2-4 for UUUU). Table 12 reports the relative proxy loss of each layout as a ratio to UHHHHHH at the same bit width (geometric mean over the 252 matrices), together with the PPL of the fully encoded model. Proxy loss and PPL rank the layouts almost identically. The only pair whose order flips is UHHHHU and UUHHHH at 4 bits, whose PPLs differ by 0.04, so the proxy can separate layouts that differ substantially but cannot decide smaller differences. HHHHHHU, whose first plane is H, has a 4–6 times larger proxy loss and collapses in PPL at low bit widths, so the first plane must be U. UUUU, with U planes only, has no half-bit modes and also falls behind at the integer bit widths, and UUHHHH, with two leading U planes, is much worse at 2 bits; using H planes early favors the low bit widths. The two layouts with one U followed by H planes are close. UHHHHU, whose last plane is U, matches or slightly beats UHHHHHH at 2–2.5 bits but has no 3.5-bit mode and falls behind at 4 bits. UHHHHHH and UUHHHH are the only layouts with all five modes, and UHHHHHH is better at every bit width in both proxy loss and PPL while staying close to the best layout at 2–2.5 bits; we therefore use UHHHHHH. 
+
+E.3. Efficient Plane-Joint Encoding 
+
+With U planes only, each column chooses its bits from its own target, which already includes the errors of earlier columns. An H plane, however, ties the bits of the eight columns of a block to one of 16 codewords, so the bits of one column depend on the choices of the other seven, and the codewords are chosen jointly per block (Section 3.2). Methods whose planes are all U, such as Any-Precision LLM (AP) (Park et al., 2024), AnyBCQ (AB) (Park et al., 2026), and MatGPTQ (MG) (Kleinegger et al., 2026), decompose over columns and do not face this problem. Let the columns of a block be 
+
+i = 1 , . . . , n (n = 8 ) and its H planes p = 1 , . . . , n H. A candidate s = ( s1, . . . , s nH ) chooses one codeword sp ∈ C for 20 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+each H plane, giving 16 nH candidates. A candidate fixes the H bits ai(s) ∈ { 0, 1}nH of column i and leaves only its U bits 
+
+u. Mode m, which reads the first km planes, gives column i the value 
+
+qm,i (a, u ) = Tkm [ι(a, u ) ≫ (b − km)] , (19) where ι(a, u ) is the b-bit index formed from a and u. With τm,i the target of mode m entering the block, the exact cost of a candidate is computed by processing the columns in order, as in GPTQ: 
+
+˜τm,i = τm,i − X
+
+> l<i
+
+em,l Rli , ui = arg min 
+
+> u
+
+X
+
+> m
+
+λm
+
+ ˜τm,i − qm,i (ai(s), u )2, (20) 
+
+em,i = ˜τm,i − qm,i (ai(s), u i)
+
+Rii 
+
+, cost( s) = X
+
+> m
+
+λmnX
+
+> i=1
+
+e2
+
+> m,i
+
+. (21) Because of the error feedback in Eq. (20), the columns must be processed in order, so evaluating one candidate is costly. U planes of the same storage need only a few comparisons per column, but the 16 nH candidates of H planes, about 1.7 × 10 7
+
+per block for UHHHHHH, cannot all be evaluated. We reduce the candidates with two approximations. First, without the error feedback inside the block, the columns become independent once a candidate is fixed, and the error of column i depends only on its H bits a. We compute once, for every 
+
+(i, a ), the error with the best U bits, 
+
+D[i, a ] = min 
+
+> u
+
+1
+
+R2
+
+> ii
+
+X
+
+> m
+
+λm
+
+ τm,i − qm,i (a, u )2, (22) and the approximate cost of a candidate is then a sum of eight entries, 
+
+dcost( s) = 
+
+> n
+
+X
+
+> i=1
+
+Di, a i(s) = vec( D)⊤Z
+
+> s
+
+, (23) where Z ∈ { 0, 1}(n 2nH )×16 nH is a fixed matrix that marks the eight entries of each candidate, so one matrix product scores all candidates. Only the K candidates with the lowest approximate cost are evaluated exactly, and the best is taken: 
+
+s∗ = arg min  
+
+> s∈S
+
+cost( s), |S| = K. (24) The number of exact evaluations is thus fixed at K, but scoring still enumerates all 16 nH candidates (Table 13). Second, we use the prefix structure: the error of a mode depends only on the codewords of the planes it reads. If mode m
+
+reads the first pm H planes, then for a partial candidate s≤p that fixes the first p codewords, the approximate errors of the modes with pm ≤ p are already determined. Defining with these modes 
+
+Dp[i, a ] = min 
+
+> u
+
+1
+
+R2
+
+> ii
+
+X 
+
+> m:pm≤p
+
+λm
+
+ τm,i − qm,i (a, u )2, a ∈ { 0, 1}p, (25) the approximate cost of a partial candidate takes the same form, 
+
+dcost p(s≤p) = 
+
+> n
+
+X
+
+> i=1
+
+Dp
+
+i, a (p) 
+
+> i
+
+(s≤p). (26) At each step, the surviving partial candidates are extended by the 16 codewords of the next H plane, and only the B with the lowest cost are kept: 
+
+Sp = top -B
+
+> (s, s p)
+
+n dcost p
+
+ (s, s p) : s ∈ S p−1, s p ∈ C 
+
+o
+
+, S0 = {∅}. (27) Before the first mode is complete, all partial candidates have the same cost, so the beam can rank them only from the plane that completes a mode. In UHHHHHH, the 2-bit mode is complete at the second H plane, and the 16 candidates of the first H plane all fit in the beam. The cost at the last step equals Eq. (23), so the K lowest of SnH form the set S of Eq. (24) and are evaluated exactly. This is Algorithm 1; unless noted otherwise, all encodings in this paper use it with B = K = 64 .The number of ranked partial candidates is 16 B per plane, linear in nH (Table 13), and the memory scales with B. With 
+
+B ≥ 16 nH−1, the ranking equals that of Eq. (23), and a smaller B approaches fixing the planes one at a time, so B trades encoding cost for quality (Appendix E.4). 21 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                
+
+> Table 13. Candidates ranked per block by full enumeration and by the prefix beam ( B= 64 ). Both evaluate K= 64 candidates exactly.
+> nHFull enumeration ( 16 nH)Prefix beam ( ≤16 Bn H)465,536 4,096 51,048,576 5,120 616,777,216 6,144
+
+E.4. Candidate Search 
+
+To check that the two approximations of Appendix E.3 do not hurt the encoding, we first compare the searches on a layout with four H planes ( nH = 4 , UHHHHU), the largest case in which every candidate can still be evaluated exactly with error feedback. We use 12 matrices of Qwen2.5-3B (the k, o, gate, and down projections of layers 3, 18, and 33) with 128 random rows per matrix, their Hessians, and equal mode weights (Table 14). Full enumeration followed by exact evaluation of the top K reaches the same loss as evaluating all candidates in every mode. The prefix beam approaches that loss as it widens: at B = 64 , every mode is within 0.7% of evaluating all candidates in less than half the time, whereas B = 16 is faster but 2.6–3.0% worse at 3 and 4 bits. Narrow beams reach a slightly lower loss at 2 bits because the objective is a weighted sum over modes, so sacrificing the higher modes can reduce the error of the lower ones. Encoding the full model with full enumeration and with the beam of width 64 gives nearly the same PPL.                                                                
+
+> Table 14. Candidate search for UHHHHU ( nH= 4 , Qwen2.5-3B): proxy loss relative to evaluating all candidates (12 matrices, geometric mean) and WikiText-2 PPL. Time is relative to evaluating all candidates. 22.5 34Time Proxy loss (relative to all candidates) All candidates 1.000 1.000 1.000 1.000 1.00 ×
+> Full enumeration, top-K1.000 1.000 1.000 1.000 0.99 ×
+> Prefix beam, B= 16 0.991 1.012 1.026 1.030 0.27 ×
+> Prefix beam, B= 32 0.996 1.006 1.013 1.017 0.32 ×
+> Prefix beam, B= 64 (default) 0.999 1.003 1.007 1.004 0.47 ×
+> Prefix beam, B= 128 1.000 1.000 1.002 1.003 0.78 ×
+> Prefix beam, B= 256 1.000 1.000 1.001 1.002 1.30 ×
+> WikiText-2 PPL Full enumeration, top-K15.01 10.74 9.37 8.50 Prefix beam, B= 64 (default) 15.08 10.77 9.39 8.53
+
+With nH = 4 the candidates are few, so wide beams take as long as evaluating all candidates (1.30 × at B = 256 ); the beam pays off for nH ≥ 5, where the cost of the other searches grows rapidly (Table 13). For our layout UHHHHHH ( nH = 6 ), neither evaluating nor ranking all candidates is feasible, so the beam of width 256 serves as the reference (Table 15). B = 64 
+
+stays within 2.2% of it in every mode at 0.29 × the search time, whereas B = 16 worsens toward the higher modes, by about 10% at 4 bits. The PPL of fully encoded models differs much less: all beam widths from 16 to 256 are within 0.2 of each other at every bit width. We therefore set both the beam width B and the number of exactly evaluated candidates K to 64. 
+
+E.5. Mode Weights 
+
+The mode weights λm set how much the error of each mode counts in the ladder objective P 
+
+> m
+
+λm tr( EmΓE⊤
+
+> m
+
+) (Eq. (4)). We compare our weights 1-1-2-3-4 with seven alternatives: uniform weights and settings that put more weight on the lower or the higher modes (Table 16). We measure the proxy loss on 63 matrices of Qwen2.5-3B (layers 3, 7, . . . , 35) and the PPL after encoding the full model. Shifting weight toward the lower modes improves the 2-bit mode at the cost of the higher modes, and shifting it toward the higher modes does the opposite. No setting improves all modes at once: each of the seven alternatives has a higher proxy loss than the default in at least one mode, and the PPL shows the same trade-off. Our weights 1-1-2-3-4 are therefore not a unique optimum but a middle point that gives up some accuracy at 2 bits to protect 3 bits and above, where they reach the lowest PPL (within 0.02 of 1-2-3-5-7). Since the weights can also be read as how often each mode is used, a deployment that knows how often each precision is used can set them accordingly before encoding. 22 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                                                                                                                     
+
+> Table 15. Beam width for UHHHHHH ( nH= 6 , Qwen2.5-3B): proxy loss relative to B= 256 (252 matrices), WikiText-2 PPL, and the time of the candidate search on the 12 matrices of Table 14 relative to B= 256 . Best in bold, second best underlined. Proxy loss WikiText-2 PPL Beam width 22.5 33.5 422.5 33.5 4Time
+> B= 16 0.948 0.992 1.046 1.085 1.104 15.29 10.94 9.38 8.78 8.50 0.17 ×
+> B= 64 (default) 0.989 0.997 1.011 1.019 1.022 15.41 10.78 9.29 8.73 8.45 0.29 ×
+> B= 256 1.000 1.000 1.000 1.000 1.000 15.31 10.83 9.32 8.73 8.46 1.00 ×
+> Table 16. Mode weights (Qwen2.5-3B): proxy loss relative to the default (63 matrices) and WikiText-2 PPL (FP16 8.03). Best in bold, second best underlined. Proxy loss WikiText-2 PPL Weights 22.5 33.5 422.5 33.5 41-1-2-3-4 (default) 1.000 1.000 1.000 1.000 1.000 15.41 10.78 9.29 8.73 8.45
+> 1-1-1-1-1 (uniform) 0.918 0.925 1.024 1.111 1.170 14.60 10.73 9.45 8.88 8.56 1-1-2-2-2 0.970 0.966 0.975 1.033 1.081 15.19 10.85 9.36 8.78 8.50 1-2-3-5-7 1.069 0.974 0.994 0.980 0.973 15.70 10.69 9.29 8.75 8.47 1-1-1-1-4 0.948 0.960 1.065 1.156 0.997 15.32 10.82 9.39 8.85 8.48 3-2-1-1-1 0.862 0.928 1.118 1.245 1.324 15.17 11.05 9.75 9.01 8.67 4-1-1-1-1 0.842 0.986 1.148 1.269 1.350 15.26 11.22 9.75 9.06 8.67 7-5-3-2-1 0.864 0.922 1.096 1.259 1.413 14.75 11.07 9.73 9.07 8.75
+
+## F. Analysis Details 
+
+F.1. Measurement Setup and the Loss Decomposition 
+
+All measurements in the analysis use the linear-layer matrices of Qwen2.5-3B (Yang et al., 2024). Its 36 layers have 7 projections each, 252 matrices in total; we exclude 6 MLP matrices of early layers (up in layer 1, gate/up/down in layer 2, and gate/up in layer 3, with layers indexed from 0), for which the LUT refit of the coded ladder became numerically singular for some rows, and use the remaining 246. The Hessians are computed on the FP16 model with the same C4 (Raffel et al., 2020) calibration data as in our experiments (Appendix G) and normalized to a mean diagonal of 1; to bound the computation, we encode the first 256 rows of each matrix. The loss is the relative proxy loss Lm of Eq. (6), always evaluated with the full Γ regardless of how the matrix was encoded. Across matrices we report means of dB values and medians of ratios. The encoder uses the same beam search ( B = K = 64 ) and refit ( Nref = 4 ) as in our experiments, with damping 10 −8
+
+instead of 0.01 so that the decomposition below holds almost exactly for the evaluation Γ. For nested encoding, the mode weights match the integer modes of the two ladders: 1-2-4 for the 2/3/4-bit modes of the scalar ladder (UUUU), and 1-0.02-2-0.02-4 for the coded ladder (UHHHHHH), which nearly switches off the half-bit modes. A single-mode encoding encodes only that bit width; for the 3- and 4-bit coded structures, we read that mode from a ladder whose other modes have weight 0.02. An encoding without error feedback uses only the diagonal of Γ during encoding. The nesting cost of MatGPTQ (MG) (Kleinegger et al., 2026) is measured on the MG (2/3/4) checkpoint of our main results, with the same rows and Γ. This checkpoint gives the three modes equal weights (1-1-1), because 1-2-4, which puts more weight on 4 bits, makes the 2-bit mode collapse (Appendix F.4); for comparison, we also measure a checkpoint requantized with weights 1-2-4 by the same recipe. The reference is the loss of quantizing only that bit width with standard GPTQ (Frantar et al., 2023) (no act_order , damping 0.01) on the grid of MG (asymmetric uniform grid with group size 128 and clip search). We now derive Eq. (7). Consider one row with weights w ∈ Rc, quantized values bw, and error Er = w − bw, and let R be the upper-triangular factor with Γ−1 = R⊤R (Appendix D.1). Error feedback sets the target of column j and its quantization error to 
+
+˜τj = wj − X
+
+> i<j
+
+Rij 
+
+Rii 
+
+εi, εj = ˜τj − bwj , (28) which is the update of Appendix D.1 with ei = εi/R ii ; passing the errors of a block at once gives the same targets. Solving Eq. (28) for Er gives, in row-vector form, 
+
+Er = ε D −1 
+
+> R
+
+R, DR = diag( R11 , . . . , R cc ), (29) 23 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+since (D−1 
+
+> R
+
+R)ij = Rij /R ii for i ≤ j. With R ΓR⊤ = I, the row loss becomes 
+
+Er ΓE⊤ 
+
+> r
+
+= ε D −1
+
+> R
+
+ R ΓR⊤D−1 
+
+> R
+
+ε⊤ = X
+
+> j
+
+dj ε2 
+
+> j
+
+, dj = 1
+
+R2
+
+> jj
+
+. (30) Because Γ = R−1R−⊤ with R−1 upper triangular, 1/R 2 
+
+> jj
+
+is the Schur complement of Γ>j,>j in Γ≥j, ≥j , which is the expression for dj in Eq. (7), and hence 
+
+dj = Γ jj − Γj,>j Γ−1 
+
+> >j,>j
+
+Γ>j,j ≤ Γjj . (31) Eq. (30) holds for any choice of bw, so whether columns are chosen one at a time or eight at a time as a block, as in an H plane, reducing the layer loss amounts to choosing, in each column or block, points close to the targets ˜τj weighted by 
+
+dj . It is exact for the Γ used during encoding; with damping, it is approximate for the evaluation Γ. Viewing Γ as the second-moment matrix of the inputs, dj is the variance of the input of column j that the inputs of later columns do not explain. Without error feedback, ˜τj = wj and Er = ε, so Er ΓE⊤ 
+
+> r
+
+= P 
+
+> j,k
+
+Γjk εj εk. If the errors of different columns have zero expected product and the same second moment σ2 in every column and in both cases, the expected row losses without and with feedback are 
+
+EEr ΓE⊤
+
+> r
+
+ 
+
+> no FB
+
+= σ2 X
+
+> j
+
+Γjj , EEr ΓE⊤
+
+> r
+
+ 
+
+> FB
+
+= σ2 X
+
+> j
+
+dj , (32) whose ratio in dB is Eq. (9). 
+
+F.2. Proof of Theorem 4.1 and the Coded Gain on Real Matrices 
+
+Let the values y = ( y1, . . . , y 8) of the 8 columns of a block be exchangeable, and let both structures map an index ι to the reconstruction value T (ι) with one LUT T per row. Let I be the set of index combinations that a block of the coded structure can choose: the bits of a U plane are free in every column, and the 8 bits of each H plane must form a codeword of the extended Hamming code C = [8 , 4, 4] (Conway & Sloane, 1999), which is the Reed–Muller code RM(1,3). For a LUT 
+
+T and importance d, the weighted distortion of the coded structure and its optimum are 
+
+DT (d) = Ey
+
+h
+
+min 
+
+> ι∈I
+
+X
+
+> j
+
+dj
+
+ yj − T (ιj )2i
+
+, D∗
+
+> coded
+
+(d) = inf  
+
+> T
+
+DT (d), (33) so that Dc = D∗
+
+> coded
+
+(1)/8. Let A = Aut( C) = AGL(3 , 2) be the automorphism group of the code, acting on d by permuting the column positions. 
+
+Proof of Theorem 4.1. For fixed T and y, the expression inside the expectation in Eq. (33) is a minimum of functions linear in d, and taking the expectation and the infimum over T preserves concavity, so D∗ 
+
+> coded
+
+is concave in d. It is also homogeneous of degree one in d. Since every H plane uses the same code and the U planes are unconstrained, each π ∈ A 
+
+maps I onto itself; as y is exchangeable and the LUT is shared by all columns, 
+
+D∗
+
+> coded
+
+(πd ) = D∗
+
+> coded
+
+(d) for all π ∈ A . (34) Because A acts transitively on the 8 positions, every entry of ¯d = |A| −1 P 
+
+> π∈A
+
+πd equals 18
+
+P 
+
+> j
+
+dj . Eq. (34), Jensen’s inequality, and homogeneity then give 
+
+D∗
+
+> coded
+
+(d) = 1
+
+|A| 
+
+X
+
+> π∈A
+
+D∗
+
+> coded
+
+(πd ) ≤ D∗
+
+> coded
+
+( ¯d) = 
+
+P 
+
+> j
+
+dj
+
+8 D∗
+
+> coded
+
+(1) = Dc
+
+X
+
+> j
+
+dj . (35) In the scalar structure, once T is fixed, the nearest point of each column does not depend on dj , so with QT the nearest-point quantizer of T ,
+
+D∗
+
+> scalar
+
+(d) = inf 
+
+> T
+
+X
+
+> j
+
+dj E(yj − QT (yj )) 2 = DLM 
+
+X
+
+> j
+
+dj , (36) where DLM is the Lloyd–Max distortion of the marginal distribution of a column. 24 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes importance  (a) original order                
+
+> importance  sorted by importance
+> blocks of 8 columns 012345
+> original order (dB)
+> 012345
+> sorted by importance (dB)
+> lower after sorting: 215/246 mean 1.84 →1.35 dB
+> (b) whole-matrix gain
+> 12345678
+> importance rank in the block (1 = most)
+> 01234
+> gain over UU (dB)
+> 1.84 1.35
+> (c) gain per column
+> original order sorted by importance whole matrix
+
+Figure 7. Allocation gain of the coded plane (Qwen2.5-3B, 2-bit). (a) Importance dj of 64 columns, original and sorted. (b) Whole-matrix gain before and after sorting columns by importance. (c) Gain of UHH over UU by in-block importance rank in the original and sorted column order (mean; band: interquartile range); dashed lines: whole matrix. 
+
+The proof uses neither the bit rate nor the LUT size, so it applies equally to UHHHH and UHHHHHH. It remains to check whether Dc < D LM at each bit width. For any fixed LUT T and any index choice ι(y) ∈ I ,
+
+Dc ≤ 18 Ey
+
+h X 
+
+> j
+
+ yj − T (ιj (y)) 2i
+
+, (37) so any encoding with a fixed LUT bounds Dc from above. We learn the row LUTs with our encoder on i.i.d. Gaussian matrices with 2048 columns, fix them, and quantize 512 freshly drawn rows with an exact index search (the U bits separate across columns, and all combinations of the H planes are enumerated). The resulting distortion is lower than Lloyd–Max by 0.61 dB at 2 bits and 0.44 dB at 3 bits, with more than 10 6 fresh samples and a standard error below 10 −4 (Table 17). This is the gain of placing the reconstruction points of eight columns jointly, known from vector quantization: applying Construction A to the same code gives the E8 lattice, on which QuIP# (Tseng et al., 2024a) builds its codebook, and QTIP (Tseng et al., 2024b) uses a trellis code; here the gain comes without a codebook. At 4 bits (UHHHHHH), the 16 6
+
+combinations of the H planes make an exact search infeasible, and the in-sample distortion, which converges as the number of columns grows, ends 0.35 dB above Lloyd–Max; we therefore cannot claim that the coded structure wins at 4 bits under uniform importance. Its 4-bit gain on real matrices comes from allocation, discussed next. 
+
+Table 17. Single-mode gain of the coded structure over the scalar one at equal rate (dB). Gaussian: uniform importance, certified against Lloyd–Max. Qwen2.5-3B: mean over matrices (matrices won). 2-bit 3-bit 4-bit Gaussian, uniform importance +0 .61 +0 .44 not certified Qwen2.5-3B +1 .84 (246) +1 .69 (242) +1 .31 (210) 
+
+On real matrices, the gain concentrates on the important columns of each block (Figure 7c): the most important column gains the most, and the gain shrinks with rank. Sorting the columns by importance, which reduces the differences within a block, flattens the gain across ranks and lowers the overall gain from 1.84 dB to 1.35 dB. The allocation gain can be predicted with a high-resolution approximation. With a uniform LUT, the reconstruction points of UHH form the set Λ = {c1 + 2 c2 + 4 z : c1, c2 ∈ C , z ∈ Z8}. This set, given by the code formula, is a lattice only if the Schur square of C lies in C (Kositwattanarerk & Oggier, 2014), but the Schur square of RM(1,3) is the [8 , 7] code RM(2,3), so Λ is not a lattice. It is still periodic with period 4Z8, so, treating the source at high resolution as uniform over one period, we can compute the per-column distortion DΛ(d) of weighted nearest-point quantization. Comparing it with the per-column distortion ¯d/ 3 of the cubic lattice 2Z8 (UU) at the same point density, where ¯d = 18
+
+P 
+
+> j
+
+dj here denotes the mean importance of the block, gives the predicted gain 
+
+ˆG(d) = 10 log 10 
+
+¯d/ 3
+
+DΛ(d) , (38) which we compute per block from the importance of the matrix and average with the loss share of each block; nothing is fitted. The prediction tracks the measured gain per matrix with rank correlations 0.88, 0.86, and 0.63 at 2, 3, and 4 bits 25 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 0 2 4 6         
+
+> predicted gain G(d) (dB)
+> -2 0246810
+> measured gain (dB)
+> (a) 2-bit
+> rank corr 0.88 mean gap +0.56 dB
+> 0246
+> predicted gain G(d) (dB)
+> (b) 3-bit
+> rank corr 0.86 mean gap +0.41 dB
+> 0246
+> predicted gain G(d) (dB)
+> (c) 4-bit
+> rank corr 0.63 mean gap +0.04 dB
+
+Figure 8. Single-mode gain of the coded structure over the scalar one, measured vs. predicted by the weighted high-resolution gain ˆG(d)
+
+(no fitted parameter), 246 matrices of Qwen2.5-3B. Dashed: y = x.
+
+(Figure 8). The measured gain exceeds the prediction by 0.56, 0.41, and 0.04 dB on average, close to the Gaussian values above (0.61 and 0.44 dB, and none certified at 4 bits), consistent with attributing the difference to the low-rate shape gain that the high-resolution prediction does not capture. Although the prediction is computed once for UHH and reused at 3 and 4 bits, it still orders the matrices well, so allocation explains much of the variation in gain across matrices even at higher bit widths. 
+
+F.3. Feedback Gain, Remark F.1, and Proposition 4.2 
+
+We measure the feedback gain by encoding the scalar structure in a single mode twice, once with the full Γ (with feedback) and once with only the diagonal of Γ (without feedback), and evaluating both with the full Γ. The gain averages about 2.75 dB at all three bit widths. At 4 bits, the measured gain per matrix follows the prediction of Eq. (9) with rank correlation 0.70 (Figure 9a), but the prediction is larger by 1.1 dB on average; since it assumes the same per-column error in both cases (Eq. (32)), it should be read as predicting the ordering across matrices rather than the size. Let Lsingle ,∗ 
+
+> m
+
+denote the loss of the optimal single-mode encoding of mode m with its own LUT. 
+
+Remark F.1 . (i) Without feedback and with exactly nested grids, cm = 0 for every mode. (ii) With or without feedback, 
+
+cm ≥ 0 when Lsingle  
+
+> m
+
+= Lsingle ,∗ 
+
+> m
+
+.
+
+Proof. (i) Without feedback, ˜τm,j = wj for every mode, so with exactly nested grids the nearest point of each mode is a child of the nearest point of the mode below, and the nested encoding attains the single-mode loss of every mode. (ii) Decoding only mode m from a nested encoding is a valid single-mode encoding with the same LUT, even though the error trajectories of the two encodings differ, so 
+
+Lnest  
+
+> m
+
+≥ Lsingle ,∗ 
+
+> m
+
+=⇒ cm = 10 log 10 
+
+Lnest 
+
+> m
+
+Lsingle ,∗
+
+> m
+
+≥ 0. (39) The measured cm, however, is relative to a single-mode encoding found by the same search with its own LUT rather than to the optimum, so it can be negative on individual matrices; the interquartile range of the 4-bit cost of the scalar ladder without feedback ( −0.47 to 0.45 dB) indicates the size of these deviations. For Proposition 4.2, fix column j and the targets ˜τm,j , and let N be the set of value tuples q = ( qm)m that satisfy the nesting constraint. The weighted column loss is 
+
+ℓj (q) = dj
+
+X
+
+> m
+
+λm
+
+ ˜τm,j − qm
+
+2. (40) Per-mode targets choose qpm = arg min q∈N ℓj (q), whereas mean propagation chooses the nested values qmp ∈ N nearest to the shared target ¯τj .
+
+Proof of Proposition 4.2. (i) Since qmp ∈ N , it is a candidate of the minimization that defines qpm , so ℓj (qpm ) ≤ ℓj (qmp ).26 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+(ii) Write the error of mode m under mean propagation as 
+
+˜τm,j − qmp  
+
+> m
+
+=  ˜τm,j − ¯τj
+
+ + ηm,j , ηm,j = ¯ τj − qmp  
+
+> m
+
+. (41) Since ηm,j has zero mean and is uncorrelated with ˜τm,j − ¯τj , the cross term vanishes in expectation, and 
+
+E(˜ τm,j − qmp  
+
+> m
+
+)2 = E(˜ τm,j − ¯τj )2 + Eη2
+
+> m,j
+
+, (42) where, by assumption, the second term equals the second moment of the error of quantizing mode m at its own target. The expected excess of ℓj is therefore the weighted sum of the first term, and with S = P 
+
+> m
+
+λm the weighted variance identity gives 
+
+∆j = dj
+
+X
+
+> m
+
+λm E(˜ τm,j − ¯τj )2 = dj
+
+S
+
+X
+
+> m<m ′
+
+λmλm′ E(˜ τm,j − ˜τm′,j )2, (43) which is Eq. (11). For two modes m < m ′ with gap gj = ˜ τm′,j − ˜τm,j , the shared target lies between the two targets, 
+
+˜τm,j − ¯τj = − λm′
+
+λm + λm′
+
+gj , ˜τm′,j − ¯τj = λm
+
+λm + λm′
+
+gj , (44) and Eq. (43) reduces to ∆j = dj λmλm′ 
+
+> λm+λm′
+
+E[g2 
+
+> j
+
+]: the mode with the smaller weight is quantized farther from its own target. In actual encoding, the error trajectories of the two rules differ, so the target gaps themselves differ, and we compare whole matrices by measurement. Changing only the target rule in the same encoder on the scalar ladder (weights 1-2-4), the sum over the three modes of the relative excess loss (Lnest  
+
+> m
+
+− Lsingle  
+
+> m
+
+)/L single  
+
+> m
+
+is 1.41 times larger under mean propagation in the median (10–90% range 1.32–1.60) and larger on 245 of the 246 matrices; per mode, mean propagation costs more on 246, 236, and 245 matrices at 2, 3, and 4 bits. On the coded ladder (weights 1-0.02-2-0.02-4, the same 1-2-4 on the integer modes) the sum is 1.42 times larger (239 of 246 matrices), but at the 3-bit mode alone mean propagation costs less on 226 matrices. 
+
+F.4. How Large the Nesting Cost Is: MatGPTQ and the Coded Ladder 
+
+Figure 9b compares the nesting costs of the three ladders. The 4-bit cost of MG (2/3/4) exceeds the feedback gain on 245 of the 246 matrices. Measured in the same way, the official ladder MG (3/4/8) has a large relative cost at 8 bits (23 dB on average), but its 8-bit nested loss is only 0.80 times the 4-bit single-mode GPTQ loss of the same matrix (median), and its 4-bit cost drops to 1.9 dB (from 5.45 dB in MG (2/3/4)). Since the single-mode loss shrinks by about a factor of four per bit, the same relative cost means a small absolute loss at high bit widths. The cost has not vanished in this ladder; without a 2-bit mode, the target gaps between modes appear to be smaller. The MG (2/3/4) checkpoint in our experiments gives the three modes equal weights (1-1-1). Requantizing with the same recipe and weights 1-2-4, which put more weight on 4 bits, lowers the 4-bit nesting cost from 5.45 dB to 2.73 dB and improves the 4-bit PPL from 9.58 to 8.83, but raises the 2-bit cost from 0.54 dB to 1.61 dB: the 2-bit layer loss grows by 1.07 dB on average, on all 246 matrices, and the 2-bit PPL degrades from 25.9 to 42.8 (Table 18). The shared target is pulled toward the heavily weighted 4-bit mode, so the 2-bit mode is quantized far from its own target (Eq. (44)). In absolute terms, the increase at 2 bits (relative proxy loss from 0.062 to 0.080) is about three times the decrease at 4 bits (from 0.013 to 0.007). Under a shared target, the weights cannot remove the cost but only shift it between modes, so we use 1-1-1, which balances all three modes including 2 bits, as the baseline. Even at the same weights 1-2-4, MG (2/3/4) costs more than the scalar ladder with per-mode targets at 2 and 4 bits (Table 1), and on the same model Any-Rate reaches a lower PPL than both versions at all three bit widths. The nesting cost splits into a structural part, which remains without feedback, and a conflict part, which arises with feedback. With cstruct  
+
+> m
+
+the nesting cost of mode m measured without feedback, we define the conflict cost κm, in units of the single-mode loss, by 
+
+10 cm/10 = 10 cstruct   
+
+> m/10
+
++ κm, i.e., κm = Lnest 
+
+> m
+
+Lsingle  
+
+> mFB
+
+− Lnest 
+
+> m
+
+Lsingle  
+
+> mno FB
+
+. (45) The structural cost of the coded ladder averages 0.11, 0.71, and 0.46 dB at 2, 3, and 4 bits, while that of the scalar ladder is small (0.12, 0.23, and −0.10 dB); it arises because the children of a coded plane do not split the cell of their parent exactly. For two modes m < m ′ at small gaps, the excess loss from conflicts takes the form 
+
+∆conf ≈ Kσ 2 
+
+> g
+
+, σ2 
+
+> g
+
+= Eg2, K ≤ λmλm′
+
+λm + λm′
+
+, (46) 27 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Table 18. MG (2/3/4) with mode weights 1-1-1 (the baseline in our results) and 1-2-4, and Any-Rate, Qwen2.5-3B: WikiText-2 PPL (FP16 8.03) and layer nesting cost (dB, mean over matrices), each against single-mode encoding of its own structure at the same bit width. Best in bold, second best underlined. WikiText-2 PPL Nesting cost (dB) 2-bit 3-bit 4-bit 2-bit 3-bit 4-bit MG (2/3/4), weights 1-1-1 25.89 10.75 9.58 0.54 1.43 5.45 MG (2/3/4), weights 1-2-4 42.77 10.08 8.83 1.61 0.96 2.73 AR (ours) 15.41 9.29 8.45 0.80 0.59 0.24 0 2 4 6 8 10          
+
+> predicted (dB)
+> 0246810
+> measured (dB)
+> (a) feedback gain, 4-bit
+> rank corr 0.70 mean gap -1.06 dB
+> 2-bit 3-bit 4-bit 0246
+> nesting cost (dB)
+> 0.5 1.4 5.5 0.8 1.0 1.5 0.4 0.8 0.7
+> feedback gain
+> (b) nesting cost
+> MG (2/3/4) coded ladder (ours) scalar ladder
+> 2-bit 3-bit 4-bit 0246
+> gain vs scalar, no feedback (dB)
+> 2.7 2.8 2.8 2.3 3.0 3.6 4.6 4.5 4.1
+> (c) combined gain
+> scalar + feedback coded + feedback (ours) coded
+
+Figure 9. Feedback and nesting, 246 matrices of Qwen2.5-3B. (a) Feedback gain at 4 bits, measured vs. predicted (dashed: y = x). (b) Nesting cost, mean; dashed: feedback gain. (c) Single-mode gain over the scalar structure without feedback, mean. 
+
+where σ2 
+
+> g
+
+is the importance-weighted mean squared gap between the targets of the two modes (Eq. (44)), and the bound on 
+
+K follows from parts (i) and (ii) of Proposition 4.2 under the assumptions of part (ii). The coded ladder moves the two factors in opposite directions. Solving the two-mode problem exactly per block for ladders one plane apart (UHH to UHHH for the coded ladder and UU to UUU for the scalar one, with equal weights), with the block targets and LUTs that the encoder actually saw, gives coded-to-scalar ratios of 0.36–0.53 for σ2 
+
+> g
+
+, 1.15–1.30 for K, and 0.46–0.64 for ∆conf . Because of its computational cost, this block model was measured on 12 matrices (layers 0, 17, and 35, one projection for each of the four Hessians: q, o, gate, and down). On the 246 matrices, the coded-to-scalar ratio of κm measured with the actual encoder is 0.33, 0.28, and 0.15 in the median, more favorable to the coded ladder than the block model. Figure 9c shows gains over scalar single-mode encoding without feedback. Feedback alone gives about 2.75 dB, and coded planes alone give 2.3–3.6 dB. Together they give the largest gain, 4.1–4.6 dB, but less than the sum of the two, and the shortfall grows with the bit width, reaching 2.3 dB at 4 bits. The gain of coded planes also moves in opposite directions: without feedback it grows with the bit width (from 2.3 to 3.6 dB), but with feedback it shrinks (from 1.84 to 1.31 dB; Table 17). Since both mechanisms exploit the differences in importance across columns, they appear to share the same room at higher bit widths. 
+
+F.5. Nested Ladders per Matrix and the Paper Ladder 
+
+What the model sees is the absolute loss of the nested ladder. Without relying on single-mode references, we therefore compare the two nested ladders on the same matrix directly, with the same encoder, rate, and integer-mode weights (Figure 10). The coded ladder has a lower loss on almost every matrix, by 2.26, 1.82, and 2.12 dB on average at 2, 3, and 4 bits. On each matrix, this difference splits as 
+
+10 log 10 
+
+Lnest ,scalar 
+
+> m
+
+Lnest ,coded 
+
+> m
+
+= 10 log 10 
+
+Lsingle ,scalar 
+
+> m
+
+Lsingle ,coded 
+
+> m
+
+| {z }
+
+> Gsingle
+> m
+
++  cscalar  
+
+> m
+
+− ccoded 
+
+> m
+
+, (47) which follows from the definition of cm in Eq. (10) and is Eq. (12) applied to a single matrix. To compare integer modes only, the coded ladder above nearly switches off the half-bit modes with weight 0.02, whereas the ladder of our experiments uses all five modes (1-1-2-3-4). Since encoding is independent across rows, we read the first 256 rows of the stored paper encoding and compare them with the same single-mode references. With the half-bit 28 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 10 −4 10 −3 10 −2 10 −1      
+
+> scalar ladder
+> 10 −4
+> 10 −3
+> 10 −2
+> 10 −1
+> coded ladder (ours)
+> (a) 2-bit
+> coded better: 246/246 mean 2.26 dB lower
+> 10 −410 −310 −210 −1
+> scalar ladder
+> (b) 3-bit
+> coded better: 246/246 mean 1.82 dB lower
+> 10 −410 −310 −210 −1
+> scalar ladder
+> (c) 4-bit
+> coded better: 245/246 mean 2.12 dB lower
+
+Figure 10. Nested loss of the coded ladder (ours) vs. the scalar ladder on the same matrix, 246 matrices of Qwen2.5-3B, same encoder and integer-mode weights (log scale). Shaded: coded ladder lower. Dashed: y = x.
+
+modes switched on, the nesting cost changes from 0.35, 0.84, and 0.70 dB to 0.80, 0.59, and 0.24 dB at 2, 3, and 4 bits: the 2-bit mode pays more, apparently because the 2.5-bit mode with weight 1 directly above it now shares the conflict, while the 3- and 4-bit modes pay less, so the 4-bit cost of the paper ladder is far below that of MG (2/3/4) (5.45 dB) and of the scalar ladder (1.51 dB). At the model level, too, switching off the half-bit modes improves only the 2-bit PPL slightly and degrades the other modes (Table 4). The stored encoding, however, uses damping 0.01 and the analysis ladder 10 −8, so this comparison also contains the effect of damping. Re-encoding the paper ladder with both dampings on 12 matrices (q/o/gate/down of layers 4, 18, and 33), the cost changes by less than 0.3 dB on 10 of them; the exceptions are the gate and down projections of layer 4, whose Hessians are close to singular, with changes of 0.7 and 6.7 dB at 4 bits. With damping fixed at 10 −8, the paper ladder still pays more at 2 bits on all 12 matrices and less at 3 and 4 bits on 10 of them, and its 4-bit cost (0.71 dB on average) stays well below those of the scalar ladder (1.47 dB) and MG (2/3/4) (6.51 dB) on the same matrices; its difference from the analysis ladder (0.75 dB), however, is smaller than in the comparison with the stored encoding. 
+
+## G. Experimental Setup 
+
+We quantize all decoder linear layers of Qwen2.5-3B (base) (Yang et al., 2024), the language model of Gemma-3-4b-it (Gemma Team, 2025), Llama-3.1-8B-Instruct (Grattafiori et al., 2024), and Phi-4 (Abdin et al., 2024), keeping the embeddings, lm_head , and normalization layers in FP16; the fused qkv and gate_up projections of Phi-4 are each quantized as one matrix. All baselines, Any-Precision LLM (AP) (Park et al., 2024), AnyBCQ (AB) (Park et al., 2026), MatGPTQ (MG) (Kleinegger et al., 2026), and GPTQ (Frantar et al., 2023), follow the authors’ public code and official recipes, with only the calibration data unified to C4 (Raffel et al., 2020) ( 100 × 512 tokens for AP, 512 samples for AB, and the same 128 × 2048 for GPTQ, MG, and Any-Rate). The two deviations are that AP lowers its seed precision from 3 to 2 bits to obtain a 2-bit mode, and that MG (2/3/4) is the official MG recipe with only the bit widths changed to 2/3/4 (4-bit master, weights 1-1-1). MG (3/4/8) reads its 2- and 6-bit modes by truncating its 8-bit master, and AB is trained for 2–4 bits only. Any-Rate uses the layout UHHHHHH (modes of 2, 2.5, 3, 3.5, and 4 bits), mode weights 1-1-2-3-4, B = K = 64 ,
+
+Nref = 4 , and damping of 0.01 times the mean Hessian diagonal (Appendix D.1); the layout, the mode weights, and the beam width were chosen on the proxy loss of Qwen2.5-3B (Appendix E), all values are used for all models, and the residual planes for 5–8 bits are encoded after the ladder is fixed (Appendix D.5). We evaluate with lm-evaluation-harness (Gao et al., 2024) 0.4.5: WikiText-2 (Merity et al., 2017) PPL on non-overlapping 2048-token windows; zero-shot acc_norm on ARC-Challenge and ARC-Easy (Clark et al., 2018), HellaSwag (Zellers et al., 2019), and PIQA (Bisk et al., 2020), and acc on WinoGrande (Sakaguchi et al., 2020); 5-shot greedy flexible-extract accuracy on all 1,319 GSM8K (Cobbe et al., 2021) problems, with generations that continue after their first answer cut at that answer for every run; and 5-shot greedy exact match on the first 1,000 validation questions of TriviaQA (Joshi et al., 2017) and NQ-open (Kwiatkowski et al., 2019). The per-question outputs and grading of every value are in the released results. 29 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+## H. Storage and Decoding Efficiency 
+
+H.1. Storage 
+
+We measure the storage needed to serve all modes of each method from one checkpoint, in bits per weight over the 224 decoder linear layers of Llama-3.1-8B-Instruct (Grattafiori et al., 2024) (Table 19). The count includes the codes and all metadata (scales, offsets, LUTs, and permutations) and excludes the FP16 embeddings, lm_head , and normalization layers, which are the same for all methods. Each method uses its recommended configuration: Any-Precision LLM (AP) (Park et al., 2024) its 8-bit parent, MatGPTQ (MG) (Kleinegger et al., 2026) its official recipe, MG (3/4/8), and AnyBCQ (AB) (Park et al., 2026) one set of scales per supported bit width; AB was encoded only for 2–4 bits because of its encoding time, but its storage for 2–8 bits follows exactly from its format. All methods store about 8 bits of codes, but their metadata grows differently. Any-Rate keeps one small LUT per row, so its metadata scales with the number of rows and is independent of the group size and the number of modes. MG (3/4/8) keeps a scale and a zero point per group and shares its 8-bit master among all modes. AP keeps a LUT per row for every bit width, dominated by that of its 8-bit parent, and AB stores b scales per group for every supported bit width b, so its metadata grows fastest with the number of modes. Serving 2–8 bits, Any-Rate thus needs about the same storage as MG (3/4/8) while providing nine modes, including two half-bit modes. Since the ladder (2–4 bits) and the residual (5–8 bits) are separate, serving only 2–4 bits needs the ladder alone, 4.21 bits per weight. The 2- and 6-bit modes of MG (3/4/8) are read by truncating its 8-bit master and are not optimized.                 
+
+> Table 19. Storage of one checkpoint serving all modes of each method (Llama-3.1-8B-Instruct, 224 linear layers; codes and all metadata). Method Optimized bits Modes Bits/weight AP 2–8 79.60 AB 2–8 713.38 MG (3/4/8) 3, 4, 8 7 (sliced) 8.26
+> AR (ours) 2–4 (by 0.5), 5–8 98.30
+
+H.2. Kernel Latency 
+
+We time the batch-1 decoding GEMV on an RTX 5070 Ti (16 GB, 48 MB L2) with FP16 activations. As in actual decoding, where the whole model is read from memory for every token, we create copies of the weights totaling at least 320 MB and call them in turn inside one CUDA graph, so that the weights come from memory rather than L2. Every combination of method and bit width is timed in five rounds, in a random order per round, and we report the median, which reduces the effect of clock fluctuations near the power limit. Since kernel time does not depend on the weight values, each method uses synthetic weights in its own format. The Any-Rate kernel assigns one lane to each row and keeps the mode LUT of the row in shared memory without bank conflicts. The 2- to 3.5-bit modes read FP16 mode LUTs precomputed from the stored 8-bit LUT, and the 4-bit mode builds its LUT inside the kernel from the 8-bit codes. H planes are stored as 4-bit messages, which the kernel either expands to codewords with a 16-entry codeword table in registers or turns into indices directly by XOR in the message domain. Small matrices fill the GPU with split-K and large ones with a persistent stream-K schedule, which prefetches the LUT of the next tile with cp.async . Like the kernels of the other methods, Any-Rate selects among these variants and their launch settings per matrix shape and mode, using short preliminary runs separate from the measurement rounds. The baselines use the kernels released by their authors without modification, and we checked that each kernel’s output matches its own dense path within a relative error of 3.1 × 10 −3. The released AP kernel supports only 3 bits and above, so we time 2 bits with the AP kernel included in the released AB code; at 3 and 4 bits this kernel produces bit-identical outputs to the released AP kernel, and its kernel time, measured with a profiler, agrees within 0.5%. The released execution path of MG applies its act_order permutation outside the kernel, so we report times with and without the permutation. Over a whole token (Table 20), Any-Rate is faster than AB and than MG with the permutation and within 5–14% of AP. Per layer (Table 21), it matches AP on down at 2 bits and on q/o at 4 bits and is faster on down at 4 bits, is 4% slower on down at 3 bits and 8–18% slower on gate/up and on q/o at 2 and 3 bits, and is 1.3–1.4 times slower on the short-row k/v, where building the LUT of each row is a fixed cost. 
+
+H.3. Decoding Throughput 
+
+For the throughput in Table 3, we implement a single decoder with the architecture of Llama-3.1-8B-Instruct (32 layers, GQA, SwiGLU, RoPE, KV cache) and replace only its linear layers with the module of each method. The embeddings, attention, and lm_head are the same FP16 code for all methods, and q/k/v and gate/up are fused into single projections, as in the generation code of AB and in vLLM (Kwon et al., 2023). One decoding step is captured as a CUDA graph, and we 30 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                                                                                                          
+
+> Table 20. Linear-layer GEMV time per decoded token (ms) of Llama-3.1-8B-Instruct, batch 1, RTX 5070 Ti. Lower is better; fastest per column in bold, second underlined. Method 22.5 33.5 4AP 2.84 –3.85 –5.14
+> AB 3.46 –4.64 –5.90 MG (2/3/4) 3.27 –4.22 –5.16 +act_order 4.12 –5.06 –5.99 AR (ours) 3.08 3.96 4.37 4.90 5.41
+> Table 21. GEMV latency (μs) of the Llama-3.1-8B-Instruct linear layers, batch 1, RTX 5070 Ti. MG: MG (2/3/4); MG †: with the
+> act_order permutation. FP16 (cuBLAS): 41.4 (q/o), 12.5 (k/v), 140.5 (gate/up), 143.6 (down). Fastest per column in bold, second underlined. q/o ( 4096 ×4096 )k/v ( 1024 ×4096 )gate/up ( 14336 ×4096 )down ( 4096 ×14336 )Bits 22.5 33.5 422.5 33.5 422.5 33.5 422.5 33.5 4AP 7.9 –10.3 –13.7 3.8 –4.3 –5.0 21.0 –29.5 –38.6 23.3 –31.9 –46.0 AB 9.5 –12.1 –15.0 6.1 –7.0 –8.0 25.8 –35.7 –46.3 25.7 –35.6 –45.9 MG 8.7 –11.0 –12.5 3.4 –4.0 –4.7 26.9 –35.0 –43.4 24.4 –31.8 –40.3
+> MG †12.3 –14.6 –15.8 7.2 –7.8 –8.4 30.7 –38.8 –47.2 28.3 –35.9 –44.3 AR (ours) 8.5 11.4 12.2 13.1 13.8 4.9 5.4 6.0 6.6 6.6 23.0 29.9 33.6 38.0 42.5 23.6 30.4 33.2 37.7 43.4
+
+generate 256 tokens continuously from position 128, running the methods in two passes of three rounds each, in alternating order, and reporting the median of the six runs. Since kernel time does not depend on the weight values, the weights are random values in each format. FP16 is not included because the model does not fit in the 16 GB memory. The cost outside the linear layers is about 4 ms per token, the same for all methods. 
+
+H.4. Energy Estimate 
+
+LLM accelerators in circuit venues report the system energy per token in two parts: the energy of the computation on the chip, from its measured efficiency, and the energy of external memory access, estimated from the number of bits transferred and the energy per bit of the DRAM (Moon et al., 2025; Qin et al., 2025; Kim et al., 2025; Dong et al., 2026). We follow the same practice and estimate the energy per token as 
+
+Etoken =  beff N + Bcommon 
+
+ eDRAM 
+
+| {z }
+
+> external memory access
+
++ 2Mη
+
+|{z} 
+
+> computation
+
+, (48) where N is the number of linear-layer weights, beff the bits actually read per weight in a mode (codes and metadata; Table 22), Bcommon the bits of the FP16 lm_head and of a KV cache of 1024 positions, which are the same for all methods, 
+
+M the number of MACs per token, eDRAM = 3 .7 pJ/bit (Moon et al., 2025), and η = 88 .36 TOPS/W (Qin et al., 2025). For 4-bit Llama-3.1-8B, Eq. (48) gives 144 mJ/token including the FP16 lm_head . Applied to 4-bit LLaMA2-7B, the same equation gives about 120 mJ/token, on the same scale as the 123 mJ/token that an accelerator reports for this model with modeled LPDDR3 access (Dong et al., 2026). Batch-1 decoding reads every weight once per token and performs one MAC per weight, so the first term of Eq. (48) dominates: the computation is at most 0.2% of the energy per token (at 2 bits), and counting each table lookup and each decoding step as one more MAC raises it only to 0.6%. The energy is therefore proportional to the bits read, and at equal accuracy, reducing the bits read per weight is the main way to reduce it, which is also why LLM accelerators focus on weight compression (Qin et al., 2025; Kim et al., 2025; Dong et al., 2026). These bits include the metadata as well as the codes (Table 22). AP reads a LUT of 2b FP16 values per row, AB b scales α and one offset β per group, and MG a scale and a zero per group; MG (2/3/4) and MG (3/4/8) read the same amount at the same bit width. Any-Rate builds the FP16 LUT of a mode once from the stored 8-bit codes when the mode changes and reads it, and at 4 bits reads the codes directly. Figure 4b compares, for each accuracy target, the energy of the cheapest mode of each method that reaches the target. Raising the memory access energy threefold or lowering the compute efficiency tenfold changes the energy Any-Rate saves at equal accuracy by less than 0.4 points, since the saving comes from the ratio of the bits read rather than from the two constants. 31 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                 
+
+> Table 22. Bits read per weight at each mode (codes and metadata), Llama-3.1-8B-Instruct linear layers, and the metadata each method reads. Method 22.5 33.5 4Metadata read at bbits AP 2.01 –3.03 –4.05 per row: LUT of 2bFP16 values AB 2.38 –3.50 –4.63 per group of 128: bscales α, one offset β(FP16) MG 2.25 –3.25 –4.25 per group of 128: scale and zero (FP16) AR (ours) 2.03 2.55 3.10 3.70 4.21 per row: 22b−1FP16 values; 4 bits: 8-bit T, FP16 lo and s(Appendix D.4)
+
+## I. Mixture-of-Experts Model 
+
+I.1. Why Mixture-of-Experts 
+
+Mixture-of-experts (MoE) models are a setting in which a checkpoint that serves several precisions is especially useful. In Qwen3-30B-A3B-Instruct-2507 (Yang et al., 2025a), the routed experts take 58.0 GB of the 61.1 GB BF16 checkpoint (95%), and attention takes about 1.8 GB. The model does not fit in the 16 GB of a consumer GPU, so on-device inference keeps only part of the experts in VRAM and fetches the rest from host memory or SSD, and this loading latency dominates the decoding time (Kim et al., 2026a). Expert weights are also known to tolerate low-bit quantization well (Kim et al., 2023; Frantar & Alistarh, 2024; Li et al., 2024; Huang et al., 2025). Moreover, the output of an MoE layer is the gate-weighted sum of the selected experts, so the quantization error of an expert reaches the output scaled by its gate score, and the selected experts of a token need not be read at the same precision. DPA-MoE (Kim et al., 2026b) stores expert weights as prefix-decodable chunks and assigns the number of chunks to each token and expert at inference time according to the gate scores. Such runtime allocation needs a format from which several precisions can be read out of one stored checkpoint, and an Any-Rate ladder is such a format: each expert is stored once, and the 2- to 4-bit modes, including the half-bit modes, are read out of the same planes. This appendix reports the accuracy of Qwen3-30B-A3B with only its experts encoded by Any-Rate (Appendix I.3), compares mode allocation by gate score with uniform allocation at the same average bit width (Appendix I.4), and measures the decoding speed under a memory budget (Appendix I.5). 
+
+I.2. Setup 
+
+We encode only the routed experts with Any-Rate. These are the gate, up, and down projections of the 128 experts in each of the 48 layers. Attention, the router, the embeddings, and the normalization layers stay in BF16. They hold about 5% of the parameters, and all bit widths in this appendix count the expert weights only. The calibration data, the ladder (UHHHHHH with mode weights 1-1-2-3-4), the candidate search ( B = K = 64 ), and the damping (0.01) follow the dense models (Appendix G). Each expert gets its own Hessian from the calibration tokens routed to it. The gate and up projections share the expert input, and the down projection uses the input it receives inside the expert. Routing selects 8 of the 128 experts, so an expert sees 16k of the 262k calibration tokens on average, but the routing is uneven: the median expert sees about 8k, 970 of the 6,144 experts (16%) receive fewer than 512 tokens, and one receives none. A Hessian built from a few hundred tokens covers only a few input directions, and the encoder then places the error in the directions it cannot see. For an expert with n < 512 tokens we add (512 /n ) (tr Γ /d ) I to its Hessian Γ, which amounts to adding 512 isotropic tokens with the same mean energy. The expert with no tokens uses an identity Hessian. We report WikiText-2 perplexity and the eight benchmarks of Section 5.1, run with the same harness and settings as for the dense models. For a nested baseline we also encode the experts with the 2/3/4-bit version of MatGPTQ (MG) (Kleinegger et al., 2026), MG (2/3/4), using the same calibration data and the same rule for experts with few tokens, and compare its perplexity with that of Any-Rate. 
+
+I.3. Results 
+
+The uniform rows of Table 23 read every expert in the same mode. With only its experts encoded, Qwen3-30B-A3B is close to BF16 at 4 bits and keeps about 95% of the BF16 mean accuracy at 2 bits, and the half-bit modes fall in order between the integer modes. Only TriviaQA, which tests knowledge recall, drops sharply as the bit width goes down; the other seven tasks lose less than five points even at 2 bits. Figure 11(b) compares this ratio with the mean of the four dense models of Section 5.2. The dense models have all their linear layers encoded, so the comparison is not direct, but the gap is large: the dense models fall below 70% at 2 bits. An MoE model can use a wider range of modes, and reading several precisions from one checkpoint pays off more. Figure 11(a) shows why we encode only the experts. Encoding only attention, 3% of the parameters, raises the perplexity sharply below 3 bits and past 50 at 2 bits, while encoding only the experts raises it by 1.4 over BF16 at 2 bits. The two uniform lines in Figure 11(c) are MG (2/3/4) and Any-Rate, encoded with the same calibration data and the same rule for 32 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 2 2.5 3 3.5 4        
+
+> bits per weight (encoded part)
+> 610 20 50
+> WikiText-2 PPL
+> 8.7 53 78
+> BF16
+> (a) which part is encoded
+> experts attention experts + attention
+> 22.5 33.5 4
+> bits per weight (mode)
+> 65 70 75 80 85 90 95 100
+> Accuracy (% of BF16 / FP16)  BF16 / FP16
+> (b) mean of eight benchmarks
+> Qwen3-30B-A3B (experts) dense models (mean of four)
+> 22.5 33.5 4
+> mean bits per expert weight
+> 7.5 8.0 8.5 9.0
+> WikiText-2 PPL
+> BF16
+> (c) per-expert mode allocation
+> uniform, MG (2/3/4) uniform, AR (ours) by gate mass reverse
+
+Figure 11. Qwen3-30B-A3B-Instruct-2507 with Any-Rate. (a) WikiText-2 perplexity by encoded part. (b) Mean accuracy on the eight benchmarks relative to BF16 / FP16. (c) Per-expert mode allocation at the same mean bits per expert weight, with uniform MG (2/3/4) and Any-Rate for reference. 
+
+experts with few tokens. Any-Rate has a lower perplexity than MG (2/3/4) at 2, 3, and 4 bits, and it also provides the 2.5-and 3.5-bit modes, which MG (2/3/4) lacks, from the same checkpoint. 
+
+Table 23. Qwen3-30B-A3B-Instruct-2507 with experts encoded by Any-Rate: WikiText-2 perplexity and accuracy (%). Bits: mean bits per expert weight. Better allocation in bold .Bits Allocation PPL ARC-c ARC-e HellaSwag PIQA WinoGrande GSM8K TriviaQA NQ-open Avg. 2 uniform 8.66 58.70 82.41 75.20 79.71 73.01 90.67 54.80 17.70 66.53 2.5 uniform 8.08 61.09 83.42 77.37 80.85 74.66 91.96 60.70 20.80 68.86 gate mass 7.83 61.26 82.87 78.42 80.58 73.95 91.05 62.40 22.10 69.08 
+
+3 uniform 7.72 60.32 82.41 78.13 80.63 74.11 92.87 63.80 21.80 69.26 gate mass 7.56 60.41 82.41 78.73 80.25 73.56 91.96 66.70 22.70 69.59 
+
+3.5 uniform 7.55 60.92 83.00 78.62 80.58 73.01 92.80 65.90 21.80 69.58 gate mass 7.47 61.18 83.46 78.99 80.03 73.40 92.57 66.90 22.80 69.92 
+
+4 uniform 7.45 60.58 82.83 79.00 80.30 73.72 92.87 67.20 22.00 69.81 BF16 - 7.26 62.03 83.59 79.70 80.47 73.80 92.27 68.00 22.40 70.28 
+
+I.4. Mode Allocation by Gate Mass 
+
+Since the quantization error of an expert reaches the output scaled by its gate score (Appendix I.1), we compute for each expert its gate mass, the sum of its gate scores over the calibration tokens, and the relative proxy loss (Eq. (6)) of each mode, averaged over its three matrices. In each layer we then raise expert modes half a bit at a time, greedily, to minimize the sum of gate mass times error at a fixed mean expert bit width. The allocation is set once per expert, offline, and changes only how many planes are read from each expert, with no re-encoding. As a control we also evaluate the reverse allocation, which keeps the same bit histogram but assigns it in reverse gate-mass order. In Figure 11(c), allocation by gate mass gives a lower perplexity than uniform allocation at all three mean bit widths, and the reverse allocation is worse than uniform, so the gain comes from giving bits in gate-mass order. In Table 23, allocation by gate mass also has a higher mean accuracy than uniform allocation, and at 3.5 bits it is above uniform 4 bits. We evaluate only this offline per-expert allocation; a per-token allocation such as that of DPA-MoE only changes the prefix length read from each expert, so the same checkpoint can serve it without re-encoding. 
+
+I.5. Decoding Speed under a Memory Budget 
+
+We measure the decoding speed of Qwen3-30B-A3B on a 16 GB consumer GPU (RTX 5070 Ti). The non-expert weights (3.1 GB) stay in VRAM in BF16, and the rest of the VRAM budget holds a per-layer LRU cache of experts. An expert that misses the cache is read from an NVMe SSD with O_DIRECT, so the page cache in host memory does not act as a second cache. Any-Rate stores the planes of an expert from the lowest up, so the mode that reads the first k planes is a single read. 33 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 5.1 6.1 7.1 9.1        
+
+> VRAM budget (GB, w/ non-expert weights)
+> 010 20 30 40 50
+> Decode speed (tokens/s)
+> 1.4 1.7 3.5 4.1 26.8 33.9 39.1 43.2
+> (a) decode speed under a VRAM budget
+> BF16 AR 3-bit AR 4-bit AR 2.5-bit AR 3.5-bit AR 2-bit
+> 010 20 30 40
+> Decode speed (tokens/s)
+> 66 67 68 69 70 71
+> Mean accuracy (%)  4-bit 3.5-bit 3-bit 2.5-bit 2-bit
+> BF16
+> (b) accuracy vs speed per mode
+> VRAM budget 5.1 GB 7.1 GB 9.1 GB
+
+Figure 12. Decoding Qwen3-30B-A3B-Instruct-2507 on an RTX 5070 Ti (16 GB) with an expert cache in VRAM. (a) Decode speed per VRAM budget. (b) Mean accuracy vs. decode speed of each mode. 
+
+BF16 experts are read the same way from the original safetensors files. We decode with batch size 1, generating 64 tokens for each of three prompts, and report the mean speed. In Figure 12(a), Any-Rate decodes 5 to 20 times faster than BF16 under the same VRAM budget. Its experts are smaller, so more of them fit in the cache and a miss reads fewer bytes. At 9.1 GB, BF16 reads almost half of the requested experts from the SSD and spends 85% of the time on reads, while Any-Rate at 3 bits serves 95% of the requests from the cache. Lower modes are faster until, at 2 bits, nearly every expert fits in the cache and computation becomes the bottleneck, so the speed levels off at about 43 tokens/s (43.4 and 43.0 tokens/s at 11.1 and 13.1 GB). Figure 12(b) shows the accuracy and speed of each mode under the same budget. At each budget in Figure 12(b), going from 4 to 2.5 bits lowers the mean accuracy by less than one point while raising the speed 1.6–1.8 times, whereas going from 2.5 to 2 bits adds only 8–23% speed and loses 2.3 points. One checkpoint covers all these operating points, the mode is chosen to fit the available VRAM, and the half-bit modes make the choice finer. Figure 17 in Appendix K shows this setup running as a chat demo on the same GPU, with the mode switched during generation. 
+
+## J. Beyond Language Models 
+
+Any-Rate needs only the weights of each linear layer and the Hessian of its inputs, so it is not limited to language models and applies to other networks whose weights lie mostly in linear layers. Models beyond language models also have to run at different levels of quality depending on user needs and the execution environment: the same model is often run at high quality when memory or power is plentiful and at a lower bit width, giving up some quality, when they are scarce. Keeping a separately quantized checkpoint for each bit width multiplies the storage and maintenance cost by the number of bit widths, whereas Any-Rate reads integer and half-bit modes from one checkpoint and meets these needs with a single model file. In this appendix, we build checkpoints of a vision-language model, diffusion models (image and video), and a speech recognition model with the same procedure and examine how their outputs change across bit widths. The goal of this appendix is to show that Any-Rate works across model types and that quality changes gradually with the bit width, not to claim the best result at every bit width. For the speech recognition, diffusion, and video generation models we compare with MatGPTQ (MG) (Kleinegger et al., 2026) applied with the same calibration data, using its 2/3/4-bit version (4-bit master) as in our main results. Since MG targets only language models, we built it ourselves by applying its quantization algorithm to the Hessians computed from the linear-layer inputs of each model. Any-Precision LLM (AP) (Park et al., 2024) obtains per-weight sensitivities from the gradient of the language-model loss, and AnyBCQ (AB) (Park et al., 2026) relies on a training procedure that assumes the block structure of decoder-only language models; applying them would require a new loss function and training code for every model, so we do not include them. We release the encoding code for the models in this appendix, the Any-Rate checkpoints of each model in quantization repositories linked to the original models, and an environment in which users can run them while switching the bit width. 
+
+J.1. Common Procedure 
+
+In every model, we encode only the linear layers inside the transformer blocks with Any-Rate and keep the embeddings, normalization layers, convolutions, and input and output projections at their original precision. Since Any-Rate needs only the input Hessian of each linear layer, we attach forward hooks to the original model, pass the calibration inputs through it once to collect the Hessians of all target linear layers at the same time, and then encode each layer with the same procedure 34 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+and settings as in the main text (the ladder UHHHHHH with mode weights 1-1-2-3-4, and the residual planes). 
+
+Table 24. Qualitative comparison of Gemma-3-4b-it with Any-Rate (language model and vision tower in the same bit mode). Responses to “Describe this image in one sentence.” for two photos (cat, left; dog, right), at each bit width (greedy decoding). Only the introductory phrase that the model sometimes prepends (e.g., “Here’s a one-sentence description of the image:”) is removed. 
+
+FP16 A fluffy, white cat with striking blue eyes sits regally on a wooden surface next to a vintage typewriter and stacks of books, creating a charming and slightly vintage scene. A happy, dark-colored chihuahua with white markings and a visible tongue is lying on a dark surface with a leash attached to its collar, looking directly at the camera with a joyful expression. 
+
+4-bit A fluffy, white cat with striking blue eyes sits regally on a wooden bench, surrounded by books and vintage typewriter, in a warmly lit room. A happy, black and white chihuahua with its tongue out is lying on a dark wooden floor, wearing a leash and looking directly at the camera. 
+
+3.5-bit A fluffy, white cat with striking blue eyes sits regally on a wooden surface, surrounded by books and a vintage type-writer, gazing intently into the distance. A happy, dark-and-white chihuahua with its tongue out is playfully lying down on a wooden floor, wearing a leash and looking towards the camera. 
+
+3-bit A fluffy white cat with striking blue eyes sits regally on a wooden bench next to a vintage Royal typewriter, framed by a rustic wooden fence and a leafy plant. A cute, dark-colored chihuahua with white markings sits happily with its tongue out, wearing a leash, on a wooden floor with a window in the background. 
+
+2.5-bit A fluffy white cat sits perched on a wooden bench, gazing at a brown wooden fence. A cute, small dog with a fluffy coat is lying on a dark floor, looking at the camera with a playful expression. 
+
+2-bit A fluffy white cat sits on a wooden fence, surrounded by books and plants, looking contemplative. A cute, black and white chihuahua sits on a wooden deck, with its mouth open, showing teeth. 
+
+J.2. Vision-Language Model 
+
+The Gemma-3-4b-it (Gemma Team, 2025) of the main text was evaluated on the language model taken from its multimodal checkpoint. Here we also encode the SigLIP (Zhai et al., 2023) vision tower of the same checkpoint with Any-Rate, so that the whole model, which takes images as input, is read at several bit widths from one checkpoint. The language model uses the same encoding as in the main text, and the linear layers of the vision tower are encoded at the same bit width. We do not apply a baseline to this model and show only FP16 and Any-Rate at each bit width, comparing the responses to two photos qualitatively (Table 24). The question is “Describe this image in one sentence.” at every bit width, and the responses are obtained with greedy decoding. As the bit width decreases, the model does not collapse abruptly; its responses lose details gradually. From 4 to 3 bits, the responses name the main objects as FP16 does, such as the cat and the typewriter or the chihuahua and its leash. At 2.5 bits the scene remains, but details disappear first: the breed and the leash of the dog, and the books and the typewriter next to the cat. Even at 2 bits the responses are natural sentences about the photo, but they contain statements that do not match it, such as the cat sitting on the wooden fence of the background. 35 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes                                                           
+
+> Table 25. WER (%, lower is better) of Whisper-large-v3. Mean: unweighted mean of the three sets. MG (2/3/4) has no 2.5-, 3.5-, 6-, or 8-bit modes. FP16 AR (ours) MG (2/3/4) Bits 16 8643.5 32.5 2432test-clean 2.03 2.04 2.03 2.10 2.11 2.20 2.24 2.39 2.03 2.20 69.36 test-other 3.90 3.92 3.97 4.06 4.16 4.24 4.48 5.31 4.40 4.84 93.79 Earnings-22 11.34 11.29 11.17 11.24 11.36 11.45 11.46 12.44 11.37 12.02 105.61 Mean 5.75 5.75 5.72 5.80 5.87 5.96 6.06 6.71 5.93 6.35 89.59
+
+J.3. Speech Recognition 
+
+We encode all linear layers in the encoder and decoder of Whisper-large-v3 (Radford et al., 2023) (attention projections and feed-forward layers), keeping the convolutional front end, embeddings, and normalization layers at their original precision. The Hessians are collected from 128 utterances of LibriSpeech (Panayotov et al., 2015) dev-clean, with log-mel features fed to the encoder and the reference transcripts to the decoder with teacher forcing. We report the word error rate (WER) on LibriSpeech test-clean and test-other and on Earnings-22 (Del Rio et al., 2022), with greedy decoding in English transcription mode and Whisper’s text normalization; the baseline is MG (2/3/4), as described at the beginning of this appendix. Any-Rate stays within 0.05 points of FP16 down to 4 bits and rises gradually as the bit width decreases, to 6.71% at 2 bits, with the half-bit modes between the integer modes (Table 25). MG (2/3/4) is slightly higher at 4 and 3 bits, which also holds sentence by sentence: among the 8,300 utterances, Any-Rate alone transcribes 398 exactly at 3 bits and MG (2/3/4) alone 226. At 2 bits, MG (2/3/4) collapses to a mean WER of 89.6%, transcribing 14% of the test-clean utterances as “Thank you.” and shortening 409 of the 2,536 utterances with at least five words to two words or fewer, which happens once for Any-Rate. Table 26 shows two utterances in which each method makes a single error at 3 bits, while MG (2/3/4) loses the content of both at 2 bits.                         
+
+> Table 26. Two utterances of LibriSpeech test-other transcribed by Whisper-large-v3 at each bit width (greedy decoding). Bits Utterance 1 Utterance 2 Reference hence a resort to cider and beer toward dark a man went in to buy a lamp FP16 16 Hence a resort to cider and beer. Toward dark, a man went in to buy a lamp. AR (ours) 4Hence a resort to cider and beer. Toward dark, a man went in to buy a lamp. 3.5 Hence a resort to cider and beer. Toward dark, a man went in to buy a lamp. 3Hence a resort to cider and beer. To our dark, a man went in to buy a lamp. 2.5 Hence a resort to cider and beer. To a dark, a man went in to buy a lamp. 2Hence a resort to cider and beer. To a dark, a man went in to buy a lamp. MG (2/3/4) 4Hence a resort to cider and beer. Toward dark, a man went in to buy a lamp. 3Hansen Resort to Cider and Beer Toward dark, a man went in to buy a lamp. 2Here’s to be so excited and beer. word dog.
+
+J.4. Diffusion Model 
+
+In diffusion models, Any-Rate follows the same procedure layer by layer. The text-to-image model PixArt-Σ (Chen et al., 2024) has two components to encode, each for a different reason. The T5 text encoder (Raffel et al., 2020), which turns the prompt into embeddings, has many parameters and takes a large share of memory but runs only once per prompt. The diffusion transformer (DiT) (Peebles & Xie, 2023), which generates the image from these embeddings, is smaller but runs at every diffusion step, so most of the computation for an image comes from it. Both consist of linear layers and are encoded with the same procedure, while the mostly convolutional VAE stays at its original precision. The Hessian of each linear layer is collected while encoding the prompts for T5 and over the whole diffusion process of generating images for the DiT. All images are generated with the same prompt, seed, and generation settings at every bit width and compared side by side qualitatively; we do not report quality metrics or speed. MG (2/3/4) is built as described at the beginning of this appendix, with a 4-bit master from which the 2- and 3-bit modes are read. Because T5 and the DiT affect the result differently, we show the cases in which only one of them or both are quantized. Figure 13 shows one prompt with the two components quantized separately and together. With only T5 quantized, both 36 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+methods produce images almost identical to FP16 at 3 and 2 bits. Quantizing the DiT changes the image. At 3 bits, Any-Rate keeps the same street scene with a slightly different viewpoint and lighting, and at 2 bits the stalls smear into streaks while the street remains. MG (2/3/4) changes the composition at 3 bits and turns into streaked noise on a dark background at 2 bits. Quantizing both components gives almost the same result as quantizing the DiT alone, so in this example the DiT sets the limit of image quality. Figure 14 shows two prompts at each bit width with the DiT and T5 quantized together. Any-Rate keeps the same scene and objects as FP16 down to 2.5 bits for both prompts, and at 2 bits the result depends on the prompt: the sunflowers remain recognizable, whereas the facial features of the dog blur. MG (2/3/4) already changes the composition at 4 bits, keeps the main object with a different scene at 3 bits, and at 2 bits turns into noise for both prompts, with only the colors of the sunflowers faintly left, the same tendency as in the street example. Since Any-Rate reads T5 and the DiT independently from one checkpoint, it can also serve them at different bit widths without additional checkpoints, for example T5 at a high bit width when the prompt must be followed closely and the DiT at a low bit width when image detail matters less; we did not evaluate such mixed combinations. 
+
+J.5. Video Generation 
+
+For the text-to-video model CogVideoX-2B (Yang et al., 2025b), we encode the 180 linear layers of the diffusion transformer (DiT) and the 168 linear layers of the T5 text encoder together with Any-Rate and keep the 3D VAE at its original precision. The T5 encoder has the same weights as that of PixArt-Σ, so we reuse its encoding, and the DiT Hessians are collected at the inputs of the linear layers while running the diffusion process (50 steps) on calibration prompts. Every video is generated with the same prompt, seed, and sampling settings (50 steps, guidance 6, 49 frames), and the comparison is again with MG (2/3/4). We do not report quality metrics or speed; instead, Figure 15 places five frames taken in temporal order from one video (frames 0, 12, 24, 36, and 48) side by side for each bit width. In the FP16 video, the robot head stays above the chip and comes down onto it at frame 36. Any-Rate keeps this motion in every mode from 4 to 2 bits, while the details fade as the bit width decreases: at 4 and 3.5 bits the grid of the chip and the shape of the head are visible, but the background turns bluish instead of the white of FP16; at 3 bits the shape of the head departs from FP16; at 2.5 bits the scene blurs; and at 2 bits only the outlines of the head and the chip remain, although the head still comes down at frame 36. MG (2/3/4) keeps the white background and the descending motion at 4 and 3 bits, so at these two bit widths its colors are closer to FP16 than those of Any-Rate. At 2 bits, all five frames show only a blurred smear and a faint outline of the chip, and the motion of the head is gone. 
+
+## K. Demo 
+
+Figures 16 and 17 show a chat demo that runs from a single Any-Rate checkpoint on an RTX 5070 Ti (16 GB). The bit width can be switched among the nine modes from 2 to 8 bits at any time; when it is switched during a reply, decoding continues in the new mode from the next token. In (a), the underline color of each part of the reply marks the mode that generated it, and (b) shows the answer of each mode to the same prompt together with the decoding speed and the energy per token of each mode, measured from the energy counters of the GPU (NVML) and the CPU package (RAPL); the rest of the PC is not measured. For Qwen3-30B-A3B, the experts stay on the SSD and only those in use are kept in a VRAM cache (4 GB); raising the mode reads only the planes that a cached expert lacks. 37 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Figure 13. Effect of quantizing each component of PixArt-Σ for the prompt “A busy street market with many people and colorful stalls”: the T5 text encoder only, the DiT only, and both, at 3 and 2 bits with MG (2/3/4) and Any-Rate. Same prompt and seed in every image. 
+
+Figure 14. PixArt-Σ images at each bit width for two prompts, with the DiT and T5 quantized together. For each prompt, MG (2/3/4) (top) and Any-Rate (bottom); MG (2/3/4) has no 2.5- and 3.5-bit modes. 
+
+38 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes 
+
+Figure 15. CogVideoX-2B frames 0, 12, 24, 36, and 48. Rows: FP16, AR (ours) at 4 to 2 bits, and MG (2/3/4) at 4, 3, and 2 bits; the DiT and T5 are quantized together, with the same prompt and seed. Prompt: “A robotic arm picks up a tiny chip and places it onto a circuit board in a clean factory, camera slowly panning.” 
+
+39 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes (a) switching the bit width mid-reply (b) comparing bit widths 
+
+Figure 16. Demo on Llama-3.1-8B-Instruct. 
+
+40 Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes (a) switching the bit width mid-reply (b) comparing bit widths 
+
+Figure 17. Demo on Qwen3-30B-A3B-Instruct-2507. 
+
+41

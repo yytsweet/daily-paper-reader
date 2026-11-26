@@ -1,0 +1,537 @@
+Title: JEPA-Tuner: From Predictive Fine-Tuning to Asynchronous Execution of Vision-Language-Action Models
+
+URL Source: https://arxiv.org/pdf/2611.29096v1
+
+Published Time: Tue, 24 Nov 2026 02:46:25 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# JEPA-Tuner: From Predictive Fine-Tuning to Asynchronous Execution of Vision-Language-Action Models 
+
+## Jingxiang Qu 1,∗ Tian Xie 2,∗ Youngjin Hong 2 Changhyun Choi 2
+
+## Yang Katie Zhao 2,† Yi Liu 1,†
+
+> 1
+
+## Stony Brook University 2University of Minnesota – Twin Cities 
+
+> ∗
+
+Equal contribution. †Corresponding authors. 
+
+## Abstract 
+
+Vision-Language-Action (VLA) models generate sequences of actions from visual observations, proprioceptive states, and language instructions. In embodied interaction, ex-ecuting these actions influences subsequent observations and robot states, providing a natural predictive signal for policy learning. However, standard action-supervised fine-tuning does not explicitly capture these action-conditioned temporal dependencies in the guidance consumed by the action predictor. We introduce JEPA-Tuner , a predictive fine-tuning framework that regularizes the VLA’s native pol-icy guidance through action-conditioned future prediction. During fine-tuning, a predictor in JEPA-Tuner learns to match guidance encoded from a future observation given the current guidance and committed actions. This objec-tive encourages a cross-modal guidance adapter to cap-ture how the scene and robot state evolve under those ac-tions, while jointly training the action expert on both ob-served and predicted guidance keeps the representation in-formative for control. In addition, when deploying the VLA model with asynchronous action-chunk inference, the pre-trained predictor will anticipate the guidance needed at the next chunk boundary. The policy can thus generate the next chunk in advance and execute it from its first action without overlap correction or additional predictor train-ing, enabling efficient and high-quality asynchronous exe-cution. Experiments on LIBERO and Meta-World show that JEPA-Tuner improves task success under synchronous in-ference with better multi-modal guidance embeddings. For asynchronous control, JEPA-Tuner improves performance and smoothness across different latency settings on both LIBERO simulator and multi-size real robot demonstra-tions. The project website with video demos is at https: //qujx.github.io/JEPA-Tuner-Website/ .   
+
+> Contacts: jiqqu@cs.stonybrook.edu and yi.liu.4@stonybrook.edu.
+
+## 1. Introduction 
+
+Vision-Language-Action (VLA) models integrate visual ob-servations, language instructions, and proprioceptive states to generate robot action chunks [4, 5, 16, 28]. Many recent VLAs couple pretrained vision-language models (VLMs) [1, 2] with action experts through multimodal pol-icy guidance (vision, language, robotic states, etc.). Struc-turing this multimodal guidance is important for both pol-icy adaptation and asynchronous execution. When a robot executes an action on an object, it changes both the arm configuration and the object’s position. Prior works used this relationship to anticipate input to a policy. For in-stance, VLASH [31] estimates future proprioceptive states using current states and committed actions, while Futur-eRTC [14] predicts visual representations and propriocep-tive states to correct a frozen VLA policy. These exam-ples suggest that multimodal control signals are coupled through learnable predictive dependencies. However, stan-dard action-supervised fine-tuning does not enforce these dependencies in the guidance consumed by the action ex-pert. We therefore use the observations of executed actions as an additional training signal for the guidance that condi-tions the action expert. Specifically, we encourage action-conditioned predictive consistency by jointly training a pre-dictor to predict future guidance and proprioception from the current guidance, and further align the policy on it. Action-conditioned prediction also offers a natural way to address inference latency in asynchronous control. As Fig. 1 illustrates, the robot continues to move while the next chunk is computed, shifting execution toward later pre-dictions conditioned on an earlier observation. Real-Time Chunking (RTC) [6] corrects the overlap with committed actions through inference-time inpainting, while training based method (e.g., T-RTC [7], Legato [23]) learn smooth-ness during training to continue the committed trajectory. Although conditioning on the committed action prefix can smooth transitions between chunks, a strong bias toward continuing the previous trajectory can limit the action ex-1arXiv:2611.29096v1 [cs.RO] 21 Nov 2026 pert’s ability to respond to state changes, reducing closed-loop task success under inference delay [20, 23]. To capture action-conditioned dependencies in multi-modal guidance and better balance trajectory smoothness with action accuracy during asynchronous inference, we introduce JEPA-Tuner , a fine-tuning framework inspired by joint-embedding predictive architectures for robot con-trol [24, 30, 33]. Specifically, a cross-modal adapter mixes visual, language, and state information at the VLA’s native input prefix. Given the adapted guidance at step t, the robot state, and the next d demonstrated actions, a predictor es-timates the future guidance and proprioceptive state at step 
+
+t + d. In VLA model finetuning, we further train the ac-tion expert to generate action chunks from both observed and predicted guidance, while jointly training the predic-tor to match the guidance encoded from the observation at 
+
+t + d. This joint objective encourages the predicted guid-ance to capture the future scene and state while retaining the information needed for action generation. During asyn-chronous inference, we reuse the same predictor with the actions committed before the handoff, allowing the expert to generate the next chunk in advance and execute it from its first action without overlap correction. Our main contributions are as follows: • We identify action-conditioned temporal dependencies in multimodal guidance that standard action-supervised VLA fine-tuning ignored. Motivated by this observa-tion, we propose JEPA-Tuner , which improves VLA fine-tuning by regularizing native multimodal guidance through future prediction while jointly training the action expert on both observed and predicted guidance. • To address latency-induced conditioning mismatch dur-ing asynchronous control, we develop a predictive exe-cution scheme that reuses the predictor learned by JEPA-Tuner during fine-tuning to anticipate guidance at the next chunk handoff. This enables each new chunk to directly execute from its first action with anticipated guidance without additional training or overlap correction. • Experiments on LIBERO and Meta-World demonstrate improved VLA fine-tuning performance. Asynchronous evaluations further demonstrate a better trade-off between task success and action smoothness, both in simulation and on robot platforms of different scales, SO-101 and ALOHA, under standard and severe inference latency. 
+
+## 2. Related Work 
+
+2.1. Vision-Language-Action Models 
+
+Vision-Language-Action (VLA) models and generalist robot policies integrate visual observations and language in-structions for robot control. RT-2 [39] represents actions as tokens, while OpenVLA [16] and Octo [13] advance generalist policy pretraining and adaptation. OpenVLA-OFT [15] studies efficient action decoding and fine-tuning. Recently, diffusion [12] and flow matching [18] play an important role in generative modeling across multiple data modalities [26, 27, 35]. These frameworks also support continuous action generation: π0 [5] introduces a flow-matching action expert, π0.5 [4] extends this paradigm through heterogeneous co-training, and SmolVLA [28] em-phasizes compact, affordable action-chunk policies. Unless otherwise specified, we consider VLA policies that generate continuous action chunks using diffusion or flow matching. 
+
+2.2. Predictive Learning for VLA Policies 
+
+VLA-JEPA [30] and JEPA-WAM [17] impose temporal supervision through visual targets defined by pretrained V-JEPA encoders, while JEPA-VLA [24] augments exist-ing VLAs with pretrained video-predictive embeddings. WoG [29] learns compact future-observation conditions for action generation, and SLIM [33] models action-conditioned transitions within its own learned observation-latent space. Their future-representation targets or trans-ferred features are primarily visual, even when actions and proprioception provide conditioning. These formula-tions do not address the joint problem of shaping an exist-ing VLA’s native multimodal guidance and forecasting that guidance at execution boundaries under inference latency. JEPA-Tuner addresses this joint problem by learning action-conditioned predictive consistency within an exist-ing VLA’s native policy guidance space. As a plug-in fine-tuning framework, it couples future visual-guidance and proprioceptive-state prediction with action supervision, di-rectly regularizing the temporal evolution of the condition-ing consumed by the action expert. Crucially, the same learned predictor is reused to anticipate guidance at the next execution boundary, unifying downstream representa-tion adaptation with latency-aware asynchronous control. 
+
+2.3. Asynchronous Inference of VLA Models 
+
+Asynchronous VLA methods seek continuous, temporally aligned control under inference latency. RTC [6] uses inference-time inpainting conditioned on committed ac-tions, while Training-Time RTC [7] learns committed-prefix conditioning during training. Legato [23] similarly learns continuation for flow-based policies. These methods promote temporal compatibility in action space. Another complementary strategy anticipates execution-time conditioning. VLASH [31] rolls proprioception forward while retaining earlier visual observations; Ea-gleVLA [36] predicts future compressed VLM features; and FutureRTC [14] forecasts visual latents and propri-oceptive states for a frozen policy. Latent Bridge [22] predicts conditioning-feature changes to reduce backbone invocations. However, these methods primarily exploit prediction for deployment, leaving underexplored whether action-conditioned predictive regularization of native multi-modal guidance can improve VLA fine-tuning. JEPA-Tuner obtains two benefits from a single fine-tuning procedure: 2improved VLA finetuning performance through predictive guidance regularization and a predictor directly reusable for asynchronous control. The jointly learned predictor anticipates execution-boundary guidance, supporting pre-fix execution without a separate predictor-training stage or inference-time overlap correction. 
+
+## 3. Preliminaries 
+
+3.1. Vision-Language-Action Models 
+
+Continuous-action VLAs, including π0 [5], π0.5 [4], and SmolVLA [28], condition a generative action expert on vi-sual observations, proprioceptive states, and language in-structions. Given visual observation ot, robot state st, and instruction ℓ, we write the policy guidance as 
+
+gt = Eθ (ot, s t, ℓ ), (1) where Eθ maps the inputs to a native conditioning inter-face and gt denotes the resulting policy guidance , serving as the conditions in action experts. The interface depends on the backbone and consists of multimodal prefix embed-dings. The downstream mapping Dθ includes subsequent multimodal processing and the action expert, generating a chunk of H actions: 
+
+At:t+H−1 = ( at, . . . , a t+H−1) ∼ Dθ (· | gt). (2) Diffusion and Flow matching-based policies iteratively transform noise into actions while keeping gt fixed. Stan-dard receding-horizon execution uses the first E ≤ H ac-tions and discards the remaining H − E actions, termed the 
+
+unexecuted suffix , before replanning from new observations. 
+
+3.2. Asynchronous VLA Inference 
+
+Asynchronous inference predicts next action chunk during robot execution [6, 28]. Suppose inference starts at time t
+
+using guidance gt, with end-to-end latency ∆ measured in control steps. During this interval, the robot executes com-mitted actions Acom 
+
+> t:t+∆ −1
+
+. When the new chunk becomes available at t + ∆ , its observation-derived guidance remains 
+
+gt, although the robot and environment have evolved. This temporal mismatch constitutes prediction–execution mis-alignment [14, 31, 36], as shown in Fig. 1. For a chunk indexed relative to observation time t,the first ∆ action positions correspond to timesteps that have elapsed by inference completion. Temporal align-ment therefore skips this prefix and executes positions 
+
+∆, . . . , ∆ + E − 1, provided that ∆ + E ≤ H. The result-ing window contains later predictions while retaining the observation-derived conditioning from time t.RTC [6] handles asynchronous continuation through inference-time inpainting conditioned on committed ac-tions, promoting continuity across chunks. Figure 1 illus-trates H = 12 , E = 8, and ∆ = 4: inference from 
+
+o5 runs while Chunk 1 executes a5, . . . , a 8, after which Chunk 2 supplies a9, . . . , a 16 . Its executed window in-cludes a13 , . . . , a 16 from the suffix omitted under first-E
+
+execution. Although inpainting reconciles overlapping ac-tions, these predictions retain visual conditioning from o5.Consequently, latency shifts execution toward later predic-tions under earlier observations, while iterative overlap cor-rection introduces additional computation. 
+
+## 4. JEPA-Tuner Methodology 
+
+In this section, we first identify two challenges: under-exploited action-conditioned multimodal dependencies in VLA fine-tuning and stale guidance during asynchronous execution. We then introduce JEPA-Tuner , which ad-dresses both through predictive modeling in the VLA’s na-tive guidance space, as introduced in Fig. 2. 
+
+4.1. Challenges 
+
+Underexploited intrinsic multimodal dependencies in VLA fine-tuning. Visual observations, language instruc-tions, proprioceptive states, and actions describe intercon-nected aspects of robotic control. Vision and proprioception describe the environment and robot configuration, while language specifies task intent. Together, they condition action generation. Executed actions subsequently change the robot state and observed environment. These comple-mentary relationships suggest that policy guidance should capture both how multimodal context informs actions and how that context evolves under their execution. However, standard action-supervised fine-tuning primarily optimizes observation-to-action prediction, without explicitly model-ing the latter dependency. Guidance sufficient for action generation is therefore not necessarily structured to predict its future counterparts. This motivates action-conditioned predictive consistency in the VLA’s native guidance space, encouraging representations that preserve intrinsic temporal dependencies while remaining informative for control. 
+
+High-latency execution under stale conditioning. 
+
+Chunked policies typically execute only the first E < H 
+
+actions before replanning from updated observations, leaving an unexecuted suffix of length H − E [5, 11]. Under asynchronous inference, latency separates the observation used for prediction from the context in which the resulting actions take effect. As discussed in Sec. 3, skipping the elapsed prefix shifts the executed positions from 0, . . . , E − 1 to ∆, . . . , ∆ + E − 1, provided that 
+
+∆ + E ≤ H. Increasing latency consequently brings more of the normally unexecuted suffix into the execution window while retaining earlier observation-derived guid-ance. For example, with H = 12 , E = 8 , and ∆ = 4 in Fig. 1, four of the eight executed predictions come from this suffix. This misalignment brings severe discontinuity in asynchronous execution. 3Environmental observations Timestep 
+
+𝑎 ₁ 𝑎 ₂ 𝑎 ₃ 𝑎 ₄ 𝑎 ₅ 𝑎 ₆ 𝑎 ₇ 𝑎 ₈ 𝑎 ₉ 𝑎 ₁₀ 𝑎 ₁₁ 𝑎 ₁₂ 
+
+𝑎 ₆ 𝑎 ₇ 𝑎 ₈ 𝑎 ₉ 𝑎 ₁₀ 𝑎 ₁₁ 𝑎 ₁₂ 𝑎 ₁₃ 𝑎 ₁₄ 𝑎 ₁₅ 𝑎 ₁₆ 
+
+𝑜 ₁ 𝑜 ₂ 𝑜 ₃ 𝑜 ₄ 𝑜 ₅ 𝑜 ₆ 𝑜 ₇ 𝑜 ₈ 𝑜 ₉ 𝑜 ₁₀ 𝑜 ₁₁ 𝑜 ₁₂ 𝑜 ₁₃ 𝑜 ₁₄ 𝑜 ₁₅ 𝑜 ₁₆ 𝑜 ₁₇ 
+
+Chunk 1 Chunk 2 Inference starts 
+
+𝑎 ₅                 
+
+> Executed horizon (Standard) Executed horizon (RTC)
+> Inference latency Unexecuted Suffix
+> Unexecuted Suffix Executed horizon (RTC) Figure 1. Latency-induced discrepancy in asynchronous execution. With chunk size H= 12 , execution horizon E= 8 , and inference latency ∆ = 4 , inference for Chunk 2 starts from o5while Chunk 1 executes a5, . . . , a 8. Chunk 2’s elapsed prefix is skipped, and its predictions a9, . . . , a 16 are executed. Relative to executing its first Epredictions, RTC shifts the execution window toward later predictions conditioned on o5, using part of the normally unexecuted suffix.
+
+To overcome such discontinuity, RTC [6] requires it-erative inference-time correction to reconcile overlapping chunks, while training-based methods such as T-RTC [7] and Legato [23] learn committed-prefix continuation, which may bias action generation toward the preceding trajec-tory. These methods nevertheless exhibit substantial per-formance degradation under high latency, as shown by our LIBERO results in Sec. 5. Motivated by these limita-tions, we seek a new asynchronous execution strategy that achieves a better trade-off between trajectory smoothness and task success. 
+
+4.2. Fine-Tuning VLAs via JEPA Modeling 
+
+Adapting native multimodal guidance. Following the decomposition in Sec. 3, we instantiate policy guidance at the VLA’s native prefix interface, before its multimodal transformer layers. Let Rθ denote the policy’s input embed-ding map and Tθ a trainable cross-modal adapter: 
+
+rt = Rθ (ot, s t, ℓ ), gt = Tθ (rt). (3) The adapter uses residual attention across visual, language, and state representations, allowing each component to in-corporate information from the others while preserving the native conditioning structure. The downstream mapping Dθ
+
+comprises the remaining multimodal processing and action expert. Predictive regularization thus acts on the policy’s own guidance, and action supervision requires that guid-ance to remain useful for control. 
+
+Action-conditioned guidance prediction. A Joint-Embedding Predictive Architecture (JEPA) learns repre-sentations through prediction in embedding space. We apply this principle to paired policy contexts separated by 
+
+d control steps. Future observations and robot states define target guidance in the same native conditioning space: 
+
+¯gt+d = E¯θ (ot+d, s t+d, ℓ ), (4) where E¯θ is the target counterpart of Eθ = Tθ ◦ Rθ , shar-ing its conditioning interface and frozen pretrained compo-nents. Let ¯Vt+d denote its visual component. Given current guidance, robot state, and demonstrated intervening actions, the predictor estimates future visual guidance and proprio-ception: 
+
+( bVt+d, bst+d) = Pϕ
+
+ gt, s t, Ademo 
+
+> t:t+d−1
+
+, d  . (5) Here, visual guidance refers to the visual positions within the adapted prefix, which already incorporate cross-modal context. The instruction remains task conditioning rather than a prediction target. The predicted components are expressed through the backbone’s native interface to construct future guidance: 
+
+bgt+d = Cθ
+
+ bVt+d, bst+d; rt, ℓ 
+
+
+
+. (6) The composition map Cθ retains the predicted visual guid-ance, supplies the predicted state through the policy’s state-conditioning map, and preserves the instruction context. The current prefix rt provides context for this construction. Consequently, observed and anticipated guidance share the conditioning structure expected by the same downstream policy. 
+
+Predictive consistency. We supervise visual evolution in guidance space and robot dynamics in state space: 
+
+LJEPA = Et,d 
+
+h
+
+ℓg ( bVt+d, ¯Vt+d) + λsℓs(bst+d, s t+d)
+
+i
+
+, (7) where ℓg combines normalized squared error and cosine distance, ℓs is normalized state-prediction error, and λs
+
+balances the two components. Their separate supervision preserves the distinct scales and semantics of visual and proprioceptive information while coupling their prediction through shared guidance and intervening actions. 
+
+Joint predictive and action supervision. Embedding agreement alone does not ensure that predicted guidance supports accurate actions. We therefore supervise action generation under both observed and anticipated guidance: 
+
+Lact = Et
+
+ℓact 
+
+ gt, Ademo 
+
+> t:t+H−1
+
+ 
+
++ λdec Et,d 
+
+ℓact 
+
+ bgt+d, Ademo 
+
+> t+d:t+d+H−1
+
+ , (8) 4Inputs to the VLA 
+
+> Vision, language, robot state, actions, …
+> Visual observation
+> Language instruction
+> “Pick up the white plate and place it on the cabinet.”
+> Robot state
+> Action context
+
+𝑎 ₜ 𝑎 ₜ₊₁ 𝑎 ₜ₊₂ ··· 
+
+> Joint angles Velocities ...
+
+## Asynchronous execution with JEPA-Tuner      
+
+> Timestep Inference latency = 4 Inference starts Next chunk starts
+> Chunk 1 Executed horizon Unexecuted suffix
+> Chunk 2 Executed horizon Unexecuted suffix
+
+Actions executed continuously No overlap correction 
+
+> Conditioned on predicted guidance
+
+𝑜 ₁ 𝑜 ₂ 𝑜 ₃ 𝑜 ₄ 𝑜 ₅ 𝑜 ₆ 𝑜 ₇ 𝑜 ₈ 𝑜 ₉ 𝑜 ₁₀ 𝑜 ₁₁ 𝑜 ₁₂ 𝑜 ₁₃ 𝑜 ₁₄ 𝑜 ₁₅ 𝑜 ₁₆                         
+
+> 𝑎 ₁𝑎 ₂𝑎 ₃𝑎 ₄𝑎 ₅𝑎 ₆𝑎 ₇𝑎 ₈𝑎 ₉𝑎 ₁₀ 𝑎 ₁₁ 𝑎 ₁₂
+> 𝑎 ₉𝑎 ₁₀ 𝑎 ₁₁ 𝑎 ₁₂ 𝑎 ₁₃ 𝑎 ₁₄ 𝑎 ₁₅ 𝑎 ₁₆ 𝑎 ₁₇ 𝑎 ₁₈ 𝑎 ₁₉ 𝑎 ₂₀ Input embeddings Current guidance Action chunk
+
+VLM encoder 
+
+> Vision Language State
+
+Cross-modal adapter JEPA predictor 
+
+> Observation + State
+
+Predicted guidance Action expert 
+
+𝑎 𝑎 𝑎 
+
+··· 
+
+> Committed actions
+
+Joint training objectives 
+
+Visual prediction loss + State prediction loss + Action generation loss    
+
+> VLS
+> Trainable in fine-tuning Frozen in fine-tuning
+
+Figure 2. Predictive fine-tuning and asynchronous execution with JEPA-Tuner. During fine-tuning (bottom) , the cross-modal adapter, JEPA predictor, and action expert are trained jointly while the VLM encoder stays frozen. The adapter fuses visual, language, and state embeddings into policy guidance. Given this guidance, the current robot state, and d intervening demonstrated actions, the predictor estimates visual guidance and robot state at t + d. The encoded future observation and measured future state supervise these predictions, while demonstrated action chunks supervise the expert under both observed and predicted guidance. During asynchronous execution (top) , the same predictor anticipates guidance at the next chunk boundary. For instance, with chunk size H = 12 , execution horizon 
+
+E = 8 , and latency ∆ = 4 , inference starts from o5 and uses the committed actions a5, . . . , a 8 to predict guidance for step 9. The expert decodes Chunk 2 from this guidance. Its first eight actions, a9, . . . , a 16 , follow the Chunk 1 immediately without overlap correction. 
+
+where ℓact is the backbone’s action-learning objective and 
+
+λdec weights future-action supervision. For flow-based policies, both terms use the standard flow-matching loss against their corresponding demonstrated chunks. The sec-ond term makes future prediction relevant to control by re-quiring the anticipated guidance to condition actions appro-priate to the future context. The resulting objective is 
+
+min  
+
+> θ,ϕ
+
+Lact + λJEPA LJEPA . (9) We jointly optimize the guidance adapter, predictor, action expert, and applicable native state-conditioning parameters while keeping the pretrained visual and language backbone frozen. This couples temporal predictability with action generation in a single fine-tuning procedure. It also enables the policy to use the anticipated conditioning supplied dur-ing asynchronous deployment. 
+
+4.3. From Predictive Learning to Asynchronous Ex-ecution 
+
+Anticipating execution-time guidance. The predictive relationship learned during fine-tuning directly matches the temporal structure of asynchronous execution. During training, demonstrated actions connect the current context to its future target. At deployment, committed policy ac-tions define the interval until the next execution boundary. JEPA-Tuner therefore reuses the jointly learned predictor to anticipate that boundary’s guidance, without a separate predictor-training stage. Let inference begin at time t with latency ∆, and set the prediction horizon to d = ∆ . While the robot executes committed actions, the next chunk is generated as 
+
+( bVt+d, bst+d) = Pϕ
+
+ gt, s t, Acom 
+
+> t:t+d−1
+
+, d  ,
+
+bgt+d = Cθ
+
+ bVt+d, bst+d; rt, ℓ 
+
+
+
+,
+
+bAt+d:t+d+H−1 ∼ Dθ (· | bgt+d).
+
+(10) The chunk becomes available at t + d and is indexed from that execution boundary. For a sequential inference sched-ule whose requests lie within the preceding execution win-dow, continuous execution requires 
+
+∆ = d ≤ E ≤ H, (11) with committed actions covering the inference interval. 
+
+Execution alignment and computational benefit. Each new chunk executes its first E actions, leaving the remain-ing H − E actions as an unexecuted suffix. Anticipated guidance therefore preserves the standard prefix-execution pattern without skipping an elapsed prefix or correcting overlapping predictions. A forward pass through the jointly 5learned predictor replaces inference-time overlap correc-tion; the policy still generates a full chunk once per exe-cution window. JEPA-Tuner consequently provides both a regularized policy and an anticipatory control mechanism, connecting fine-tuning with asynchronous deployment. 
+
+## 5. Experiments 
+
+We first use synchronous inference to test whether action-conditioned predictive supervision improves VLA fine-tuning. We follow the standard protocols on LIBERO [19] and Meta-World MT50 [37], counting an episode as suc-cessful when the policy achieves the task goal within the episode limit. We then reuse the predictor during asyn-chronous execution and evaluate both task success and the smoothness of action trajectories, first on LIBERO and then on real robots SO-101 and ALOHA. The supplemen-tary material gives the backbone-specific implementations, baseline configurations, deployment settings, latency mea-surements, and ablation studies on the multimodal adapter and predictor in JEPA-Tuner. Specifically, the ablations show that our design enables accurate prediction in the guidance embedding space without compromising action learning, while multimodal interaction itself can also im-proves policy learning. Therefore, JEPA-Tuner combines guidance prediction with multimodal interaction to improve VLA fine-tuning and enable asynchronous execution by an-ticipating the guidance required at the next chunk handoff. 
+
+5.1. Benefits for VLA Fine-Tuning 
+
+We compare JEPA-Tuner with standard fine-tuning (Stan-dard FT) on SmolVLA [28], π0.5 [4], and GR00T [3]. Dur-ing synchronous evaluation, both policies decode actions from the current observation, and JEPA-Tuner’s predictor is inactive. On LIBERO, we use the published Standard FT results [30] and fine-tune the unavailable weights by our-selves. On Meta-World MT50, we match demonstrations and training budgets within each backbone and evaluate 50 episodes per task. JEPA-Tuner improves average task success over Stan-dard FT for all three VLA backbones on both LIBERO and Meta-World MT50 (Tables 1 and 2). On LIBERO, for example, average success rises from 77 .9% to 78 .4% 
+
+for SmolVLA and from 93 .9% to 96 .8% for GR00T. On Meta-World MT50, π0.5 improves from 37 .2% to 44 .0% ,and GR00T improves from 57 .7% to 65 .5% . In all cases, the action expert decodes directly from observed guidance with the predictor disabled at inference. These results sug-gest that incorporating action-conditioned prediction of fu-ture guidance into VLA fine-tuning helps the policy gener-ate more effective action chunks from current observations, improving manipulation success even when latency com-pensation is unnecessary. 
+
+Table 1. Synchronous success on LIBERO [19] (%). Avg gives equal weight to each suite.                                                                     
+
+> Method Spatial Object Goal LIBERO-10 Avg ↑
+> UniVLA [8] 96.5 96.8 95.6 92.0 95.2 OpenVLA-OFT [15] 97.6 98.4 97.9 94.5 97.1
+> π0[5] 96.8 98.8 95.8 85.2 94.2
+> π0-FAST [25] 96.4 96.8 88.6 60.2 85.5 WorldVLA [9] 87.6 96.2 83.4 60.0 81.8 villa-X [10] 97.5 97.0 91.5 74.5 90.1 VLA-JEPA [30] 96.2 99.6 97.2 95.8 97.2 Standard FT (SmolVLA) [28] 78.6 88.6 87.8 56.6 77.9 Standard FT ( π0.5) [4] 98.8 98.2 98.0 92.4 96.9 Standard FT (GR00T) [3] 94.4 97.6 93.0 90.6 93.9 JEPA-Tuner (SmolVLA) 77.2 93.0 88.6 54.8 78.4 JEPA-Tuner ( π0.5)98.4 98.6 97.8 95.6 97.6 JEPA-Tuner (GR00T) 96.6 99.8 97.8 93.0 96.8
+
+Table 2. Synchronous success on Meta-World MT50 [37] (%). Avg weights each difficulty group by its number of tasks.                                                     
+
+> Method Easy Medium Hard Very Hard Avg ↑
+> Diffusion Policy [11] 23.1 10.7 1.9 6.1 16.1 TinyVLA-H [34] 77.6 21.5 11.4 15.8 51.1
+> π0[5] 71.8 48.2 41.7 30.0 58.8 Standard FT (SmolVLA) 81.0 46.7 37.7 42.8 64.4 Standard FT ( π0.5)54.0 18.2 8.7 19.2 37.2 Standard FT (GR00T) 76.3 30.4 34.0 42.0 57.7 JEPA-Tuner (SmolVLA) 80.9 50.2 38.7 50.0 66.0 JEPA-Tuner ( π0.5)64.0 19.3 12.0 24.8 44.0 JEPA-Tuner (GR00T) 80.3 44.2 47.0 52.0 65.5
+
+5.2. Asynchronous Execution on Varying Latency 
+
+We next test whether the predictor learned during fine-tuning can support asynchronous execution by anticipat-ing guidance at the next chunk handoff. Across the four LIBERO suites, SmolVLA and π0.5 generate 50 -action chunks while the robot executes previously committed ac-tions. We compare JEPA-Tuner with Naive Async., Tem-poral Ensembling (TE) [38], BID [21], RTC [6], Training-Time RTC (T-RTC) [7], Legato-uniform [23], VLASH [31], and REMAC [32] (Table 3). We follow the baselines’ of-ficial repositories and match adaptation budgets and op-timizer steps; training details are provided in the supple-mentary material. We impose inference delays of ∆ ∈{5, 10 , 15 } control steps. All methods execute E = 10 ac-tions per chunk for ∆ ∈ { 5, 10 } and E = 15 for ∆ = 15 .For Naive Async., T-RTC, and JEPA-Tuner, we assess trajectory smoothness using the action step change between consecutive executed commands, 
+
+δt = ∥eat − eat−1∥2 , (12) where eat contains the normalized translation and rotation components of the command at step t, excluding the binary gripper command. At a handoff, δt measures the change from the last executed command of the preceding chunk to the first executed command of the new chunk. Smaller val-6SO101-Simple 
+
+> Pick up the cube and place it into the medium box.
+> SO101-Complex
+> Pick up the blue cube and place it in the medium box
+> ALOHA-Complex ALOHA-Simple
+> Pick up the banana with the left arm and place it onto the green towel Pick up the banana with the left arm and insert it in the box
+
+Figure 3. Task success and action continuity in real-robot experiments. SO-101 (left) and ALOHA (right) each show the simple task above the complex task. Each circle (success) or cross (failure) gives one trial’s mean boundary step change. Percentages report success over 20 trials under the methods’ names. Boxes show medians and interquartile ranges. 
+
+Figure 4. Action-step changes during asynchronous execution at ∆ = 10 . Each trace shows a successful LIBERO episode for SmolVLA (left) or π0.5 (right). Dashed lines mark chunk exe-cution boundaries. The step change δt measures the distance be-tween consecutive normalized continuous actions. 
+
+ues indicate a smoother transition. JEPA-Tuner achieves the highest success rate in five of the six backbone–delay settings, as shown in Table 3. At 
+
+∆ = 5 , BID leads on SmolVLA ( 79 .4% versus 77 .3% ), and JEPA-Tuner leads on π0.5 (95 .8% ). At ∆ = 10 , JEPA-Tuner reaches 76 .8% on SmolVLA and 85 .4% on π0.5, ex-ceeding BID and REMAC by 4.5 and 5.3% , respectively. At ∆ = 15 , where all methods also increase the execution horizon to E = 15 , JEPA-Tuner reaches 72 .1% and 58 .2% ,widening its lead to 10 .8% over VLASH on SmolVLA and 
+
+11 .7% over REMAC on π0.5. At this delay, T-RTC and Legato reach 34 .6% and 34 .1% on π0.5. Training-based approaches to asynchronous control, such as T-RTC and Legato, modify the diffusion or flow-matching probability path so that the action expert learns to generate a continu-ation consistent with the committed action prefix. At high latency, this prefix spans a larger fraction of the chunk and may dominate generation of the remaining actions, bias-ing the expert toward continuing the previous motion even when visual or proprioceptive cues call for an adjustment. The successful rollouts in Fig. 4 illustrate the trade-off at ∆ = 10 . Naive Async. decodes from the observation available at query time and skips actions whose execution 
+
+Table 3. Asynchronous success on LIBERO (%), averaged across the four suites. Column headers give ∆ in control steps. Bold marks the best result in each column. 
+
+SmolVLA π0.5
+
+Method 5 10 15 5 10 15 Naive Async. 77.6 68.5 53.8 94.5 73.5 32.4 TE [38] 78.1 72.0 58.4 64.6 53.5 33.0 BID [21] 79.4 72.3 60.1 94.7 74.9 34.9 RTC [6] 59.6 58.4 57.3 89.2 72.5 31.1 T-RTC [7] 64.5 61.1 58.3 94.5 74.4 34.6 Legato [23] 45.8 43.1 42.5 89.2 67.0 34.1 VLASH [31] 76.3 72.0 61.3 52.5 45.7 22.2 REMAC [32] 45.9 52.1 57.4 94.7 80.1 46.5 
+
+JEPA-Tuner 77.3 76.8 72.1 95.8 85.4 58.2 
+
+Table 4. Computational efficiency on LIBERO. We report pa-rameters used at inference (M) and generation time per chunk (ms, mean ± standard deviation). 
+
+SmolVLA π0.5
+
+Inference mode Params (M) Time (ms) Params (M) Time (ms) Standard FT (sync) 450 .0 216 .3 ± 1.4 4,143 .4 277 .7 ± 5.4
+
+JEPA-Tuner (sync) 454 .2 216 .9 ± 0.9 4,161 .2 279 .2 ± 1.5
+
+JEPA-Tuner (async) 478 .1 223 .2 ± 1.0 4,250 .1 287 .6 ± 0.8
+
+times have passed. Its traces show sharp changes at several chunk handoffs. T-RTC conditions each new chunk on the committed prefix and produces the smoothest transitions in these examples. JEPA-Tuner uses the committed actions to predict guidance at the handoff, allowing the robot to ex-ecute the first E actions of the new chunk without overlap correction. Its traces show smaller spikes than Naive Async. at several handoffs, while its success rate exceeds T-RTC’s by 15 .7% on SmolVLA and 11 .0% on π0.5.
+
+Computational efficiency. To assess the computational cost of JEPA-Tuner’s gains in task success and trajectory smoothness, we quantify the trainable parameters added during fine-tuning and measure inference time per action chunk. We compare three configurations on LIBERO, as 7shown in Table 4. Standard FT runs the base VLA alone. Synchronous JEPA-Tuner adds only the guidance adapter and disables the predictor because the action expert de-codes from observed guidance. The adapter increases the parameter count by 0.9% on SmolVLA and 0.4% on π0.5.The corresponding policies take only 0.3% and 0.5% longer per chunk than Standard FT, respectively, while achieving higher average success on LIBERO and Meta-World MT50. During asynchronous execution, JEPA-Tuner reuses the predictor learned during fine-tuning to anticipate guidance at the next chunk handoff. Together, the adapter and predic-tor increase the parameter count by 6.2% on SmolVLA and 
+
+2.6% on π0.5, adding 6.9 and 9.9 ms per chunk over Stan-dard FT, respectively. However, we set the query lead to cover the end-to-end inference latency, including this over-head. So this increased inference time has a limited af-fect on real vla model deployment. Without further training or overlap correction, JEPA-Tuner reduced mean boundary step change relative to Naive Async. in all real-robot test, with competitive success rates, as shown in Table 5. 
+
+5.3. Real-Robot Asynchronous Manipulation 
+
+We evaluate the trade-off between task success and action trajectory smoothness on the small-size SO-101 and larger-size ALOHA using SmolVLA policies. Both SO-101 tasks require placing a cube in the medium compartment of a tray. In the complex task, the robot must select the blue cube be-side a differently colored distractor. On ALOHA, the robot places a banana on a green towel or inserts it into a box. Across these tasks, we compare JEPA-Tuner with Naive Async. and T-RTC. To test how each method handles in-ference delay, we vary the query lead, the interval between requesting the next action chunk and its scheduled handoff. For real-world latency, we align JEPA-Tuner’s prediction gap with a query lead that exceeds the maximum measured end-to-end response time. The details and video demos are shown in supplementary material. We evaluate two deployment settings. In the local setting, SO-101 uses a 10 -step ( 0.50 s) query lead, and ALOHA uses manually set leads of 15 or 20 steps ( 0.50 or 
+
+0.67 s). For remote inference, SO-101 in Minnesota queries a server in New York; the measured end-to-end latency is 
+
+0.8–0.9 s, so we use a 20 -step ( 1.0 s) lead. Control frequen-cies and deployment details are given in the supplementary material. We run 20 trials per method on each task and manually score whether the correct object reaches its des-tination. To measure action trajectory smoothness, we stan-dardize joint and gripper targets using the task demonstra-tions and average the step change between the last executed target of one chunk and the first of the next across all action trajectories in each trial. JEPA-Tuner achieves the highest observed success rate outright in five of the eight task–lead conditions and ties                                                  
+
+> Table 5. Asynchronous inference on real-robots (SO-101 and ALOHA). Success rate (%, ↑) / mean boundary step change ( ↓)over 20 trials per condition. Bold marks the best success rate per row, including ties.
+> Task (robot) Query Lead (s) Naive Async. T-RTC JEPA-Tuner Simple 0.50 60 / 0.411 75 / 0.125 70 / 0.198
+> (SO-101) 1.00 65 / 0.837 55 / 0.137 80 / 0.223 Complex 0.50 35 / 0.343 35 / 0.123 55 / 0.178
+> (SO-101) 1.00 45 / 0.700 55 / 0.124 60 / 0.238 Simple 0.50 60 / 0.362 85 / 0.112 90 / 0.167
+> (ALOHA) 0.67 60 / 0.417 85 / 0.120 85 / 0.177 Complex 0.50 70 / 0.756 60 / 0.397 80 / 0.575
+> (ALOHA) 0.67 100 / 0.851 80 / 0.498 100 / 0.677
+
+for highest in two (Table 5). With high-latency on SO-101, JEPA-Tuner achieves 80% success on the simple task and 
+
+60% on the complex task, compared with 65% and 45% ,respectively, for Naive Async. On ALOHA simple tasks at 
+
+0.50 s, JEPA-Tuner achieves 90% success, compared with 
+
+60% for Naive Async. and 85% for T-RTC. Figure 3 relates task success to changes in commanded actions across all SO-101 and ALOHA chunk trajectories. JEPA-Tuner reduces the mean boundary step change rel-ative to Naive Async. in every condition, by 48 .1–73 .4% 
+
+on SO-101 and 20 .4–57 .6% on ALOHA. T-RTC yields the smallest boundary changes in all eight conditions. JEPA-Tuner achieves higher success than T-RTC in six conditions, ties in one, and trails only on the simple SO-101 task at 
+
+0.50 s ( 70% versus 75% ). On ALOHA insertion at 0.67 s, JEPA-Tuner matches the 100% success rate of Naive Async. while reducing the mean boundary step change from 0.851 
+
+to 0.677 . T-RTC reduces the mean change further to 0.498 
+
+and achieves 80% success. Conditioning each new chunk on the committed action prefix, as in T-RTC and Legato, encourages continuity across handoffs. The LIBERO traces and real-robot results illustrate this benefit for T-RTC, but its lower task success suggests that a strong bias toward con-tinuing the previous motion may limit the policy’s ability to adjust when the task calls for a change. JEPA-Tuner uses the committed actions to predict handoff guidance, allowing the action expert to generate a new chunk for the anticipated state without overlap correction. It achieves higher success than both T-RTC and Legato in all six LIBERO backbone– delay settings (Table 3). On the real robots, it reduces mean boundary step change relative to Naive Async. in all eight conditions while matching or exceeding the best baseline success rate in seven (Table 5). 
+
+## 6. Conclusions 
+
+In this paper, we identify two challenges in VLA learning and deployment: underexploited action-conditioned depen-dencies in multimodal guidance and stale conditioning dur-ing asynchronous execution. Motivated by them, we intro-duce a unified VLA fine-tuning framework, JEPA-Tuner .During fine-tuning, joint supervision of future-guidance 8prediction and action generation captures temporal depen-dencies in the VLA’s native guidance while preserving its utility for control. During asynchronous execution, the same predictor uses committed actions to anticipate guid-ance at the next handoff, enabling each new chunk to ex-ecute from its first action without overlap correction. Ex-periments on LIBERO and Meta-World MT50 demonstrate improved fine-tuning performance across all three evaluated backbones, even with the predictor inactive. Asynchronous evaluations in simulation and on SO-101 and ALOHA fur-ther support a favorable trade-off between task success and action continuity under inference latency. Although JEPA-Tuner has the potential to extend to large-scale VLA pre-training and more diverse real-world tasks, our evaluation remains limited to small-scale fine-tuning and two robot platforms; we leave these extensions to future work. 
+
+## 7. LLM Usage Statement 
+
+In this work, we used LLMs (ChatGPT and Claude Code) to assist with paper writing and method implementation. We did not use these tools to generate research ideas, develop theoretical models, design research methodology or experiments. We have reviewed all content associ-ated with this work, including LLM-assisted text and code, for accuracy, correctness, and consistency with our intended methodology. We take full responsibility for the final content of this work, including all text, claims, and artifacts produced with the assistance of LLMs. 
+
+## References 
+
+[1] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, et al. Qwen3-vl technical report. arXiv preprint arXiv:2511.21631 , 2025. 1 [2] Lucas Beyer, Andreas Steiner, Andr´ e Susano Pinto, Alexan-der Kolesnikov, Xiao Wang, Daniel Salz, Maxim Neumann, Ibrahim Alabdulmohsin, Michael Tschannen, Emanuele Bugliarello, et al. Paligemma: A versatile 3b vlm for trans-fer. arXiv preprint arXiv:2407.07726 , 2024. 1 [3] Johan Bjorck, Fernando Casta˜ neda, Nikita Cherniadev, Xingye Da, Runyu Ding, Linxi Fan, Yu Fang, Dieter Fox, Fengyuan Hu, Spencer Huang, et al. Gr00t n1: An open foundation model for generalist humanoid robots. arXiv preprint arXiv:2503.14734 , 2025. 6, 13 [4] Kevin Black, Noah Brown, James Darpinian, Karan Dha-balia, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szy-mon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky. π0.5: a vision-language-action model with open-world generalization. In Proceed-ings of the 9th Conference on Robot Learning , pages 17–40. PMLR, 2025. 1, 2, 3, 6, 13 [5] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-aoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-language-action flow model for general robot control. In 
+
+Proceedings of Robotics: Science and Systems , Los Ange-les, CA, USA, 2025. 1, 2, 3, 6 [6] Kevin Black, Manuel Y. Galliker, and Sergey Levine. Real-time execution of action chunking flow policies. In Advances in Neural Information Processing Systems , pages 33383– 33407, 2025. 1, 2, 3, 4, 6, 7, 14 [7] Kevin Black, Allen Z. Ren, Michael Equi, and Sergey Levine. Training-time action conditioning for efficient real-time chunking, 2025. 1, 2, 4, 6, 7, 14 [8] Qingwen Bu, Yanting Yang, Jisong Cai, Shenyuan Gao, Guanghui Ren, Maoqing Yao, Ping Luo, and Hongyang Li. Learning to act anywhere with task-centric latent actions. In 
+
+Proceedings of Robotics: Science and Systems , Los Angeles, CA, USA, 2025. 6 [9] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng Huang, Jiayan Guo, Xin Li, Yibing Song, Hao Luo, Fan Wang, Deli Zhao, and Hao Chen. WorldVLA: To-wards autoregressive action world model. arXiv preprint arXiv:2506.21539 , 2025. 6 [10] Xiaoyu Chen, Hangxing Wei, Pushi Zhang, Chuheng Zhang, Kaixin Wang, Yanjiang Guo, Rushuai Yang, Yucen Wang, Xinquan Xiao, Li Zhao, Jianyu Chen, and Jiang Bian. villa-X: Enhancing latent action modeling in vision-language-action models. In International Conference on Learning Representations , 2026. 6 [11] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin Burchfiel, and Shuran Song. Diffusion policy: Visuomotor policy learning via action diffusion. In 
+
+Proceedings of Robotics: Science and Systems (RSS) , 2023. 3, 6 [12] Florinel-Alin Croitoru, Vlad Hondru, Radu Tudor Ionescu, and Mubarak Shah. Diffusion models in vision: A survey. 
+
+IEEE transactions on pattern analysis and machine intelli-gence , 45(9):10850–10869, 2023. 2 [13] Dibya Ghosh, Homer Rich Walke, Karl Pertsch, Kevin Black, Oier Mees, Sudeep Dasari, Joey Hejna, Tobias Kreiman, Charles Xu, Jianlan Luo, You Liang Tan, Lawrence Yunliang Chen, Quan Vuong, Ted Xiao, Pannag R. Sanketi, Dorsa Sadigh, Chelsea Finn, and Sergey Levine. Octo: An open-source generalist robot policy. In Proceed-ings of Robotics: Science and Systems , Delft, Netherlands, 2024. 2 [14] Hai Jiang, Yixian Zou, Binbin Liang, Boqian Liu, Fan-man Meng, and Shuaicheng Liu. FutureRTC: Real-time robot execution with anticipatory-conditioned action chunk-ing, 2026. 1, 2, 3, 14 
+
+9[15] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning vision-language-action models: Optimizing speed and suc-cess. In Proceedings of Robotics: Science and Systems , Los Angeles, CA, USA, 2025. 2, 6 [16] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P. Foster, Pannag R. Sanketi, Quan Vuong, Thomas Kollar, Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-source vision-language-action model. In Proceedings of the 8th Conference on Robot Learning , pages 2679–2713. PMLR, 2025. 1, 2 [17] Yihan Lin, Jiawei He, Shifeng Bao, Chen Zhao, Yang Li, Xiaobo Wang, Yan Wang, Cheng Chi, and Jing Zhang. Jepa-wam: Learning vision-language-action poli-cies with joint-embedding world modeling. arXiv preprint arXiv:2608.09381 , 2026. 2 [18] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxim-ilian Nickel, and Matthew Le. Flow matching for generative modeling. In International Conference on Learning Repre-sentations , 2023. 2 [19] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-edge transfer for lifelong robot learning. In Advances in Neu-ral Information Processing Systems , 2023. 6, 13 [20] Dongyang Liu, Zhaowen Zheng, Yu Sun, Longxu Zhang, Yixuan Liu, and Hao Wan. Action-prior denois-ing for smooth real-time chunking. arXiv preprint arXiv:2605.25537 , 2026. 2 [21] Yuejiang Liu, Jubayer Ibn Hamid, Annie Xie, Yoonho Lee, Max Du, and Chelsea Finn. Bidirectional decoding: Improv-ing action chunking via guided test-time sampling. In Inter-national Conference on Learning Representations , 2025. 6, 7, 14 [22] Yudong Liu, Yuan Li, Zijia Tang, Yuxi Zheng, Yueqian Lin, Qinsi Wang, Yi Li, Shuangjun Liu, Shuai Zhang, Taotao Jing, et al. Latent bridge: Feature delta prediction for ef-ficient dual-system vision-language-action model inference. 
+
+arXiv preprint arXiv:2605.02739 , 2026. 2 [23] Yufeng Liu, Hang Yu, Juntu Zhao, Bocheng Li, Di Zhang, Mingzhu Li, Wenxuan Wu, Yingdong Hu, Junyuan Xie, Jun-liang Guo, Dequan Wang, and Yang Gao. Learning native continuation for action chunking flow policies. In Proceed-ings of Robotics: Science and Systems , Sydney, Australia, 2026. 1, 2, 4, 6, 7, 14 [24] Shangchen Miao, Ningya Feng, Jialong Wu, Ye Lin, Xu He, Dong Li, and Mingsheng Long. JEPA-VLA: Video predic-tive embedding is needed for vla models. arXiv preprint arXiv:2602.11832 , 2026. 2 [25] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and Sergey Levine. FAST: Efficient action tokenization for vision-language-action models. In Proceedings of Robotics: Science and Systems , Los Angeles, CA, USA, 2025. 6 [26] Dustin Podell, Zion English, Kyle Lacey, Andreas Blattmann, Tim Dockhorn, Jonas M¨ uller, Joe Penna, and Robin Rombach. Sdxl: Improving latent diffusion models for high-resolution image synthesis. In International Confer-ence on Learning Representations , pages 1862–1874, 2024. 2[27] Jingxiang Qu, Wenhan Gao, Ruichen Xu, and Yi Liu. Gaga: Gaussianity-aware gaussian approximation for efficient 3d molecular generation. In International Conference on Learn-ing Representations , pages 4769–4789, 2026. 2 [28] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn Kooijmans, Steven Palma, Adil Zouitine, Michel Ar-actingi, Caroline Pascal, Martino Russi, Andres Marafioti, Simon Alibert, Matthieu Cord, Thomas Wolf, and Remi Ca-dene. SmolVLA: A vision-language-action model for afford-able and efficient robotics. arXiv preprint arXiv:2506.01844 ,2025. 1, 2, 3, 6, 13 [29] Yue Su, Sijin Chen, Haixin Shi, Mingyu Liu, Zhengshen Zhang, Ningyuan Huang, Weiheng Zhong, Zhengbang Zhu, Yuxiao Liu, and Xihui Liu. World guidance: World model-ing in condition space for action generation. In Proceedings of the 43rd International Conference on Machine Learning ,pages 115917–115933. PMLR, 2026. 2 [30] Jingwen Sun, Wenyao Zhang, Zekun Qi, Shaojie Ren, Zezhi Liu, Hanxin Zhu, Guangzhong Sun, Xin Jin, and Zhibo Chen. VLA-JEPA: Enhancing vision-language-action model with latent world model. arXiv preprint arXiv:2602.10098 ,2026. 2, 6, 13 [31] Jiaming Tang, Yufei Sun, Yilong Zhao, Shang Yang, Yujun Lin, Zhuoyang Zhang, James Hou, Yao Lu, Zhijian Liu, and Song Han. VLASH: Real-time vlas via future-state-aware asynchronous inference, 2025. 1, 2, 3, 6, 7, 14 [32] Haoxuan Wang, Gengyu Zhang, Yan Yan, Yuzhang Shang, Ramana Rao Kompella, and Gaowen Liu. Real-time robot execution with masked action chunking. In International Conference on Learning Representations , 2026. 6, 7, 14 [33] Jingkai Wang, Zihan Tang, Gu Zhang, Mingyu Cao, Jia-peng Chen, Jingjiao Zhao, Xiansheng Chen, Pengwei Wang, Lemao Liu, and Dejing Dou. SLIM-0.5B: Learning action-grounded predictive latents for robot manipulation. arXiv preprint arXiv:2608.09771 , 2026. 2 [34] Junjie Wen, Yichen Zhu, Jinming Li, Minjie Zhu, Zhibin Tang, Kun Wu, Zhiyuan Xu, Ning Liu, Ran Cheng, Chaomin Shen, et al. Tinyvla: toward fast, data-efficient vision-language-action models for robotic manipulation. IEEE Robotics and Automation Letters , 10(4):3988–3995, 2025. 6[35] Ningyuan Yang, Yize Li, Pu Zhao, Diego A Cuji, Kanad Sarkar, Ryan M Corey, Xue Lin, and Andrew C Singer. P2flow: Phoneme-aware progressive flow match-ing for extreme speech super-resolution. arXiv preprint arXiv:2609.24138 , 2026. 2 [36] Zebin Yang, Qi Wang, Yunhe Wang, Xiurui Guo, Bo Yu, Shaoshan Liu, Jiafeng Xu, Hao Dong, and Meng Li. Eaglevla: Towards onboard real-time robot control via foresight-aligned asynchronous inference. 2026. 2, 3 [37] Tianhe Yu, Deirdre Quillen, Zhanpeng He, Ryan Julian, Karol Hausman, Chelsea Finn, and Sergey Levine. Meta-world: A benchmark and evaluation for multi-task and meta reinforcement learning. In Conference on robot learning ,pages 1094–1100. PMLR, 2020. 6, 12, 14 
+
+10 [38] Tony Z. Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn. Learning fine-grained bimanual manipulation with low-cost hardware. In Proceedings of Robotics: Science and Systems , 2023. 6, 7, 14 [39] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker, Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S. Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine, Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi, Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog, Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu, Pete Florence, Chelsea Finn, Kumar Avinava Dubey, Danny Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi Chen, Yevgen Chebotar, Justice Carbajal, Noah Brown, An-thony Brohan, Montserrat Gonzalez Arenas, and Kehang Han. RT-2: Vision-language-action models transfer web knowledge to robotic control. In Proceedings of the 7th Con-ference on Robot Learning , pages 2165–2183. PMLR, 2023. 2
+
+11 Supplementary Materials 
+
+## Table of Contents 
+
+A Ablation Studies . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12 A.1 Future-guidance prediction . . . . . . . . . . . . . . . . . . . . . . . . 12 A.2 Policy without prediction . . . . . . . . . . . . . . . . . . . . . . . . . . 12 B Additional Experimental Results . . . . . . . . . . . . . . . . . . . . 12 C Implementation Details of JEPA-Tuner . . . . . . . . . . . . . 13 D Experimental Settings . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 D.1 Synchronous simulation benchmarks . . . . . . . . . . . . . . . . 13 D.2 Asynchronous simulation and latency . . . . . . . . . . . . . . . 14 D.3 Physical manipulation protocols . . . . . . . . . . . . . . . . . . . . 15 D.4 Action continuity and aggregation . . . . . . . . . . . . . . . . . . 16 
+
+## A. Ablation Studies 
+
+We conduct two ablation studies on Meta-World MT50 [37] with SmolVLA and π0.5. To test whether the action-conditioned predictor anticipates the guidance needed at the next chunk handoff, we evaluate the predicted end-effector position and the actions decoded from the predicted guid-ance at the scheduled execution steps. To test whether self-predictive fine-tuning improves task success from ob-served multimodal guidance, we disable the predictor at inference and compare JEPA-Tuner with Standard FT un-der synchronous inference and a shared naive asynchronous schedule. 
+
+A.1. Future-guidance prediction 
+
+We evaluate ten-step prediction on held-out frames from 50 demonstration episodes. For an observation at step t, we compare the ten actions that both methods would execute from t + 10 through t + 19 . JEPA-Tuner decodes from pre-dicted guidance for t+10 and uses chunk entries 0–9. Naive asynchronous inference decodes from the observation at t
+
+and skips the first ten entries, using entries 10 –19 . We use the same action expert for all three decodes, taking the first ten actions decoded from the observed guidance at t + 10 as the reference. For end-effector position error, we compare JEPA-Tuner’s predicted position and the position at t used by the naive baseline with the observed position at t + 10 .Table 6 shows that JEPA-Tuner reduces relative executed-action error by 26 .4% on SmolVLA and 27 .2% 
+
+on π0.5 compared with naive asynchronous inference. It also reduces the end-effector position error from 63 .2 mm to 
+
+6.7 mm and 5.0 mm, respectively. These results show that predicting guidance helps the action expert generate actions closer to those conditioned on the handoff observation. 
+
+A.2. Policy without prediction 
+
+We disable the predictor at inference for the jointly trained JEPA-Tuner checkpoint and compare its task success with Standard FT. We evaluate both policies synchronously and 
+
+Table 6. Time-aligned prediction accuracy on Meta-World MT50. Pred. uses guidance and state predicted for t + 10 . Naive decodes from the observation at t and skips the first ten actions.                
+
+> SmolVLA π0.5
+> Metric Pred. Naive Pred. Naive Relative executed-action error ↓0.192 0.261 0.155 0.213 End-effector position error (mm) ↓6.7 63.2 5.0 63.2
+
+under the same naive asynchronous schedule with a delay of ∆ = 10 control steps. Each condition comprises 50 episodes on each of the 50 tasks, for 2,500 episodes. Ta-ble 7 shows that JEPA-Tuner improves synchronous success by 1.6 percentage points on SmolVLA and 6.8 points on 
+
+π0.5. Under the matched asynchronous schedule, the gains are 1.6 and 3.9 points, respectively. 
+
+Table 7. Success rates on Meta-World MT50 (%). JEPA denotes JEPA-Tuner with the predictor disabled in both settings.              
+
+> SmolVLA π0.5
+> Inference Std. FT JEPA Std. FT JEPA Synchronous 64.4 66.0 37.2 44.0
+> Naive async. ( ∆ = 10 )58.1 59.7 35.0 38.9
+
+## B. Additional Experimental Results 
+
+To complement the individual LIBERO rollouts in Fig. 4 of the main paper, we compare the action step change 
+
+δt at chunk handoffs (Eq. (12) of the main paper) across Naive Async., T-RTC, and JEPA-Tuner. We use chunk size 
+
+H = 50 and a nominal execution horizon of E = 10 at de-lays ∆ ∈ { 5, 10 } control steps. On SmolVLA at ∆ = 10 ,the initial chunk executes E + ∆ actions before the first handoff. For each method, backbone, and delay, we trace 400 episodes with matched initializations across methods, using ten episodes per task in each of the four LIBERO suites. We average δt over all valid handoffs across these episodes, as described in Sec. D.4. Action normalization differs across backbones, so we compare methods within each backbone. Table 8 shows that on π0.5, JEPA-Tuner reduces the mean handoff step change relative to Naive Async. from 
+
+0.89 to 0.77 at ∆ = 5 and from 1.37 to 1.13 at ∆ = 10 . On SmolVLA, the pooled means are slightly higher for JEPA-Tuner at both delays. The SmolVLA rollout in Fig. 4 of the main paper illustrates smaller step changes at several indi-vidual handoffs. T-RTC produces the smallest mean hand-off step change in all four settings, consistent with its use of 12 Table 8. Mean action step change at chunk handoffs on LIBERO. Each entry reports mean δt (↓) during asynchronous execution. Bold marks the lowest value in each setting.                  
+
+> SmolVLA π0.5
+> Method ∆ = 5 ∆ = 10 ∆ = 5 ∆ = 10
+> Naive Async. 1.13 1.23 0.89 1.37 T-RTC 0.38 0.38 0.43 0.45
+> JEPA-Tuner 1.26 1.30 0.77 1.13
+
+committed-prefix conditioning. JEPA-Tuner uses the com-mitted actions to predict guidance at the handoff and ex-ecutes the first E actions of the new chunk without over-lap correction. In the traced rollouts, JEPA-Tuner achieves higher task success than T-RTC in every setting and exceeds Naive Async. on both backbones at ∆ = 10 , consistent with Table 3 of the main paper. These results illustrate the trade-off between handoff continuity and task success. 
+
+## C. Implementation Details of JEPA-Tuner 
+
+We freeze the pretrained vision–language backbone and jointly train a cross-modal guidance adapter, an action-conditioned predictor, the action expert, and any trainable state projection. For a valid pair of observations d steps apart in the same demonstration, the predictor takes the adapted guidance gt, measured state st, intervening demon-strated actions at, . . . , a t+d−1, and gap d. Its targets are the visual guidance encoded from the later observation and the measured state st+d. The task instruction stays fixed across the pair. We train the same action expert to generate the demonstrated chunk starting at t from observed guidance and the chunk starting at t + d from predicted guidance. Both terms use the backbone’s flow-matching objective, so the predictor must encode information needed for the ac-tions that follow the predicted state. Synchronous execution uses observed guidance. Asynchronous execution reuses the predictor with the actions already committed through the next handoff. For SmolVLA and π0.5 [4, 28], we insert a one-layer residual attention adapter at the input prefix. It has eight attention heads and a feed-forward bottleneck of 256. Zero-initialized output projections make the adapter an identity map at initialization. The predictor is a two-layer trans-former with eight heads and feed-forward width 2,048. It reads the adapted prefix, eight tokens encoding the inter-vening actions, and one learned gap token. Residual heads predict changes to the visual embeddings and the normal-ized state. The loss weights for the current action loss, nor-malized visual squared error, visual cosine distance, nor-malized state squared error, and future action loss are 1, 1,
+
+0.1, 1, and 1, respectively. Visual and state errors are nor-malized separately. We omit padding and fixed instruction tokens from the prediction targets. The two backbones encode proprioception differently. SmolVLA projects the robot state into one token. On LIBERO, its prefix has 177 positions of width 960, compris-ing 64 tokens per camera for two cameras, 48 instruction positions, and the state token. We predict proprioception in normalized state coordinates, pass the prediction through SmolVLA’s trainable state projection, and insert it at the state position. We run the adapter on this prefix to recover the state token in context, then combine it with the predicted visual tokens and the observed instruction. This preserves the state input used by the action expert. In π0.5, the state enters through the instruction prompt. On LIBERO, the PaliGemma prefix has 968 positions of width 2,048. Each of three camera slots occupies 256 po-sitions, with two real views and one masked slot, followed by 200 prompt positions. We discretize the predicted state into 256 bins, rebuild the prompt with the same instruction, update its padding mask, and apply the adapter in context. We combine the rebuilt prompt with the predicted image embeddings. Each valid camera contributes equally to the normalized visual prediction loss. For the Meta-World experiments labeled “GR00T” in Table 2 of the main paper, we use the GR00T-N1.7-3B checkpoint [3], with its backbone frozen and its action head configured for the new embodiment. A one-layer, 16-head cross-modal adapter includes a state token in the features used for action conditioning. The action-conditioned pre-dictor has approximately 110 million parameters. We train the action head on predicted guidance with a future action loss weight of 1.0, and use the observed guidance for the synchronous evaluation. Both Standard FT and JEPA-Tuner use 20-action chunks and execute ten actions per chunk on this benchmark. 
+
+## D. Experimental Settings 
+
+For every comparison, we match the training budget within each backbone: all methods that we train build on the same pretrained weights and demonstrations, with no baseline receiving fewer optimizer steps than JEPA-Tuner, and the training-free asynchronous baselines reuse the Standard FT checkpoint. 
+
+D.1. Synchronous simulation benchmarks 
+
+Standard FT trains the action expert to generate demon-strated actions from the current observation. On LIBERO [19], we evaluate the Spatial, Object, Goal, and LIBERO-10 suites. A rollout succeeds when the environ-ment’s task-specific goal condition is satisfied within its episode limit. The suite success rate is the fraction of suc-cessful rollouts, and the LIBERO average gives each suite equal weight. The π0.5 and GR00T Standard FT rows use published backbone results [30], while we obtain the 13 SmolVLA Standard FT row by fine-tuning its pretrained base following the official configuration. For synchronous inference, JEPA-Tuner uses the current observation directly with no imposed delay. The JEPA-Tuner checkpoints for SmolVLA and π0.5 used in these LIBERO evaluations were trained with gap d = 5 .On Meta-World MT50 [37], we use 50 scripted demon-strations per task. The dataset has one 480 × 480 camera view and four-dimensional state and action vectors. We evaluate 50 episodes per task with the same episode across policies and a 500-step cap. An episode counts as a suc-cess if the environment raises its task-success flag within this limit. Easy, Medium, Hard, and Very Hard contain 28, 11, 6, and 5 tasks, contributing 1,400, 550, 300, and 250 episodes, respectively. We divide the total number of suc-cessful episodes by 2,500 to obtain the overall rate, which weights each difficulty group by its episode count. We match the demonstrations and training budget within each backbone. SmolVLA and GR00T train for 20,000 op-timizer steps with effective batch size 64. SmolVLA uses float32. GR00T uses bfloat16. The π0.5 configuration uses 30,000 steps, effective batch size 28, and bfloat16. For these Meta-World experiments, JEPA-Tuner uses a train-ing gap of d = 10 for all three backbones. SmolVLA and π0.5 decode 50-action chunks and GR00T decodes 20-action chunks, with ten actions executed per chunk in each case. 
+
+D.2. Asynchronous simulation and latency account-ing 
+
+Let H be the number of decoded actions, E the number ex-ecuted per chunk, and b the control step at which the next chunk is scheduled to start. A single worker issues the query at step q = b − ∆ while the previous chunk supplies the committed actions through step b − 1. For nominal control frequency f in Hz, the scheduled observation-to-handoff in-terval is 
+
+τlead = b − qf = ∆
+
+f . (13) The response time for an individual request is defined on the robot client’s clock as 
+
+τresp = Tready − Tstart , (14) where Tstart marks the start of the client request and Tready 
+
+marks the availability of the returned action chunk. This interval includes transmission, remote processing, and re-turn of the actions. Sensor age at request time and any wait between receipt and the scheduled handoff are separate in-tervals. An early response can wait until b, so the scheduled lead and observed response time can differ. For variable real-world latency, we profile the complete request path, including JEPA-Tuner’s prediction overhead,                 
+
+> Table 9. Checkpoint initialization and adaptation on LIBERO.
+> Standard FT initializations have already received 20,000 steps on SmolVLA and 30,000 on π0.5.Legato uses effective batch size 32.
+> Backbone Method Initial weights Extra steps SmolVLA T-RTC Pretrained base 20,000 Legato Pretrained base 20,000
+> π0.5T-RTC Standard FT 10,000 Legato Standard FT 10,000
+
+and choose a query lead above the maximum measured re-sponse time, rather than the mean. If τmax is this measured maximum and ε > 0 is a margin in seconds, we choose 
+
+d = ∆ = ⌈f (τmax + ε)⌉ , ∆
+
+f > τ max . (15) The prediction gap d therefore targets the scheduled hand-off, rather than the response time of an individual request. For example, if a cloud deployment has typical response times near 0.6 s and a measured maximum of 0.9 s, we can use a 1.0 s lead, corresponding to d = ∆ = 20 at 20 Hz. An early response is buffered until the scheduled handoff, and the previous chunk supplies the committed actions un-til then. We use E ≥ ∆ for a single sequential worker. Response times beyond the profiled bound are handled by the late-arrival policy described below. In LIBERO, we impose the delay in control steps by making a request issued at b − ∆ available at b, indepen-dently of host inference speed. We use H = 50 through-out. For ∆ = 5 , 10 , 15 , the execution horizons are E =10 , 10 , 15 , respectively. At the high-latency setting, the longer horizon allows one worker to complete each request before the next one starts. Comparisons across those set-tings therefore change both delay and execution horizon. JEPA-Tuner uses a separately fine-tuned checkpoint with 
+
+d = ∆ for each delay. Following FutureRTC [14], Naive Async., Temporal Ensembling (TE) [38], BID [21], and RTC [6] use the same conventionally fine-tuned checkpoint for a given backbone. Training-Time RTC (T-RTC) [7], Legato [23], VLASH [31], and REMAC [32] use the same LIBERO demonstrations with their respective training objectives. We adapt the official implementations to the common VLA in-terfaces and match the additional adaptation budgets and optimizer steps within each backbone. These step counts exclude any prior Standard FT stage. Table 9 gives the checkpoint initializations and adaptation budgets for T-RTC and Legato. For the Legato results reported as “Legato-uniform” in Sec. 5.2 of the main paper (abbreviated to “Legato” in Ta-ble 3), we use the paper’s uniformly sampled training de-lays, extending the range to cover 0–15 control steps. The 14 guided-prefix length dL is sampled as 
+
+Pr( dL = k) = 116 , k ∈ { 0, . . . , 15 }. (16) The training ramp length is zero with probability 0.5 and otherwise sampled uniformly from 1 to 35 control steps. SmolVLA starts from its pretrained base and π0.5 from its standard LIBERO fine-tune, as detailed in Table 9. We train the action expert with the vision–language backbone frozen. At deployment, SmolVLA uses a linear ramp of length r = H − ∆ − E, while π0.5 uses a step schedule with no ramp. In both cases, the first ∆ actions are fully guided by the committed prefix. Legato uses five Euler denoising steps, whereas the other asynchronous rows use ten. Each reported latency setting is evaluated over 2,000 episodes across the four suites. 
+
+Choice of delay sampling. The official simulation code also uses an exponential guided-prefix sampler, which, when rescaled to our delay range, gives 
+
+Pr( dL = k) = exp( −4k/ 15) 
+
+P15  
+
+> j=0
+
+exp( −4j/ 15) , k ∈ { 0, . . . , 15 }.
+
+(17) Under this distribution, prefix lengths 10 and 15 occur in ap-proximately 1.65% and 0.43% of training samples, respec-tively, compared with 6.25% each under uniform sampling. Longer delays therefore receive substantially less training exposure. We retain uniform sampling to ensure equal sam-pling probability across the evaluated delay range, including the larger gaps relevant to physical deployment with sub-stantial or variable inference latency. Naive Async. skips the actions whose intended times have elapsed. T-RTC and Legato condition the new chunk on the committed prefix and execute the remaining suffix in the execution horizon. JEPA-Tuner decodes from predicted boundary guidance, so an on-time handoff starts at the first action of the new chunk. 
+
+D.3. Physical manipulation protocols 
+
+Table 10 gives the four physical deployment settings. On SO-101, the robot and control client are in Minnesota. The shorter-lead condition uses a Minnesota server, and the longer-lead condition sends observations to an NVIDIA RTX A6000 server in New York. The approximate end-to-end response time for the New York deployment is 0.8–
+
+0.9 s, equivalent to roughly 16–18 control steps at 20 Hz. We schedule handoff after 20 steps, giving a 1.0 s nomi-nal lead. On ALOHA, transmitting four camera views to a distant server makes tight deadlines difficult to meet. We run inference locally and manually set the query lead with no additional artificial sleep. At the nominal 30 Hz control rate, 15 steps give exactly 0.50 s and 20 steps give 2/3 s, displayed as 0.67 s.                                
+
+> Table 10. Physical deployment timing. All methods decode H=50 actions. The lead is the scheduled time from query to handoff, computed as ∆/f .
+> Robot Inference site f(Hz) ∆ELead (s) SO-101 Minnesota 20 10 10 0.50 New York 20 20 20 1.00 ALOHA Local 30 15 25 0.50 Local 30 20 25 0.67
+
+On SO-101, the simple task requires placing a cube in the medium compartment of a tray. The complex task adds a differently colored distractor and requires placing the blue cube in that compartment. Each task has 50 demonstra-tions. The policy receives two 640 × 480 overhead views, one 320 × 240 wrist view, the instruction, and six state co-ordinates. The client transmits JPEG images and executes absolute targets for five arm joints and the gripper. The pol-icy runs at 20 Hz, and the local motor loop runs at a nominal 
+
+60 Hz. The Minnesota and New York deployments use dif-ferent servers, transports, and execution horizons. The robot holds its starting pose for the first chunk. Dur-ing execution, an on-time JEPA-Tuner response starts at in-dex zero, whereas Naive Async. and T-RTC start at index 
+
+∆. If k additional policy steps elapse before a late chunk can be installed, the corresponding start indices advance to 
+
+k and ∆ + k. In sessions using the deadline-aware con-troller, the robot holds its position when a chunk exceeds its 
+
+0.25 s late-arrival tolerance. We retain all 20 episodes for each method and task. For the SO-101 runs at d = 20 , we use 48 demonstra-tions from each task for training and hold out two for offline evaluation. All three methods use the same SmolVLA base, 10,000 optimizer steps, batch size 32, and float32 on one RTX A6000. AdamW uses a peak learning rate of 10 −4,1,000 warmup steps, cosine decay to 2.5 × 10 −6, and gra-dient clipping at 10. The JEPA-Tuner runs use state-space prediction, camera-wise visual normalization, future action supervision, and an auxiliary-to-action loss cap of 0.5. For each physical lead, the JEPA-Tuner prediction gap and T-RTC maximum training delay match ∆.On ALOHA, both tasks use the left arm. The simple task requires picking up a banana and placing it on a green towel. The complex task requires inserting the banana into a box. The input comprises high and low external views and both wrist views, all 640 × 480 RGB. The logged action in-terface contains six joint targets and one gripper target per arm. In the simple task, the seven predicted left-arm tar-gets are expanded to this interface with the right arm held. The demonstrations were recorded at 50 Hz, and deploy-ment uses a nominal 30 Hz with E = 25 . At an on-time handoff, JEPA-Tuner starts at action zero and Naive Async. and T-RTC start at action ∆.15 On both platforms, we manually label success when the correct object reaches the instructed destination. The two tasks, two leads, and three methods give 240 scored trials per platform. 
+
+D.4. Action continuity and aggregation 
+
+On LIBERO, we use the action step change δt defined in Eq. (12) of the main paper. We compute it over the six nor-malized translation and rotation coordinates of consecutive executed actions, excluding the binary gripper command. A handoff pairs the last executed action of one chunk with the first executed action of the next. For each backbone and de-lay, we pool handoff and within-chunk changes separately over 400 episodes with matched initializations across meth-ods. Only valid consecutive pairs before episode termina-tion contribute. The LIBERO traces in the main paper show individual successful episodes. For SO-101 and ALOHA, we retain the Euclidean step-change definition δt but apply it to the absolute policy tar-gets selected before local speed limiting. Unlike the six continuous LIBERO coordinates, the physical-robot targets include the joint and gripper coordinates. We standardize each coordinate using its task-specific demonstration mean and standard deviation, shared across methods and query leads. The target includes all six joint and gripper coordi-nates on SO-101 and all 14 on ALOHA. At the first control step b of a newly installed chunk, the handoff contributes 
+
+δb = ea new  
+
+> b
+
+− ea old   
+
+> b−12
+
+, (18) where the superscripts identify the chunks that supplied the two successive targets. 16

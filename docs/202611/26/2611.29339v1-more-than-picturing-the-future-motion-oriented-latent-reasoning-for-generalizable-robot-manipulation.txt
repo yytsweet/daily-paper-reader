@@ -1,0 +1,1734 @@
+More Than Picturing the Future: Motion-Oriented Latent Reasoning
+for Generalizable Robot Manipulation
+Xin Zhang1
+Yushuo Hou2,✉
+Anqi Zhao3
+Moyun Liu2, †
+Xingwei Zhao2
+Bo Tao2
+Jiawei Du1
+Joey Tianyi Zhou4,✉
+1Institute of Advanced Intelligence and Computing, Agency for Science, Technology and Research (A*STAR), Singapore
+2Huazhong University of Science and Technology, China
+3University of Electronic Science and Technology of China, China
+4Singapore Management University, Singapore
+✉Corresponding authors
+†Project lead
+{zhangx7, dujw}@a-star.edu.sg, {houyushuo, lmomoy, zhaoxingwei, taobo}@hust.edu.cn
+zhaoanqiii@gmail.com, tyzhou@smu.edu.sg
+Abstract
+Latent reasoning lets Vision-Language-Action (VLA) mod-
+els deliberate at a fraction of the cost of explicit chain-
+of-thought, increasingly through visual foresight, which we
+show to be indispensable for predicting actions. Yet this
+paradigm is inherited from Vision-Language Models, where
+it serves understanding rather than action: each latent is
+aligned with an isolated future frame, often enriched with
+further modalities of that frame. We find that this binds the
+policy to the appearance of its training scenes, so that it
+degrades sharply once the scene changes. We argue that
+visual latents for action should capture not what a future
+frame looks like, but how the scene evolves toward the goal.
+We therefore propose Motion-Oriented Latent Reasoning,
+which redirects visual latents from the whole frame to the
+interaction that the action must bring about. Semantic la-
+tents, following the stages of embodied chain-of-thought,
+first establish what to accomplish and how. Conditioned
+on them, motion-oriented latents anticipate each future step
+from coarse to fine: from the global scene, to the interaction
+region spanned by the manipulated object and its destina-
+tion, to the robot state. Relative to the state-of-the-art latent
+VLA LaST0, our method raises the mean success rate on
+SimplerEnv-WidowX from 37.5% to 55.2% in distribution
+and from 22.4% to 30.2% under out-of-distribution shifts,
+and on an AgileX Piper dual-arm platform from 60.8% to
+90.8% in training scenes and from 6.7% to 37.5% under
+environmental changes.
+Figure 1. Snapshot vs. motion-oriented latents. Existing latents
+learn what a future frame looks like; ours focus on the interaction
+region and learn how to move. Under a new background (right),
+LaST0 [28] recognizes the task in 2% of cases on LIBERO-Long
+(ours: 66%), and under a likewise changed environment on a real
+robot, it succeeds in 6.7% of trials (ours: 37.5%).
+1. Introduction
+Building
+on
+pretrained
+Vision-Language
+Models
+(VLMs) [1, 16], Vision-Language-Action (VLA) mod-
+els [4, 18, 56] inherit web-scale visual-semantic priors
+and translate visual observations and language instructions
+directly into robot actions.
+Yet such reactive policies
+lack explicit deliberation over subgoals and action conse-
+quences, which is indispensable for complex, long-horizon
+manipulation [13, 37]. To bridge this gap, recent VLAs
+incorporate
+Chain-of-Thought
+(CoT)
+[42]
+reasoning,
+verbalizing sub-task plans [12, 24, 37, 48] or anticipating
+future observations [49, 50, 52] before acting, and thereby
+attain stronger generalization.
+Despite these gains, explicit reasoning suffers from two
+1
+arXiv:2611.29339v1  [cs.RO]  22 Nov 2026
+
+
+Figure 2. Visual foresight matters. Added to the initial state, tex-
+tual latents leave the predicted actions scattered around the ground
+truth, whereas ground-truth visual foresight places them on target;
+bars report the action predictability of the initial state alone and
+with textual latents or visual foresight added.
+inherent drawbacks: 1) autoregressive decoding incurs pro-
+hibitive latency [2, 13], and 2) discretizing reasoning into
+tokens imposes an information bottleneck [2, 28], both
+acute in embodied settings that demand real-time, con-
+tinuous control.
+These limitations have spurred a shift
+toward Latent Reasoning [55], which unfolds reasoning
+in continuous hidden states [46] and endows compact la-
+tent tokens with task-relevant content, from verbalizable
+textual rationales in Heima [35] to visual evidence such
+as trajectory maps in Mirage [47], regions of interest in
+LVR [20], 3D geometric priors in 3DThinker [8], and per-
+ceptual maps in CoVT [33]. A burgeoning body of work has
+brought this paradigm into VLAs [2, 12, 13, 28–30, 38, 44]:
+Fast-ThinkAct [13] distills lengthy textual reasoning into
+compact verbalizable latents, whereas LaST0 [28], LaRA-
+VLA [2], and, in autonomous driving, LaST-VLA [29] fur-
+ther ground their latents in future visual dynamics, 3D struc-
+ture, and robot proprioception. Such grounding proves es-
+sential for embodied control: our oracle analysis reveals
+that, added to the current observation, ground-truth future
+visual evidence attains an action predictability1 of 0.678,
+against 0.616 for textual latents (Figure 2). Visual latents
+thus constitute an indispensable component of latent rea-
+soning in VLAs.
+In VLMs, latent visual reasoning serves to comprehend
+the image at hand: its latents encode the current input across
+diverse modalities, from RGB features [20, 47] and 3D
+geometry [8] to segmentation and depth maps [33], and
+the reasoning culminates in a single answer rather than
+an action sequence.
+Latent VLAs, however, inherit this
+understanding-oriented paradigm largely intact: each latent
+is aligned with the features of an isolated future frame, and
+1Action predictability measures how accurately the actions can be pre-
+dicted from the given features; details are in Appendix A.
+richer foresight is pursued by stacking further modalities of
+that same frame [28]. This raises a pivotal question: does a
+paradigm built to understand a frame suit a policy that must
+decide how to act? We find that it does not. Reproducing
+what a future frame looks like rewards the backbone for
+encoding the appearance of the scene, and each additional
+modality of the same frame supplies further supervision on
+appearance rather than on how to move. For example, when
+only the workspace background changes while the task re-
+mains the same, the backbone of LaST0 [28] recognizes the
+task in only 2% of the observations (Figure 1), mistaking
+a change of scene for a change of task. Bound to the ap-
+pearance of its training scenes, the latent VLA overfits the
+training distribution: under the same kind of change on a
+real robot, it succeeds in only 6.7% of trials, against 37.5%
+for our method (Figure 1).
+In this paper, we argue that visual latents for action
+should capture not what a future frame looks like, but how
+the scene evolves toward the goal. Textual reasoning un-
+folds step by step, with each step conditioned on its prede-
+cessors and the goal. Visual latents should likewise follow
+a logic of their own: within each future step, they should
+progress from the global scene to the interaction region and
+the robot state, i.e., from coarse to fine; across steps, each
+should build on the one before, so that successive steps
+chain into a motion path.
+Such a derivation supervises
+what changes, where, and in which order, which transfers
+across scenes, rather than the appearance that distinguishes
+one training scene from another. Based on this insight, we
+propose Motion-Oriented Latent Reasoning, which orga-
+nizes latent reasoning as a logically structured derivation.
+Semantic latents, aligned with the semantic stages of em-
+bodied chain-of-thought [48] and trained under random tex-
+tual prefix substitution, first establish what to accomplish
+and how. Conditioned on them, motion-oriented latents an-
+ticipate each future step from coarse to fine, zooming from
+the global scene into the interaction region spanned by the
+manipulated object and its destination before specifying the
+robot state. Without altering the inference procedure of la-
+tent reasoning, the policy thereby learns how to move rather
+than what the training scenes look like, and still recognizes
+the task in unseen scenes (Section 4.2).
+Our contributions are threefold: (1) We reveal that la-
+tent VLAs inherit an understanding-oriented paradigm of
+latent visual reasoning from VLMs, and show that align-
+ing latents with isolated future frames and their modalities
+binds the policy to the appearance of its training scenes and
+impairs its generalization. (2) We propose Motion-Oriented
+Latent Reasoning, which organizes visual latents as a logi-
+cally structured derivation, from coarse to fine within each
+step and chained across steps into a motion path, scaf-
+folded by semantic latents. (3) Extensive experiments on
+SimplerEnv-WidowX, LIBERO, LIBERO-PRO, and an Ag-
+2
+
+
+ileX Piper dual-arm platform demonstrate that our method
+matches or improves in-distribution performance while sub-
+stantially improving out-of-distribution generalization.
+2. Related Work
+Reasoning in VLA models.
+Vision-Language-Action
+models adapt pretrained VLMs to robot control by map-
+ping observations and instructions directly to actions [4, 18,
+21, 31, 32, 34, 56]. To equip such reactive policies with
+deliberation, a line of work interposes explicit reasoning
+before acting: textual approaches verbalize subtasks, mo-
+tions, and grounded object locations as embodied chain-
+of-thought [6, 24, 37, 48], while visual approaches syn-
+thesize a subgoal image [49, 52] or forecast dynamic re-
+gions, depth, and semantics [50]. Others condition the pol-
+icy on motion through predicted point tracks [3, 43], object
+flow [45], or tracked visual traces [53], improving gener-
+alization across objects, scenes, and embodiments and cor-
+roborating that motion transfers where appearance does not.
+In both lines, however, the intermediate representation is de-
+coded or tracked at every control step, incurring substantial
+latency at inference.
+Latent reasoning. Latent reasoning relocates deliberation
+into continuous hidden states [55]. In language models, the
+chain of thought is replaced by continuous thoughts [10],
+compressed into fewer latent steps [39], interleaved with
+discrete text tokens [36], or condensed into verbalizable
+hidden tokens [35]; VLMs extend it to visual evidence,
+aligning latent tokens with image features [47], regions of
+interest [20], 3D geometry [8], or segmentation and depth
+cues [33], although recent analyses question how effectively
+such latents are exploited [23, 51].
+These latents serve
+to comprehend the image at hand rather than to act.
+In
+VLAs, RD-VLA [40] scales test-time computation through
+latent iteration, Fast-ThinkAct [13] compresses reasoning
+into verbalizable latents, and ThinkAct [12] distills rein-
+forced reasoning into a visual plan latent. Closer to our set-
+ting, implicit visual chain-of-thought [30], LaST0 [28], and
+LaRA-VLA [2] ground latents in future visual features, 3D
+structure, and robot proprioception, as do driving models
+that forecast future scenes in latent space [15, 29, 38, 44].
+These methods inherit the understanding-oriented design
+of VLMs, supervising latents with snapshots of future
+frames or further modalities thereof, without organizing
+them around the interaction that the action must bring about.
+3. Method
+Problem Formulation. Consider a VLA policy built on a
+multimodal backbone Φθ, which, following LaST0 [28], is
+a Mixture-of-Transformers comprising a reasoning expert
+and an action expert that share a global self-attention con-
+text. Given an observation ot and a language instruction
+ℓat time step t, Φθ is required to predict an action chunk
+At = (at, . . . , at+H−1). The key insight of latent VLAs is
+to deliberate before acting by unfolding the reasoning in a
+sequence of continuous latents Z = (z1, . . . , zK)2, rather
+than in discrete textual tokens or generated images. Among
+them, visual latent methods, exemplified by LaST0 [28], op-
+timize Φθ with a joint objective that (i) aligns each latent
+with a snapshot of the future, while (ii) generating actions
+conditioned on the latents,
+θ∗= arg min
+θ
+1
+K
+K
+X
+k=1
+d
+ zk, ¯vk
+
+|
+{z
+}
+①visual latent alignment
++ Lact
+ At | ot, ℓ, Z
+
+|
+{z
+}
+②action generation
+.
+(1)
+Here, d(x, y) = 1 −cos(x, y); ¯vk denotes the patch-
+averaged visual feature of the future frame It+∆k, along-
+side which further modalities of the same frame, such as
+point clouds, may be stacked; and Lact is the flow-matching
+objective [25] of the action expert.
+Each target in ①thus summarizes what an entire future
+frame looks like. As the background and fixtures occupy
+most of the patches, this summary is dominated by the ap-
+pearance of the scene rather than by the interaction that the
+action must bring about. Since the latents are produced by
+the same backbone that encodes the observation, matching
+these targets shapes the backbone itself and, as shown in
+Section 1, binds it to the appearance of the training scenes.
+Overview. To learn how to move rather than what the scene
+looks like, we rethink what the latents should anticipate
+along two axes (Figure 3): (i) where to look, shifting the
+visual targets from the entire frame to the interaction re-
+gion spanned by the manipulated object and its destination,
+where the action takes effect; and (ii) how to unfold, or-
+dering the latents so that each builds on the ones before:
+semantic latents first establish what to accomplish and how;
+conditioned on them, the motion-oriented latents anticipate
+each future step from the global scene to the interaction re-
+gion and the robot state, and successive steps connect into a
+motion path. Accordingly, the latent segment is laid out as
+Z =
+ c1, . . . , cM
+|
+{z
+}
+semantic latents
+, g1, ρ1, s1, . . . , gJ, ρJ, sJ
+|
+{z
+}
+motion-oriented latents
+
+,
+(2)
+with M=5 semantic latents and J=4 future steps, i.e.,
+K=M+3J=17. Within the j-th step, the global latent gj
+situates the step in the scene, the region latent ρj zooms
+into the interaction region, and the state latent sj specifies
+the robot configuration; since each latent is conditioned on
+all its predecessors, successive region latents trace how the
+interaction unfolds over time. Inference is unchanged: the
+2Special tokens delimit the latent segment. Each latent is the last hidden
+state at the preceding position and is fed back as the input embedding of
+the next, so that zk depends on (ot, ℓ, z<k).
+3
+
+
+Figure 3. Overview of Motion-Oriented Latent Reasoning. Left: Given the current observation ot and the instruction, the reasoning
+expert first generates semantic latents c1, . . . , c5 (C1–C5), which establish what to accomplish and how, and then motion-oriented latents
+that anticipate each future step from coarse to fine: the global scene (G), the interaction region (R), and the robot state (S). Each latent
+is conditioned on all its predecessors, and the action expert generates an action chunk conditioned on the observation, the instruction,
+and the latents. The inset (Motion over steps) overlays the interaction regions at t+8, t+16, and t+24 with the end-effector path: the
+regions contract toward the destination and trace how the robot moves rather than what the scene looks like. Top right: Each semantic
+latent encodes one stage of embodied chain-of-thought. Bottom right: The global and regional targets pool future-frame features from the
+frozen SigLIP encoder over the whole frame and within the interaction region, respectively. All targets are used only during training.
+latents are generated as in Equation 1 and the action expert
+is untouched. Section 3.1 and Section 3.2 detail the seman-
+tic and motion-oriented latents, respectively.
+3.1. Semantic Latents as a Logical Scaffold
+We derive the scaffold from embodied chain-of-thought an-
+notations [48], which decompose the reasoning at each step
+into M semantic stages: Subtask, Why, Movement, Move-
+ment reasoning, and Plan. The stages progress from the
+sub-goal and its rationale to the movement that realizes it
+and the plan that follows, so that each stage presupposes the
+ones before; each is represented by a semantic latent cm.
+Textual prefix.
+Aligning each latent with its own stage
+alone would let the latents memorize their targets indepen-
+dently, without deriving one stage from another. Inspired
+by Token Assorted [36], we therefore condition each latent
+on the annotations of the stages before it. For each training
+sample, we draw κ ∼U{0, . . . , M} and replace the in-
+puts at the first κ semantic latent positions with ¯c1, . . . , ¯cκ,
+where ¯cm is the averaged token embedding of the annota-
+tion of the m-th stage (e.g., turn on the stove for Subtask
+in Figure 3). Since each latent is read out at the position
+preceding it, every cm in this prefix (m ≤κ) is predicted
+from the averaged annotation embeddings ¯c1, . . . , ¯cm−1 of
+the preceding stages and is trained to match ¯cm,
+Lsem = 1
+κ
+κ
+X
+m=1
+d
+ cm, ¯cm
+
+,
+(3)
+with Lsem=0 when κ=0.
+Latent suffix. The remaining M−κ stages receive no anno-
+tation embeddings: their positions keep placeholder inputs,
+and their latents have no target to align with. Following
+Heima [35], we instead require each of them to be verbal-
+izable, i.e., taken alone as a prefix, cm must suffice for the
+backbone to decode the annotation of its stage, supervised
+by the next-token cross-entropy Ldec.
+Since κ is resampled for every sample, each stage falls
+sometimes in the prefix, where it must be inferred from the
+stages before it, and sometimes in the suffix, where it must
+carry its own content. The semantic latents thereby learn
+both the order of the stages and what each stage conveys.
+At inference, no annotations are provided and all semantic
+latents are generated by the backbone itself.
+3.2. Coarse-to-Fine Motion-Oriented Latents
+Conditioned on the scaffold, the motion-oriented latents an-
+ticipate J future steps t+∆j (∆j ∈{8, 16, 24, 32}). Let
+Fj ∈RN×D denote the patch features of the future frame
+It+∆j, extracted by the frozen visual encoder of the back-
+bone and projected into its input space, where the N patches
+form a regular grid over the image and Fj,n denotes the fea-
+ture of the n-th patch. Each step is described by three latents
+of increasing specificity.
+Global latent. The global latent gj captures the overall
+layout of the scene, including the arm, the objects, and their
+spatial arrangement. Its target ¯gj =
+1
+N
+PN
+n=1 Fj,n aver-
+ages all patches and coincides with the snapshot target of
+Equation 1, situating the step within the scene.
+4
+
+
+Region latent. The region latent ρj anticipates the inter-
+action region Bj, the bounding box enclosing the manip-
+ulated object and its destination in the future frame; for
+operations without grasping, such as turning on a stove or
+opening a drawer, the gripper takes the place of the object.
+The component boxes are obtained offline with Grounding
+DINO [27] and SAM 3 [5], with manual correction where
+needed (Appendix C). The target averages the patches Pj
+that overlap Bj,
+¯ρj =
+1
+|Pj|
+X
+n∈Pj
+Fj,n,
+(4)
+and falls back to ¯gj when no valid box is available, e.g.,
+when detection fails or the future frame lies beyond the
+end of the episode. Computed only from the patches where
+the interaction takes place, ¯ρj is far less dominated by the
+background and distractors than ¯gj. Moreover, as the ob-
+ject approaches its destination, Bj shrinks and shifts across
+consecutive steps, so that the sequence of regional targets
+traces how the interaction progresses rather than what the
+scene looks like.
+State latent. The state latent sj specifies the robot config-
+uration that realizes the step. As in LaST0 [28], the future
+robot state is normalized, discretized into tokens, and em-
+bedded by the backbone, and the mean of these embeddings
+forms the target ¯sj.
+Objective. The motion-oriented latents are trained with
+Lmot = 1
+3J
+J
+X
+j=1
+h
+d
+ gj, ¯gj
+
++ d
+ ρj, ¯ρj
+
++ d
+ sj,¯sj
+i
+. (5)
+Whereas the snapshot target of Equation 1 supervises only
+at the level of the whole frame, the supervision here de-
+scends from the scene to the interaction and further to the
+robot.
+3.3. Training and Inference
+Two-pass training. Following LaST0 [28], training pro-
+ceeds in two forward passes over the same sequence. In the
+first pass, the inputs at the motion-oriented latent positions
+are replaced by their targets, and those at the first κ seman-
+tic latent positions by ¯c1, . . . , ¯cκ. The remaining M−κ se-
+mantic latent positions keep their placeholder inputs. Each
+latent is read out from the hidden state at the preceding po-
+sition, and Lsem (Equation 3), Ldec, and Lmot (Equation 5)
+are computed on these predictions. In the second pass, all
+K latent positions are filled with the latents predicted in the
+first pass, and the action expert is optimized with Lact con-
+ditioned on them. The action expert is thus trained on the
+latents that the backbone itself produces, as at inference,
+and the action loss is back-propagated through these latents
+into the first pass. The overall objective is
+L = Lact + Lmot + λsem Lsem + λdec Ldec.
+(6)
+Table 1. Success rates (%) on SimplerEnv-WidowX in distribu-
+tion (ID) and under the three out-of-distribution (OOD) splits of
+Interleave-VLA [9]: visual changes (Visual), novel objects (Novel
+Obj.), and novel categories (Novel Cat.). Numbers in brackets give
+the gain relative to LaST0 [28], and the best mean is in bold.
+ID
+Size
+Spoon
+Carrot
+Block
+Eggplant
+Mean
+OpenVLA [18]
+7B
+4.2
+12.5
+8.3
+16.7
+10.4
+OpenVLA-OFT [17]
+7B
+16.0
+18.0
+0.0
+58.0
+23.0
+MAPS [11]
+7B
+2.0
+16.0
+0.0
+74.0
+23.0
+SpatialVLA [34]
+4B
+29.2
+33.3
+33.3
+100.0
+49.0
+Octo-Base [31]
+0.09B
+20.8
+20.8
+0.0
+45.8
+21.9
+LaST0 [28]
+3.3B
+25.0
+25.0
+16.7
+83.3
+37.5
+Ours
+3.3B
+58.3
+29.2
+37.5
+95.8
+55.2
+[+33.3]
+[+4.2]
+[+20.8]
+[+12.5]
+[+17.7]
+OOD
+Size
+Visual
+Novel Obj.
+Novel Cat.
+Mean
+OpenVLA [18]
+7B
+6.0
+15.3
+0.7
+7.3
+OpenVLA-OFT [17]
+7B
+16.0
+9.3
+0.7
+8.7
+MAPS [11]
+7B
+18.7
+20.0
+12.7
+17.1
+SpatialVLA [34]
+4B
+29.3
+20.0
+22.0
+23.8
+Octo-Base [31]
+0.09B
+7.3
+0.7
+1.3
+3.1
+LaST0 [28]
+3.3B
+18.7
+22.0
+26.7
+22.4
+Ours
+3.3B
+32.0
+30.0
+28.7
+30.2
+[+13.3]
+[+8.0]
+[+2.0]
+[+7.8]
+Inference. The text annotations, bounding boxes, and fu-
+ture frames serve only to construct the training targets. At
+inference, all K latents are generated autoregressively in
+the continuous hidden space without decoding any text, af-
+ter which the action expert produces the action chunk. The
+inference procedure thus follows that of LaST0 [28], pre-
+serving the efficiency of latent reasoning.
+4. Experiments
+In this section, we first evaluate our method in simulation in
+terms of success rate and generalization (Section 4.1). We
+then ablate each component and examine whether our la-
+tents resolve the failure identified in Section 1 (Section 4.2),
+and finally validate our method in the real world (Sec-
+tion 4.3).
+4.1. Simulation Experiments
+Benchmark
+setup.
+We
+evaluate
+on
+SimplerEnv-
+WidowX [22] and LIBERO [26], each paired with an out-
+of-distribution (OOD) counterpart.
+SimplerEnv-WidowX
+evaluates policies trained on BridgeData V2 [41] in four
+real-to-sim tasks, i.e., placing a spoon on a towel, a carrot
+on a plate, stacking blocks, and putting an eggplant in a bas-
+ket. For its OOD evaluation, we adopt the extended suite of
+Interleave-VLA [9] with the task list of MAPS [11], com-
+prising nine tasks in three splits: Visual alters the lighting,
+table texture, and background; Novel Object introduces un-
+seen instances of familiar categories; and Novel Category
+introduces entirely unseen categories. LIBERO comprises
+four suites, i.e., Spatial, Object, Goal, and Long, each with
+500 demonstrations over 10 tasks.
+For its OOD evalua-
+5
+
+
+Table 3. Latent ablation: success rates (%) in distribution (ID) on LIBERO and out of distribution (OOD) on the Spatial suite of LIBERO-
+PRO [54]. ✓marks the latent groups that are retained, # is the total number of latents, the numbers in brackets give the gain over the
+baseline without latents, and the best mean is in bold.
+Latents
+ID
+OOD (Pro)
+Semantic Motion
+#
+Spatial
+Object
+Goal
+Long
+Mean
+Obj.
+Swap
+Lang.
+Task
+Env.
+Mean
+0
+81.8
+99.2
+41.2
+86.8
+77.3
+68.2
+7.0
+81.0
+22.2
+25.6
+40.8
+✓
+12
+90.0 [+8.2]
+99.2 [+0.0]
+91.2 [+50.0]
+85.2 [−1.6] 91.4 [+14.1]
+78.4 [+10.2]
+17.4 [+10.4] 91.4 [+10.4]
+29.0 [+6.8]
+35.0 [+9.4]
+50.2 [+9.4]
+✓
+✓
+17 99.2 [+17.4]
+99.8 [+0.6]
+96.0 [+54.8]
+93.6 [+6.8]
+97.2 [+19.9]
+89.8 [+21.6] 18.2 [+11.2]
+89.2 [+8.2]
+36.4 [+14.2] 32.8 [+7.2] 53.3 [+12.5]
+Table 2. Success rates (%) on LIBERO in distribution (ID) and out
+of distribution on the Spatial suite. OOD reports the five perturba-
+tions of LIBERO-PRO [54]: manipulated objects (Obj.), swapped
+initial positions (Swap), paraphrased instructions (Lang.), modi-
+fied tasks (Task), and environments (Env.). Numbers in brackets
+give the gain relative to LaST0 [28], and the best mean is in bold.
+ID
+Size
+Spatial
+Object
+Goal
+Long
+Mean
+OpenVLA [18]
+7B
+84.7
+88.4
+79.2
+53.7
+76.5
+CogACT [21]
+7B
+97.2
+98.0
+90.2
+88.8
+93.6
+CoT-VLA [52]
+7B
+87.5
+91.6
+87.6
+69.0
+83.9
+OpenVLA-OFT [17] 7B
+97.6
+98.4
+97.9
+94.5
+97.1
+MolmoAct [19]
+7B
+87.0
+95.4
+87.6
+77.2
+86.8
+SpatialVLA [34]
+4B
+88.2
+89.9
+78.6
+55.5
+78.1
+π0 [4]
+3.3B
+96.8
+98.8
+95.8
+85.2
+94.2
+π0.5 [32]
+3.3B
+98.8
+98.2
+98.0
+92.4
+96.9
+NORA-Long [14]
+3B
+92.2
+95.4
+89.4
+74.6
+87.9
+LaST0 [28]
+3.3B
+98.4
+99.4
+95.8
+92.0
+96.4
+Ours
+3.3B
+99.2
+99.8
+96.0
+93.6
+97.2
+[+0.8]
+[+0.4]
+[+0.2]
+[+1.6]
+[+0.8]
+OOD (Pro)
+Size
+Obj.
+Swap
+Lang.
+Task
+Env.
+Mean
+OpenVLA-OFT [17] 7B
+97.0
+0.0
+97.0
+0.0
+89.0
+56.6
+MolmoAct [19]
+7B
+90.0
+0.0
+88.0
+0.0
+–
+44.5
+π0 [4]
+3.3B
+95.0
+0.0
+97.0
+0.0
+60.0
+50.4
+π0.5 [32]
+3.3B
+97.0
+20.0
+97.0
+1.0
+46.0
+52.2
+NORA-Long [14]
+3B
+92.0
+0.0
+91.0
+0.0
+–
+45.8
+LaST0 [28]
+3.3B
+85.0
+10.8
+87.2
+32.8
+29.8
+49.1
+Ours
+3.3B
+89.8
+18.2
+89.2
+36.4
+32.8
+53.3
+[+4.8]
+[+7.4]
+[+2.0]
+[+3.6]
+[+3.0]
+[+4.2]
+tion, we adopt LIBERO-PRO [54], which perturbs the same
+suites in five ways: the manipulated objects, their initial po-
+sitions, the instructions, the tasks, and the environments.
+Training and evaluation protocol.
+Our model is built
+on Janus-Pro-1B [7] and initialized from the action expert
+pretrained by LaST0 [28], which generates 16-step action
+chunks via flow matching [25]. Embodied chain-of-thought
+annotations follow [48], and the interaction regions are ob-
+tained offline with Grounding DINO [27] and SAM 3 [5]
+(Appendix C). We train on 8 NVIDIA H200 GPUs with
+AdamW at a total batch size of 128 and a learning rate of
+10−4 with cosine decay, and set λsem=0.05 and λdec=0.01
+in Equation 6. The baselines are listed in Table 1 and Ta-
+ble 2. On SimplerEnv-WidowX, each in-distribution task
+is evaluated over 24 trials and each OOD task over 50 tri-
+als. On LIBERO, our model is evaluated over 500 trials per
+suite, and on LIBERO-PRO, over 500 trials per perturbation
+of the Spatial suite. On both benchmarks, all methods are
+evaluated under the same setting.
+SimplerEnv-WidowX results. As shown in Table 1, our
+Figure 4. Task recognition from the backbone under a new back-
+ground on LIBERO-Long. Each row gives the fraction of per-
+turbed observations of a task assigned to each original-scene task;
+bold tasks are those whose scene visibly changes.
+method attains the highest mean success rate both in and out
+of distribution. In distribution, it reaches 55.2%, exceed-
+ing LaST0 [28], on which it builds, by 17.7 points and the
+strongest baseline, SpatialVLA, by 6.2 points; on Spoon, it
+attains 58.3%, twice the best competing result. Out of dis-
+tribution, it reaches 30.2%, against 23.8% for SpatialVLA
+and 22.4% for LaST0 [28], and leads all methods on ev-
+ery split: Visual (32.0%), Novel Object (30.0%), and Novel
+Category (28.7%), improving on LaST0 [28] by 13.3, 8.0,
+and 2.0 points, respectively. It does so with 3.3B parame-
+ters, fewer than SpatialVLA (4B) and OpenVLA (7B).
+LIBERO benchmark results. As shown in Table 2, our
+method attains the highest in-distribution mean of 97.2%,
+ahead of OpenVLA-OFT (97.1%) and π0.5 (96.9%), with
+the best results on Spatial (99.2%) and Object (99.8%). It
+improves on LaST0 [28] in every suite, most notably by 1.6
+points on the multi-stage Long suite. On the Spatial suite
+of LIBERO-PRO, it improves on LaST0 [28] under all five
+perturbations, raising the mean from 49.1% to 53.3%, with
+the largest gains under swapped positions and manipulated
+objects (7.4 and 4.8 points). Our method thus surpasses
+π0.5 and OpenVLA-OFT in distribution; out of distribu-
+tion, it exceeds π0.5 (52.2%) while trailing OpenVLA-OFT
+(56.6%).
+6
+
+
+4.2. Ablation Study and Analysis
+What does each latent group contribute? Table 3 ab-
+lates the two latent groups against a baseline whose la-
+tents are removed at inference, in distribution on LIBERO
+and out of distribution on the Spatial suite of LIBERO-
+PRO. The twelve motion-oriented latents alone raise the
+in-distribution mean from 77.3% to 91.4%; the gain con-
+centrates on Goal, which rises from 41.2% to 91.2%. Out
+of distribution, they improve all five perturbations, by 6.8 to
+10.4 points, raising the mean from 40.8% to 50.2%. Adding
+the five semantic latents improves every suite in distribu-
+tion, most notably Spatial and Long (by 9.2 and 8.4 points),
+lifting the mean to 97.2%. Out of distribution, it further
+raises manipulated objects from 78.4% to 89.8% and modi-
+fied tasks from 29.0% to 36.4%, lifting the mean to 53.3%.
+The two groups are thus complementary: motion-oriented
+latents furnish most of the gain both in and out of distribu-
+tion, whereas the semantic scaffold extends it to the long-
+horizon suite and to changes of the manipulated object and
+the task.
+Does the backbone recognize the task under a new
+scene? We probe whether the training target determines
+what the backbone encodes.
+On the ten LIBERO-Long
+tasks, each rendered from 20 initial states in the orig-
+inal scene and under the environmental perturbation of
+LIBERO-PRO [54], we take the hidden states of the third-
+person image tokens at the middle layer of the backbone.
+As these tokens precede the latent segment under causal
+attention, their states are independent of the generated la-
+tents and reflect only what training has instilled. Each per-
+turbed observation is assigned to the task whose original-
+scene centroid is nearest. On the five tasks whose scene
+visibly changes, the backbone of LaST0 [28] recognizes the
+task in only 2% of the observations, mistaking a change of
+scene for a change of task, whereas ours recognizes it in
+66% (Figure 1). Over all ten tasks, the rates are 30% and
+74%, and Figure 4 shows that LaST0 [28] assigns most per-
+turbed observations to the living-room tasks T5–T7, i.e., it
+identifies the scene rather than the task. Predicting isolated
+future frames thus binds the backbone to the appearance of
+the training scenes, whereas the motion-oriented derivation
+steers it toward what transfers across them.
+What do the latents represent? We further inspect the pre-
+dicted latents in the space where they are supervised. On
+80 LIBERO-Long training states with annotated interaction
+regions, we compute the cosine similarity between each la-
+tent and the patch features of the future frame it anticipates.
+As shown in Figure 5, the snapshot latent of LaST0 [28]
+resembles patches scattered over the scene, whereas our re-
+gion latent concentrates on the interaction region. Over all
+320 latent–frame pairs, 38.5% of our top-10% patches fall
+inside the region, against 15.7% for LaST0 [28] and 19.4%
+by chance.
+Figure 5. Similarity between the predicted latents and the patch
+features of the anticipated future frame on LIBERO-Long. Top:
+future frames with the annotated interaction region (dashed box).
+Middle: the visual latent of LaST0 [28]. Bottom: the region latent
+of our method. Redder areas are more similar to the latent.
+Table 4. Success rates (%) on an AgileX Piper dual-arm platform
+in distribution (ID), i.e., in the training scene, and under three out-
+of-distribution (OOD) perturbations: replaced objects or contain-
+ers (Obj.), altered workspace backgrounds (Env.), and paraphrased
+instructions (Lang.). Numbers in brackets give the gain relative to
+LaST0 [28], and the best mean is in bold.
+OOD
+Tasks
+Methods
+ID
+Obj.
+Env.
+Lang.
+π0.5 [32]
+53.3
+0.0
+3.3
+46.7
+LaST0 [28]
+73.3
+23.3
+6.7
+73.3
+Ours
+93.3
+53.3
+33.3
+86.7
+Click the bell
+[+20.0]
+[+30.0]
+[+26.7]
+[+13.3]
+π0.5 [32]
+66.7
+63.3
+3.3
+46.7
+LaST0 [28]
+63.3
+66.7
+6.7
+63.3
+Ours
+96.7
+93.3
+36.7
+96.7
+Pick up the red cup
+[+33.3]
+[+26.7]
+[+30.0]
+[+33.3]
+π0.5 [32]
+66.7
+56.7
+0.0
+43.3
+LaST0 [28]
+63.3
+73.3
+0.0
+56.7
+Ours
+96.7
+96.7
+43.3
+96.7
+Pour the water
+[+33.3]
+[+23.3]
+[+43.3]
+[+40.0]
+π0.5 [32]
+43.3
+36.7
+0.0
+33.3
+LaST0 [28]
+43.3
+46.7
+13.3
+16.7
+Ours
+76.7
+83.3
+36.7
+76.7
+Put blocks into cup
+[+33.3]
+[+36.7]
+[+23.3]
+[+60.0]
+π0.5 [32]
+57.5
+39.2
+1.7
+42.5
+LaST0 [28]
+60.8
+52.5
+6.7
+52.5
+Ours
+90.8
+81.7
+37.5
+89.2
+Mean
+[+30.0]
+[+29.2]
+[+30.8]
+[+36.7]
+4.3. Real-World Experiments
+Data collection.
+We deploy our method on an AgileX
+Piper dual-arm platform equipped with three external RGB
+cameras. We record 14-dimensional joint-space states and
+control targets covering both arms and grippers. The pol-
+icy uses the right arm only, predicting 7-dimensional end-
+effector actions comprising translation, rotation, and grip-
+7
+
+
+Figure 6. Real-world rollouts on pick up the red cup in the training scene (Ori.) and under object (Obj.), environment (Env.), and language
+(Lang.) perturbations. Our method succeeds in all four settings, whereas LaST0 [28] and π0.5 fail through empty, missed, or unstable
+grasps, drop or tip over the cup, or select the blue distractor cup. Frames are sampled uniformly over each episode from the main camera.
+Rollouts of our method on further tasks are provided in Appendix D.
+per commands. Further details on the action representation
+and robot control are provided in Appendix B. We design
+four tabletop tasks: click the bell, pick up the red cup and
+place it in a white area with a blue distractor cup present,
+pour the water from a kettle into a cup, and put blocks into
+cup, which requires placing a red and a yellow cube into a
+cup. For each task, we collect approximately 60–90 teleop-
+erated demonstrations.
+Training and evaluation details. We train task-specific
+policies using the same architecture and two-pass training
+strategy as in simulation, with real-world-specific hyperpa-
+rameters detailed in Appendix B, and compare them with
+LaST0 [28] and π0.5 [32]. Beyond the training scene (ID),
+we evaluate three out-of-distribution (OOD) perturbations:
+Object (Obj.), which replaces the manipulated object or
+container, e.g., a silver bell with a red one or a handle-
+less cup with a handled mug; Environment (Env.), which
+overlays colored background paper on the workspace; and
+Language (Lang.), which paraphrases the instruction, e.g.,
+“activate the bell by pressing it”. Specifically, object per-
+turbations in the red-cup task replace the target cup while
+retaining the blue distractor cup and white placement area;
+in the pouring and block-placement tasks, they replace the
+receiving cup with a handled mug. Each task–condition pair
+is evaluated over 30 trials.
+Quantitative and qualitative analysis. As shown in Ta-
+ble 4, our method achieves a mean success rate of 90.8%
+in the training scenes, surpassing LaST0 [28] and π0.5 by
+30.0 and 33.3 points, respectively. The advantage persists
+under perturbations: relative to LaST0 [28], our method
+improves the mean success rate from 52.5% to 81.7% un-
+der object changes, from 6.7% to 37.5% under environmen-
+tal changes, and from 52.5% to 89.2% under paraphrased
+instructions. Selected qualitative examples illustrate these
+differences. When the original red cup is replaced with a
+handled mug, our method completes the transfer, whereas
+LaST0 [28] fails to achieve a stable lift and π0.5 misses the
+grasp. The failure modes of the baselines are telling: given
+a paraphrased instruction, LaST0 [28] grasps the blue dis-
+tractor cup instead of the red one, and under environmental
+changes, both baselines topple the cup or fail to complete
+the transfer. These failures accord with the analysis in Sec-
+tion 4.2: once the scene or instruction departs from training,
+a policy bound to the appearance of its training scenes falls
+back on memorized patterns, whereas our motion-oriented
+latents ground the action in the intended target (Figure 6).
+5. Conclusion
+We have revisited the visual latents of latent VLAs, which
+inherit from Vision-Language Models the role of pictur-
+ing an isolated future frame. Such snapshot targets bind
+the policy to the appearance of its training scenes.
+We
+have therefore proposed Motion-Oriented Latent Reason-
+ing, which redirects the visual latents from the whole frame
+to the interaction that the action must bring about. Scaf-
+folded by semantic latents that establish what to accom-
+plish and how, these latents anticipate each future step from
+the global scene through the interaction region to the robot
+state. Our method improves on its latent counterpart both in
+distribution and under perturbations, in simulation and on a
+real robot. We hope these findings encourage latent reason-
+ing for robotics to be designed around what the action must
+accomplish, not borrowed from image understanding.
+8
+
+
+Limitations
+Our method relies on offline annotations, namely the stage
+descriptions of embodied chain-of-thought and the interac-
+tion regions obtained with open-vocabulary detection and
+segmentation, so that annotation errors carry over to the la-
+tent targets. Its region latent localizes the interaction of each
+future step with a single two-dimensional box, which can-
+not separate several interactions that occur at once, as in bi-
+manual manipulation, and carries no depth, on which dex-
+terous manipulation relies. Moreover, although the global
+and region targets are built from video frames without ac-
+tion labels, we have so far trained on robot demonstrations;
+learning them from large-scale human video, far more abun-
+dant than robot data, is left to future work.
+LLM Usage Statement
+We used Claude (Anthropic) and Codex (OpenAI), two
+large language model assistants, to edit the language of
+the manuscript and to format tables and LATEX source.
+The method, the experiments, and all scientific claims
+were conceived, conducted, and validated by the authors,
+who take full responsibility for the content of this paper.
+References
+[1] Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, An-
+toine Miech, Iain Barr, Yana Hasson, Karel Lenc, Arthur
+Mensch, Katie Millican, Malcolm Reynolds, Roman Ring,
+Eliza Rutherford, Serkan Cabi, Tengda Han, Zhitao Gong,
+Sina Samangooei, Marianne Monteiro, Jacob Menick, Se-
+bastian Borgeaud, Andrew Brock, Aida Nematzadeh, Sa-
+hand Sharifzadeh, Mikolaj Binkowski, Ricardo Barreira,
+Oriol Vinyals, Andrew Zisserman, and Karen Simonyan.
+Flamingo:
+a visual language model for few-shot learn-
+ing. In Advances in Neural Information Processing Systems
+(NeurIPS), 2022. 1
+[2] Shuanghao Bai, Jing Lyu, Wanqi Zhou, Zhe Li, Dakai Wang,
+Lei Xing, Xiaoguang Zhao, Pengwei Wang, Zhongyuan
+Wang, Cheng Chi, Badong Chen, and Shanghang Zhang. La-
+tent reasoning vla: Latent thinking and prediction for vision-
+language-action models. In International Conference on Ma-
+chine Learning (ICML), 2026. 2, 3
+[3] Homanga Bharadhwaj, Roozbeh Mottaghi, Abhinav Gupta,
+and Shubham Tulsiani. Track2act: Predicting point tracks
+from internet videos enables generalizable robot manipula-
+tion. In European Conference on Computer Vision (ECCV),
+2024. 3
+[4] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim
+Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mohith
+Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang Shi,
+James Tanner, Quan Vuong, Anna Walling, Haohuan Wang,
+and Ury Zhilinsky. π0: A vision-language-action flow model
+for general robot control. In Robotics: Science and Systems
+(RSS), 2025. 1, 3, 6
+[5] Nicolas Carion, Laura Gustafson, Yuan-Ting Hu, Shoub-
+hik Debnath, Ronghang Hu, Didac Suris, Chaitanya Ryali,
+Kalyan Vasudev Alwala, Haitham Khedr, Andrew Huang,
+et al.
+SAM 3: Segment anything with concepts.
+arXiv
+preprint arXiv:2511.16719, 2025. 5, 6, 3
+[6] William Chen, Suneel Belkhale, Suvir Mirchandani, Oier
+Mees, Danny Driess, Karl Pertsch, and Sergey Levine.
+Training strategies for efficient embodied reasoning. arXiv
+preprint arXiv:2505.08243, 2025. 3, 1
+[7] Xiaokang Chen, Zhiyu Wu, Xingchao Liu, Zizheng Pan,
+Wen Liu, Zhenda Xie, Xingkai Yu, and Chong Ruan. Janus-
+pro: Unified multimodal understanding and generation with
+data and model scaling. arXiv preprint arXiv:2501.17811,
+2025. 6
+[8] Zhangquan Chen, Manyuan Zhang, Xinlei Yu, Xufang Luo,
+Mingze Sun, Zihao Pan, Xiang An, Yan Feng, Peng Pei,
+Xunliang Cai, and Ruqi Huang. Think with 3d: Geometric
+imagination grounded spatial reasoning from limited views.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2026. 2, 3
+[9] Cunxin Fan, Xiaosong Jia, Yihang Sun, Yixiao Wang,
+Jianglan Wei, Ziyang Gong, Xiangyu Zhao, Masayoshi
+Tomizuka, Xue Yang, Junchi Yan, and Mingyu Ding.
+Interleave-VLA: Enhancing robot manipulation with image-
+text interleaved instructions. In International Conference on
+Learning Representations (ICLR), 2026. 5
+[10] Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhiting
+Hu, Jason E Weston, and Yuandong Tian.
+Training large
+language models to reason in a continuous latent space. In
+Second Conference on Language Modeling (COLM), 2025.
+3, 1
+[11] Chengyue Huang, Mellon M. Zhang, Robert Azarcon, Glen
+Chou, and Zsolt Kira. MAPS: Preserving vision-language
+representations via module-wise proximity scheduling for
+better vision-language-action generalization. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2026. 5
+[12] Chi-Pin Huang, Yueh-Hua Wu, Min-Hung Chen, Yu-
+Chiang Frank Wang, and Fu-En Yang. Thinkact: Vision-
+language-action reasoning via reinforced visual latent plan-
+ning. In Advances in Neural Information Processing Systems
+(NeurIPS), 2025. 1, 2, 3
+[13] Chi-Pin Huang, Yunze Man, Zhiding Yu, Min-Hung Chen,
+Jan Kautz, Yu-Chiang Frank Wang, and Fu-En Yang. Fast-
+thinkact: Efficient vision-language-action reasoning via ver-
+balizable latent planning. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2026. 1, 2, 3
+[14] Chia-Yu Hung, Qi Sun, Pengfei Hong, Amir Zadeh, Chuan
+Li, U-Xuan Tan, Navonil Majumder, and Soujanya Po-
+ria.
+NORA: A small open-sourced generalist vision lan-
+guage action model for embodied tasks.
+arXiv preprint
+arXiv:2504.19854, 2025. 6
+[15] Feiyang Jia, Lin Liu, Ziying Song, Caiyan Jia, Hangjun Ye,
+Xiaoshuai Hao, and Long Chen. Driveworld-vla: Unified
+9
+
+
+latent-space world modeling with vision-language-action for
+autonomous driving.
+arXiv preprint arXiv:2602.06521,
+2026. 3
+[16] Siddharth Karamcheti, Suraj Nair, Ashwin Balakrishna,
+Percy Liang, Thomas Kollar, and Dorsa Sadigh. Prismatic
+vlms: Investigating the design space of visually-conditioned
+language models. In International Conference on Machine
+Learning (ICML), 2024. 1
+[17] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. In Robotics: Science and Systems (RSS), 2025. 5, 6
+[18] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P
+Foster, Pannag R Sanketi, Quan Vuong, Thomas Kollar,
+Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey
+Levine, Percy Liang, and Chelsea Finn. Openvla: An open-
+source vision-language-action model.
+In Proceedings of
+The 8th Conference on Robot Learning, pages 2679–2713.
+PMLR, 2025. 1, 3, 5, 6
+[19] Jason Lee, Jiafei Duan, Haoquan Fang, Yuquan Deng, Shuo
+Liu, Boyang Li, Bohan Fang, Jieyu Zhang, Yi Ru Wang,
+Sangho Lee, Winson Han, Wilbert Pumacay, Angelica Wu,
+Rose Hendrix, Karen Farley, Eli VanderBilt, Ali Farhadi,
+Dieter Fox, and Ranjay Krishna. MolmoAct: Action rea-
+soning models that can reason in space.
+arXiv preprint
+arXiv:2508.07917, 2025. 6
+[20] Bangzheng Li, Ximeng Sun, Jiang Liu, Ze Wang, Jialian Wu,
+Xiaodong Yu, Emad Barsoum, Muhao Chen, and Zicheng
+Liu. Latent visual reasoning. In International Conference on
+Learning Representations, 2026. 2, 3
+[21] Qixiu Li, Yaobo Liang, et al.
+CogACT: A founda-
+tional vision-language-action model for synergizing cogni-
+tion and action in robotic manipulation.
+arXiv preprint
+arXiv:2411.19650, 2024. 3, 6
+[22] Xuanlin Li, Kyle Hsu, Jiayuan Gu, Oier Mees, Karl Pertsch,
+Homer Rich Walke, Chuyuan Fu, Ishikaa Lunawat, Isabel
+Sieh, Sean Kirmani, Sergey Levine, Jiajun Wu, Chelsea
+Finn, Hao Su, Quan Vuong, and Ted Xiao. Evaluating real-
+world robot manipulation policies in simulation. In Confer-
+ence on Robot Learning (CoRL), 2024. 5
+[23] You Li, Chi Chen, Yanghao Li, Fanhu Zeng, Kaiyu Huang,
+Jinan Xu, and Maosong Sun. Imagination helps visual rea-
+soning, but not yet in latent space. In International Confer-
+ence on Machine Learning (ICML), 2026. 3
+[24] Fanqi Lin, Ruiqian Nai, Yingdong Hu, Jiacheng You, Jun-
+ming Zhao, and Yang Gao. Onetwovla: A unified vision-
+language-action model with adaptive reasoning.
+arXiv
+preprint arXiv:2505.11917, 2025. 1, 3
+[25] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow matching for generative
+modeling. In International Conference on Learning Repre-
+sentations (ICLR), 2023. 3, 6
+[26] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu,
+Yuke Zhu, and Peter Stone. Libero: Benchmarking knowl-
+edge transfer for lifelong robot learning. In Advances in Neu-
+ral Information Processing Systems (NeurIPS), 2023. 5
+[27] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao
+Zhang, Jie Yang, Qing Jiang, Chunyuan Li, Jianwei Yang,
+Hang Su, Jun Zhu, and Lei Zhang. Grounding DINO: Mar-
+rying DINO with grounded pre-training for open-set object
+detection.
+In European Conference on Computer Vision
+(ECCV), 2024. 5, 6, 3
+[28] Zhuoyang Liu, Jiaming Liu, Hao Chen, Jiale Yu, Ziyu Guo,
+Chengkai Hou, Chenyang Gu, Xiangju Mi, Renrui Zhang,
+Kun Wu, Zhengping Che, Jian Tang, Pheng-Ann Heng, and
+Shanghang Zhang.
+Last0: Latent spatio-temporal chain-
+of-thought for robotic vision-language-action model. arXiv
+preprint arXiv:2601.05248, 2026. 1, 2, 3, 5, 6, 7, 8
+[29] Yuechen Luo, Fang Li, Shaoqing Xu, Yang Ji, Zehan Zhang,
+Bing Wang, Yuannan Shen, Jianwei Cui, Long Chen, Guang
+Chen, Hangjun Ye, Zhi-Xin Yang, and Fuxi Wen.
+Last-
+vla: Thinking in latent spatio-temporal space for vision-
+language-action in autonomous driving.
+arXiv preprint
+arXiv:2603.01928, 2026. 2, 3
+[30] Xiangkai Ma, Lekai Xing, Han Zhang, Wenzhong Li, and
+Sanglu Lu.
+Unifying perception and action: A hybrid-
+modality pipeline with implicit visual chain-of-thought for
+robotic action generation. arXiv preprint arXiv:2511.19859,
+2025. 2, 3
+[31] Octo Model Team, Dibya Ghosh, Homer Walke, Karl
+Pertsch, Kevin Black, Oier Mees, et al.
+Octo: An open-
+source generalist robot policy. In Robotics: Science and Sys-
+tems (RSS), 2024. 3, 5
+[32] Physical Intelligence, Kevin Black, Noah Brown, et al. π0.5:
+a vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 3, 6, 7, 8
+[33] Yiming
+Qin,
+Bomin
+Wei,
+Jiaxin
+Ge,
+Konstantinos
+Kallidromitis, Stephanie Fu, Trevor Darrell, and XuDong
+Wang. Chain-of-visual-thought: Teaching vlms to see and
+think better with continuous visual tokens. arXiv preprint
+arXiv:2511.19418, 2025. 2, 3
+[34] Delin Qu et al. SpatialVLA: Exploring spatial representa-
+tions for visual-language-action model. In Robotics: Science
+and Systems (RSS), 2025. 3, 5, 6
+[35] Xuan Shen, Yizhou Wang, Yufa Zhou, Xiangxi Shi, Pu Zhao,
+Yanzhi Wang, and Jiuxiang Gu.
+Efficient reasoning with
+hidden thinking. In International Conference on Machine
+Learning (ICML), 2026. 2, 3, 4
+[36] DiJia Su, Hanlin Zhu, Yingchen Xu, Jiantao Jiao, Yuandong
+Tian, and Qinqing Zheng. Token assorted: Mixing latent and
+text tokens for improved language model reasoning. arXiv
+preprint arXiv:2502.03275, 2025. 3, 4
+[37] Qi Sun, Pengfei Hong, Tej Deep Pala, Vernon Toh, U-Xuan
+Tan, Deepanway Ghosal, and Soujanya Poria. Emma-X: An
+embodied multimodal action model with grounded chain of
+thought and look-ahead spatial reasoning. In Proceedings
+of the 63rd Annual Meeting of the Association for Computa-
+tional Linguistics (ACL), pages 14199–14214, 2025. 1, 3
+[38] Shuhan Tan, Kashyap Chitta, Yuxiao Chen, Ran Tian,
+Yurong You, Yan Wang, Wenjie Luo, Yulong Cao, Philipp
+Krahenbuhl, Marco Pavone, and Boris Ivanovic.
+Latent
+chain-of-thought world modeling for end-to-end driving. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), 2026. 2, 3
+[39] Wenhui Tan, Jiaze Li, Jianzhong Ju, Zhenbo Luo, Ruihua
+Song, and Jian Luan. Think silently, think fast: Dynamic
+10
+
+
+latent compression of llm reasoning chains. In Advances in
+Neural Information Processing Systems (NeurIPS), 2025. 3
+[40] Yalcin Tur, Jalal Naghiyev, Haoquan Fang, Wei-Chuan Tsai,
+Jiafei Duan, Dieter Fox, and Ranjay Krishna.
+Recurrent-
+depth vla:
+Implicit test-time compute scaling of vision-
+language-action models via latent iterative reasoning. arXiv
+preprint arXiv:2602.07845, 2026. 3
+[41] Homer Rich Walke, Kevin Black, Tony Z. Zhao, Quan
+Vuong, Chongyi Zheng, Philippe Hansen-Estruch, An-
+dre Wang He, Vivek Myers, Moo Jin Kim, Max Du, Abra-
+ham Lee, Kuan Fang, Chelsea Finn, and Sergey Levine.
+Bridgedata v2: A dataset for robot learning at scale. In Con-
+ference on Robot Learning (CoRL), 2023. 5
+[42] Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten
+Bosma, Brian Ichter, Fei Xia, Ed Chi, Quoc V Le, and Denny
+Zhou. Chain-of-thought prompting elicits reasoning in large
+language models. Advances in neural information process-
+ing systems, 35:24824–24837, 2022. 1
+[43] Chuan Wen, Xingyu Lin, John So, Kai Chen, Qi Dou, Yang
+Gao, and Pieter Abbeel. Any-point trajectory modeling for
+policy learning. In Robotics: Science and Systems (RSS),
+2024. 3
+[44] Chengen Xie, Chonghao Sima, Tianyu Li, Bin Sun, Junjie
+Wu, Zhihui Hao, and Hongyang Li. Flare: Learning future-
+aware latent representations from vision-language models
+for autonomous driving. arXiv preprint arXiv:2601.05611,
+2026. 2, 3
+[45] Mengda Xu, Zhenjia Xu, Yinghao Xu, Cheng Chi, Gor-
+don Wetzstein, Manuela Veloso, and Shuran Song. Flow as
+the cross-domain manipulation interface. In Conference on
+Robot Learning (CoRL), 2024. 3
+[46] Zhongxing Xu, Zhonghua Wang, Zhe Qian, Dachuan Shi,
+Feilong Tang, Ming Hu, Shiyan Su, Xiaocheng Zou, Wei
+Feng, Dwarikanath Mahapatra, Yifan Peng, Mingquan Lin,
+and Zongyuan Ge. Thinking in uncertainty: Mitigating hal-
+lucinations in mlrms with latent entropy-aware decoding.
+arXiv preprint arXiv:2603.13366, 2026. 2
+[47] Zeyuan Yang, Xueyang Yu, Delin Chen, Maohao Shen, and
+Chuang Gan.
+Machine mental imagery: Empower multi-
+modal reasoning with latent visual tokens. arXiv preprint
+arXiv:2506.17218, 2025. 2, 3
+[48] Michał Zawalski, William Chen, Karl Pertsch, Oier Mees,
+Chelsea Finn, and Sergey Levine.
+Robotic control via
+embodied chain-of-thought reasoning.
+In Proceedings of
+The 8th Conference on Robot Learning, pages 3157–3181.
+PMLR, 2025. 1, 2, 3, 4, 6
+[49] Jianke Zhang, Yanjiang Guo, Yucheng Hu, Xiaoyu Chen, Xi-
+ang Zhu, and Jianyu Chen. Up-vla: A unified understanding
+and prediction model for embodied agent. In International
+Conference on Machine Learning (ICML), 2025. 1, 3
+[50] Wenyao Zhang, Hongsi Liu, Zekun Qi, Yunnan Wang, Xin-
+qiang Yu, Jiazhao Zhang, Runpei Dong, Jiawei He, He
+Wang, Zhizheng Zhang, Li Yi, Wenjun Zeng, and Xin Jin.
+Dreamvla: A vision-language-action model dreamed with
+comprehensive world knowledge. In Advances in Neural In-
+formation Processing Systems (NeurIPS), 2025. 1, 3
+[51] Xin Zhang, Qiqi Tao, Jiawei Du, Moyun Liu, and Joey Tianyi
+Zhou. Visual latents know more than they say: Unsilencing
+latent reasoning in MLLMs. In Advances in Neural Informa-
+tion Processing Systems (NeurIPS), 2026. 3
+[52] Qingqing Zhao, Yao Lu, Moo Jin Kim, Zipeng Fu, Zhuoyang
+Zhang, Yecheng Wu, Zhaoshuo Li, Qianli Ma, Song Han,
+Chelsea Finn, Ankur Handa, Tsung-Yi Lin, Gordon Wet-
+zstein, Ming-Yu Liu, and Donglai Xiang. Cot-vla: Visual
+chain-of-thought reasoning for vision-language-action mod-
+els. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition (CVPR), 2025. 1, 3,
+6
+[53] Ruijie Zheng, Yongyuan Liang, Shuaiyi Huang, Jianfeng
+Gao, Hal Daum´e III, Andrey Kolobov, Furong Huang, and
+Jianwei Yang. TraceVLA: Visual trace prompting enhances
+spatial-temporal awareness for generalist robotic policies.
+In International Conference on Learning Representations
+(ICLR), 2025. 3
+[54] Xueyang Zhou et al. LIBERO-PRO: Towards robust and fair
+evaluation of vision-language-action models beyond memo-
+rization. arXiv preprint arXiv:2510.03827, 2025. 6, 7
+[55] Rui-Jie Zhu, Tianhao Peng, Tianhao Cheng, Xingwei Qu,
+Jinfa Huang, Dawei Zhu, Hao Wang, Kaiwen Xue, Xuan-
+liang Zhang, Yong Shan, Tianle Cai, Taylor Kergan, As-
+sel Kembay, Andrew Smith, Chenghua Lin, Binh Nguyen,
+Yuqi Pan, Yuhong Chou, Zefan Cai, Zhenhe Wu, Yongchi
+Zhao, Tianyu Liu, Jian Yang, Wangchunshu Zhou, Chujie
+Zheng, Chongxuan Li, Yuyin Zhou, Zhoujun Li, Zhaoxiang
+Zhang, Jiaheng Liu, Ge Zhang, Wenhao Huang, and Jason
+Eshraghian. A survey on latent reasoning. arXiv preprint
+arXiv:2507.06203, 2025. 2, 3
+[56] Brianna Zitkovich, Tianhe Yu, Sichun Xu, Peng Xu, Ted
+Xiao, Fei Xia, Jialin Wu, Paul Wohlhart, Stefan Welker,
+Ayzaan Wahid, Quan Vuong, Vincent Vanhoucke, Huong
+Tran, Radu Soricut, Anikait Singh, Jaspiar Singh, Pierre
+Sermanet, Pannag R. Sanketi, Grecia Salazar, Michael S.
+Ryoo, Krista Reymann, Kanishka Rao, Karl Pertsch, Igor
+Mordatch, Henryk Michalewski, Yao Lu, Sergey Levine,
+Lisa Lee, Tsang-Wei Edward Lee, Isabel Leal, Yuheng
+Kuang, Dmitry Kalashnikov, Ryan Julian, Nikhil J. Joshi,
+Alex Irpan, Brian Ichter, Jasmine Hsu, Alexander Herzog,
+Karol Hausman, Keerthana Gopalakrishnan, Chuyuan Fu,
+Pete Florence, Chelsea Finn, Kumar Avinava Dubey, Danny
+Driess, Tianli Ding, Krzysztof Marcin Choromanski, Xi
+Chen, Yevgen Chebotar, Justice Carbajal, Noah Brown, An-
+thony Brohan, Montserrat Gonzalez Arenas, and Kehang
+Han.
+Rt-2: Vision-language-action models transfer web
+knowledge to robotic control.
+In Proceedings of The 7th
+Conference on Robot Learning, pages 2165–2183. PMLR,
+2023. 1, 3
+11
+
+
+More Than Picturing the Future: Motion-Oriented Latent Reasoning
+for Generalizable Robot Manipulation
+Supplementary Material
+A. Action Predictability
+This section details the oracle analysis in Section 1 and Fig-
+ure 2, which measures how much action-relevant informa-
+tion a set of features carries. On timesteps t sampled from
+LIBERO-90 demonstrations, we compare four feature sets:
+the hidden states of the latent tokens of a Coconut-style [10]
+latent ECoT [6, 48] policy built on MiniVLA-1B (textual
+latents); the visual features of the current observation (ini-
+tial state); the ground-truth visual features of the frames at
+t+8, t+16, t+24, and t+32 (visual foresight); and those
+of the same number of frames drawn from other timesteps
+of the same task (random frames). Each set is standard-
+ized, reduced to 64 dimensions by PCA, and fed to a ridge
+regression that predicts the ground-truth actions over the
+next 8 steps, with the sets concatenated when combined.
+Action predictability is the R2 on the held-out 30% of the
+episodes, averaged over action dimensions. The initial state
+alone attains 0.523; adding textual latents raises it to 0.616,
+whereas adding visual foresight raises it to 0.678. Replac-
+ing the foresight with random frames yields only 0.610, so
+the gain stems from the correspondence to the actual future
+rather than from the additional appearance.
+B. Real-World Experimental Setup
+This section describes the data collection, annotation, and
+deployment procedures for the four real-world tasks in the
+main paper. Figure 7 presents the real-world experimental
+setup.
+Platform and data collection.
+We use an AgileX Piper
+dual-arm platform with three external RGB cameras and
+collect demonstrations through leader–follower teleopera-
+tion. Each arm has six joints and one gripper channel. At
+each time step, we record the three RGB views, joint and
+gripper feedback, control targets, and the task instruction.
+The recordings use a sampling rate of 30 Hz and an image
+resolution of 640 × 480. Visual observations and numer-
+ical records are associated through episode indices, frame
+indices, and timestamps, and stored in the LeRobot for-
+mat. We collect approximately 60–90 teleoperated demon-
+strations for each of the four tasks: bell pressing, red-cup
+pickup, water pouring, and block placement.
+State and action representation.
+The raw recordings
+contain 14-dimensional states and joint-space control tar-
+gets for both arms. Our policy uses the right arm, with a
+seven-dimensional state comprising six joint angles in ra-
+dians and the gripper opening in meters. We convert the
+recorded control targets into end-effector action labels us-
+ing Piper forward kinematics. Let (pt, Rt) and (ptar
+t , Rtar
+t )
+denote the end-effector poses corresponding to the current
+feedback and the recorded target, respectively. The action
+is
+at =
+
+∆pT
+t , ∆rT
+t , gt
+T ∈R7,
+(7)
+where ∆pt = ptar
+t
+−pt is expressed in the right-arm
+base frame, and ∆rt = EulerXY Z(Rtar
+t RT
+t ) uses extrin-
+sic XYZ angles in radians.
+The absolute gripper target
+gt ∈[0, 1] represents the opening fraction over the con-
+figured 0–0.08 m range. Thus, action labels describe the
+displacement from current feedback to the control target,
+rather than the displacement between consecutive feedback
+frames. The bell task keeps the gripper fixed and masks its
+action channel from supervision.
+Temporal supervision.
+Each sample contains a 16-step
+action chunk starting at the current frame. Future visual and
+proprioceptive targets are taken at offsets {8, 16, 24, 32},
+corresponding to approximately {0.27, 0.53, 0.80, 1.07}
+seconds. All three RGB views are used as current visual
+inputs to the policy, and future visual targets are taken from
+the main camera.
+Targets extending beyond an episode
+are padded with its final frame or action. When no valid
+interaction-region box is available, including for future
+frames beyond the episode boundary, the regional target
+falls back to the global visual target. No supervision crosses
+episode boundaries.
+Reasoning and spatial annotations.
+We organize offline
+reasoning supervision into five fields: Subtask, Why, Move-
+ment, Movement reasoning, and Plan. These describe the
+current operation, its purpose, the intended motion, the mo-
+tion rationale, and the remaining steps. Descriptions are
+conditioned on the task, the manipulation phase, and the
+recorded action, with visual observations and robot motion
+providing the context. Movement descriptions refer to the
+current control target, and gripper descriptions distinguish
+closing, holding, and releasing.
+For spatial supervision,
+we associate task-relevant objects with their interaction or
+placement regions in the main view. When both object and
+destination boxes are available, their enclosing rectangle de-
+fines the region of interest. Box coordinates are normalized
+by image width and height and matched to the correspond-
+ing future frame. When no valid interaction-region box is
+1
+
+
+Figure 7. Real-world experimental setup with an AgileX Piper dual-arm platform and three external RGB cameras.
+available, the regional target falls back to the corresponding
+global visual target. These textual and spatial annotations
+provide offline supervision and are not required as inputs
+during deployment.
+Training.
+We train a separate policy for each real-world
+task.
+We initialize the vision–language backbone with
+Janus-Pro-1B weights and the action expert with pretrained
+weights from LaST0 [28]. The visual encoders and visual
+projection module remain frozen, while the language and
+action components are fine-tuned. Each policy uses 17 la-
+tent tokens: five reasoning tokens followed by four groups
+of global visual, ROI visual, and proprioceptive tokens, cor-
+responding to the future offsets defined above. The training
+objective combines a masked flow-matching action loss, co-
+sine alignment of future visual and proprioceptive latents,
+reasoning-embedding alignment, and autoregressive text re-
+construction.
+The latent alignment objectives are super-
+vised in the first pass using teacher-forced inputs, while the
+action loss in the second pass is conditioned on the latents
+predicted in the first pass, rather than on ground-truth latent
+targets.
+Demonstrations are split by episode into approximately
+90% training and 10% validation data using seed 42. Joint
+angles and the six end-effector displacement components
+are normalized to [−1, 1] using the 1st and 99th percentiles
+computed exclusively from the training episodes. We op-
+timize with AdamW on eight GPUs using bfloat16 preci-
+sion, a peak learning rate of 5 × 10−5 for both the language
+and action components, linear warmup over the first 5% of
+training steps, and cosine decay to zero. Weight decay is
+disabled, and the gradient norm is clipped to 1.0.
+Closed-loop deployment.
+At inference time, the policy
+receives the task instruction, the three current RGB views,
+and the right-arm state, using the same view ordering, units,
+and normalization statistics as during training. The flow-
+based action expert generates a 16-step chunk with 10 in-
+tegration steps. We execute the first 8 actions before ac-
+quiring fresh observations and predicting the next chunk.
+Execution uses a nominal 30 Hz control loop; this is the
+command rate rather than the rate of full policy inference.
+Before each command, the predicted action is denormalized
+and applied to the latest measured end-effector pose. Joint-
+limit-constrained numerical inverse kinematics, initialized
+from the current joint feedback, converts the target pose into
+joint commands. Per-command joint changes and cumula-
+tive displacement within a chunk are bounded. Infeasible
+inverse-kinematics solutions trigger a hold, with repeated
+failures stopping execution. The left arm is not commanded.
+The right gripper follows the predicted opening for grasping
+tasks and remains fixed for the bell task.
+Evaluation protocol.
+Each model is evaluated on the four
+real-world tasks in the training scene and under object, en-
+vironment, and language perturbations. For each model, 30
+trials are conducted for every task–condition pair, and suc-
+cess rates are computed separately for each pair.
+2
+
+
+C. Interaction-Region Annotation
+The region latent (Section 3.2) requires, for every training
+frame, the box Bj enclosing the manipulated object and its
+destination. We construct these boxes offline as follows;
+they serve only to build the training targets and are never
+used at inference.
+Object tracks. For the manipulated object, per-frame box
+tracks are obtained by prompting SAM 3 [5] with Ground-
+ing DINO [27] detections and are verified step by step.
+Destinations. Destinations remain static within an episode,
+e.g., the plate in LIBERO-Spatial and the basket in
+LIBERO-Object.
+We therefore detect each destination
+once, on the first frame of the episode, with Grounding
+DINO (Swin-T) prompted by the name of the destination,
+using box and text thresholds of 0.25 and 0.20 and non-
+maximum suppression at an IoU of 0.5, and reuse the box
+for all frames. On BridgeData V2, the destination phrase is
+parsed from the instruction; when it names a location rather
+than an object, e.g., the lower right corner, the correspond-
+ing region of the workspace serves as the destination.
+Gripper. For operations without grasping, such as turning
+on the stove or opening a drawer, the gripper takes the place
+of the object. We detect it with Grounding DINO, prompted
+by white gripper on robot arm with a box threshold of 0.12,
+and track it with SAM 3 prompted by the detected box. A
+box prompt is preferred over a point prompt, which tends to
+expand the mask to the entire arm.
+Merging and quality control. The interaction region of
+each frame is the tightest box enclosing its component
+boxes, expressed on the 224×224 input image. We visu-
+alize the boxes of every episode and correct failures manu-
+ally or by re-detection with revised prompts, e.g., missed or
+duplicated destinations and unparsable destination phrases.
+Frames without a valid box, including future frames beyond
+the end of an episode, fall back to the global target ¯gj.
+D. Additional Real-World Rollouts
+Figure 8 presents rollouts of our method on click the bell,
+pour the water, and put blocks into cup, complementing the
+comparison in Figure 6.
+3
+
+
+Figure 8. Real-world rollouts of our method in the training scene (Ori.) and under object (Obj.), environment (Env.), and language (Lang.)
+perturbations. Frames are sampled uniformly over each episode from the main camera.
+4

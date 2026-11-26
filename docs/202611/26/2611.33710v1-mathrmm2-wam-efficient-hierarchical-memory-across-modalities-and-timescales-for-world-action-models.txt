@@ -1,0 +1,2868 @@
+M2-WAM: Efficient Hierarchical Memory Across Modalities and Timescales for
+World-Action Models
+Xiaopeng Zhang1,2
+Weiqi Yuan1
+Xin Zhu2,†,‡
+Jiaxi Huang2
+Yueqi Hu2
+Yin Zhang2
+Jian Yao2
+Yanjie Li1,†
+1Harbin Institute of Technology, Shenzhen
+2Robotics Foundation Model Team, XPENG
+It
+It
+I0
+It
+Video DiT
+Action DiT
+f1
+fh
+f1
+fh
+a1
+ah
+a1
+ah
+(a) No memory
+Video DiT
+Action DiT
+f1
+fh
+f1
+fh
+a1
+ah
+a1
+ah
+(b) Full memory
+Video DiT
+Action DiT
+f1
+fh
+f1
+fh
+a1
+ah
+a1
+ah
+(c) M2-WAM (Ours)
+Historical 
+Observations
+Lack of historical context
+Growing memory footprint
+Memory
+Bank
+Associative Visual LTM
+Associative Interaction LTM
+Dense Visual STM
+Interaction STM
+a1
+ah
+Gated Delta 
+Update
+Gated Delta 
+Update
+a1
+ah
+a1
+ah
+Persistent multimodal memory
+Bounded memory and retrieval costs
+ȯɌ
+(Ɉ)
+ȯȷ
+Figure 1. Motivation and overview of M2-WAM. (a) Memoryless WAMs lack historical context. (b) Full-history memory incurs growing
+storage and retrieval costs. (c) M2-WAM organizes visual and interaction histories into short-term memory (STM) and fixed-size associative
+long-term memory (LTM), enabling persistent history conditioning with bounded online memory costs.
+Abstract
+Long-horizon robotic manipulation requires historical con-
+text, yet retaining extensive visual histories incurs grow-
+ing storage and retrieval costs, while aggressive compres-
+sion risks losing fine-grained information needed for sub-
+sequent decisions.
+Moreover, executed action histories
+capture intermediate behaviors that sparse visual obser-
+vations may miss.
+Preserving this complementary con-
+text efficiently calls for modality-specific memory mech-
+anisms that balance recent detail with long-term reten-
+tion. To this end, we introduce M2-WAM, a world-action
+model equipped with hierarchical visual and interaction
+†Corresponding authors.
+‡Project leader.
+memories. M2-WAM preserves recent visual observations
+in dense short-term memory while consolidating entries
+evicted from this window into fixed-size associative long-
+term memory through gated delta updates.
+Within the
+same short- and long-term hierarchy, interaction mem-
+ory encodes executed action prefixes into compact tem-
+poral representations, complementing visual observations
+with behavioral context. These complementary memories
+are integrated into world-action modeling through layer-
+wise retrieval, enabling memory-augmented action gener-
+ation with a bounded online memory footprint indepen-
+dent of episode length. On the memory-dependent simula-
+tion benchmarks MIKASA-Robo and RMBench, M2-WAM
+achieves +53.2% and +61.2% absolute improvements in
+1
+arXiv:2611.33710v1  [cs.RO]  25 Nov 2026
+
+
+average success rates over Fast-WAM, respectively. These
+gains extend to real-world manipulation, where M2-WAM
+achieves a +29.3% absolute improvement over LingBot-VA
+in average success across three tasks. These results sug-
+gest that M2-WAM offers a promising approach to efficient
+memory-augmented world-action modeling.
+1. Introduction
+Long-horizon robotic manipulation often requires reason-
+ing beyond the current observation [22, 38, 52]. For exam-
+ple, in a shell game task, a robot must track a target ob-
+ject as it is occluded and moved beneath visually identical
+cups, relying on historical observations to identify its loca-
+tion [10, 13]. Such tasks are inherently non-Markovian with
+respect to instantaneous observations, requiring policies to
+reason over past observations and interactions [17]. Recent
+world-action models (WAMs) have demonstrated promis-
+ing capabilities by jointly modeling visual dynamics and
+robot actions [19, 42, 44]. However, many WAMs still rely
+on current observations or limited contexts, making it diffi-
+cult to exploit information from earlier stages of execution.
+Historical context must support ongoing decisions while
+preserving information from earlier task stages. Recent ob-
+servations provide spatial detail, whereas earlier observa-
+tions may contain cues that remain relevant after they leave
+view. As shown in Figure 1(a,b), a memoryless WAM lacks
+access to earlier observations, whereas retaining full visual
+history incurs storage and retrieval costs that grow with
+episode length. A sliding window preserves recent detail
+but discards older observations [37, 39]. Alternatively, com-
+pact or recurrent memories reduce storage costs, but com-
+pression can limit access to fine-grained historical informa-
+tion [41, 49].
+We argue for allocating memory capacity
+across timescales: retaining recent observations explicitly
+and consolidating older entries into a compact, persistent
+state. This design preserves recent detail without compress-
+ing all observations and extends historical coverage beyond
+a fixed window, drawing inspiration from short- and long-
+term memory [1] and complementary learning systems [26].
+However, retaining history across timescales is only part
+of the challenge: memory must also capture complementary
+information from observations and executed actions. Visual
+observations describe scene configurations and changes,
+but may omit behavior between sampled frames. Denser
+sampling increases visual encoding and storage costs for
+the same duration. Executed action prefixes complement
+these observations by recording the intervening actions,
+providing compact, temporally denser behavioral context
+[27, 50, 53]. This motivates modality-aware memory that
+preserves both scene observations and executed actions. We
+therefore adopt visual and interaction memories that pre-
+serve spatial details and temporal action patterns, respec-
+tively, within a common short- and long-term hierarchy.
+Building on these considerations, we propose M2-
+WAM, which augments a mixture-of-transformers (MoT)
+architecture with complementary visual and interaction
+memories across timescales, as illustrated in Figure 1(c).
+The visual memory preserves an initial observation anchor
+and recent observations as dense spatial key-value (KV)
+representations, while consolidating older information into
+fixed-size, layer-wise associative states through gated delta
+updates [14, 40]. To accommodate robot image sequences,
+we apply temporal decay once per observation according
+to elapsed time, rather than repeatedly across its spatial to-
+kens. We further replace channel-wise erasure with a scalar
+erase gate per token and head to improve numerical stabil-
+ity. In parallel, the interaction memory encodes executed
+action prefixes into compact temporal representations and
+maintains a shared associative state. These memories are
+integrated into world-action modeling through layer-wise,
+query-conditioned retrieval. By combining bounded short-
+term memories with fixed-size associative states, M2-WAM
+enables persistent history conditioning with online memory
+storage and retrieval costs independent of episode length.
+Our main contributions are as follows: 1) We propose
+M2-WAM, a world-action model equipped with modality-
+specialized hierarchical memory that jointly preserves vi-
+sual observations and executed interactions across short and
+long timescales.
+2) We develop modality-specific mem-
+ory representations and associative consolidation mecha-
+nisms, together with complementary retrieval pathways that
+incorporate historical information into world-action com-
+putation with bounded online memory and retrieval costs.
+3) We conduct extensive experiments on MIKASA-Robo
+[10], RMBench [9], RoboTwin 2.0 [8], and three real-world
+tasks, complemented by ablation studies and qualitative and
+quantitative analyses. Results demonstrate improved per-
+formance on memory-dependent tasks with bounded on-
+line memory and retrieval costs, supporting the effective-
+ness and efficiency of our method.
+2. Related Work
+2.1. World-Action Models
+Recent robot policies learn compact state representations
+[24], couple visual prediction with policy learning [7, 15,
+34], or plan with predicted future states [11, 16, 46, 47].
+World-action models connect visual dynamics prediction
+with action generation through unified generative mod-
+els or coupled video–action architectures [2, 5, 18, 54].
+DreamZero and LingBot-VA demonstrate the potential of
+video-based world modeling for generalizable robot con-
+trol [19, 42]. Recent studies further investigate video-action
+coupling and its role in policy learning and task transfer
+[6, 25, 32, 35]. Inference efficiency is also a practical con-
+2
+
+
+VAE Encoder
+Current Frame Future Frames
+K
+Q
+V
+Action Encoder
+K
+Q
+V
+Action Decoder
+Cross-Attention
+FFN
+Cross-Attention
+FFN
+IM. Reader
+Action Chunk
+Future (Latent) Frames
+Video DiT
+Action DiT
+(a) Model architecture
+(b) Memory retrieval
+Interaction Memory (in IM. Reader)
+2
+Visual Memory (in MoT Attention)
+1
+(c) Associative state update
+K V
+Current obs.
+STM (FIFO)
+LTM
+K V
+K V
+New
+Old
+Executed prefix
+STM (FIFO)
+New
+Old
+LTM
+Interaction Memory
+2
+Visual Memory
+1
+x
+Action 
+feature
+x
+Action 
+feature
+(c)
+(c)
+Linear
+Linear
+ȯ֧ ɇ
+Linear
+Linear
+Output
+ɇ
+ȯ
+Output
+ȯ
+ɇ
+K V
+Gated delta update
+ƶ2
+Ɂ
+Ɍ
+ڞ
+ɍ
+ڧȻ
+ȯɌ,Ȼ−ׅ
+ȯɌ,Ȼ
+Gated delta update
+Phase
+ƶ2
+ȯȷ,Ȼ
+ȯȷ,Ȼ−ׅ
+Evicted 
+executed prefix
+Ɂ
+Ɍ
+ڞ
+ɍ
+ڧȻ
+Evicted obs.
+MoT Attention
+MoT 
+Attention
+Linear
+Cross-
+attention
+Linear
+ȯ֧ ɇ
+Encode
+Encode
+Norm
+Linear
+Linear
+Linear
+Gate
+projection
+noise
+Norm
+Linear
+Gate
+projection
+Figure 2. Overview of the M2-WAM architecture. (a) Video and action diffusion transformers form a mixture-of-transformers backbone;
+future-video prediction is training-only. (b) Action features retrieve visual memory within MoT attention and interaction memory (IM)
+through a reader. Both combine short-term memory (STM) attention with associative long-term memory (LTM) readouts. (c) Modality-
+specific writers consolidate evicted visual key-value entries and executed prefixes into fixed-size LTM states using a common gated delta
+update rule. Blue and orange indicate visual and interaction memory, respectively. Some normalization and scaling operations are omitted.
+cern for robot policies [45]. Fast-WAM retains video co-
+training but skips future prediction at test time, whereas
+Faster-WAM preserves future conditioning through selec-
+tive video-action interactions [44, 48]. Building on Fast-
+WAM, we investigate how visual and executed-action his-
+tories can support action generation under a bounded online
+memory budget.
+2.2. Memory-Augmented Robotic Policies
+Memory-augmented robotic policies address partial observ-
+ability through explicit memory banks, compressed visual
+histories, and selective retrieval [6, 12, 21, 36, 37, 43].
+MemoryVLA maintains perceptual and cognitive memory
+streams, retrieving historical context with current tokens
+and consolidating redundant entries [29]. MemoryVLA++
+combines this memory with imagined future latents to con-
+dition action generation [30].
+BridgeVLA++ pairs tem-
+poral memory of historical keyframes with spatial mem-
+ory of the initial scene geometry, supporting task-progress
+reasoning and localization under occlusion [20]. Memo-
+ryWAM combines recent observations, anchor frames, and
+historical gist tokens [41], whereas HiMem-WAM stores
+compact task states at predicted skill boundaries [33]. To
+retain history without accumulating tokens, recurrent ap-
+proaches maintain fixed-size associative states using gated
+delta updates [14, 40].
+DRAM jointly incorporates to-
+kens within each observation [49], while MemBodied com-
+bines action summaries with their observed visual con-
+sequences [27].
+The latter also highlights the relevance
+of behavioral history, explored through joint visual-action
+representations in AEM and executed-action memory in
+ActMem-VLA [50, 53].
+M2-WAM organizes visual ob-
+servations and executed action prefixes into separate path-
+ways, each combining explicit short-term storage with as-
+sociative long-term consolidation. Dense visual KV fea-
+tures and compact temporal action representations are re-
+tained and retrieved through modality-specific structures,
+while entries evicted from each short-term window update
+its corresponding fixed-size associative state.
+3. Method
+3.1. Problem Formulation and Architecture
+We consider long-horizon robotic manipulation under par-
+tial observability, where action generation may depend on
+information beyond the current observation. At each replan-
+ning step t, the robot receives an observation ot = (It, st),
+comprising multi-view images and proprioceptive state, and
+a task instruction ℓ. Given a bounded memory bank Mt
+representing past observations and executed actions, the
+policy predicts an action chunk At ∈RH×da:
+πθ(At | ot, ℓ, Mt).
+(1)
+3
+
+
+Here, H is the prediction horizon and da is the action di-
+mension.
+The online memory satisfies Size(Mt) ≤B,
+where B is a fixed budget independent of episode length.
+As illustrated in Figure 2, M2-WAM builds on Fast-
+WAM’s MoT backbone, comprising a video Diffusion
+Transformer (DiT) [28] and an action DiT. During infer-
+ence, the video DiT encodes the current observation into
+layer-wise visual KV representations that condition itera-
+tive action denoising in the action DiT, without generating
+future video.
+We augment this architecture with complementary visual
+and interaction memories, each combining bounded short-
+term memory (STM) with fixed-size associative long-term
+memory (LTM). The action DiT directly retrieves historical
+context from both memory streams during denoising.
+3.2. Short-Term Visual and Interaction Memory
+Visual and interaction STM preserve recent visual context
+and executed action prefixes in separate bounded first-in,
+first-out (FIFO) queues. Let Wt denote the ordered indices
+of retained historical entries before replanning step t, with
+|Wt| ≤N. Each entry pairs a sampled observation with the
+action prefix executed after that observation. The effect of
+FIFO length is examined in Appendix C.1.
+Visual memory. For each observation i, we cache the dense
+spatial KV tensors (K(r)
+i , V(r)
+i
+) produced at every layer r
+of the video DiT. Each observation is encoded without read-
+ing historical memory, and its cached representations re-
+tain the spatial token layout without additional pooling. Vi-
+sual STM maintains these layer-wise KV entries in chrono-
+logical order. In addition, the KV representations of the
+episode’s first observation form a permanent visual anchor,
+retained outside the FIFO without consuming its N slots.
+Interaction memory. Interaction STM stores normalized
+executed action prefixes Aexec
+i
+in a matching FIFO. For re-
+trieval, a temporal encoder applies one-dimensional convo-
+lutions and adaptive average pooling, followed by a linear
+projection and layer normalization:
+Zi = Eψ(Aexec
+i
+) ∈RP ×dm,
+(2)
+where P is the number of tokens per executed prefix and
+dm is their feature dimension. The resulting tokens sum-
+marize successive temporal regions and provide an explicit
+representation of recent robot behavior for retrieval.
+3.3. Associative Long-Term Memory
+When advancing a full FIFO, we consolidate its oldest en-
+try into a fixed-size associative state before eviction. Vi-
+sual LTM maintains an independent multi-head state at each
+layer of the video DiT, while interaction LTM maintains one
+multi-head state shared across layers of the action DiT. The
+writers are independently parameterized and follow a com-
+mon update rule. Below, we describe one head, omitting
+modality and layer indices. Its state S ∈Rdk×dv, where
+dk and dv are the per-head key and value dimensions, is
+initialized to zero at the start of each episode.
+Writing representations. For visual writes, we reuse the
+video DiT’s native keys before rotary position embeddings
+(RoPE) [31], together with its native values. The writer ap-
+plies per-head ℓ2 normalization to the keys and predicts its
+gates from normalized and projected value features. For in-
+teraction writes, the action content tokens Zi are normalized
+and projected into writer features, augmented with sinu-
+soidal within-chunk phase encodings, and mapped to mem-
+ory keys and values. The keys are also ℓ2-normalized. Gate
+projection in Figure 2(c) predicts erase and write gates and
+decay rates.
+Gated delta update. We build on Gated DeltaNet-2 [14],
+adapting its erase granularity and temporal decay to WAM
+memory, as illustrated in Figure 2(c). We predict one scalar
+erase gate per token and head, shared across key channels,
+while retaining independent channel-wise writing. Scalar
+erasure avoids the numerical instability we observe with
+channel-wise erasure during training.
+Spatial tokens from the same observation share a times-
+tamp, so we apply temporal decay once per evicted entry
+rather than once per spatial token. The same entry-level de-
+cay applies to interaction memory. For each evicted entry e,
+we first decay the memory state:
+De = diag (exp(−∆eλe)) ,
+Se,0 = DeSe−1.
+(3)
+Here, λe ∈Rdk
+>0 contains input-dependent decay rates pre-
+dicted from writer features averaged over the entry’s tokens.
+∆e is the source-frame interval since the preceding written
+entry, normalized by the memory sampling stride and set to
+one for the first write. Interaction entries use their paired ob-
+servations’ source-frame indices, so decay in both streams
+follows elapsed source time.
+We then process the Je tokens in entry e sequentially
+in flattened spatial or temporal order, indexed by j =
+1, . . . , Je. Let ke,j ∈Rdk and ve,j ∈Rdv denote the to-
+ken’s key and value, respectively, with ∥ke,j∥2 = 1. The
+update is
+Se,j =
+ I −βe,jke,jk⊤
+e,j
+
+Se,j−1
++ ke,j (we,j ⊙ve,j)⊤.
+(4)
+Here, I is the dk×dk identity matrix and ⊙denotes element-
+wise multiplication. The memory predicts the value associ-
+ated with the incoming key as S⊤
+e,j−1ke,j. The update ap-
+plies a rank-one correction along ke,j, subtracting this pre-
+diction under the scalar erase gate βe,j ∈(0, 1) and insert-
+ing the incoming value under the independent channel-wise
+write gate we,j ∈(0, 1)dv. Both gates are predicted by
+4
+
+
+separate sigmoid projections of the token’s writer feature.
+After all Je tokens, the updated state is Se = Se,Je.
+For unit-norm keys,
+scalar erasure satisfies ∥I −
+βkk⊤∥2 ≤1. Together with the contractive entry-level de-
+cay, this makes the direct propagation of the previous state
+non-expansive for fixed keys and gates. Further update de-
+tails are in Appendix A.3.
+3.4. Memory-Augmented Action Generation
+At each denoising iteration, the action DiT uses its features
+to retrieve context from short- and long-term memories, as
+shown in Figure 2(b). For visual memory, queries from
+action features perform comparably to those from current-
+observation features in our experiments. We choose the for-
+mer because it avoids recursively encoding historical obser-
+vations with memory and reduces training cost.
+Short-term memory retrieval. At layer r, action queries
+attend to the KV representations of the current observation,
+the permanent visual anchor, the visual FIFO, and the noisy
+action sequence through the backbone’s MoT attention. A
+shared cross-attention module reads the interaction content
+tokens Zi every five layers of the action DiT. Relative-age
+embeddings augment historical visual keys and interaction
+content tokens at retrieval time, allowing the readers to dis-
+tinguish entries within each FIFO.
+Long-term memory retrieval. Let S(r)
+v
+and Sa denote the
+visual and interaction LTM states in the memory bank Mt,
+with head indices omitted. For one head of either memory,
+the readout is
+q =
+Wqx
+√dk ∥Wqx∥2
+,
+u = S⊤q.
+(5)
+Here, x is the action feature supplied to the reader, Wq is
+its learned query projection, and S is the corresponding per-
+head state. Thus, q ∈Rdk and u ∈Rdv. The head outputs
+are concatenated, layer-normalized, and projected back to
+the hidden dimension of the action DiT.
+The visual LTM reader uses the attention block’s nor-
+malized, timestep-modulated input. Its projected readout
+is added to the MoT attention output before the timestep-
+conditioned residual gate.
+The interaction LTM reader
+uses normalized action features after interaction STM cross-
+attention and adds its output as a separate residual every five
+layers. Visual readers have layer-specific projections, while
+the interaction reader is shared across insertion layers.
+Training. We follow Fast-WAM’s joint flow-matching for-
+mulation [23, 44]. Let y denote either a normalized demon-
+strated action chunk or future video latents.
+For each
+branch, we independently sample a noise level τ ∈(0, 1)
+and standard Gaussian noise ϵ to construct
+yτ = (1 −τ)y + τϵ.
+(6)
+The corresponding branch predicts the velocity ϵ −y, with
+objective
+LFM(y) = E
+h
+∥fθ(yτ, τ, ot, ℓ, Mt) −(ϵ −y)∥2
+2
+i
+.
+(7)
+Here, fθ denotes the corresponding branch’s velocity pre-
+dictor. The current observation ot provides clean condition-
+ing alongside the instruction ℓ. In implementation, we apply
+noise-level weighting and average squared errors over non-
+padded elements. Applying this objective to actions and
+video latents gives Lact and Lvid, respectively. The com-
+bined objective is
+Ltrain = Lact + λvidLvid.
+(8)
+Here, λvid balances action learning and video co-training.
+During training, STM contains the preceding history
+window, while LTM is reconstructed by replaying earlier
+sampled history from the same episode under current pa-
+rameters. We detach historical visual KV while keeping
+memory writers, readers, and the executed-prefix encoder
+trainable. Backpropagating through historical visual encod-
+ing increases training time and GPU memory substantially,
+with little performance change in our experiments.
+Additionally, to discourage shortcuts from visual context
+and action continuity, we randomly mask visual STM en-
+tries at retrieval and add Gaussian noise to selected dimen-
+sions of normalized executed prefixes before encoding.
+Closed-loop inference.
+During inference, the memory
+bank Mt remains fixed throughout action denoising. Af-
+ter generation, sampled observations enter the visual FIFO,
+while action prefixes enter the interaction FIFO once exe-
+cuted, with evicted entries consolidated into LTM. Imple-
+mentation and training details are in Appendix A.
+4. Experiments
+4.1. Experimental Setup
+We evaluate M2-WAM on three simulation benchmarks and
+three real-world tasks to assess its use of historical context
+and general manipulation performance. Figure 3 shows the
+robot platform and representative tasks.
+Simulation benchmarks. MIKASA-Robo [10] tests abili-
+ties such as remembering occluded object locations, recall-
+ing previously observed colors, and inferring object motion
+from observation sequences. We select ShellGameTouch,
+InterceptMedium, and RememberColor3/5/9 to assess these
+abilities over relatively short task horizons. RMBench [9]
+comprises nine memory-dependent tasks requiring recall
+of earlier observations or accumulation of past interaction
+outcomes.
+We use it to evaluate whether memory sup-
+ports longer, multi-stage manipulation, including repeated
+attempts and tracking task progress. RoboTwin 2.0 [8] pro-
+vides diverse bimanual manipulation tasks with variations
+5
+
+
+Franka 
+Research 3
+(7 DoF)
+RealSense 
+D405
+RealSense 
+D435i
+Franka Research 3 Platform
+RoboTwin 2.0
+Lift pot
+Pick dual bottles
+Scan object
+MIKASA-Robo
+Shell game
+Intercept
+RemColor5
+Real-world Tasks
+Put back block
+Shell game
+Press button
+RMBench
+Battery try
+Cover blocks
+Swap blocks
+Figure 3. Robot platform used in real-world experiments and representative tasks from simulation benchmarks and real-world evaluation.
+Table 1. MIKASA-Robo success rates (%). RC3/5/9 denote RememberColor with three, five, or nine candidates. Bold marks column-
+wise best results in the main comparison. Parentheses show gains over Fast-WAM in percentage points.
+Method
+ShellGameTouch
+InterceptMedium
+RC3
+RC5
+RC9
+Avg. ↑
+π0 [4]
+33
+42
+35
+22
+15
+29.4
+MemoryVLA [29]
+88
+24
+44
+30
+20
+41.2
+MemoryVLA++ [30]
+97
+40
+50
+19
+16
+44.4
+GMP [12]
+98
+83
+80
+61
+17
+67.8
+SimpleMemVLA [43]
+99
+83
+71
+58
+59
+74.0
+Fast-WAM [44]
+30
+38
+28
+20
+12
+25.6
+M2-WAM (Ours)
+98
+91
+81
+63
+61
+78.8 (+53.2)
+Memory variants
+w/o-LTM
+99
+83
+47
+43
+45
+63.4
+w/o-STM
+96
+68
+64
+47
+49
+64.8
+Full-history memory
+91
+69
+49
+40
+50
+59.8
+w/o modality separation
+94
+81
+55
+61
+58
+69.8
+w/o-interaction memory
+84
+63
+68
+58
+59
+66.4
+in scene appearance and clutter. Its Clean and Randomized
+settings allow us to assess whether memory augmentation
+preserves the backbone’s performance on general manipu-
+lation tasks with less dependence on historical context.
+Real-world setup. We further evaluate on three memory-
+dependent real-world tasks: Put Back Block, Shell Game,
+and Press Button. We use a 7-DoF Franka Research 3 arm
+with a main-view RealSense D435i camera and a wrist-
+mounted RealSense D405 camera. The action space con-
+sists of end-effector pose increments and a binary gripper
+open/close command. We run inference on one NVIDIA
+RTX 3090 GPU and send control commands at 15 Hz. For
+each task, we collected 50 demonstration trajectories using
+an Omega.7 teleoperation device and trained a separate pol-
+icy for up to 20,000 optimization steps.
+Evaluation protocol.
+For our main simulation experi-
+ments, we follow the official evaluation protocols with 100
+episodes per task. We evaluate each real-world policy over
+50 consecutive trials per task. We report task success rates
+and their unweighted average across tasks, with the two
+RoboTwin 2.0 settings reported separately.
+4.2. Main Results
+We first report simulation results for memory-dependent
+and general manipulation tasks.
+We build M2-WAM on
+Fast-WAM [44] and compare the two models to evaluate
+the benefits of our memory mechanism.
+MIKASA-Robo.
+M2-WAM improves performance on
+short-horizon tasks requiring visual recall and motion in-
+ference. In Table 1, it achieves the highest average suc-
+cess among the compared methods at 78.8%, exceeding
+Fast-WAM and SimpleMemVLA by 53.2 and 4.8 percent-
+age points, respectively.
+Relative to SimpleMemVLA,
+the largest gains occur on RememberColor3 and Inter-
+ceptMedium, while improvements also extend to Remem-
+berColor5/9. This pattern suggests benefits for both recall-
+ing earlier visual attributes and using observation sequences
+to infer motion.
+RMBench. Memory augmentation also yields substantial
+gains on longer, multi-stage manipulation tasks. M2-WAM
+6
+
+
+Table 2. RMBench success rates (%). M(1) and M(n) require one and multiple task-relevant past observations, respectively [9].
+Boldface and parentheses follow Table 1.
+Method
+M(1): one past observation
+M(n): accumulated history
+Avg. ↑
+ObsPick
+Rearrange
+PutBack
+SwapBlocks
+SwapT
+BatteryTry
+BlocksRank
+CoverBlocks
+PressButton
+π0.5 [3]
+9
+13
+11
+24
+15
+16
+6
+0
+0
+10.44
+X-VLA [51]
+9
+13
+18
+16
+3
+26
+1
+2
+0
+9.78
+Mem-0 [9]
+4
+89
+90
+67
+14
+28
+18
+68
+0
+42.00
+HiMem-WAM [33]
+28
+33
+32
+38
+27
+28
+24
+19
+8
+26.33
+DRAM [49]
+15
+95
+65
+100
+45
+65
+45
+70
+20
+57.78
+Fast-WAM [44]
+1
+20
+0
+4
+11
+2
+3
+0
+0
+4.56
+M2-WAM (Ours)
+11
+97
+100
+100
+88
+28
+76
+74
+18
+65.78 (+61.22)
+Memory variants
+w/o-LTM
+8
+87
+100
+53
+63
+20
+19
+0
+0
+38.89
+w/o-STM
+3
+56
+32
+68
+19
+17
+6
+0
+0
+22.33
+Full-history memory
+10
+0
+0
+0
+20
+5
+0
+0
+0
+3.89
+w/o modality separation
+10
+10
+56
+98
+64
+16
+8
+24
+4
+32.22
+w/o-interaction memory
+8
+19
+0
+19
+38
+12
+33
+0
+0
+14.33
+achieves 65.78% average success, the highest among the
+methods compared in Table 2.
+This exceeds DRAM by
+8.00 percentage points and Fast-WAM by 61.22 percentage
+points. The largest gains over DRAM occur on SwapT, Put-
+Back and BlocksRank. The improvement thus spans both
+recall of an earlier scene and decisions requiring accumu-
+lated history. Success remains low on ObsPick and Press-
+Button. Our failure-case analysis suggests that limitations
+in the Fast-WAM backbone’s generalization and character
+recognition may contribute to these errors.
+Table 3. RoboTwin 2.0 success rates (%). Avg. is the mean of
+the two settings.
+Method
+Clean
+Randomized
+Avg. ↑
+π0 [4]
+65.92
+58.40
+62.16
+X-VLA [51]
+72.88
+72.84
+72.86
+π0.5 [3]
+82.74
+76.76
+79.75
+Motus [2]
+88.66
+87.02
+87.84
+LingBot-VA [19]
+92.90
+91.50
+92.20
+Fast-WAM [44]
+91.62
+91.24
+91.43
+M2-WAM (Ours)
+91.78
+90.70
+91.24
+RoboTwin 2.0. The results in Table 3 show that memory
+augmentation largely preserves Fast-WAM’s performance
+on general manipulation tasks. M2-WAM achieves 91.78%
+and 90.70% success in the Clean and Randomized settings,
+respectively. Together with the gains on memory-dependent
+benchmarks, these results suggest that memory augmenta-
+tion improves history-dependent decisions without substan-
+tially compromising general manipulation performance.
+Real-world experiments. Figure 4 shows that the gains on
+memory-dependent tasks extend to the physical robot. M2-
+WAM achieves 88.7% average success, exceeding LingBot-
+VA, the strongest baseline, by 29.3 percentage points. The
+improvement holds across all three tasks. Relative to Fast-
+WAM, the average gain is 84.0 percentage points, support-
+ing the benefit of augmenting the backbone with historical
+context for these tasks.
+4.3. Memory Design Ablations
+We compare five memory variants on MIKASA-Robo
+and RMBench in Table 1 and Table 2 to assess memory
+timescales, modality-specific processing, and history con-
+solidation. All variants share the full model’s training data
+and optimization budget.
+Memory hierarchy. The full hierarchy outperforms either
+memory timescale alone on average across benchmarks.
+w/o-LTM retains the STMs and visual anchor, whereas w/o-
+STM stores history only in associative states. Their RM-
+Bench averages fall from 65.78% to 38.89% and 22.33%,
+respectively, supporting the combination of explicit recent
+context and compressed longer-term history. Without LTM,
+success on the four M(n) tasks drops from 49.0% to 9.75%,
+π0.5
+Fast-WAM
+LingBot-VA
+M²-WAM (Ours)
+0
+25
+50
+75
+100
+Success rate (%)
+0
+2
+40
+90
+Put Back Block
+8
+12
+72
+84
+Shell Game
+0
+0
+66
+92
+Press Button
+Figure 4. Results on real-world tasks. M2-WAM achieves the
+highest success on all three tasks, with the largest margin over
+LingBot-VA on Put Back Block.
+7
+
+
+0
+200
+400
+Steps
+0
+1000
+2000
+3000
+Inference latency (ms)
+0
+400
+800
+Steps
+0
+4
+8
+12
+16
+20
+Peak GPU memory (GiB)
+π0.5
+Fast-WAM
+LingBot-VA
+M²-WAM (Ours)
+Figure 5. Inference efficiency as trajectories grow. Inference
+latency (left) and peak GPU memory usage (right). Both costs
+stabilize for M2-WAM as history accumulates.
+highlighting the importance of retention beyond the recent
+window. On MIKASA-Robo, removing LTM lowers the
+RememberColor3/5/9 average from 68.3% to 45.0%, al-
+though ShellGameTouch remains competitive.
+Modality-specific memory.
+Interaction history comple-
+ments visual memory, and modality separation also matters.
+Removing interaction memory reduces RMBench success
+to 14.33%. w/o modality separation retains both visual and
+interaction histories but projects executed-prefix tokens into
+visual KV space for shared storage and retrieval. Success
+recovers to 32.22%, but remains well below the full model.
+Both variants also underperform on MIKASA-Robo, with
+smaller losses. These comparisons favor retaining behav-
+ioral history through a dedicated interaction-memory path-
+way alongside visual memory.
+Uncompressed history. Retaining more history alone does
+not ensure better decisions. Full-history memory stores all
+sampled visual KV entries and executed prefixes without
+eviction or associative consolidation. It achieves 59.8% on
+MIKASA-Robo and only 3.89% on RMBench, well below
+the full model on both benchmarks. The RMBench result is
+also slightly below Fast-WAM (4.56%). Accumulated his-
+torical tokens may dilute attention to current observations
+and make task-relevant context harder to retrieve.
+4.4. In-depth Analysis
+4.4.1. Inference Efficiency and Scalability
+Figure 5 shows that M2-WAM adds bounded inference
+overhead to Fast-WAM. After an initial increase, latency
+and GPU memory usage stabilize as trajectories grow:
+bounded FIFOs and fixed-size associative states incorporate
+new history without expanding storage or retrieval context.
+For real-world inference, both models use precomputed text
+embeddings without loading the text encoder.
+For GPU
+memory measurements, we replace LingBot-VA’s default
+KV cache preallocation with on-demand allocation.
+0
+20
+40
+60
+80
+100
+Success rate (%)
+Shell
+Intercept
+RC3
+RC5
+RC9
+Full retrieval
+STM read off
+LTM read off
+Both reads off
+100.0
+96.7
+93.3
+70.0
+90.0
+83.3
+76.7
+46.7
+83.3
+80.0
+76.7
+23.3
+63.3
+56.7
+50.0
+10.0
+56.7
+46.7
+43.3
+16.7
+Figure 6. Effect of memory retrieval on task success. Full re-
+trieval performs best on all five MIKASA-Robo tasks, while dis-
+abling both memory levels causes the largest decline.
+4.4.2. Effect of Memory Retrieval on Decision-Making
+For each task, we compare full retrieval with STM retrieval,
+LTM retrieval, or both disabled, using a fixed checkpoint
+and 30 matched-seed rollouts per condition. All interven-
+tions affect visual and interaction memory while retaining
+the initial visual anchor. In Figure 6, full retrieval performs
+best on all five MIKASA-Robo tasks. Disabling both par-
+ticularly degrades RememberColor performance, while re-
+taining either level recovers much of the lost performance.
+Disabling LTM consistently causes larger drops than dis-
+abling STM, highlighting the contribution of consolidated
+history. Across the RememberColor tasks, combining both
+memory levels provides increasing gains over LTM retrieval
+alone as the number of candidate colors grows, suggesting
+complementary contributions.
+4.4.3. Qualitative Analysis
+Figure 7 compares the policies on real-world Put Back
+Block. Both grasp the block, but Fast-WAM selects an in-
+correct placement location, whereas M2-WAM reaches the
+correct target. This contrast suggests that historical context
+supports target selection after grasping. Additional qualita-
+tive examples are in Appendix D.
+(a) The baseline model lacking memory makes incorrect decisions at critical moments.
+(b) Our model successfully finishes the task by leveraging memory information.
+Figure 7. Qualitative comparison on Put Back Block. (a) Fast-
+WAM selects an incorrect placement location. (b) M2-WAM se-
+lects the correct target and succeeds.
+8
+
+
+5. Conclusion
+We present M2-WAM, a world-action model with hierarchi-
+cal visual and interaction memories. The two pathways pre-
+serve dense visual context and encode executed action pre-
+fixes into compact temporal representations, respectively.
+Recent entries are retained explicitly, while older ones
+are consolidated into fixed-size associative states through
+adapted gated delta updates.
+Layer-wise retrieval brings
+both memory levels into action generation with bounded on-
+line storage and retrieval costs. Simulation and real-world
+experiments show improved memory-dependent manipula-
+tion while largely preserving general manipulation perfor-
+mance. These findings support modality-specific memory
+organization and retrieval across timescales as a promising
+direction for memory-augmented world-action modeling.
+9
+
+
+References
+[1] R. C. Atkinson and R. M. Shiffrin. Human memory: A pro-
+posed system and its control processes.
+In Psychology of
+Learning and Motivation, pages 89–195. Elsevier, 1968. 2
+[2] Hongzhe Bi, Hengkai Tan, Shenghao Xie, Zeyuan Wang,
+Shuhe Huang, Haitian Liu, Ruowen Zhao, Yao Feng, Chen-
+dong Xiang, Yinze Rong, Hongyan Zhao, Hanyu Liu,
+Zhizhong Su, Lei Ma, Hang Su, and Jun Zhu.
+Motus:
+A unified latent action world model.
+In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 35101–35113, 2026. 2, 7
+[3] Kevin Black, Noah Brown, James Darpinian, Karan Dha-
+balia, Danny Driess, Adnan Esmail, Michael Robert Equi,
+Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya
+Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szy-
+mon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc,
+Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj
+Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura
+Smith, Jost Tobias Springenberg, Kyle Stachowicz, James
+Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan
+Wang, Lili Yu, and Ury Zhilinsky. π0.5: a vision-language-
+action model with open-world generalization. In Conference
+on Robot Learning, pages 17–40. PMLR, 2025. 7
+[4] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Robert Equi, Chelsea Finn, Niccolo Fusai, Lachy
+Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak,
+Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell,
+Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-
+aoyang Shi, Laura Smith, James Tanner, Quan Vuong, Anna
+Walling, Haohuan Wang, and Ury Zhilinsky. π0: A vision-
+language-action flow model for general robot control.
+In
+Proceedings of Robotics: Science and Systems, Los Ange-
+les, CA, USA, 2025. 6, 7
+[5] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng
+Huang, Jiayan Guo, Xin Li, Yibing Song, Hao Luo,
+Fan Wang, Deli Zhao, and Hao Chen.
+WorldVLA: To-
+wards autoregressive action world model.
+arXiv preprint
+arXiv:2506.21539, 2025. 2
+[6] Jun Cen, Yubo Guo, Hao Li, Liangkai Li, Yaoxu Lyu,
+Meng Wei, Zeqi Xiao, Sizhe Yang, Yuqiang Yang, Yifan Ye,
+Shanghang Zhang, and Duo Zheng. WorldBridge: Bridg-
+ing video and action for task generalization in world action
+models. arXiv preprint arXiv:2610.40748, 2026. 2, 3
+[7] Chi-Lam Cheang, Guangzeng Chen, Ya Jing, Tao Kong,
+Hang Li, Yifeng Li, Yuxiao Liu, Hongtao Wu, Jiafeng
+Xu, Yichu Yang, Hanbo Zhang, and Minzhao Zhu.
+GR-
+2:
+A generative video-language-action model with web-
+scale knowledge for robot manipulation.
+arXiv preprint
+arXiv:2410.06158, 2024. 2
+[8] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin
+Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge,
+Zhenyu Gu, Weiliang Deng, Yubin Guo, Tian Nian, Xuan-
+bing Xie, Qiangyu Chen, Kailun Su, Tianling Xu, Guodong
+Liu, Mengkang Hu, Huan-Ang Gao, Kaixuan Wang, Zhix-
+uan Liang, Yusen Qin, Xiaokang Yang, Ping Luo, and Yao
+Mu. RoboTwin 2.0: A scalable data generator and bench-
+mark with strong domain randomization for robust bimanual
+robotic manipulation. In International Conference on Ma-
+chine Learning, pages 13673–13699. PMLR, 2026. 2, 5
+[9] Tianxing Chen, Yuran Wang, Mingleyang Li, Yan Qin, Hao
+Shi, Zixuan Li, Yifan Hu, Yingsheng Zhang, Kaixuan Wang,
+Yue Chen, Hongcheng Wang, Junjie Wang, Tianhang Yang,
+Renjing Xu, Ruihai Wu, Yao Mu, Yaodong Yang, Hao Dong,
+and Ping Luo. RMBench: Memory-dependent robotic ma-
+nipulation benchmark with insights into policy design. arXiv
+preprint arXiv:2603.01229, 2026. 2, 5, 7, S5
+[10] Egor Cherepanov, Nikita Kachaev, Alexey Kovalev, and
+Aleksandr I. Panov. Memory, benchmark & robots: A bench-
+mark for solving complex tasks with reinforcement learning.
+In International Conference on Learning Representations,
+2026. 2, 5
+[11] Yilun Du, Sherry Yang, Bo Dai, Hanjun Dai, Ofir Nachum,
+Josh Tenenbaum, Dale Schuurmans, and Pieter Abbeel.
+Learning universal policies via text-guided video genera-
+tion. In Advances in Neural Information Processing Systems,
+pages 9156–9172. Curran Associates, Inc., 2023. 2
+[12] Yihuai Gao, Jeff Jinyun Liu, Shuang Li, and Shuran Song.
+Gated Memory Policy: In-context memorization and adapta-
+tion. arXiv preprint arXiv:2604.18933, 2026. 3, 6
+[13] Xinying Guo, Chenxi Jiang, Hyun Bin Kim, Yuhang Han,
+Ying Sun, Yang Xiao, and Jianfei Yang.
+Chameleon:
+Control-indexed prospective memory for visuomotor manip-
+ulation. In Conference on Robot Learning. PMLR, 2026. 2
+[14] Ali Hatamizadeh, Yejin Choi, and Jan Kautz.
+Gated
+DeltaNet-2: Decoupling erase and write in linear attention.
+arXiv preprint arXiv:2605.22791, 2026. 2, 3, 4, S3
+[15] Yucheng Hu, Yanjiang Guo, Pengchao Wang, Xiaoyu Chen,
+Yen-Jen Wang, Jianke Zhang, Koushil Sreenath, Chaochao
+Lu, and Jianyu Chen. Video prediction policy: A generalist
+robot policy with predictive visual representations. In In-
+ternational Conference on Machine Learning, pages 24328–
+24346. PMLR, 2025. 2
+[16] Wenlong Huang, Yu-Wei Chao, Arsalan Mousavian, Ming-
+Yu Liu, Dieter Fox, Kaichun Mo, and Li Fei-Fei.
+Point-
+World: Scaling 3D world models for in-the-wild robotic ma-
+nipulation.
+In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 20765–
+20779, 2026. 2
+[17] Leslie Pack Kaelbling, Michael L. Littman, and Anthony R.
+Cassandra.
+Planning and acting in partially observable
+stochastic domains. Artificial Intelligence, 101(1-2):99–134,
+1998. 2
+[18] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin,
+Yunhao Ge, Grace Lam, Percy Liang, Shuran Song, Ming-
+Yu Liu, Chelsea Finn, and Jinwei Gu. Cosmos Policy: Fine-
+tuning video models for visuomotor control and planning.
+In International Conference on Learning Representations,
+pages 71531–71552, 2026. 2
+[19] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin
+Wang, Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing Zhu,
+Yujun Shen, and Yinghao Xu. Causal world modeling for
+robot control. arXiv preprint arXiv:2601.21998, 2026. 2, 7
+[20] Peiyan Li, Yuze Zhu, Yixiang Chen, Qisen Ma, Yuan Xu, Ji-
+abing Yang, He Guan, Yan Huang, Hongtao Wu, Xiao Ma,
+10
+
+
+Tao Kong, Liang Wang, and Tieniu Tan.
+BridgeVLA++:
+A data-efficient, generalizable, and memory-augmented
+vision-language-action framework for 3D manipulation.
+arXiv preprint arXiv:2608.05042, 2026. 3
+[21] Xiang Li, Ya-Li Li, Yuan Wang, and Shengjin Wang.
+TRM-VLA: Temporal-aware chain-of-thought reasoning
+and memorization for vision-language-action models.
+In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, 2026. 3
+[22] Minghui Lin, Pengxiang Ding, Shu Wang, Zifeng Zhuang,
+Yang Liu, Xinyang Tong, Wenxuan Song, Shangke Lyu,
+Siteng Huang, and Donglin Wang. HiF-VLA: Hindsight, in-
+sight and foresight through motion representation for vision-
+language-action models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 20732–20742, 2026. 2
+[23] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-
+milian Nickel, and Matt Le. Flow matching for generative
+modeling. arXiv preprint arXiv:2210.02747, 2023. 5
+[24] Mingyu Liu, Jiuhe Shu, Hui Chen, Zeju Li, Canyu Zhao,
+Jiange Yang, Shenyuan Gao, Hao Chen, and Chunhua Shen.
+StaMo: Unsupervised learning of generalizable robot mo-
+tion from compact state representation. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2026. 2
+[25] Teli Ma, Jia Zheng, Zifan Wang, Chunli Jiang, Andy Cui,
+Junwei Liang, and Shuo Yang. DiT4DiT: Jointly modeling
+video dynamics and actions for generalizable robot control.
+arXiv preprint arXiv:2603.10448, 2026. 2
+[26] James L. McClelland, Bruce L. McNaughton, and Randall C.
+O’Reilly. Why there are complementary learning systems in
+the hippocampus and neocortex: Insights from the successes
+and failures of connectionist models of learning and memory.
+Psychological Review, 102(3):419–457, 1995. 2
+[27] Tej Deep Pala, Navonil Majumder, Bryce Goh, Raphael Yee,
+Jianfei Yang, Liming Chen, and Soujanya Poria.
+Mem-
+Bodied: Recurrent associative memory for vision-language-
+action models. arXiv preprint arXiv:2609.28256, 2026. 2,
+3
+[28] William Peebles and Saining Xie. Scalable diffusion models
+with transformers. In Proceedings of the IEEE/CVF Inter-
+national Conference on Computer Vision, pages 4195–4205,
+2023. 4
+[29] Hao Shi, Bin Xie, Yingfei Liu, Lin Sun, Fengrong Liu, Tian-
+cai Wang, Erjin Zhou, Haoqiang Fan, Xiangyu Zhang, and
+Gao Huang.
+MemoryVLA: Perceptual-cognitive memory
+in vision-language-action models for robotic manipulation.
+arXiv preprint arXiv:2508.19236, 2025. 3, 6
+[30] Hao Shi, Weiye Li, Bin Xie, Yulin Wang, Renping Zhou,
+Tiancai Wang, Xiangyu Zhang, Ping Luo, and Gao Huang.
+MemoryVLA++: Temporal modeling via memory and imag-
+ination in vision-language-action models.
+arXiv preprint
+arXiv:2606.09827, 2026. 3, 6
+[31] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen
+Bo, and Yunfeng Liu. RoFormer: Enhanced transformer with
+rotary position embedding. Neurocomputing, 568:127063,
+2024. 4
+[32] Yue Su, Bokai Lin, Xinkai Wang, Chubin Zhang, Xiangnan
+Wu, Kuan Zhang, Weiyang Jin, Jiwen Yu, Yiming Li, Cewu
+Lu, Lixin Yang, and Xihui Liu. Can world and action mod-
+eling benefit each other under unified causal training? arXiv
+preprint arXiv:2610.21095, 2026. 2
+[33] Xiaoquan Sun, Ruijian Zhang, Chen Cao, Yihan Sun, Jiahui
+Chen, Zetian Xu, Bo Chen, Haijier Chen, Zhen Yang, Jiarun
+Zhu, Yijun Hong, JingZhe Xu, Jingrui Pang, Mingqi Yuan,
+and Jiayu Chen. HiMem-WAM: Hierarchical memory-gated
+world action models for robotic manipulation. arXiv preprint
+arXiv:2606.10363, 2026. 3, 7
+[34] Yang Tian, Sizhe Yang, Jia Zeng, Ping Wang, Dahua Lin,
+Hao Dong, and Jiangmiao Pang. Predictive inverse dynamics
+models are scalable learners for robotic manipulation. In In-
+ternational Conference on Learning Representations, pages
+92033–92052, 2025. 2
+[35] Tianheng Wang, Zhou Xie, Heng Jia, Jianhua Xu, Tong
+Zhang, and Kaicheng Yu. An action is worth one patch: Uni-
+fied world-action modeling with PatchWAM. arXiv preprint
+arXiv:2609.25961, 2026. 2
+[36] Yang Wang, Ping Liu, Ruiyu Wang, Xuhua Chen, Lingfeng
+Zhang, and Tao Zhang.
+Dual-stream memory for vision-
+language-action policies. arXiv preprint arXiv:2610.13262,
+2026. 3
+[37] Ziye Wang, Modi Shi, Chaojun Ni, Jiazhi Yang, Mengdi Li,
+Zhizhong Su, Tianwei Lin, and Hongyang Li. NativeMEM:
+Native memory compression for long-horizon robotic ma-
+nipulation. arXiv preprint arXiv:2607.06678, 2026. 2, 3
+[38] Lei Xiao, Jifeng Li, Juntao Gao, Feiyang Ye, Yan Jin,
+Jingjing Qian, Jing Zhang, Yong Wu, and Xiaoyuan Yu.
+AVA-VLA: Improving vision-language-action models with
+active visual attention.
+In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 13453–13463, 2026. 2
+[39] Ganlin Yang, Zhangzheng Tu, Yuqiang Yang, Sitong Mao,
+Junyi Dong, Tianxing Chen, Jiaqi Peng, Jing Xiong, Ji-
+afei Cao, Jifeng Dai, Wengang Zhou, Yao Mu, and Tai
+Wang. EventVLA: Event-driven visual evidence memory for
+long-horizon vision-language-action policies. arXiv preprint
+arXiv:2606.20092, 2026. 2
+[40] Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated delta
+networks: Improving Mamba2 with delta rule. In Interna-
+tional Conference on Learning Representations, 2025. 2, 3
+[41] Sizhe Yang, Juncheng Mu, Tianming Wei, Chenhao Lu,
+Xiaofan Li, Linning Xu, Zhengrong Xue, Zhecheng Yuan,
+Dahua Lin, Jiangmiao Pang, and Huazhe Xu.
+Memory-
+WAM: Efficient world action modeling with persistent mem-
+ory. arXiv preprint arXiv:2606.20562, 2026. 2, 3
+[42] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan
+Gao,
+Sihyun
+Yu,
+George
+Kurian,
+Suneel
+Indupuru,
+You Liang Tan, Chuning Zhu, Jiannan Xiang, Ayaan Malik,
+Kyungmin Lee, William Liang, Nadun Ranawaka, Jiasheng
+Gu, Yinzhen Xu, Guanzhi Wang, Fengyuan Hu, Avnish
+Narayan, Johan Bjorck, Jing Wang, Gwanghyun Kim, Dan-
+tong Niu, Ruijie Zheng, Yuqi Xie, Jimmy Wu, Qi Wang,
+Ryan Julian, Danfei Xu, Yilun Du, Yevgen Chebotar, Scott
+Reed, Jan Kautz, Yuke Zhu, Linxi “Jim” Fan, and Joel Jang.
+11
+
+
+World action models are zero-shot policies. arXiv preprint
+arXiv:2602.15922, 2026. 2
+[43] Cheng Yin, Wang Xu, Junpeng Yang, Sikyuen Tam, Hanyu
+Liu, Yuan Yao, Xiangrui Zeng, Junbo Cui, Yequan Wang,
+Zhouping Yin, and Yankai Lin. SimpleMemVLA: A sim-
+ple but effective native-video memory for vision-language-
+action models. arXiv preprint arXiv:2609.05533, 2026. 3, 6,
+S5
+[44] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao.
+Fast-WAM: Do world action models need test-time future
+imagination? arXiv preprint arXiv:2603.16666, 2026. 2, 3,
+5, 6, 7, S1
+[45] Rongyu Zhang, Menghang Dong, Yuan Zhang, Liang Heng,
+Xiaowei Chi, Gaole Dai, Li Du, Yuan Du, and Shanghang
+Zhang.
+MoLe-VLA: Dynamic layer-skipping vision lan-
+guage action model via mixture-of-layers for efficient robot
+manipulation. arXiv preprint arXiv:2503.20384, 2025. 3
+[46] Zhuoyang Zhang, Shang Yang, Qinghao Hu, Luke J. Huang,
+James Hou, Yufei Sun, Yao Lu, and Song Han. ForeAct:
+Steering your VLA with efficient visual foresight planning.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 37195–37205, 2026.
+2
+[47] Qingqing Zhao, Yao Lu, Moo Jin Kim, Zipeng Fu, Zhuoyang
+Zhang, Yecheng Wu, Zhaoshuo Li, Qianli Ma, Song Han,
+Chelsea Finn, Ankur Handa, Tsung-Yi Lin, Gordon Wet-
+zstein, Ming-Yu Liu, and Donglai Xiang. CoT-VLA: Visual
+chain-of-thought reasoning for vision-language-action mod-
+els. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition, pages 1702–1713,
+2025. 2
+[48] Weiheng Zhao, Haoyi Jiang, Xin Shi, Liu Liu, Fan Huang,
+Zhizhong Su, Wei Sui, and Xinggang Wang. Faster-WAM:
+Efficient inference-time future conditioning for robust world
+action models. arXiv preprint arXiv:2608.04404, 2026. 3
+[49] Xinyu Zhao, Yixiang Shan, Tao Yang, Runyu Lei, Yiming
+Zhao, Jiaxin Fan, Zongbao Feng, and Peng Jia.
+DRAM:
+Delta-rule recurrent associative memory for robot manipu-
+lation policies. arXiv preprint arXiv:2609.32453, 2026. 2, 3,
+7
+[50] Yaxin Zhao, Dianye Huang, Chenwei Wang, Chenguang
+Yang, and Zhongliang Jiang. ActMem-VLA: Action-history
+memory with dual-expert denoising for long-horizon vision-
+language-action policies. arXiv preprint arXiv:2609.37307,
+2026. 2, 3
+[51] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu,
+Xirui Kang, Yuchun Feng, Yinan Zheng, Jiayin Zou, Yilun
+Chen, Jia Zeng, Ya-Qin Zhang, Jiangmiao Pang, Jingjing
+Liu, Tai Wang, and Xianyuan Zhan. X-VLA: Soft-prompted
+transformer as scalable cross-embodiment vision-language-
+action model. arXiv preprint arXiv:2510.10274, 2025. 7
+[52] Ruijie Zheng, Yongyuan Liang, Shuaiyi Huang, Jianfeng
+Gao, Hal Daum´e III, Andrey Kolobov, Furong Huang, and
+Jianwei Yang. TraceVLA: Visual trace prompting enhances
+spatial-temporal awareness for generalist robotic policies.
+In International Conference on Learning Representations,
+pages 54277–54296, 2025. 2
+[53] Yijing Zhou, Qiwei Liang, Sitong Zhuang, Jiaxi Li, Xian-
+peng Wang, Boyang Cai, Yunyang Mo, and Renjing Xu.
+Action-effect memory pretraining for robot manipulation.
+arXiv preprint arXiv:2606.12499, 2026. 2, 3
+[54] Chuning Zhu, Raymond Yu, Siyuan Feng, Benjamin Burch-
+fiel, Paarth Shah, and Abhishek Gupta. Unified world mod-
+els: Coupling video and action diffusion for pretraining on
+large robotic datasets. In Proceedings of Robotics: Science
+and Systems, 2025. 2
+12
+
+
+M2-WAM: Efficient Hierarchical Memory Across Modalities and Timescales for
+World-Action Models
+Supplementary Material
+Contents
+A. Implementation and Training Details
+S1
+A.1. Architecture and Hyperparameters . . . . . .
+S1
+A.2. Training and Online Memory Construction .
+S1
+A.3. Gated Delta Update Details
+. . . . . . . . .
+S3
+A.4. Storage and Retrieval Complexity . . . . . .
+S4
+B. Experimental Details
+S4
+B.1. Simulation Benchmarks
+. . . . . . . . . . .
+S5
+B.2. Real-World Tasks and Protocols . . . . . . .
+S6
+B.3. Memory Variant Configurations . . . . . . .
+S6
+B.4. Memory Retrieval Intervention Protocol . . .
+S7
+C. Additional Memory Design Analyses
+S8
+C.1. Sensitivity to FIFO Length . . . . . . . . . .
+S8
+C.2. Effect of the Visual Anchor
+. . . . . . . . .
+S8
+C.3. Effect of Erase Granularity . . . . . . . . . .
+S8
+C.4. Effect of Decay Granularity . . . . . . . . .
+S9
+D. Qualitative Analysis and Failure Cases
+S9
+D.1. Memory Retrieval Intervention Cases . . . .
+S9
+D.2. Real-World Trajectory Comparisons . . . . . S10
+D.3. Failure Cases . . . . . . . . . . . . . . . . . S11
+E. Limitations and Future Work
+S12
+A. Implementation and Training Details
+This section describes the architecture and hyperparameters
+of M2-WAM and explains how memory is constructed dur-
+ing training and online inference. We then detail the gated
+delta updates and analyze the storage and retrieval costs of
+the memory hierarchy.
+A.1. Architecture and Hyperparameters
+We retain the video and action DiT architectures of Fast-
+WAM [44] and add the memory modules described in Sec-
+tion 3.
+Table 4 summarizes the shared architecture, op-
+timization, and inference settings; Table 5 lists the task-
+specific settings. The permanent visual anchor is stored sep-
+arately and does not occupy any of the N FIFO slots.
+We train our policies on PPU-ZW810E accelerators,
+with training resources summarized in Table 5. Simulation
+inference uses NVIDIA RTX PRO 5000 Blackwell GPUs,
+while real-world deployment uses a single NVIDIA RTX
+3090.
+Algorithm 1 Online memory maintenance
+Require: Policy πθ, instruction ℓ, settings in Table 5
+1: Qv, Qa ←[ ], [ ]; Canchor ←∅
+2: S(r)
+v
+←0 for all r; Sa ←0
+3: for each replanning step t until episode termination do
+4:
+Observe ot and compute Ct = {(K(r)
+t , V(r)
+t
+)}r
+5:
+Mt ←(Canchor, Qv, Qa, {S(r)
+v }r, Sa)
+6:
+At ∼πθ(· | ot, ℓ, Mt)
+▷Fixed Mt
+7:
+if ot is selected by the memory sampling stride then
+8:
+if |Qv| = N then
+9:
+CONSOLIDATE(Qv. front(), Qa. front())
+10:
+end if
+11:
+Qv. push(Ct)
+12:
+Canchor ←Ct if Canchor = ∅
+13:
+end if
+14:
+Execute prefix Aexec
+t
+of At
+15:
+if ot was selected and the prefix is complete then
+16:
+Qa. push(Aexec
+t
+)
+17:
+end if
+18: end for
+A.2. Training and Online Memory Construction
+Training memory construction. For each training sam-
+ple at replanning step t, we construct memory from ear-
+lier observations and demonstrated action prefixes in the
+same episode. Each sampled observation is paired with the
+subsequent action prefix, all of whose commands precede
+the current prediction. The most recent N sampled entries
+populate the visual and interaction FIFOs, with fewer en-
+tries available near the episode start. Earlier entries are re-
+played chronologically from zero-initialized LTM states un-
+der the current model parameters. The first observation also
+provides the permanent visual anchor. Memory is recon-
+structed for each sample from its preceding history, rather
+than carried across optimization steps.
+Gradient handling. Historical observations are encoded
+independently, and their visual KV representations are de-
+tached before memory construction. Gradients propagate
+through the memory writers, readers, executed-prefix en-
+coder, and replayed LTM updates. Both DiTs are trained
+through the current sample’s objectives, while historical vi-
+sual encoding is excluded from the backward pass.
+Memory augmentation. Visual STM dropout masks com-
+plete observation entries at retrieval while retaining the per-
+manent anchor. A common mask is used across layers and
+heads. Stored entries and LTM writer inputs are unchanged.
+When executed-prefix augmentation is enabled, each train-
+S1
+
+
+Table 4. Shared architecture, training, and inference hyperparameters. Noise parameters apply only when executed-prefix augmenta-
+tion is enabled.
+Parameter
+Value
+Base architecture
+Layers (video / action)
+30 / 30
+Hidden dimension (video / action)
+3,072 / 1,024
+FFN dimension (video / action)
+14,336 / 4,096
+Attention heads / head dimension
+24 / 128 in both branches
+Proprioceptive projection
+Linear, output dimension 4,096
+Text conditioning
+Precomputed embeddings
+VAE parameters
+Frozen
+Memory modules
+LTM heads (visual / interaction)
+24 per layer / 4 in one shared state
+Per-head key/value dimensions (dk, dv)
+(128, 128)
+Writer feature dimension dw
+256
+Prefix encoder convolutions
+Three Conv1d layers, 256 channels each
+Kernel sizes / padding
+(1, 3, 3) / (0, 1, 1)
+Encoder activation
+SiLU after each convolution
+Encoder output
+Adaptive average pooling, Linear, LayerNorm
+Prefix tokens P / dimension dm
+4 / 1,024
+Interaction reader placement
+Every 5 action DiT layers; shared parameters
+Reader output projection initialization
+Zero for LTM and interaction STM readers
+Optimization
+Optimizer / moment coefficients
+AdamW / (0.9, 0.95)
+Peak learning rate / weight decay
+10−4 / 0.01
+Learning-rate schedule
+5% linear warmup, then cosine decay
+Final learning rate
+1% of peak learning rate
+Gradient clipping
+Global norm 1.0
+Video loss weight λvid
+1
+Noise-schedule shift (video / action)
+5 / 5
+Memory augmentation (training only)
+Visual STM dropout probability
+0.25, per observation entry
+Executed-prefix noise standard deviation
+0.005, in normalized action space
+Executed-prefix noise probability
+0.5 per training sample
+Inference
+Action denoising steps
+10
+ing sample is selected with the probability in Table 4, and
+zero-mean Gaussian noise is added to selected dimensions
+of its normalized executed prefixes before encoding. For
+joint-space actions in RMBench and RoboTwin 2.0, we per-
+turb arm joint dimensions while leaving gripper commands
+and padded timesteps unchanged. Both augmentations are
+disabled during evaluation.
+Online memory construction. Algorithm 1 summarizes
+online memory maintenance for the full model. The mem-
+ory bank Mt remains fixed throughout action denoising,
+and updates become available at the next replanning step.
+Sampled visual entries are committed after action gener-
+ation, and their interaction entries after the corresponding
+prefix has been executed. The two FIFOs are aligned by
+source observation before the next prediction. Only com-
+plete executed prefixes are stored; unexecuted action tails
+and incomplete terminal prefixes are omitted.
+In the algorithm, Qv and Qa denote the visual and in-
+teraction FIFOs. The operation push appends an entry and
+evicts the oldest if capacity N is exceeded; front returns
+the oldest entry without removing it. Ct denotes the cur-
+rent layer-wise visual KV, and Canchor stores the permanent
+anchor. CONSOLIDATE updates the visual and interaction
+LTM states in place from the oldest paired entries, following
+Appendix A.3. Each entry retains its source-frame meta-
+data, omitted from the pseudocode for readability. Action
+prefixes are normalized before storage.
+S2
+
+
+Table 5. Task-specific hyperparameters. The sampling stride counts source frames; prediction and execution lengths count action steps.
+FIFO capacity excludes the permanent visual anchor.
+Parameter
+MIKASA-Robo
+RMBench
+RoboTwin 2.0
+Real world
+FIFO capacity N
+4
+16
+16
+16
+Memory sampling stride (source frames)
+4
+16
+16
+16
+Prediction horizon H (action steps)
+8
+32
+32
+32
+Executed prefix length (action steps)
+4
+16
+16
+16
+Batch size per device
+4
+2
+4
+4
+Training PPUs
+32
+64
+64
+16
+Global batch size
+128
+128
+256
+64
+Approximate training cost (PPU-hours)
+1,660
+1,890
+2,760
+—
+A.3. Gated Delta Update Details
+This subsection expands the gated delta update in Sec-
+tion 3.3. As in the main text, e indexes evicted entries, each
+containing Je tokens indexed by j = 1, . . . , Je. Interac-
+tion entries contain Je = P tokens. We describe one head
+with state S ∈Rdk×dv, omitting modality, layer, and head
+indices.
+Gate parameterization. Let he,j ∈Rdw denote the writer
+feature, where dw is the writer dimension in Table 4. Visual
+writer features are obtained by normalizing and projecting
+the video DiT’s values. For an interaction entry e paired
+with observation i, the writer normalizes and projects Zi,
+then adds the sinusoidal within-chunk phase encoding be-
+fore predicting keys, values, and gates. FIFO-relative age
+embeddings are applied only at retrieval. Separate bias-free
+projections predict the erase and write gates:
+βe,j = sigmoid(p⊤
+β he,j),
+we,j = sigmoid(Wwhe,j).
+(9)
+Here, pβ ∈Rdw and Ww ∈Rdv×dw are learned param-
+eters for the selected head, producing one erase scalar and
+dv write coefficients per token. Decay rates instead use an
+entry-averaged feature:
+¯he = 1
+Je
+Je
+X
+j=1
+he,j,
+λe = exp(a) softplus
+ Fλ(¯he) + bλ
+
+.
+(10)
+The learned scalar a is shared across key channels within a
+head, and bλ ∈Rdk is a learned bias. Fλ : Rdw →Rdk
+denotes the head’s output from two consecutive bias-free
+linear layers, with no intervening activation. Gate projec-
+tion in Figure 2(c) comprises these erase, write, and decay
+branches.
+Decay for image sequences. Spatial tokens within an ob-
+servation share a source timestamp. Applying temporal de-
+cay at every spatial token would compound decay within
+one image, making the total decay depend on its token
+count. We apply De once before processing the entry’s to-
+kens. The tokenwise implementation uses log-decay vec-
+tors ge,j ∈Rdk:
+ge,j =
+(
+−∆eλe,
+j = 1,
+0,
+j > 1.
+(11)
+Thus, diag(exp(ge,1)) = De, and subsequent tokens in-
+troduce no additional temporal decay. The interval ∆e is
+the difference between source-frame indices of consecu-
+tive valid written entries, divided by the memory sampling
+stride, with ∆e = 1 at the first write. Interaction entries use
+their paired observations’ indices. Decay therefore follows
+elapsed source time, while token updates remain sequential
+and order-dependent. Applying decay before the token up-
+dates also avoids temporally decaying information written
+earlier within the same entry, as would occur if decay were
+distributed across its tokens. Appendix C.4 compares entry-
+level and per-token decay on MIKASA-Robo.
+Scalar erasure. Gated DeltaNet-2 uses channel-wise erase
+and write gates [14]. We retain channel-wise writing but use
+one erase scalar per token and head to address the numer-
+ical instability observed with channel-wise erasure in our
+training runs. After entry-level decay, each token applies
+the correction
+re,j = we,j ⊙ve,j −βe,jS⊤
+e,j−1ke,j,
+Se,j = Se,j−1 + ke,jr⊤
+e,j,
+(12)
+where re,j ∈Rdv is the correction vector and Se,0 =
+DeSe−1. For a unit-norm key k and erase gate β ∈(0, 1),
+the erase operator I −βkk⊤has eigenvalue 1 −β along
+k and eigenvalue 1 in orthogonal directions. Its spectral
+norm is therefore at most one. The channel-wise counter-
+part is generally asymmetric and does not have this spectral-
+norm guarantee. Together with ∥De∥2 ≤1, scalar era-
+sure makes direct propagation of the previous state non-
+expansive for fixed keys and gates. This property concerns
+the propagated state; additive writes can still increase its
+norm. Appendix C.3 provides numerical diagnostics com-
+paring channel-wise and scalar erasure.
+S3
+
+
+Table 6. Persistent memory storage and retrieval complexity.
+Retrieval costs are per denoising iteration; constant factors and
+fixed visual-anchor costs are omitted. Among these designs, only
+Full-history memory scales with accumulated history.
+Memory design
+Storage
+Retrieval
+Full-history memory
+Bs(T)
+Cs(T)
+w/o-LTM
+Bs(N)
+Cs(N)
+w/o-STM
+Bl
+Cl
+M2-WAM
+Bs(N) + Bl
+Cs(N) + Cl
+State handling. Padded entries leave both the state and its
+source timestamp unchanged. An empty history is repre-
+sented by a zero state. Retrieval reads the stored state with-
+out updating or decaying it.
+A.4. Storage and Retrieval Complexity
+We analyze persistent memory storage and history-
+dependent computation for a single sample.
+Model pa-
+rameters and the backbone’s processing of current obser-
+vations and actions are excluded from these complexity ex-
+pressions. Let T denote the number of accumulated histori-
+cal entries, Jv the number of spatial tokens per visual entry
+across views, and R the number of action steps per executed
+prefix. We retain N, H, and P for FIFO capacity, predic-
+tion horizon, and tokens per encoded prefix. We hold layer
+counts, head counts, and feature dimensions fixed through-
+out the analysis.
+Storage and retrieval. Let Bs(n) denote the storage for n
+paired visual and interaction entries. Visual entries retain
+layer-wise KV tensors, whereas interaction entries retain
+normalized executed prefixes, giving Bs(n) = O(n(Jv +
+R)) with fixed feature dimensions omitted.
+After prefix
+encoding, the readers attend to nJv visual tokens and nP
+interaction tokens.
+For H action queries, their history-
+dependent retrieval cost per denoising iteration is
+Cs(n) = O(Hn(Jv + P)) .
+Each LTM head instead stores dkdv scalars and reads its
+state in O(Hdkdv) operations.
+Summing over the fixed
+numbers of heads and reader layers gives LTM storage
+Bl = O(1) and retrieval cost Cl = O(H), both indepen-
+dent of T. The interaction reader’s computation is counted
+at each insertion layer, although its parameters are shared.
+Table 6 compares the four designs once the FIFO is
+full; before then, N is replaced by min(T, N). The ex-
+pressions suppress constant factors, including differences
+in the KV tensors retained by each implementation. Full-
+history memory grows linearly with T in both storage and
+retrieval. The other designs have bounded costs for fixed
+N and per-step input sizes. Compared with w/o-LTM, M2-
+WAM adds fixed-size states to consolidate history beyond
+the FIFO. Compared with w/o-STM, it retains recent detail
+at a bounded additional cost. The w/o-STM variant writes
+entries directly into LTM and retains the visual anchor with-
+out maintaining historical FIFOs.
+Preparation and updates.
+Interaction prefixes are en-
+coded once per replanning step, before denoising, with cost
+O(n(R+P)) for fixed encoder dimensions. Their attention
+KV projections are recomputed at each reader invocation.
+Retrieval costs recur at every denoising iteration. Consoli-
+dation processes the evicted entry’s Jv visual tokens and P
+encoded interaction tokens, with each per-head state update
+costing O(dkdv) per token. For M2-WAM, these prepara-
+tion and update costs are bounded with respect to T because
+the number of retained entries and the size of each evicted
+entry are bounded. The bound applies to memory opera-
+tions at each replanning step. Cumulative computation still
+grows with the number of steps, and training-time LTM re-
+construction depends on the replay length.
+Empirical scaling. We measure the four implementations
+on a PPU-ZW810E with batch size one, N = 16, H = 32,
+R = 16, and Jv = 98, using the same pretrained pa-
+rameters for corresponding modules.
+We profile system
+costs by cyclically replaying eight recorded observations
+and executed prefixes with increasing timestamps, varying
+T up to 128. Storage is the sum of unique persistent ten-
+sor allocations: shared allocations are counted once, and
+model weights and temporary tensors are excluded. Tim-
+ing covers MoT attention and memory reads across all ac-
+tion layers, including the backbone attention computation
+within MoT. Instruction cross-attention, FFNs, prefix en-
+coding, and memory updates fall outside the timed regions.
+Each condition uses five rounds of 50 measurements after
+20 warmup iterations per round; plotted values are the me-
+dian of the round medians.
+Figure 8 shows the predicted scaling trends. Full-history
+memory exhibits linear storage growth and increasing read
+latency, whereas M2-WAM reaches a storage plateau af-
+ter the first FIFO eviction and maintains roughly stable
+read latency as history grows. Removing either STM or
+LTM reduces the measured overhead while omitting FIFO-
+based recent context or associative consolidation, respec-
+tively. The full hierarchy retains both at a bounded addi-
+tional cost. These instrumented module measurements sup-
+port the scaling comparison; end-to-end policy efficiency is
+evaluated separately in Section 4.4.1.
+B. Experimental Details
+This section details the simulation benchmarks, real-world
+tasks, and evaluation protocols, followed by the memory
+variant configurations and retrieval interventions.
+S4
+
+
+0
+20
+40
+60
+80
+100
+120
+Historical entries
+0
+1000
+2000
+3000
+4000
+Memory-bank storage (MiB)
+0
+20
+40
+60
+80
+100
+120
+Historical entries
+20
+40
+60
+80
+100
+MoT + memory read latency (ms)
+M²-WAM (Ours)
+w/o-STM
+w/o-LTM
+Full-history memory
+Figure 8. Storage and retrieval scaling across memory designs. Left: persistent memory-bank tensor storage. Right: MoT and memory-
+read latency per denoising iteration. Dotted lines mark FIFO capacity N = 16; latency shading shows the range of medians across five
+measurement rounds. Full-history storage and read latency grow with history, while bounded FIFOs and fixed-size states yield storage
+plateaus and approximately stable read latency.
+Table 7. Simulation observation and action configurations. Im-
+age sizes are height × width in pixels after combining camera
+views. qpos denotes joint-position targets; action dimensions in-
+clude gripper commands.
+Setting
+MIKASA-Robo
+RMBench
+RoboTwin 2.0
+Camera views
+Top
+Wrist
+Head, front
+Left wrist
+Right wrist
+Main
+Left wrist
+Right wrist
+Image size
+224 × 448
+448 × 448
+384 × 320
+Action space
+qpos
+qpos
+qpos
+Action mode
+Absolute
+Absolute
+Absolute
+Action dim.
+8
+14
+14
+B.1. Simulation Benchmarks
+We use benchmark-specific observation and control config-
+urations, summarized in Table 7. Each policy receives RGB
+images, proprioception, and a task instruction. Shared train-
+ing settings, FIFO capacities, and action horizons are given
+in Appendix A.1.
+MIKASA-Robo. We jointly train on ShellGameTouch, In-
+terceptMedium, and RememberColor3/5/9 using the Sim-
+pleMemVLA demonstration dataset [43], which provides
+500 trajectories per task, for 2,500 in total.
+Top-view
+and wrist-view RGB images are resized to 224 × 224
+and concatenated horizontally. The policy predicts eight-
+dimensional absolute commands comprising seven arm
+joint-position targets and one gripper command, using the
+corresponding joint-position controller during evaluation.
+Actions and the eight-dimensional proprioceptive state use
+min–max normalization.
+RMBench. We use the nine-task suite in Table 2, com-
+prising five M(1) tasks and four M(n) tasks. Under RM-
+Bench’s task memory-complexity definition, M(1) requires
+retaining one task-relevant past observation to disambiguate
+the current state, whereas M(n) requires retaining multi-
+ple such observations for optimal decision-making [9]. The
+demonstration corpus contains 50 trajectories per task. We
+jointly train one policy across the nine tasks using episode-
+level instructions.
+Observations include two static cam-
+era views and two wrist-camera views, each resized to
+224 × 224. The head and front views form the upper row of
+a 2×2 image grid, with the left and right wrist views below.
+The policy predicts 14-dimensional absolute joint-position
+and gripper commands and receives a 14-dimensional pro-
+prioceptive state. Actions and proprioception use z-score
+normalization. In Table 2, ObsPick and BlocksRank ab-
+breviate Observe and Pick Up and Blocks Ranking, respec-
+tively.
+RoboTwin 2.0. We train a multi-task policy across all 50
+tasks using a mixture of 50 Clean and 500 Randomized
+demonstrations per task, totaling 2,500 and 25,000 trajecto-
+ries, respectively. The same policy is evaluated separately in
+the Clean and Randomized settings. The main camera im-
+age occupies the upper 256 × 320 region of the input, while
+two 128×160 wrist-camera images form the lower row. The
+policy predicts 14-dimensional absolute joint-position and
+gripper commands and receives a 14-dimensional proprio-
+ceptive state. Both actions and proprioception use z-score
+normalization.
+S5
+
+
+Evaluation. The main comparisons use 100 episodes per
+task, with the two RoboTwin 2.0 settings evaluated sepa-
+rately. Memory is reset at each episode boundary. Suc-
+cess is determined by the benchmark’s task-specific evalua-
+tor. For MIKASA-Robo, an episode succeeds if its success
+condition is reached at any point during the rollout. The re-
+trieval interventions use the matched-seed protocol in Ap-
+pendix B.4.
+B.2. Real-World Tasks and Protocols
+We evaluate on Put Back Block, Shell Game, and Press But-
+ton using the robot platform shown in Figure 3. Figure 9
+illustrates the task procedures with representative demon-
+stration frames.
+Platform and policy inputs. Our platform consists of a 7-
+DoF Franka Research 3 arm, a main-view RealSense D435i
+camera, and a wrist-mounted RealSense D405 camera. For
+M2-WAM, each RGB image is center-cropped to 640×640,
+resized to 224 × 224, and concatenated horizontally with
+the other view to form a 224 × 448 input.
+The eight-
+dimensional proprioceptive state contains the end-effector
+position, quaternion orientation, and gripper width. Actions
+comprise end-effector translation increments, relative rota-
+tions represented by quaternions, and a binary gripper com-
+mand. Press Button uses a fixed closed gripper, so its policy
+predicts only the seven pose-increment components. We ap-
+ply min–max normalization to actions and proprioception.
+Demonstrations and training. We collected 50 demon-
+stration trajectories per task using an Omega.7 teleopera-
+tion device, shown in Figure 10, and trained a separate M2-
+WAM policy for each task for up to 20,000 optimization
+steps. Optimization and memory hyperparameters are listed
+in Appendix A.1.
+Put Back Block. The robot moves a block to the center of
+the workspace and then returns it to its original location. It
+must remember the initial placement and track whether the
+intermediate move is complete. Success requires complet-
+ing both stages in order.
+Shell Game. Each trial begins with a five-frame observa-
+tion phase, during which the robot waits while receiving the
+initial scene observations. The program then pauses while a
+human operator covers the block with a cup. After the pro-
+gram resumes, the robot combines its memory of the initial
+scene with the current observation to identify and lift the
+cup covering the block. A trial succeeds when the robot
+lifts the correct cup.
+Press Button.
+The scene contains three buttons, with a
+number displayed in front of each of the first two. The robot
+tracks its completed presses and must match both indicated
+counts before pressing the third button to signal completion.
+A trial succeeds when both counts are correct and the com-
+pletion button is pressed last.
+Deployment and evaluation. Inference runs on a single
+NVIDIA RTX 3090 GPU, with control commands issued
+at 15 Hz. M2-WAM predicts action chunks of length H =
+32 and executes the first 16 commands before replanning
+from the latest observation. Both M2-WAM and Fast-WAM
+use precomputed text embeddings without loading the text
+encoder during inference. We reset memory at the start of
+each trial and evaluate each policy over 50 consecutive trials
+per task. Trials exceeding 1,000 control steps are counted
+as failures due to timeout.
+B.3. Memory Variant Configurations
+We train the five variants in Table 1 and Table 2 sepa-
+rately, using the same training data and optimization budget
+as the full model. All retain the permanent visual anchor,
+current-observation conditioning, and benchmark-specific
+action horizon and memory sampling stride.
+Each vari-
+ant uses its memory configuration during both training and
+evaluation.
+w/o-LTM. We remove both associative states and their writ-
+ers and readers, while retaining the visual and interaction
+FIFOs, each with capacity N. MoT attention reads visual
+history, and interaction cross-attention reads encoded exe-
+cuted prefixes. Evicted entries are discarded without con-
+solidation.
+w/o-STM. We remove both FIFOs while retaining the vi-
+sual and interaction associative states. Each sampled ob-
+servation is written directly into visual LTM before action
+denoising, while its executed prefix is encoded and writ-
+ten into interaction LTM after execution. The LTM readers
+remain, while interaction STM cross-attention is removed.
+Apart from the visual anchor, history is retained only in the
+associative states.
+Full-history memory. We retain all sampled visual KV en-
+tries and executed prefixes from the episode, without evic-
+tion or LTM consolidation. Action queries read the accu-
+mulated visual history through MoT attention and the en-
+coded prefixes through interaction cross-attention. Storage
+and retrieval costs consequently grow with episode length,
+as analyzed in Appendix A.4.
+w/o modality separation. We retain the STM–LTM hierar-
+chy but use a shared memory pathway for both modalities.
+The prefix encoder produces P interaction tokens, which re-
+ceive learned within-prefix position embeddings and layer-
+specific projections into visual KV space. The projected
+interaction keys and values are concatenated with their vi-
+sual counterparts from the paired observation to form one
+FIFO entry. Entries are committed after prefix execution
+and evicted as a unit. On eviction, visual tokens followed
+by interaction tokens update the same per-layer associative
+state. Retrieval uses the visual STM and LTM pathways,
+without separate interaction readers. The FIFO retains a ca-
+pacity of N, and relative-age embeddings are shared by the
+tokens within each entry.
+S6
+
+
+(a) Put Back Block
+Initial position
+Pick up block
+Place at center
+Pick up again
+Return to start
+(b) Shell Game
+Observe and wait
+After covering
+Approach target cup
+Grasp cup
+Reveal block
+(c) Press Button
+Observe counts
+First button: 1/1
+Second button: 1/2
+Second button: 2/2
+Completion button
+Figure 9. Real-world task sequences. Demonstration frames progress from left to right. (a) Put Back Block: move the block to the center,
+then return it to its original location. (b) Shell Game: use the initial scene to identify and lift the cup covering the block. (c) Press Button:
+press the first two buttons the indicated number of times, then press the completion button. Frames show task milestones at nonuniform
+intervals.
+Figure 10. Omega.7 teleoperation device used to collect real-world
+demonstrations.
+w/o-interaction memory. We remove the executed-prefix
+encoder, interaction FIFO and LTM, and their readers. The
+visual anchor, visual FIFO, and visual LTM remain un-
+changed.
+B.4. Memory Retrieval Intervention Protocol
+We assess the effect of memory retrieval using a fixed
+checkpoint on ShellGameTouch, InterceptMedium, and Re-
+memberColor3/5/9. For each task, all four retrieval condi-
+tions use the same 30 environment seeds, yielding 30 roll-
+outs per condition. Figure 6 reports their success rates.
+Retrieval conditions. Full retrieval enables both STM and
+LTM retrieval. STM read off disables retrieval from the vi-
+sual and interaction FIFOs while retaining both LTM read-
+ers. LTM read off disables both associative-state readouts
+while retaining retrieval from the two FIFOs. Both reads
+off combines these interventions. All four conditions retain
+current-observation conditioning and access to the perma-
+nent initial visual anchor.
+The selected retrieval condition remains active through-
+out each episode, across all denoising iterations and relevant
+layers. FIFO storage, eviction, and LTM updates proceed
+normally; only retrieval is masked.
+Paired evaluation.
+We reset memory at each episode
+boundary and use the same task success criteria as in Ap-
+pendix B.1. Matching seeds controls the initial task con-
+ditions, while closed-loop actions and subsequent observa-
+tions may diverge across retrieval conditions.
+S7
+
+
+C. Additional Memory Design Analyses
+We examine sensitivity to FIFO capacity, memory use with-
+out a permanent visual anchor, and the effects of erase and
+decay granularity.
+C.1. Sensitivity to FIFO Length
+We examine sensitivity to visual FIFO capacity at inference
+using a fixed checkpoint trained with N = 4. We evaluate
+N ∈{0, 1, 2, 8, 16} over 100 episodes per task on the five
+MIKASA-Robo tasks, retaining visual LTM and the perma-
+nent initial anchor throughout. Table 8 reports task success
+rates.
+Table 8. Success rates (%) across visual FIFO capacities. Shell
+and Intercept denote ShellGameTouch and InterceptMedium;
+RC3/5/9 follow Table 1. † denotes an earlier evaluation of the
+same checkpoint, included for reference and not rerun in this
+sweep.
+N
+Shell Intercept RC3 RC5 RC9 Avg.
+0
+97
+51
+70
+50
+35
+60.6
+1
+94
+63
+72
+51
+38
+63.6
+2
+93
+80
+74
+51
+39
+67.4
+4†
+98
+91
+81
+63
+61
+78.8
+8
+91
+73
+74
+51
+39
+65.6
+16
+91
+74
+74
+51
+39
+65.8
+Sensitivity to FIFO capacity varies across tasks. Inter-
+ceptMedium benefits substantially from recent visual con-
+text, with success increasing from 51% at N = 0 to 80%
+at N = 2. ShellGameTouch remains above 90% across
+all evaluated capacities, while RememberColor3/5/9 show
+smaller changes across the newly evaluated settings. These
+differences suggest that tasks vary in their reliance on the
+amount of recent history retained for direct retrieval. FIFO
+capacity can therefore be selected according to task require-
+ments and the available memory budget.
+Figure 11 shows that larger FIFOs increase memory-
+bank storage, while each fixed capacity reaches a plateau as
+history accumulates. Once the FIFO is full, evicted entries
+are consolidated into fixed-size associative states. Increas-
+ing capacity therefore raises the storage budget for recent
+observations while preserving bounded storage over longer
+histories.
+C.2. Effect of the Visual Anchor
+The permanent visual anchor gives the policy direct access
+to the initial observation. To examine memory use with-
+out this permanent access, we train and evaluate a variant
+without the anchor on the five MIKASA-Robo tasks, while
+retaining the STM–LTM hierarchy. Table 9 compares this
+variant with the full M2-WAM model from Table 1.
+0
+20
+40
+60
+80
+100
+120
+Historical entries
+0
+200
+400
+600
+800
+1000
+Memory-bank storage (MiB)
+FIFO 0
+FIFO 1
+FIFO 2
+FIFO 4
+FIFO 8
+FIFO 16
+Figure 11. Memory-bank storage under different FIFO capac-
+ities. Storage is measured in MiB as historical entries accumulate.
+Larger capacities yield higher storage plateaus.
+Table 9. Effect of the visual anchor on MIKASA-Robo success
+rates (%). The w/o-anchor variant omits the anchor during train-
+ing and evaluation. Task abbreviations follow Table 8.
+Method
+Shell Intercept RC3 RC5 RC9 Avg.
+M2-WAM
+98
+91
+81
+63
+61
+78.8
+w/o-anchor
+93
+77
+83
+61
+61
+75.0
+Removing the anchor reduces average success only mod-
+estly, from 78.8% to 75.0%. This 3.8-point drop is substan-
+tially smaller than the 15.4-point drop for w/o-LTM in Ta-
+ble 1, which achieves 63.4% with the anchor retained. The
+policy thus retains most of its performance without a per-
+manent visual anchor, supporting LTM’s role in preserving
+earlier information beyond the STM window.
+C.3. Effect of Erase Granularity
+During training, we observe numerical instability when us-
+ing channel-wise erasure in visual memory, motivating our
+use of one erase scalar per token and head.
+In an RM-
+Bench training run, the total, video, and action losses first
+become non-finite at logged step 2,320 and remain non-
+finite through the final record at step 7,640, as shown in
+Figure 12(a).
+To understand the failure mechanism, consider the erase
+operator for a normalized key ke,j and a channel-wise gate
+βch
+e,j ∈(0, 1)dk:
+Ech
+e,j = I −ke,j(βch
+e,j ⊙ke,j)⊤.
+(13)
+Unlike the scalar erase operator in Appendix A.3, this ma-
+trix is generally asymmetric and can amplify the state. This
+distinction matters for image sequences: temporal decay is
+applied once per observation, while successive spatial-token
+S8
+
+
+0
+2k
+4k
+6k
+8k
+Training steps
+0.01
+0.1
+1
+Training loss
+Non-finite
+losses
+2,320
+(a) RMBench training
+Total
+Video
+Action
+0
+64
+128
+192
+256
+Frames written
+100
+1020
+1040
+1060
+Maximum absolute state entry
+(b) State accumulation
+Channel-wise
+Scalar
+Figure 12. Training instability and the effect of erase granularity. (a) RMBench training losses with channel-wise erasure; shading
+marks the interval with non-finite losses. (b) Maximum absolute state entries during cyclic replay of the same input sequence under the
+two erase rules. Channel-wise erasure produces sustained state growth, whereas scalar erasure suppresses this amplification.
+Table 10. Effect of decay granularity on MIKASA-Robo suc-
+cess rates (%). Entry-level decay is used in M2-WAM. Task ab-
+breviations follow Table 8.
+Decay
+Shell Intercept RC3 RC5 RC9 Avg.
+Entry-level
+98
+91
+81
+63
+61
+78.8
+Per-token
+97
+89
+62
+60
+57
+73.0
+updates can accumulate amplification within that observa-
+tion.
+To diagnose this training instability, Figure 12(b) com-
+pares the two erase rules using a trained memory writer. The
+same input sequence is replayed cyclically without resetting
+the state. We replace each channel-wise erase gate with its
+per-token, per-head channel mean, keeping keys, values, de-
+cay, and write gates unchanged. With channel-wise erasure,
+the maximum absolute state entry grows steadily to approx-
+imately 1057 after 256 frames. Scalar erasure instead keeps
+the state magnitude at a much smaller scale, with the maxi-
+mum absolute entry remaining below 56 even when replay
+is extended to 1,024 frames. This comparison shows that
+scalar erasure suppresses state amplification in the replay,
+supporting its use to address the numerical instability ob-
+served during training while retaining channel-wise writing.
+C.4. Effect of Decay Granularity
+We compare applying temporal decay at every spatial to-
+ken with our entry-level decay, which applies it once per
+visual entry. The per-token variant is evaluated after 30,000
+training steps on the five MIKASA-Robo tasks. Table 10
+compares its success rates with the entry-level results from
+Table 1.
+Entry-level decay achieves higher success on all five
+tasks, improving average success from 73.0% to 78.8%.
+The largest gain is 19 percentage points on Remember-
+Color3, compared with one and two points on ShellGa-
+meTouch and InterceptMedium, respectively.
+Spatial to-
+kens within one observation share a timestamp, yet per-
+token decay repeatedly attenuates the state as these tokens
+are processed.
+Our entry-level rule instead applies de-
+cay once according to the elapsed source time, indepen-
+dently of the number of spatial tokens, as detailed in Ap-
+pendix A.3. These results support separating temporal de-
+cay from within-frame spatial-token updates when adapting
+gated delta updates to image sequences.
+D. Qualitative Analysis and Failure Cases
+This section examines how memory retrieval affects de-
+cisions, compares real-world trajectories with Fast-WAM,
+and analyzes simulation and real-world failures.
+D.1. Memory Retrieval Intervention Cases
+Figure 13 compares rollouts with memory retrieval enabled
+or disabled, using the same checkpoint and environment
+seed for each pair. Current observations remain available,
+and memory writes proceed normally.
+The Remember-
+Color3 case uses visual memory, while the Put Back Block
+case uses both visual and interaction memories. In both
+cases, memory is queried by action features.
+In RememberColor3, retrieval enables the policy to
+reach the initially indicated red target at step 19. Without re-
+trieval, it approaches the green distractor and does not com-
+plete the task within 25 steps. In Put Back Block, the pol-
+icy succeeds at step 341 with retrieval; without it, the robot
+S9
+
+
+(a) RememberColor3: target selection
+(b) Put Back Block: task completion
+Full retrieval
+Success at step 19
+Step 0
+Step 7
+Step 16
+Step 19
+Step 25
+Reads disabled
+Wrong target; no success by step 25
+Step 0
+Step 7
+Step 16
+Step 19
+Step 25
+Full retrieval
+Success at step 341
+Step 0
+Step 97
+Step 244
+Step 300
+Step 341
+Reads disabled
+Task incomplete at step 500
+Step 0
+Step 97
+Step 244
+Step 300
+Step 500
+Figure 13. Qualitative effects of disabling memory retrieval. Each pair uses the same checkpoint and environment seed. (a) In
+RememberColor3, the robot reaches the red target with full retrieval, whereas disabling visual memory and anchor reads leads the robot
+toward a green distractor. (b) In Put Back Block, disabling visual and interaction memory reads, including the anchor, leaves the robot
+holding the block without completing the task.
+grasps the block but holds it above the workspace until the
+500-step limit. These behaviors illustrate how retrieved his-
+tory supports target selection and task progression.
+Changing history with the current input fixed. In Fig-
+ure 14, we replace the Put Back Block memory bank at
+step 304 with a snapshot from before step 272 of the
+same episode. Current images, proprioception, instruction,
+warm-start actions, and sampling seed remain fixed, with
+all readers enabled. Executing both predicted prefixes from
+the same reconstructed simulation state yields right end-
+effector trajectories that differ by up to 8.10 cm over 16
+actions. Thus, stored history changes decisions even with
+identical current inputs.
+D.2. Real-World Trajectory Comparisons
+Figure 19 complements the aggregate results in Section 4.2
+with representative trials. In Put Back Block, both policies
+grasp the block and move it to the center. Fast-WAM then
+carries it toward the opposite side, whereas M2-WAM re-
+turns it to its initial position. In Shell Game, M2-WAM lifts
+S10
+
+
+Put Back Block: fixed current input, different stored history
+Current memory (before step 304)
+History example: step 288
+Same current state: step 304
+After 8 executed actions
+After 16 executed actions
+Earlier memory (before step 272)
+History example: step 256
+Same current state: step 304
+After 8 executed actions
+After 16 executed actions
+Figure 14. Effect of stored history with current inputs fixed. In Put Back Block, the two rows use memory snapshots from before
+steps 304 and 272, respectively, while sharing the current inputs and simulation state at step 304. The first column shows the most recent
+observation stored in each snapshot. The remaining columns show the shared starting state and the states after 8 and 16 executed actions.
+With all readers enabled, changing the stored history produces different subsequent movements.
+the cup covering the block, while Fast-WAM approaches an
+incorrect cup. These cases illustrate how historical context
+supports destination and target selection when current ob-
+servations alone are insufficient.
+Press Button also requires progression through repeated
+actions. M2-WAM presses the first task button, repeats the
+motion at the second, and proceeds to the completion but-
+ton. Fast-WAM instead remains near the first button with-
+out completing the sequence, illustrating a failure in task
+progression.
+D.3. Failure Cases
+PressButton. With both memories enabled in Figure 16,
+the robot reaches the required counts [1, 9] at step 502 but
+presses the second task button again, reaching [1, 10] at
+step 550. It then presses the confirmation button 11 times
+without success by the 1,500-step limit. This failure to tran-
+sition at the required count may reflect limitations in the
+Fast-WAM backbone’s generalization and character recog-
+nition, as discussed in Section 4.2.
+ObserveAndPickup. In Figure 17, both memories are en-
+abled, but the robot fails to pick up the blue bell matching
+the initial reference. After the reference is occluded, the
+left arm repeatedly operates near non-target objects, while
+the right arm remains nearly stationary. The target remains
+unmoved at the 250-step limit.
+Across our experiments, the policy performs well on lay-
+outs resembling the training data but fails more often on un-
+familiar arrangements, even for the same target. This sensi-
+tivity highlights limited generalization, consistent with Sec-
+tion 4.2. We hypothesize that the policy relies too heavily
+on the current scene, associating familiar layouts with tra-
+jectories rather than consistently using the initial reference
+to select the target.
+BatteryTry. The task requires placing two batteries in their
+slots with the correct orientations.
+With both memories
+enabled in Figure 18, one battery remains beside its slot,
+while the other is initially aligned but subsequently knocked
+off the tabletop. Neither placement is recovered before the
+1,000-step limit. This case highlights difficulties in preserv-
+ing intermediate progress and recovering from placement
+errors.
+Real-world decision errors. Figure 15(a,b) shows target-
+selection and action-sequencing errors with M2-WAM. In
+Shell Game, the robot approaches the middle cup despite
+the initial cue identifying the right cup. In Press Button,
+it makes one downward pressing motion at the first button
+and two at the second, reversing the displayed requirements.
+These errors reflect incorrect use of initial target cues or
+numerical instructions.
+S11
+
+
+(a) Decision error: Shell Game
+M²-WAM (Ours)
+Approaches the middle cup instead of the right cup
+Initial observation
+Step 5
+Step 62
+Step 107
+End of trial
+(b) Decision error: Press Button
+M²-WAM (Ours)
+Pressing motions follow 1 / 2 instead of the required 2 / 1
+Step 0
+Step 115
+Step 240
+Step 319
+End of trial
+(c) Manipulation precision: Put Back Block
+M²-WAM (Ours)
+Misaligned gripper fails to grasp the block
+Step 48
+Step 57
+Step 61
+Step 70
+End of trial
+Figure 15. Decision and manipulation-precision failures of M2-WAM. (a) Shell Game: the robot approaches the middle cup although
+the initial cue identifies the right cup. (b) Press Button: the robot makes one downward pressing motion at the first button and two at the
+second, reversing the required counts. (c) Put Back Block: gripper misalignment prevents a stable grasp. Panels (a,b) use the main view;
+panel (c) uses the wrist view to show the contact geometry. Labels identify recorded steps, initial observations, or trial endpoints.
+PressButton: extra press despite full memory retrieval
+Required task-button counts: [1, 9]
+Outcome: failure at step 1500
+Step 0
+Counts [0, 0]
+Confirmations: 0
+Step 502
+Counts [1, 9]
+Confirmations: 0
+Step 550
+Counts [1, 10]
+Confirmations: 0
+Step 675
+Counts [1, 10]
+Confirmations: 1
+Step 1500
+Counts [1, 10]
+Confirmations: 11
+Figure 16. PressButton failure with memory retrieval enabled. The policy reaches the required task-button counts [1, 9] but continues to
+[1, 10] before repeatedly pressing the confirmation button. The task remains unsuccessful. Labels report control steps, task-button counts,
+and confirmation counts from the environment’s event log.
+Real-world manipulation precision. In Figure 15(c), the
+wrist view reveals gripper misalignment in Put Back Block.
+The robot fails to grasp the block, which remains on its orig-
+inal pad. Such errors may also reflect limitations in low-
+level tracking accuracy, highlighting the need to coordinate
+high-level action predictions with low-level control.
+E. Limitations and Future Work
+Selective memory writing and retention.
+Apart from
+the initial anchor, dense visual KV storage is allocated
+by recency, although older observations may contain fine-
+grained details needed later. The FIFO sensitivity in Ap-
+pendix C.1 also motivates selectively retaining older obser-
+S12
+
+
+ObserveAndPickup: actions near non-target objects
+Correct target: blue bell (circled)
+Outcome: failure at step 250
+Step 0
+Reference visible
+Step 32
+Reference occluded
+Step 80
+Non-target region
+Step 128
+Continued attempts
+Step 250
+Target not lifted
+Figure 17. ObserveAndPickup failure with memory retrieval enabled. The initial reference specifies the matching blue bell on the
+tabletop, marked by a dashed blue circle in each frame. After the reference is occluded, the robot operates near non-target objects and fails
+to lift the target within 250 steps. Frames are captured from a front-right display camera, with control steps labeled.
+BatteryTry: inaccurate placement and failed recovery
+Memory retrieval enabled
+Outcome: failure at step 1000
+Step 0
+Initial configuration
+Step 193
+One battery misplaced
+Step 620
+Continued manipulation
+Step 635
+Other battery displaced
+Step 1000
+No recovery
+Figure 18. BatteryTry failure with memory retrieval enabled. One battery remains beside its slot, while subsequent manipulation
+dislodges the other from an initially aligned position. The robot fails to recover before the 1,000-step limit. Frames show a close-up
+display view at the labeled control steps.
+vations or spatial regions within a fixed budget. Replac-
+ing the fixed sampling stride with writes guided by scene
+changes, task progress, or anticipated decision relevance
+could further reduce redundant updates.
+Adaptive memory retrieval. Retrieval follows a prede-
+fined schedule across layers and denoising iterations, al-
+though the need for history varies with task stage and cur-
+rent observations. Adaptive readers could choose when to
+retrieve and which modalities or memory levels to consult.
+Skipping unnecessary reads or reusing context across de-
+noising iterations could further reduce computation.
+Memory use and generalization.
+The failures in Ap-
+pendix D.3 suggest that memory use does not generalize
+consistently to unfamiliar layouts. Broader layout variation
+and examples with similar current observations but different
+historical cues and required actions could encourage more
+reliable use of history.
+Finer visual or contact feedback
+could complement memory conditioning to improve grasp
+alignment and manipulation precision.
+S13
+
+
+(a) Put Back Block
+Fast-WAM
+Incorrect return direction
+Step 0
+Step 105
+Step 253
+Step 400
+End of trial
+M²-WAM (Ours)
+Returns to the initial position
+Step 0
+Step 88
+Step 211
+Step 316
+End of trial
+(b) Shell Game
+Fast-WAM
+Approaches an incorrect cup
+Initial observation
+Step 3
+Step 40
+Step 65
+End of trial
+M²-WAM (Ours)
+Lifts the cup covering the block
+Initial observation
+Step 12
+Step 112
+Step 174
+End of trial
+(c) Press Button
+Fast-WAM
+Stalls near the first button
+Step 0
+Step 83
+Step 104
+Step 125
+End of trial
+M²-WAM (Ours)
+Completes the button sequence
+Step 0
+Step 123
+Step 247
+Step 329
+Step 453
+Figure 19. Representative real-world trajectories of Fast-WAM and M2-WAM. (a) Put Back Block: M2-WAM returns the block to its
+initial position, while Fast-WAM moves toward a different location. (b) Shell Game: M2-WAM reveals the hidden block, while Fast-WAM
+approaches an incorrect cup. (c) Press Button: M2-WAM completes the button sequence, while Fast-WAM stalls near the first button.
+Rows show separate trials. Labels indicate recorded steps, initial observations, or trial endpoints.
+S14
