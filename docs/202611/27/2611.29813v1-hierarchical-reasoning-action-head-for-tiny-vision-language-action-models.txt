@@ -1,0 +1,359 @@
+Title: Hierarchical Reasoning Action Head for Tiny Vision-Language-Action Models
+
+URL Source: https://arxiv.org/pdf/2611.29813v1
+
+Published Time: Tue, 24 Nov 2026 04:03:27 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+# Hierarchical Reasoning Action Head for Tiny Vision-Language-Action Models 
+
+# Aditya Makineni Amitesh Sahoo Qing Tian *
+
+# Department of Computer Science, University of Alabama at Birmingham   
+
+> {amakinen, sahooa, qtian }@uab.edu
+
+# Abstract 
+
+Real-time onboard robot control calls for a lightweight vision-language-action (VLA) model, yet shrinking the backbone leaves less capacity for deliberation at inference time. Chain-of-thought decoding, dual-system architec-tures, and larger backbones can restore deliberation but reintroduce the latency and memory costs that motivated going small. Recurrent action heads offer a lighter alter-native by iterating in latent space before committing to an action, but existing designs refine a single undifferentiated state that must simultaneously encode slowly evolving task context and rapidly changing motor commands. We pro-pose the Hierarchical Reasoning Action Head (HR-AH), which maintains two latent states updated at different fre-quencies: a low-level state that updates fast, grounded in action tokens and proprioception, and a high-level state that updates slowly, grounded in visual understanding and the instruction-informed low-level state. The two states ex-change information through nested reasoning cycles. Be-cause all iteration occurs in the compact head after a single backbone pass, HR-AH adds hierarchical reasoning with-out increasing the backbone size. With a 22.5M-parameter head, 3–4.3 × smaller than those of RD-VLA and VLA-Adapter on the same backbone, HR-AH reaches 97.0% suc-cess rate on LIBERO and a 4.40 average chain length on CALVIN ABC →D, at the lowest latency among compared methods. We show that this hierarchy improves perfor-mance over a parameter-matched single-state head, and that routing distinct modalities to each level yields further gains in both accuracy and inference cost. 
+
+# 1. Introduction 
+
+Vision-language-action (VLA) models attach an action de-coder to a pretrained vision-language backbone, bringing general-purpose robotic manipulation directly from raw im-ages and natural-language commands within reach [4, 19, 20]. However, deploying these models onboard at control 
+
+> *Corresponding author.
+
+frequency demands a compact backbone. A growing line of tiny VLAs delivers this by shrinking the backbone to a fraction of the original scale [2, 36, 42, 43], but a smaller backbone has less capacity available for deliberation at in-ference time. Chain-of-Thought decoding at 3–8.5B param-eters [16, 17, 51, 54] and dual-system designs that distribute modalities across large VLM subsystems [10, 49] can re-store deliberation, but they reintroduce the very costs that a tiny backbone was chosen to avoid. Recurrent action heads offer a lighter path by iterating in latent space before com-mitting to an action [33, 40]. Latent iteration suits chun-ked continuous control well, since the objective is to refine a motor plan rather than to generate tokens sequentially. However, latent recurrence alone does not determine how computation should be organized. Within an action chunk, task-level context remains relatively steady while concrete motor commands must be jointly refined across timesteps. Refining them in a single recurrent state forces it to repre-sent quantities that evolve at different rates, analogous to running a task planner at servo rate [33, 40]. This raises a central question: can explicitly separating the two improve the effectiveness and efficiency of recurrent computation without increasing the backbone’s computational burden? We introduce the Hierarchical Reasoning Action Head (HR-AH) , which decouples the two processes into levels that correspond to naturally distinct inputs. The motor command draws on instruction-conditioned action queries and proprioception, while the task context draws on vision and the evolving instruction-informed motor plan. This ar-rangement, fast proprioception-driven feedback operating beneath slower vision-driven deliberation, reflects a well-established principle in sensorimotor control [25, 39] and in layered robot control architectures [6]. Unlike dual-system designs that distribute this hierarchy across two large VLM subsystems [10, 49], HR-AH routes modalities to two states inside a single lightweight action head, keeping the entire model compact. To our knowledge, HR-AH is the first hierarchical recur-rent action head for a tiny VLA. The two levels exchange information through nested reasoning cycles with top-down refinement. Because vision tokens are the larger input, con-1arXiv:2611.29813v1 [cs.CV] 22 Nov 2026 Step 1 Step 4 Step 8 (halted)    
+
+> Step 1 Step 2 Step 3 (halted)
+> Single state reasoning (RD-VLA) Our hierarchical reasoning (HR-AH)
+> Input observation Task: pick up the black bowl on the cookie box and place it on the plate
+> reasoning steps
+> Figure 1. Attention maps over reasoning steps for RD-VLA (top row) and our HR-AH (bottom row). The dashed ellipse highlights the task-relevant region. HR-AH halts after only 3 steps with attention sharply focused on the target bowl and destination plate, whereas the single-state baseline requires 8 steps and attends more diffusely. Both rows visualize attention from the vision-grounded latent state. Only the third-person view is shown.
+
+fining them to the slower path amortizes their cost over mul-tiple fast executor steps. The backbone is evaluated once per observation, and all iterative reasoning takes place in the lightweight head. Fig. 1 visualizes how the resulting at-tention sharpens over reasoning steps compared to a single-state baseline. The contributions of this paper are as fol-lows: • Hierarchical recurrent computation for tiny VLAs. 
+
+HR-AH separates visual-context update from motor-command refinement through high- and low-level latent states, providing an explicit hierarchical structure for iter-ative action refinement entirely within the action head. • Modality-specific routing for efficient reasoning. We route vision tokens to the high-level planner and action tokens with proprioception to the low-level executor, con-centrating expensive visual attention in the slower rea-soning pathway. Combined with adaptive halting, this routing allows inference depth to vary with task difficulty while keeping per-step cost low. • Strong results with a compact head. With a 22.5M-parameter head, 3–4.3 × smaller than the heads of RD-VLA and VLA-Adapter on the same backbone, HR-AH reaches 97.0% on LIBERO, a 4.40 average chain length on CALVIN ABC →D, and 78.8% on a real Ki-nova Gen3 Lite robot, at the lowest latency among com-pared methods. Ablations show that hierarchical state separation accounts for most of the gain over a parameter-matched single-state baseline, while modality-specific routing contributes a further 3.4 points and reduces the number of reasoning steps required. 
+
+# 2. Related Work 
+
+Vision-language-action models. VLAs adapt pretrained vision-language models to robot control. They differ chiefly in how actions are decoded, e.g., whether by autoregressive discretization [19], compressed action tokens [27], diffu-sion [11], flow matching [4], or parallel decoding with ℓ1
+
+regression [20]. A complementary line shrinks the back-bone for practical deployment [2, 36, 43]. Most relevant is VLA-Adapter [42], which trains a feed-forward policy over a tiny backbone by injecting per-layer VLM features through Bridge Attention. Its 97M-parameter head is purely feed-forward, with no provision for iterative refinement. We operate in the same tiny-VLA setting but show that a com-pact hierarchical recurrent head can surpass feed-forward decoding in both accuracy and efficiency. 
+
+Iterative computation for action prediction. A grow-ing body of work allocates variable computation per action. Early-exit methods adapt how much of the backbone runs at each step [47], and dual-system designs split slow reasoning and fast control into distinct models or modules [7, 26, 35, 49], with Fast-in-Slow [10] distributing modalities across two subsystems that share a 7B VLM at a 1:4 update ratio. UniFS [38] schedules backbone layer groups at decreas-ing update frequencies, LoopVLA [33] repeatedly applies a shared transformer block to the multimodal tokens, and PredVLA [31] is a sub-million-parameter multi-timescale recurrent policy with no VLM backbone. These approaches organize computation at different frequencies across back-bone components or outside the action head. Recurrence 2Inputs VLM backbone (one pass) Hierarchical Reasoning Action Head Output                     
+
+> o: 3rd-person
+> o: wrist
+> ℓ:“put the tape mea-sure in the basket”
+> action queries
+> 01L−1
+> · · · · · ·
+> segment ×S
+> reasoning cycle ×KH
+> Executor fL
+> Planner fH
+> Refinement fRz(0)
+> L
+> z(0)
+> H
+> learned init ×KL
+> zL
+> zH
+> σ(g)⊙hemb viz
+> hviz
+> proprioception pLinear
+> hahigh-level (slow) path low-level (fast) path RMSNorm + Linear
+> ˆA∈RNact ×7
+> ˆAsafter every segment halt once δs< τ
+> execute
+
+Figure 2. Overview of the Hierarchical Reasoning Action Head (HR-AH). The VLM backbone extracts multimodal features from a deep layer ( hviz , ha) and the embedding layer ( hemb viz ). Inside the HR-AH, iterative latent reasoning is performed over S segments, each comprising KH hierarchical reasoning cycles. Within each cycle, the executor ( fL) attends to concise action and proprioceptive context for frequent updates of the detailed motor commands, while the planner ( fH ) processes the larger vision context and the instruction-informed compact zL at a slower rate to maintain an abstract task representation. The refinement module ( fR) feeds the updated plan back into the action state, closing the bidirectional loop. All three modules share the same UBAttn block architecture (Sec. 3.3) with different context inputs. After each segment s, the action state is projected to a candidate action chunk ˆAs, and the reasoning halts once the relative change 
+
+δs between consecutive predictions falls below a threshold τ (Sec. 3.5). The final prediction is executed as ˆA ∈ RNact ×7.
+
+inside the action head has been explored, but only with a single state. For example, RD-VLA [40] places a single weight-tied recurrent core and shows that success scales with test-time iterations. Such a head uses the same recur-rent representation to integrate visual context and refine mo-tor commands at every iteration, rather than assigning these operations distinct update frequencies. No existing design combines multi-level hierarchy with iterative recurrence in-side the action head. We close this gap with two latent states, updated at different frequencies after a single back-bone pass, whose modality-routed inputs let scene context and motor commands be updated in separate but interact-ing streams. We show this design outperforms a parameter-matched single-state recurrent head with access to the same visual context, and competes with much larger architectures on standard benchmarks. 
+
+Recursive reasoning models. Adaptive and weight-tied recurrent computation was explored early by adaptive com-putation time [15] and Universal Transformers [12], and has resurfaced as recurrent-depth language models [14] and looped transformers for 3D vision [8]. HRM [41] cou-ples a slow high-level and a fast low-level recurrent module on symbolic puzzles. Its high-level module observes only the low-level module’s output, so both levels are ultimately grounded in the same representation despite differing in up-date frequency. Subsequent analyses find that this hierarchy adds little on these tasks [1, 13, 30], and TRM [18] outper-forms it with a single tiny network trained by backprop-agating through the recursion. Embodied control hints at a different outcome, as PredVLA reports that removing the temporal hierarchy from its predictive recurrent architecture lowers success substantially [31]. Our hierarchy routes dis-tinct modalities to each level, so the timescale separation arises naturally from the distinct input modalities. We ab-late against a parameter-matched single-state head that sees the full context from the backbone and a variant that pre-serves both states and their update rates but feeds them iden-tical inputs. Hierarchy accounts for the larger gain, while modality-specific routing contributes a further improvement in both accuracy and inference cost. 
+
+Multi-layer VLM features for control. Which backbone depth best conditions an action head remains unsettled. GR00T N1 conditions on a middle layer [26], SmolVLA discards the upper half of the backbone [36], and FLOWER prunes layers and fuses intermediate tokens [29]. VLA-Adapter matches each policy block to one VLM layer [42] and LIRA widens this to a local window of layers [50], while ABot-M0 reports that, after large-scale robot pretrain-3ing, final-layer features alone suffice [46]. Our head reads both token groups from a deep backbone layer and addi-tionally supplies the planner with gated vision features from the embedding layer. This retains both high-level semantic features and fine-grained spatial detail while extracting all representations once per observation. 
+
+# 3. Methodology 
+
+3.1. Overview 
+
+We consider a manipulation policy πθ that maps visual ob-servation o (third-person and wrist camera views), language instruction ℓ, and proprioceptive states p to an action chunk 
+
+ˆA ∈ RNact ×da , where Nact is the chunk length and da is the action dimension. Unlike standard VLAs that map the fi-nal hidden state directly to actions, or recurrent heads that refine a single undifferentiated latent [40], we propose the 
+
+Hierarchical Reasoning Action Head (HR-AH) as illus-trated in Fig. 2, which decouples the latent state into two interacting components updated at different frequencies: • A low-level action state zL ∈ RNact ×D , where D is the hidden dimension, grounded in action tokens and propri-oception, representing the evolving motor command. • A high-level planning state zH ∈ RNplan ×D , where Nplan 
+
+is the number of planning tokens, grounded in vision to-kens and the instruction-conditioned zL, encoding task-relevant visual context to guide motor-command refine-ment. This routing is deliberate. The action tokens provide a com-pact, instruction-conditioned input that, together with pro-prioception, directly grounds the motor command and feeds the low-level state at every step. Vision tokens are the larger input and change slowly, so routing them (together with zL)to the high-level planner amortizes their cost over multi-ple low-level updates. The refinement step then lets vision guide the executor without requiring it to attend to vision tokens at every step. Both states ( zH and zL) are initialized from learnable pa-rameters ZH and ZL (truncated normal initialization), with sequence order maintained by Rotary Positional Embed-dings (RoPE) [37] within the attention layers. States are reinitialized at every chunk boundary. The overall pipeline extracts features from the backbone VLM once per obser-vation (Sec. 3.2), then iteratively refines (zH , z L) through S
+
+segments of KH hierarchical reasoning cycles each before projecting the refined zL to actions (Eq. (9)): 
+
+F = VLM( o, ℓ ), ˆA = HR-AH (F, p ), (1) where F denotes the backbone features. 
+
+3.2. Feature Extraction 
+
+We extract features from the VLM backbone to serve as in-put to the HR-AH. Given features F from a chosen back-bone stage (e.g., penultimate layer), we extract vision to-kens hviz and action-query tokens ha:
+
+hviz = F [: Nviz , :] , ha = F [−Nq :, :] , (2) where Nviz is the number of vision tokens and Nq is the number of action-query tokens (typically Nviz ≫ Nq ). Language-token positions lie between the two groups and are not extracted directly, as is standard in causal VLAs where action queries already attend to the preceding lan-guage tokens [20, 40, 42]. Proprioceptive input p is pro-jected into dimension D via a linear layer. The planner re-ceives hviz as visual context. To supplement it with fine-grained spatial features that contextual layers may discard, we additionally extract vision tokens from the backbone embedding layer and apply a learned sigmoid gate: 
+
+hemb viz = σ(g) ⊙ F (0) [: Nviz , :] , (3) where F (0) denotes the features at the embedding layer (be-fore any transformer block). g ∈ RD is initialized so that 
+
+σ(g) is near zero, allowing the model to start from the deep features hviz alone and gradually learn how much embed-ding information to incorporate. All features are computed once per observation and reused across segments as context inputs to the reasoning modules (Sec. 3.3). 
+
+3.3. Hierarchical Reasoning Modules 
+
+Unified Bridge Attention Block. The Unified Bridge At-tention ( UBAttn ) block adapts the Bridge Attention mech-anism [42] to operate over arbitrary context sets. Given a query source X ∈ Rn×D and a context set C =
+
+{C1, . . . , C m}, UBAttn concatenates X and all Ci into one sequence and computes a single softmax so that X at-tends jointly to itself and every context. Unlike Bridge At-tention, UBAttn applies RoPE [37] to queries and keys to encode token order within the concatenated sequence. 
+
+UBAttn also removes the learnable gate on vision atten-tion scores, making it source-agnostic, so C may be any set of sources and each source’s contribution arises from query-key similarity alone. This source-agnostic design is what enables the hierarchical head: a single block defini-tion can serve as the executor, planner, and refinement mod-ule, each receiving different contexts. Concretely, letting 
+
+¯C = [ X; C1; . . . ; Cm] denote the concatenated sequence, 
+
+UBAttn( X, C) = Attn  XW Q, ¯CW K , ¯CW V
+
+, (4) where Attn is multi-head attention with projection ma-trices WQ, W K , W V . Each block pairs UBAttn with a SwiGLU [32] FFN under RMSNorm [48] ( NRMS ) pre-normalization: 
+
+X′ = X + UBAttn  NRMS (X), {NRMS (Ci)},
+
+Block( X, C) = X′ + SwiGLU( NRMS (X′)) . (5) 4Module routing. The HR-AH contains three modules, each implemented as a UBAttn block with different con-text inputs: fL (low-level executor), fH (high-level plan-ner), and fR (top-down refinement). Concretely, the execu-tor fL attends to the compact ha and p, enabling frequent updates ( KL iterations per cycle) at low cost. The planner 
+
+fH attends to the large hviz , hemb viz , and the current z′
+
+> L
+
+, con-centrating the costly vision attention at the slow rate while staying informed of the evolving motor command. The re-finement module fR then injects the updated zH back into 
+
+zL, closing the bidirectional loop so that vision understand-ing reaches the motor command. 
+
+3.3.1. Low-Level Executor 
+
+The low-level executor refines zL by attending to action to-kens ha and proprioception p:
+
+z′ 
+
+> L
+
+= fL(zL, {ha, p }). (6) Here and below, primes distinguish updated states within a single reasoning cycle. Each iteration grounds the ac-tion state in the action tokens ha and the robot’s proprio-ceptive state p. Through ha, the executor also embeds in-struction information into z′
+
+> L
+
+, where language can be well represented due to its compact nature. 
+
+3.3.2. High-Level Planner 
+
+The high-level planner updates the planning state zH using the full vision tokens from different backbone depths and the instruction-informed action state z′
+
+> L
+
+:
+
+z′ 
+
+> H
+
+= fH (zH , {hviz , h emb viz , z ′
+
+> L
+
+}). (7) Concentrating the full vision context at the planner, which runs at the slow rate, avoids repeating the costly attention at every executor step. The planner integrates visual under-standing into the planning state zH , with z′ 
+
+> L
+
+steering atten-tion toward the features that matter for the current motor command. 
+
+3.3.3. Top-Down Refinement 
+
+Following the high-level update, we introduce a refinement step that explicitly injects the updated plan back into the low-level action state. The low-level state attends to itself and to the newly updated high-level state: 
+
+z′′  
+
+> L
+
+= fR(z′
+
+> L
+
+, {z′ 
+
+> H
+
+}). (8) This acts as a top-down modulation step, ensuring that the low-level motor command is aligned with the updated high-level intent before the next cycle or the final prediction. 
+
+3.4. Segments and Hierarchical Reasoning Cycles 
+
+The HR-AH performs iterative latent reasoning through a sequence of S segments. Each segment consists of KH hi-erarchical reasoning cycles. A single cycle applies KL low-level executor iterations followed by one high-level plan-ner iteration, and concludes with the top-down refinement. 
+
+Algorithm 1: One segment of the HR-AH. 
+
+Input: States (zH , z L); context (hviz , h emb viz , h a, p );cycles KH , iterations KL
+
+Output: Updated states (zH , z L)
+
+for c = 1 to KH do for k = 1 to KL do 
+
+zL ← fL(zL, {ha, p }) // Eq. 6
+
+zH ← fH (zH , {hviz , h emb viz , z L}) // Eq. 7
+
+zL ← fR(zL, {zH }) // Eq. 8
+
+zL ← NRMS (zL)
+
+zH ← NRMS (zH )
+
+Starting from states (zH , z L), one segment executes Algo-rithm 1. To avoid buffering activations for all intermediate steps, we adopt the one-step gradient approximation from HRM [41]. Within each segment, only the last reasoning cycle is differentiable, with all preceding cycles running de-tached. At the end of each segment, we apply RMSNorm to both recurrent states to stabilize their magnitudes before carrying them into the next segment. After S segments, the final low-level state is projected to the action chunk: 
+
+ˆA = NRMS (z(S) 
+
+> L
+
+) Wout . (9) During training, the model unrolls a fixed number of Stotal 
+
+segments per forward pass. Each segment produces an ac-tion prediction ˆAs, and we apply deep supervision with an 
+
+ℓ1 loss between predicted and ground-truth action chunks, weighted linearly by segment index. States are detached between segments so that gradients flow only within each segment. 
+
+3.5. Inference with Adaptive Halting 
+
+Inspired by [40], we adopt a training-free halting criterion to dynamically determine the number of segments at inference time. After each segment s, the model computes the relative change in its action prediction: 
+
+δs = ∥ ˆAs − ˆAs−1∥∞
+
+∥ ˆAs∥∞ + ϵ , (10) where ∥·∥ ∞ denotes the maximum absolute value and ϵ is a small constant for numerical stability. Since no prior pre-diction exists at the first segment, the comparison begins at s = 2 . Halting is triggered when δs < τ for P con-secutive segments, subject to a minimum of Smin segments and a hard cap of Smax . This allows the model to allocate more computation to complex observations while saving in-ference time on routine ones. 54. Experiments and Results 
+
+4.1. Experimental Setup 
+
+We evaluate our method across standard simulation bench-marks and a real-world setting to assess both standardized performance and physical generalizability. For simulation, we train and evaluate on all four suites of the LIBERO benchmark [23] (Spatial, Object, Goal, and Long) and the CALVIN ABC →D benchmark [24]. For the real-world ex-periments, we collect a small dataset using a 6-DoF Kinova Gen3 Lite robot arm and evaluate the policy on a set of di-verse manipulation tasks. 
+
+Implementation details. All models are trained on NVIDIA A100 GPUs. We use a MiniVLA backbone [2] built on Qwen2.5-0.5B [45] with fused DINOv2/SigLIP vi-sion encoders, initialized from the MiniVLA checkpoint and fine-tuned with LoRA (rank 64). The action dimen-sion da = 7, comprising end-effector translation deltas (∆x, ∆y, ∆z), axis-angle rotation deltas ( ∆rx, ∆ry , ∆rz ), and gripper state. We use a batch size of 24 for LIBERO and 16 for CALVIN, a learning rate of 5 × 10 −5, KL = 2 
+
+executor iterations per cycle, and KH = 1 reasoning cy-cle per segment. The head hidden dimension is D = 896 
+
+and the chunk length is Nact = 8 , and the backbone carries 
+
+Nq = 64 action-query tokens. We use Nplan = 32 high-level planning tokens and Nviz = 512 visual tokens. The primary visual features are extracted from the penultimate backbone layer. During training, we unroll all Stotal = 8 
+
+reasoning segments and apply deep supervision to the in-termediate action predictions. At inference, adaptive halt-ing is configured with a minimum of Smin = 2 segments, a maximum of Smax = 8 segments, a prediction-stability threshold of τ = 0 .01 , and a patience of P = 1 .
+
+4.2. Simulation Results 
+
+LIBERO. Table 1 compares our method against state-of-the-art end-to-end (E2E) VLAs, Chain-of-Thought (CoT) reasoning models, and iterative refinement baselines on the LIBERO benchmarks. HR-AH achieves the highest aver-age success rate (97.0%) across the four suites, leading on Spatial (98.0%), tying on Object (99.6%), and taking the top score on Goal (97.4%), while placing second on Long (93.0%) only behind VLA-Adapter. The HR-AH action head contains only 22.5M parameters, roughly 4× smaller than VLA-Adapter’s 97M head and 3× smaller than RD-VLA’s 72.3M head. HR-AH also achieves the lowest infer-ence latency among the methods compared, at 49.63 ms, as shown in Fig. 6. 
+
+CALVIN. We further evaluate on CALVIN ABC →D, which tests generalization to unseen environments. Ta-ble 2 reports success rates for chains of up to five tasks 
+
+> Figure 3. Real-world experimental setup using the Kinova Gen3 Lite robot arm.
+
+and the average chain length. HR-AH achieves an average chain length of 4.40, matching VLA-Adapter while using a 4× smaller head, and substantially outperforms RD-VLA (3.39) and OpenVLA (3.27). Compared to RD-VLA, the nearest recurrent head on the same backbone, the gains are especially pronounced on longer chains, with HR-AH com-pleting 5-task chains in 74.0% of rollouts versus 45.3%. This gain reflects the benefit of the high-level planning state zH within each action chunk. While the executor re-fines the motor command over multiple fast steps, zH in-tegrates the task-relevant visual context once per slow-rate update and holds it stable across the remaining fast steps. The executor can therefore focus on precise action refine-ment without reconstructing the scene at every step, an ad-vantage over the single-state design that compounds over the longer rollouts required by multi-task chains. 
+
+4.3. Real-World Results 
+
+To evaluate physical generalizability, we collect demonstra-tions on a 6-DoF Kinova Gen3 Lite robotic arm across four tasks of increasing complexity: Put , Move , Stack , and Long ,testing basic manipulation, spatial reasoning, and sustained behavior over long sequences. We collect 20 demonstra-tions per task for Put, Move, and Stack, and 30 for Long. Each policy is evaluated over 20 rollouts per task. Figure 3 shows the setup and Table 3 reports success rates for HR-AH and RD-VLA, the two recurrent-head methods on the same backbone. Beyond higher accuracy, HR-AH also ex-ecutes faster. Figure 4 shows that RD-VLA requires more time to complete the same task, consistent with the latency gap observed in simulation (Fig. 6). 
+
+4.4. Ablation Studies 
+
+Fig. 5 isolates the contributions of hierarchy, modality rout-ing, and learned initialization on LIBERO-Spatial. Com-pared with a parameter-matched single-state baseline re-ceiving full context, introducing a second recurrent state with identical inputs improves success by 9.4 percentage points while reducing the average number of reasoning seg-6Table 1. LIBERO success rates (%) by suite. The number after each model name is the pretrained VLM size in billions of parameters. Head (M) denotes the action-head size in millions of parameters. Head size governs the memory footprint of the reasoning module on resource-constrained hardware. – indicates that a separately identifiable action head is not available. Bold : best; italics : second best. VLA-Adapter results are our reproduction of the released checkpoint. 
+
+Method Model Head (M) Spat. Obj. Goal Long Avg. E2E VLAs 
+
+SmolVLA-0.5B [36] 98.2 90.0 96.0 92.0 71.0 87.3 OpenVLA-7B [19] – 84.7 88.4 79.2 53.7 76.5 WorldVLA-7B [9] – 87.6 96.2 83.4 60.0 81.8 
+
+π0-FAST-3B [27] – 96.4 96.8 88.6 60.2 85.5 VLA-Adapter-0.5B [42] 97 97.2 99.2 96.0 94.0 96.6 
+
+SpatialVLA-4B [28] – 88.2 89.9 78.6 55.5 78.1 
+
+CoT Reasoning 
+
+CoT-VLA-7B [51] – 87.5 91.6 87.6 69.0 81.1 FlowVLA-8.5B [54] – 93.2 95.0 91.6 72.6 88.1 ThinkAct-7B [16] 432 88.3 91.4 87.1 70.9 84.4 Fast-ThinkAct-3B [17] ∼1200 92.0 97.2 90.2 79.4 89.7 TraceVLA-7B [53] – 84.6 85.2 75.1 54.1 74.8 MolmoAct-7B [21] – 87.0 95.4 87.6 77.2 86.6 
+
+Iterative Refinement 
+
+RD-VLA-0.5B (Adapt.) [40] 72.3 88.6 98.8 96.8 85.8 92.5 LoopOFT α-1.2B [33] – 94.0 99.6 96.8 91.0 95.3 
+
+HR-AH-0.5B (Ours) 22.5 98.0 99.6 97.4 93.0 97.0 
+
+> RD-VLA Ours
+
+t = 0 t = 4 t = 7 t = 11 t = 14 t = 18 
+
+Figure 4. Real-world rollout comparison between RD-VLA (top) and HR-AH (bottom) on the Put task. Both methods succeed in this example, isolating the difference in execution speed. 
+
+ments. Modality-specific routing contributes a further 3.4-point gain and reduces inference depth to 4.96 segments. Removing learned state initializations lowers success by 1.2 points and increases the average segments to 7.27. These results indicate that hierarchical state separation provides the largest gain, with routing providing a substantial fur-ther gain and learned initialization offering an additional improvement. Fig. 1 reflects the effect qualitatively: HR-AH concentrates attention on task-relevant objects over suc-cessive reasoning steps, whereas the single-state baseline attends more diffusely. 
+
+4.5. Inference Efficiency 
+
+Table 4 analyzes the trade-off between computation and ac-curacy. Accuracy is not monotonic in the number of seg-ments: Fixed-4 (96.4%) falls below Fixed-2 (97.0%), while Fixed-8 reaches the peak (98.2%), suggesting that no single fixed budget suits all tasks. Our adaptive halting strategy (τ = 0 .01 ) reaches 98.0% using only 4.96 segments on av-erage, a 38% reduction over Fixed-8 at a cost of only 0.2 7Table 2. CALVIN ABC →D results. We report the percentage of successful chains of length 1 to 5, and the average chain length. The number after each model name is the pretrained VLM size in billions of parameters. Bold : best; italics : second best. VLA-Adapter results are our reproduction of the released checkpoint.                                                                           
+
+> Method Tasks completed in a row ↑Avg. len ↑
+> 12345
+> OpenVLA-7B [19] 91.3 77.8 62.0 52.1 43.5 3.27 VLAS-7B [52] 87.2 64.2 40.9 28.1 19.6 2.40 LCB-7B [34] 73.6 50.2 28.5 16.0 9.9 1.78 VLA-Adapter-0.5B [42] 97.2 93.8 89.1 83.2 76.3 4.40
+> DeeR-3B [47] 86.2 70.1 51.8 41.5 30.4 2.82 RoboFlamingo-3B [22] 82.4 61.9 46.6 33.1 23.5 2.48 GR-1-3.1B [44] 85.4 71.2 59.6 49.7 40.1 3.06 SuSIE-1.3B [3] 87.0 69.0 49.0 38.0 26.0 2.69 RT-1 [5] 53.3 22.2 9.4 3.8 1.3 0.90 RD-VLA-0.5B [40] 91.4 79.5 67.9 54.9 45.3 3.39
+> HR-AH-0.5B (Ours) 99.3 94.6 89.1 83.4 74.0 4.40
+
+Table 3. Real-world success rates (%) on the Kinova Gen3 Lite. We evaluate four manipulation tasks of increasing complexity. 
+
+Method Put Move Stack Long Avg. 
+
+RD-VLA [40] 85.0 75.0 60.0 45.0 66.3 
+
+HR-AH (Ours) 95.0 90.0 75.0 55.0 78.8 5 6 7 885 90 95 100    
+
+> + hierarchy (+9.4) + routing (+3.4) −learned init. ( −1.2) Single state Two states, no routing
+> Full HR-AH
+> w/o learned init. Average reasoning segments ↓
+> Success rate (%)  ↑
+
+Figure 5. Architectural ablation on LIBERO-Spatial. Each point plots success rate against average reasoning segments (upper left is best). Solid arrows follow the additive build-up from a parameter-matched single-state baseline to the full model, and the dashed arrow shows the effect of removing learned initialization. Hierar-chical recurrence raises success from 85.2% to 94.6% while reduc-ing average segments from 7.44 to 5.71. Modality-specific routing further raises success to 98.0% and reduces segments to 4.96. Re-moving learned initializations drops success to 96.8% and raises average segments to 7.27. 
+
+points. By letting each observation choose its own depth, adaptive halting avoids committing to a fixed budget that may be too large for easy actions or too small for hard 
+
+Table 4. Fixed segment budgets versus adaptive halting for HR-AH on LIBERO-Spatial. 
+
+Inference Strategy Success Rate (%) Avg. Segments 
+
+Fixed-2 97.0 2.00 
+
+Fixed-4 96.4 4.00 Fixed-6 97.4 6.00 Fixed-8 98.2 8.00 Adaptive ( τ = 0 .05 ) 97.6 2.89 
+
+Adaptive ( τ = 0 .01 ) 98.0 4.96   
+
+> 100 1000 8000
+> 85 90 95 100
+> HR-AH (ours, 22.5M)
+> VLA-Adapter (97M) RD-VLA (adaptive, 72.3M) Fast-ThinkAct-3B ( ∼1200M) MolmoAct-7B ThinkAct-7B (432M)
+> better
+> Latency (ms, log scale) Success rate (%)
+
+Figure 6. Success rate versus latency on LIBERO-Spatial. HR-AH (star) achieves 98.0% at 49.63 ms, combining the highest ac-curacy with the lowest latency among compared methods. Circle: end-to-end, triangle: CoT reasoning, square: iterative refinement. Numbers in parentheses give the action-head size. 
+
+ones. Fig. 6 plots success rate against per-chunk latency on LIBERO-Spatial for representative end-to-end, CoT rea-soning, and iterative refinement methods. 
+
+# 5. Conclusion 
+
+We introduced the Hierarchical Reasoning Action Head (HR-AH), a lightweight recurrent module that brings struc-tured deliberation to tiny VLA models. By decoupling the latent state into a slow planner and a fast executor, HR-AH bridges the gap between compact model size and the need for iterative reasoning. Among the methods compared, HR-AH achieves the highest accuracy on LIBERO and matches the best chain length on CALVIN with an action head 3–
+
+4.3× smaller than prior recurrent and feed-forward heads on the same backbone, and the gains transfer to a phys-ical robot. Ablations show that the improvement stems from both the hierarchical state separation and the modality-specific routing, which confines costly vision attention to the slow planner. Together, these results suggest that struc-tured deliberation in a compact head is sufficient for strong 8performance on a tiny backbone, opening a path toward ca-pable VLAs deployable on resource-constrained robots. 
+
+# References 
+
+[1] ARC Prize Team. The hidden drivers of HRM’s performance on ARC-AGI. https://arcprize.org/blog/hrm-analysis , 2025. 3 [2] Suneel Belkhale and Dorsa Sadigh. MiniVLA: A better VLA with a smaller footprint. Stanford AI Lab Blog, https: //ai.stanford.edu/blog/minivla/ , 2024. 1, 2, 6 [3] Kevin Black, Mitsuhiko Nakamoto, Pranav Atreya, Homer Walke, Chelsea Finn, Aviral Kumar, and Sergey Levine. Zero-shot robotic manipulation with pre-trained image-editing diffusion models. In ICLR , 2024. 8 [4] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, et al. π0: A vision-language-action flow model for general robot control. In Robotics: Science and Systems (RSS) , 2025. 1, 2 [5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Joseph Dabis, Chelsea Finn, Keerthana Gopalakr-ishnan, Karol Hausman, Alex Herzog, Jasmine Hsu, et al. RT-1: Robotics transformer for real-world control at scale. 
+
+arXiv preprint arXiv:2212.06817 , 2022. 8 [6] Rodney A. Brooks. A robust layered control system for a mobile robot. IEEE Journal on Robotics and Automation , 2 (1):14–23, 1986. 1 [7] Qingwen Bu, Hongyang Li, Li Chen, Jisong Cai, Jia Zeng, Heming Cui, Maoqing Yao, and Yu Qiao. Towards synergis-tic, generalized, and efficient dual-system for robotic manip-ulation. arXiv preprint arXiv:2410.08001 , 2024. 2 [8] Alessandro Burzio, Tobias Fischer, Sven Elflein, Qunjie Zhou, Riccardo de Lutio, Jiawei Ren, Jiahui Huang, Shengyu Huang, et al. D´ ej` a view: Looping transformers for multi-view 3D reconstruction. arXiv preprint arXiv:2605.30215 ,2026. 3 [9] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng Huang, Jiayan Guo, Xin Li, Yibing Song, Hao Luo, Fan Wang, et al. WorldVLA: Towards autoregressive action world model. arXiv preprint arXiv:2506.21539 , 2025. 7 [10] Hao Chen, Jiaming Liu, Chenyang Gu, Zhuoyang Liu, Ren-rui Zhang, Xiaoqi Li, Xiao He, Yandong Guo, Chi-Wing Fu, Shanghang Zhang, and Pheng-Ann Heng. Fast-in-Slow: A dual-system foundation model unifying fast manipulation within slow reasoning. In NeurIPS , 2025. 1, 2 [11] Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin Burchfiel, and Shuran Song. Diffu-sion policy: Visuomotor policy learning via action diffusion. In Robotics: Science and Systems (RSS) , 2023. 2 [12] Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszkoreit, and Łukasz Kaiser. Universal transformers. In 
+
+ICLR , 2019. 3 [13] Renee Ge, Qianli Liao, and Tomaso Poggio. Hierarchical reasoning models: Perspectives and misconceptions. arXiv preprint arXiv:2510.00355 , 2025. 3 [14] Jonas Geiping, Sean McLeish, Neel Jain, John Kirchenbauer, Siddharth Singh, Brian R. Bartoldson, Bhavya Kailkhura, Abhinav Bhatele, and Tom Goldstein. Scaling up test-time compute with latent reasoning: A recurrent depth approach. 
+
+arXiv preprint arXiv:2502.05171 , 2025. 3 [15] Alex Graves. Adaptive computation time for recurrent neural networks. arXiv preprint arXiv:1603.08983 , 2016. 3 [16] Chi-Pin Huang, Yueh-Hua Wu, Min-Hung Chen, Frank Wang, and Fu-En Yang. ThinkAct: Vision-Language-Action reasoning via reinforced visual latent planning. In NeurIPS ,pages 82782–82802, 2025. 1, 7 [17] Chi-Pin Huang, Yunze Man, Zhiding Yu, Min-Hung Chen, Jan Kautz, Yu-Chiang Frank Wang, and Fu-En Yang. Fast-ThinkAct: Efficient Vision-Language-Action reason-ing via verbalizable latent planning. arXiv preprint arXiv:2601.09708 , 2026. 1, 7 [18] Alexia Jolicoeur-Martineau. Less is more: Recursive reason-ing with tiny networks. arXiv preprint arXiv:2510.04871 ,2025. 3 [19] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-ter, Grace Lam, Pannag Sanketi, Quan Vuong, Thomas Kol-lar, Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. OpenVLA: An open-source vision-language-action model. In Conf. on Robot Learning (CoRL) , pages 2679–2713, 2024. 1, 2, 7, 8 [20] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning vision-language-action models: Optimizing speed and suc-cess. In Robotics: Science and Systems (RSS) , 2025. 1, 2, 4[21] Jason Lee, Jiafei Duan, Haoquan Fang, Yuquan Deng, Shuo Liu, Boyang Li, Bohan Fang, Jieyu Zhang, Yi Ru Wang, Sangho Lee, et al. MolmoAct: Action reasoning models that can reason in space. In IEEE Int. Conf. Robotics and Automation (ICRA) , pages 2585–2592, 2026. 7 [22] Xinghang Li, Minghuan Liu, Hanbo Zhang, Cunjun Yu, Jie Xu, Hongtao Wu, Chilam Cheang, Ya Jing, Weinan Zhang, Huaping Liu, et al. Vision-language foundation models as effective robot imitators. In ICLR , 2024. 8 [23] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO: Benchmarking knowl-edge transfer for lifelong robot learning. In NeurIPS , pages 44776–44791, 2023. 6 [24] Oier Mees, Lukas Hermann, Erick Rosete-Beas, and Wol-fram Burgard. CALVIN: A benchmark for language-conditioned policy learning for long-horizon robot manip-ulation tasks. IEEE Robotics and Automation Letters , 7(3): 7327–7334, 2022. 6 [25] Josh Merel, Matthew Botvinick, and Greg Wayne. Hierarchi-cal motor control in mammals and machines. Nature Com-munications , 10, 2019. 1 [26] NVIDIA. GR00T N1: An open foundation model for gen-eralist humanoid robots. arXiv preprint arXiv:2503.14734 ,2025. 2, 3 [27] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and Sergey Levine. FAST: Efficient action tokeniza-tion for vision-language-action models. arXiv preprint arXiv:2501.09747 , 2025. 2, 7 
+
+9[28] Delin Qu, Haoming Song, Qizhi Chen, Yuanqi Yao, Xinyi Ye, Yan Ding, Zhigang Wang, JiaYuan Gu, Bin Zhao, Dong Wang, et al. SpatialVLA: Exploring spatial representa-tions for Visual-Language-Action model. arXiv preprint arXiv:2501.15830 , 2025. 7 [29] Moritz Reuss, Hongyi Zhou, Marcel R¨ uhle, ¨Omer Erdinc ¸ Ya˘ gmurlu, Fabian Otto, and Rudolf Lioutikov. FLOWER: Democratizing generalist robot policies with effi-cient vision-language-action flow policies. In Conf. on Robot Learning (CoRL) , 2025. 3 [30] Leo Raphael Rodrigues and Jian Kang. Dissecting hierarchi-cal reasoning models: A mechanistic study. arXiv preprint arXiv:2609.22197 , 2026. 3 [31] Hiroki Sawada and Shunichi Kasahara. PredVLA: Predic-tive sensorimotor modeling for sub-million-parameter robot manipulation. arXiv preprint arXiv:2608.26673 , 2026. 2, 3 [32] Noam Shazeer. GLU variants improve transformer. arXiv preprint arXiv:2002.05202 , 2020. 4 [33] Boyang Shen, Kaixiang Yang, Hao Wang, Qiuyu Yu, Qiang Xie, Qiang Li, and Zhiwei Wang. LoopVLA: Learning suf-ficiency in recurrent refinement for vision-language-action models. arXiv preprint arXiv:2605.09948 , 2026. 1, 2, 7 [34] Yide Shentu, Philipp Wu, Aravind Rajeswaran, and Pieter Abbeel. From LLMs to actions: Latent codes as bridges in hierarchical robot control. In IEEE/RSJ Int. Conf. Intelligent Robots and Systems (IROS) , pages 8539–8546, 2024. 8 [35] Lucy Xiaoyang Shi, Brian Ichter, Michael Equi, Liyiming Ke, Karl Pertsch, Quan Vuong, James Tanner, Anna Walling, et al. Hi robot: Open-ended instruction following with hier-archical vision-language-action models. In Int. Conf. Mach. Learn. (ICML) , 2025. 2 [36] Mustafa Shukor, Dana Aubakirova, Francesco Capuano, Pepijn Kooijmans, Steven Palma, Adil Zouitine, Michel Aractingi, Caroline Pascal, et al. SmolVLA: A vision-language-action model for affordable and efficient robotics. 
+
+arXiv preprint arXiv:2506.01844 , 2025. 1, 2, 3, 7 [37] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. RoFormer: Enhanced transformer with rotary position embedding. Neurocomputing , 568:127063, 2024. 4 [38] Lin Sun, Zhiwei Guan, Conglin Wang, Zihong Chen, Jianhai Yu, Zongsheng Li, et al. UniFS: Unified fast-to-slow hierar-chical architecture for vision-language-action models. arXiv preprint arXiv:2606.22794 , 2026. 2 [39] Emanuel Todorov and Michael I. Jordan. Optimal feedback control as a theory of motor coordination. Nature Neuro-science , 5:1226–1235, 2002. 1 [40] Yalcin Tur, Jalal Naghiyev, Haoquan Fang, Wei-Chuan Tsai, Jiafei Duan, Dieter Fox, and Ranjay Krishna. Recurrent-depth VLA: Implicit test-time compute scaling of vision-language-action models via latent iterative reasoning. arXiv preprint arXiv:2602.07845 , 2026. 1, 3, 4, 5, 7, 8 [41] Guan Wang, Jin Li, Yuhao Sun, Xing Chen, Changling Liu, Yue Wu, Meng Lu, Sen Song, and Yasin Abbasi Yadkori. Hierarchical reasoning model. arXiv preprint arXiv:2506.21734 , 2025. 3, 5 [42] Yihao Wang, Pengxiang Ding, Lingxiao Li, Can Cui, Zirui Ge, Xinyang Tong, Wenxuan Song, Han Zhao, Wei Zhao, Pengxu Hou, Siteng Huang, Yifan Tang, Wenhui Wang, Ru Zhang, Jianyi Liu, and Donglin Wang. VLA-Adapter: An effective paradigm for tiny-scale vision-language-action model. In AAAI , pages 18638–18646, 2026. 1, 2, 3, 4, 7, 8 [43] Junjie Wen, Yichen Zhu, Jinming Li, Minjie Zhu, Kun Wu, Zhiyuan Xu, Ning Liu, Ran Cheng, et al. TinyVLA: Towards fast, data-efficient vision-language-action models for robotic manipulation. arXiv preprint arXiv:2409.12514 , 2024. 1, 2 [44] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen, Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and Tao Kong. Unleashing large-scale video generative pre-training for visual robot manipulation. In ICLR , 2024. 8 [45] An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, et al. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. 6 [46] Yandan Yang, Shuang Zeng, Tong Lin, Xinyuan Chang, Dekang Qi, Junjin Xiao, Haoyun Liu, Ronghan Chen, et al. ABot-M0: VLA foundation model for robotic ma-nipulation with action manifold learning. arXiv preprint arXiv:2602.11236 , 2026. 4 [47] Yang Yue, Yulin Wang, Bingyi Kang, Yizeng Han, Shenzhi Wang, Shiji Song, Jiashi Feng, and Gao Huang. DeeR-VLA: Dynamic inference of multimodal large language models for efficient robot execution. In NeurIPS , 2024. 2, 8 [48] Biao Zhang and Rico Sennrich. Root mean square layer nor-malization. In NeurIPS , 2019. 4 [49] Jianke Zhang, Yanjiang Guo, Xiaoyu Chen, Yen-Jen Wang, Yucheng Hu, Chengming Shi, and Jianyu Chen. HiRT: En-hancing robotic control with hierarchical robot transformers. In Conf. on Robot Learning (CoRL) , 2024. 1, 2 [50] Zhewei Zhang, Puyue Wang, Guanren Qiao, Yijie Weng, Jiawei Hu, Guo Li, Lujia Wang, Junyan Wang, Tao Gu, Hongliang Lu, Guiliang Liu, Hong Jia, and Xinhu Zheng. LIRA: Local cross-layer information routing for vision-language-action decoding. arXiv preprint arXiv:2608.07596 ,2026. 3 [51] Qingqing Zhao, Yao Lu, Moo Jin Kim, Zipeng Fu, Zhuoyang Zhang, Yecheng Wu, Zhaoshuo Li, Qianli Ma, Song Han, Chelsea Finn, et al. CoT-VLA: Visual chain-of-thought rea-soning for Vision-Language-Action models. In CVPR , pages 1702–1713, 2025. 1, 7 [52] Wei Zhao, Pengxiang Ding, Zhang Min, Zhefei Gong, Shuanghao Bai, Han Zhao, and Donglin Wang. VLAS: Vision-language-action model with speech instructions for customized robot manipulation. In ICLR , 2025. 8 [53] Ruijie Zheng, Yongyuan Liang, Shuaiyi Huang, Jianfeng Gao, Hal Daum´ e III, Andrey Kolobov, Furong Huang, and Jianwei Yang. TraceVLA: Visual trace prompting enhances spatial-temporal awareness for generalist robotic policies. In 
+
+ICLR , 2025. 7 [54] Zhide Zhong, Haodong Yan, Junfeng Li, Xiangchen Liu, Xin Gong, Tianran Zhang, Wenxuan Song, Jiayi Chen, Xinhu Zheng, Hesheng Wang, et al. FlowVLA: Visual chain of thought-based motion reasoning for Vision-Language-Action models. IEEE Trans. Robotics , 2026. Early access. 1, 7 
+
+10

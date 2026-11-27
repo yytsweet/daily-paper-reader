@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-11-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-11-27</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 19 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>12</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-11-26 19:03:05 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-11-27 18:52:27 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,7 +69,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选19篇，精读7篇，重点聚焦LLM量化与视觉-语言-动作（VLA）模型。最值得看的是《Any-Rate》以10.0分提出的半比特多精度量化与编码比特平面方法，以及9.0分的自主叉车卸货VLA落地研究。普通读者可先读这两篇精读，再顺着JEPA-Tuner、ζ₀等速读条目把握VLA从预测微调到异步执行、世界动作模型的最新动向。</p>
+<p>今日共筛读19篇机器人视觉-语言-动作论文，其中精读7篇、速读12篇。最值得关注的是Self-Refining VLA Sampling（8.0）与多智能体世界动作模型MAWAM（8.0），它们分别指向VLA自采样优化和协同操作想象两条路线。普通读者可先看这两篇的精读笔记，再结合RMR-VLA、MotionServe等速读摘要了解记忆推理与多机调度。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -81,9 +81,9 @@
     <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes">Any-Rate: Half-Bit Multi-Precision LLM Quantization with Coded Bit-Planes</span></li><li><span class="dpr-home-dashboard-paper-title" title="Integration of Vision-Language-Action Control for Autonomous Forklift Unloading with Limited Real-World Data">Integration of Vision-Language-Action Control for Autonomous Forklift Unloading with Limited Real-World Data</span></li><li><span class="dpr-home-dashboard-paper-title" title="Aegis-VLA: Reliability-Gated Action Refinement via a Trajectory World Model for Dynamic Object Manipulation">Aegis-VLA: Reliability-Gated Action Refinement via a Trajectory World Model for Dynamic Object Manipulation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Self-Refining VLA Sampling">Self-Refining VLA Sampling</span></li><li><span class="dpr-home-dashboard-paper-title" title="MAWAM: Joint Imagination for Collaborative Robot Manipulation with a Multi-Agent World Action Model">MAWAM: Joint Imagination for Collaborative Robot Manipulation with a Multi-Agent World Action Model</span></li><li><span class="dpr-home-dashboard-paper-title" title="Estimating Silenced Tokens in Quantized LLMs">Estimating Silenced Tokens in Quantized LLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>6</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">quantization <strong>4</strong></span><span class="dpr-home-dashboard-tag">vla-control <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -94,9 +94,9 @@
     <strong class="dpr-home-dashboard-count">12 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="JEPA-Tuner: From Predictive Fine-Tuning to Asynchronous Execution of Vision-Language-Action Models">JEPA-Tuner: From Predictive Fine-Tuning to Asynchronous Execution of Vision-Language-Action Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="$ζ_0$: A Framework for World Action Models with Joint Scene and Body Foresight in Humanoid Control">$ζ_0$: A Framework for World Action Models with Joint Scene and Body Foresight in Humanoid Control</span></li><li><span class="dpr-home-dashboard-paper-title" title="A2I-VLA: A Two-Stage Vision-Language-Action model with Semantic-Physical Alignment and Integration">A2I-VLA: A Two-Stage Vision-Language-Action model with Semantic-Physical Alignment and Integration</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MotionServe: Efficient Multi-Robot Serving by Exploiting Robot Execution Slack">MotionServe: Efficient Multi-Robot Serving by Exploiting Robot Execution Slack</span></li><li><span class="dpr-home-dashboard-paper-title" title="RMR-VLA: Recurrent Memory Reasoning for Vision-Language-Action Models">RMR-VLA: Recurrent Memory Reasoning for Vision-Language-Action Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Which: Where, How, and When in Vision-Language-Action Models">Beyond Which: Where, How, and When in Vision-Language-Action Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>11</strong></span><span class="dpr-home-dashboard-tag">quantization <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">vla-control <strong>12</strong></span></div>
 </section>
 </div>
 

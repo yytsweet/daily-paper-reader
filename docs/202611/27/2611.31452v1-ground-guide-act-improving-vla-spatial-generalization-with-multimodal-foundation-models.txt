@@ -1,0 +1,2056 @@
+Ground, Guide, Act: Improving VLA Spatial Generalization with
+Multimodal Foundation Models
+Guangting Zheng*, Shaoxuan Wang*, Yu Yuan, Zhipeng Tang, Jiajun Deng, Yanyong Zhang
+University of Science and Technology of China
+{zgt,wangshaoxuan,yyhappier,tangzhipeng}@mail.ustc.edu.cn, {dengjj,yanyongz}@ustc.edu.cn
+Abstract
+Vision-Language-Action (VLA) models effectively learn ac-
+tion policies from robot demonstrations, but struggle to gen-
+eralize to changes in object positions and task goals. Gen-
+eral multimodal foundation models (MFMs) offer comple-
+mentary scene understanding and spatial reasoning, but re-
+main slow and unreliable for direct fine-grained control.
+To understand how MFMs can improve VLA spatial gen-
+eralization, we conduct a systematic capability analysis
+across multiple VLA architectures using atomic-stage inter-
+ventions, revealing that many failures stem from poor target
+grounding and global spatial routing, while local manipu-
+lation skills remain largely usable. Based on these findings,
+we propose MFM-VLA, a selective collaboration frame-
+work in which an MFM provides target grounding and spa-
+tial guidance, controllers execute free-space motion, and
+the VLA retains control over fine-grained manipulation. We
+fine-tune the VLA with action-chunk-level dense geometric
+captions and perturbed-state recovery data to improve local
+guidance following and recovery from unfamiliar handoff
+states. A development-calibrated capability router selects
+between direct VLA execution and MFM-assisted execution
+to avoid unnecessary intervention. Across LIBERO-PRO,
+ALOHA-Sim-PRO, RoboCasa365, and real-world chem-
+istry tasks, MFM-VLA improves success rates by 14.9, 74.0,
+3.6, and 30.9 percentage points, respectively, over the cor-
+responding base VLA. The project page is available at
+https://tom-zgt.github.io/MFM-VLA.
+1. Introduction
+Vision-Language-Action (VLA) models learn manipulation
+policies from demonstrations [2, 3, 10, 12, 27], but struggle
+with changes in object positions and task goals due in part
+to limited demonstration coverage [6, 11]. General mul-
+timodal foundation models (MFMs) offer complementary
+capabilities in scene understanding, spatial reasoning, and
+*These authors contributed equally.
+task planning [1, 7, 9]. Yet direct action generation with
+these models is slow and unreliable for fine-grained manip-
+ulation, while local trajectory corrections alone may not re-
+solve errors in target selection and spatial routing [21, 23].
+This raises a central question: how can MFMs improve VLA
+spatial generalization?
+To answer this question, we conduct a capability analy-
+sis across multiple VLA architectures, combining counter-
+factual instruction tests with a five-level Phase-Decoupled
+Intervention Staircase (PDIS). Counterfactual tests provide
+evidence of visual scene shortcuts: policies often select the
+original training target despite updated instructions. By de-
+composing manipulation into atomic stages, PDIS further
+identifies target grounding and global spatial routing as ma-
+jor bottlenecks, while showing that local manipulation skills
+remain largely usable under appropriate spatial guidance.
+For example, guiding the end effector to the correct tar-
+get increases the target-lifting rate of π0.5 from 42.3% to
+93.1%. These findings suggest that MFMs should provide
+target grounding and spatial guidance, while VLAs retain
+fine-grained manipulation control.
+Based on these findings, we propose MFM-VLA, a se-
+lective collaboration framework in which an MFM iden-
+tifies task-relevant manipulation targets and provides spa-
+tial guidance, controllers execute free-space motion, and
+the VLA handles fine-grained manipulation. To help the
+VLA use external guidance, we fine-tune it with action-
+chunk-level dense geometric captions and perturbed-state
+recovery data, improving local guidance following and re-
+covery from unfamiliar handoff states. We further intro-
+duce a development-calibrated capability router that selects
+between direct VLA execution and MFM-assisted execu-
+tion, avoiding unnecessary intervention on tasks the VLA
+already handles well.
+We evaluate MFM-VLA on the LIBERO-PRO bench-
+mark [39], ALOHA-Sim-PRO [36], RoboCasa365 [18],
+and real-world multi-stage chemistry tasks [25], achiev-
+ing success-rate gains of 14.9, 74.0, 3.6, and 30.9 percent-
+age points over the corresponding base VLAs, respectively.
+We also explore an extended system in which the MFM
+1
+arXiv:2611.31452v1  [cs.CV]  23 Nov 2026
+
+
+selects between the adapted VLA and task-specific code-
+based controllers for operations beyond the VLA’s skills.
+Our main contributions are summarized as follows:
+• We systematically analyze multiple pretrained VLAs
+through counterfactual instruction tests and phase-
+decoupled interventions, revealing the visual scene short-
+cuts and identifying the roles of target grounding, spatial
+routing, and local manipulation in VLA failures.
+• We propose MFM-VLA, a selective collaboration frame-
+work combining dense geometric policy adaptation,
+perturbed-state recovery, development-calibrated routing,
+and MFM-based spatial guidance.
+• We evaluate MFM-VLA on three simulation benchmarks
+and real-world chemistry tasks, demonstrating its gener-
+alization and effectiveness across scenes and tasks.
+2. Related Work
+Vision-Language-Action Models.
+VLA models have
+made significant progress in robotic manipulation. RT-2 [3]
+transfers vision-language knowledge to robot control, while
+OpenVLA [12] provides an open-source model trained on
+large-scale robot demonstrations. π0 [2] uses flow matching
+for continuous action generation, and π0.5 [10] extends this
+approach toward open-world generalization.
+OpenVLA-
+OFT [13] and OpenWAM [28] explore efficient policy fine-
+tuning and unified world-action modeling, respectively. De-
+spite these advances, generalization remains challenging
+when scenes, object positions, or task goals differ from
+training data [39]. We analyze the roles of target grounding,
+spatial routing, and local control in these failures to identify
+where external MFMs can effectively assist VLA policies.
+Foundation Models for Robotic Manipulation. Language
+and multimodal foundation models have been used for
+robotic task planning, executable program generation, and
+spatial grounding [1, 9, 15, 38]. Other approaches integrate
+vision-language models (VLMs) into robot policies for spa-
+tial guidance and action correction [22, 32], while coding
+agents generate and refine manipulation skills through ex-
+ecution feedback [4, 8, 17, 30, 35]. PLD further improves
+pretrained VLAs through reinforcement learning and recov-
+ery data generation [29]. Effective collaboration also re-
+quires identifying VLA capability gaps, adapting policies to
+external guidance, and avoiding unnecessary intervention.
+Concurrent work explores learned intervention for selec-
+tive GPT assistance [24], visual-trace guidance for VLA
+policies [37], and hybrid control with pretrained VLAs [26,
+33]. Other studies investigate direct VLM action genera-
+tion [34] and hierarchical VLM–policy collaboration [31].
+Unlike uniform guidance, MFM-VLA combines capability
+analysis, geometric policy adaptation, and calibrated rout-
+ing for selective MFM assistance.
+3. Capability Analysis of Pretrained VLAs
+To understand the limitations of pretrained VLAs and iden-
+tify where MFM assistance is needed, we investigate their
+generalization under perturbations, instruction following,
+and stage-wise manipulation capabilities.
+3.1. Performance Gap Under Perturbations
+High success on familiar scenes does not necessarily indi-
+cate that a VLA can adapt to new spatial configurations or
+task goals. To examine this, we evaluate the official π0.5,
+trained on LIBERO, on LIBERO-PRO over 8,000 episodes
+with four types of perturbations: Semantic (instruction para-
+phrases), Object (appearance changes), Position (object lo-
+cation swaps), and Task (changes to the instructed target).
+While Semantic and Object perturbations preserve the re-
+quired spatial trajectories, Position and Task perturbations
+require changes in target selection or spatial movement.
+As shown in Fig. 1(a), π0.5 maintains high success un-
+der Semantic (92.0%) and Object (80.2%) perturbations,
+but drops sharply under Position (22.2%) and Task (25.1%)
+perturbations, reaching only 2.4% on LIBERO-10 Position.
+This gap suggests that pretrained VLAs handle surface-
+level variations better than changes requiring new target se-
+lection and spatial trajectories. We next investigate whether
+these failures arise from an over-reliance on familiar visual
+scenes rather than insufficient local manipulation skills.
+3.2. Visual Scene Shortcuts
+The performance gap under Task perturbations raises a
+question: do VLAs fail to manipulate the newly instructed
+targets, or do they simply ignore updated instructions? To
+investigate this, we conduct counterfactual instruction tests
+by keeping the scene fixed while changing the instruc-
+tion. Specifically, we compare an updated instruction ℓnew,
+which specifies a new target onew instead of the original
+training target otrain, with an empty instruction ℓ∅= "".
+We evaluate π0.5, π0, OpenVLA-OFT, and OpenWAM on
+LIBERO-Object Task perturbations, with 50 episodes per
+condition. We measure the lifting rates of both targets and
+the Same-Lift Rate, which measures whether paired rollouts
+under the two instructions lift the same object first.
+As shown in Fig. 1(b), OpenVLA-OFT and OpenWAM
+lift the original training target in 90.0% and 92.0% of
+empty-instruction episodes, respectively. Updated instruc-
+tions often fail to redirect this behavior: OpenVLA-OFT
+never lifts the newly instructed target, lifts the original tar-
+get in 94.0% of episodes, and achieves a 96.0% Same-Lift
+Rate. Similar patterns are observed for π0.5 on LIBERO-
+10 (90.0% agreement) and π0 on bimanual ALOHA-Sim
+(86.0% agreement). These results suggest a visual scene
+shortcut: pretrained VLAs may use familiar visual configu-
+rations to retrieve manipulation behaviors, often overriding
+updated language goals. This indicates that improving local
+2
+
+
+Original Semantic
+Object
+Position
+Task
+Perturbation Type
+0
+25
+50
+75
+100
+Overall Success (%)
+96.9
+92.0
+↓ 4.9 pp
+80.2
+↓ 16.7 pp
+22.2
+↓ 74.7 pp
+25.1
+↓ 71.8 pp
+0
+25
+50
+75
+100
+Episodes (%)
+π0.5
+π0
+OpenVLA-OFT
+OpenWAM
+12%
+0%
+0%
+0%
+38%
+74%
+6%
+46%
+50%
+26%
+94%
+54%
+New instruction
+0
+25
+50
+75
+100
+Episodes (%)
+38%
+64%
+10%
+8%
+62%
+36%
+90%
+92%
+Empty instruction
+Task description: “Pick object A.”
+Task description: ""
+Training data: {“Pick object B.”, Observation images, Action sequence}
+(a) Performance under perturbations
+(b) First-lift object under different instructions
+New target (A)
+Other / No lift
+Training target (B)
+Figure 1. Generalization gaps and visual scene shortcuts in pretrained VLAs. (a) π0.5 degrades sharply under Position and Task
+perturbations. (b) Across four VLA/WAM architectures, updated and empty instructions frequently lead to lifting the original training
+target, revealing limited instruction sensitivity in familiar scenes.
+Base
++R
++C
++RC
++RCL
+VLA
+VLA
+GT
+VLA
+GT
+VLA
+GT
+VLA
+GT
+VLA
+GT
+VLA
+GT
+VLA
+44.1%
+63.3%
+54.1%
+78.7%
+82.8%
+Initial
+Pre-Grasp Hover
+Grasped & Lifted
+Pre-Place Hover
+Lowered at Rim 
+Success
+(a) Visualization of atomic stage analysis.
+Model
+Split
+Base
++R
++C
++RC +RCL
+π0.5
+Overall
+44.1
+63.3 54.1 78.7
+82.8
+Pos.
+13.8
+42.3 43.1 68.5
+71.5
+Task
+20.0
+57.7 27.7 77.7
+86.9
+π0
+Overall
+30.8
+32.1 35.6 53.1
+54.4
+Pos.
+3.1
+5.4
+16.2 28.5
+29.2
+Task
+18.5
+30.8 19.2 51.5
+60.0
+OpenVLA-OFT Overall
+37.2
+44.1 39.0 65.1
+66.4
+Pos.
+13.1
+15.4 16.9 53.1
+50.8
+Task
+7.7
+39.2
+7.7
+57.7
+62.3
+OpenWAM
+Overall
+45.4
+59.2 40.8 57.7
+56.4
+Pos.
+11.5
+35.4 17.7 50.0
+49.2
+Task
+32.3
+55.4 20.0 50.8
+46.9
+(b) Task success across VLA architectures.
+Figure 2. Atomic stage analysis across four VLA architectures (390 perturbed episodes per setting). Task success is reported in percent.
+Assisting free-space reach (+R) and carry (+RC) improves task success without modifying VLA weights.
+action execution alone may be insufficient; explicit target
+grounding and spatial guidance are also needed.
+3.3. Atomic Stage Analysis
+The preceding analysis reveals target-selection failures but
+does not determine whether VLA policies retain local ma-
+nipulation skills once the correct target is identified. To in-
+vestigate this, we decompose pick-and-place tasks into four
+atomic stages: Reach (R), moving the open gripper above
+the target; Grasp, acquiring and lifting the object; Carry
+(C), transporting it above the destination; and Lower/Place
+(L), lowering and releasing the object.
+We introduce a
+five-level Phase-Decoupled Intervention Staircase (PDIS)
+to isolate the effects of assistance at different stages: Base
+uses the VLA throughout; +R assists Reach; +C assists
+Carry after a successful grasp; +RC assists both Reach and
+Carry; and +RCL additionally assists Lower/Place. We use
+ground-truth spatial guidance with fixed VLA weights to
+isolate stage-specific assistance benefits without introduc-
+ing MFM grounding errors. All four VLA architectures are
+evaluated over 390 perturbed episodes per setting.
+As shown in Fig. 2, Reach assistance increases π0.5’s
+target-lifting rate from 42.3% to 93.1% under Position per-
+turbations and from 40.0% to 91.5% under Task perturba-
+tions. Similar improvements across other architectures sug-
+gest that local grasping skills remain largely usable once
+the gripper reaches the correct target. However, successful
+grasping does not guarantee task completion. Under Posi-
+tion perturbations, +R achieves only 42.3% task success
+despite a 93.1% target-lifting rate. Adding Carry assistance
+(+RC) increases task success to 68.5% on Position and
+77.7% on Task, while +RCL further improves these re-
+sults to 71.5% and 86.9%, respectively. These results reveal
+complementary capabilities: MFMs provide target ground-
+ing and free-space spatial guidance, while VLAs retain use-
+ful local manipulation skills. This motivates a collaborative
+approach that combines MFM spatial reasoning with VLA-
+based fine-grained control.
+3
+
+
+Perturbed-State Recovery
+ǅ0
+ǅ֏
+Existing data: action sequence
+{ǅ0, ǅ1, ⋯, ǅ֏} 
+ǅ0
+ǅ֏
+ǅ֏
+ƾ(1) ={ǖ1:և1
+(1)
+, ⋯, ǅ֑ , ⋯, ǅ֏} 
+ƾ(2) ={ǖ1:և2
+(2)
+, ⋯, ǅ֑ , ⋯, ǅ֏} 
+ƾ(3) ={ǖ1:և3
+(3)
+, ⋯, ǅ֑ , ⋯, ǅ֏} 
+Perturbed data: 
+ǖ(1)
+ǅ֑
+ǖ(2)
+ǖ(3)
+Dense Geometric Captions
+Task description: 
+For each action chuck ǅս, paired 
+with the same task instruction ℓ:  
+Action-chunk-level Dense
+Geometric Caption Ǉս: 
+scene (ȹȿ
+풔ȹȻɄȻ): milk carton (back-
+left), woven basket (front-right).
+subgoal (ȹȿ
+풔풖풃ȽɅȷ岀) : lower milk 
+carton onto woven basket and 
+open gripper.
+geometry (ȹȿ
+ȽȻɅ풎ȻɊ䀀ɏ) : destination 
+woven basket is 2cm left, 9cm 
+below gripper (dist 9cm).
+next H step (ȹȿ
+풎ɅɊȿɅɄ) : move 5cm 
+down; open gripper to release.
+For each action chuck ǅս, paired 
+with a chunk-specific caption Ǉս:  
+(b) Selective Routing
+Observation + instruction
+DIRECT
+Adapted VLA
+Closed-loop execution
+ASSIST
+MFM-Based Target Grounding
+Coarse Detection
+Fine Localization
+Second-View Match
+3D Triangulation
+Two-view rays +
+camera calibrations
+Stage-wise Spatial Guidance & VLA Execution
+MFM Controller
+Reach
+Adapted VLA
+Grasp & Lift
+MFM Controller
+Carry
+Adapted VLA
+Place & Release
+Frozen
+Router
+MFM: 3D targets → handoff poses + local captions
+Grasp/place targets
+position estimation
+pick the milk and place it in 
+the basket
+Adapted VLA
+Recover from
+imperfect states
+Follow local
+geometric guidance
+(a) Policy Adaptation
+(c) 3D Grounding and Stage-wise Execution
+Dev-calibrated Router
+Fixed at Test 
+Local recovery
+Grasp verification
+Fail grasp / wrong lift / drop
+Fail
+Resume
+Figure 3. Overview of MFM-VLA. Perturbed-state recovery data improve robustness to off-trajectory states, while dense geometric
+captions enable local guidance following. A development-calibrated router selects direct or assisted execution. In the illustrated single-arm
+pipeline, task-aware manipulation-point grounding and two-view triangulation provide spatial targets for controller-executed free-space
+motion. The adapted VLA performs contact execution, while a separate grasp monitor triggers bounded controller-assisted local recovery.
+4. Method
+Our analysis identifies target grounding and global spa-
+tial routing as major sources of VLA failures, while local
+manipulation skills remain largely usable. Based on this,
+we propose MFM-VLA (Fig. 3), a selective collaboration
+framework with three components: (1) dense geometric pol-
+icy adaptation to enable local guidance following and re-
+covery from perturbed states; (2) development-calibrated
+capability routing to determine when to invoke MFMs;
+and (3) MFM-based 3D grounding and spatial guidance to
+guide free-space motion while retaining VLA control over
+fine-grained manipulation. We primarily use GPT-6 Astra
+with π0.5, and the official π0 policy for ALOHA-Sim-PRO.
+4.1. Dense Geometric Policy Adaptation
+Recovery policies have been studied for handling out-of-
+distribution states in imitation learning [20]. To enable the
+VLA to follow external guidance, we adapt π0.5 through
+perturbed-state recovery and action-chunk-level dense geo-
+metric captions.
+Perturbed-State Recovery. Given an original training tra-
+jectory T
+= {a0, . . . , aN}, we sample an intermediate
+step n with robot state sn and perturb the arm to a new
+pose s′
+n without recording.
+A Cartesian controller then
+drives the arm from s′
+n back to sn, recording Lk recov-
+ery chunks {r(k)
+1 , . . . , r(k)
+Lk }, before replaying the remaining
+demonstration {an, . . . , aN}. By sampling multiple pertur-
+bations (k = 1, 2, 3), we construct augmented trajectories:
+T (k) = {r(k)
+1 , . . . , r(k)
+Lk , an, . . . , aN}. Only successful roll-
+outs are retained and added to the original training data,
+enabling πθ to recover from perturbed handoff states. All
+recovery data are generated from training demonstrations,
+without using router-calibration or test episodes.
+Dense Geometric Captions.
+Standard VLA fine-tuning
+pairs all action chunks in an episode with the same task-
+level instruction ℓ. We instead associate each H-step action
+chunk ai with a chunk-specific dense geometric caption:
+ci = ϕdense(oi, peef
+i , ˆpgrasp, ˆpplace),
+(1)
+where ci consists of four fields: (1) scene, describing the
+locations of the grasp target and destination; (2) subgoal,
+specifying the current manipulation stage; (3) geometry,
+encoding the target-relative offset ∆pi = ˆpactive −peef
+i
+and its Euclidean distance; and (4) next H steps, de-
+scribing short-horizon end-effector displacement and grip-
+per commands. These fields provide action-specific seman-
+tic and geometric conditions for local manipulation.
+During training, motion descriptions are generated in
+two ways: with 50% probability, they are extracted from
+the expert’s next H actions, including end-effector displace-
+ments and gripper commands; otherwise, they are gener-
+ated using predefined geometric rules based on the current
+manipulation stage and the 3D displacement from the end
+effector to the active target. We fine-tune πθ on original
+demonstrations and recovery data, sampling text conditions
+from {ℓ, [ℓ; ci], ci}. The DIRECT branch uses the original
+instruction ℓ, while the ASSISTED branch can use geometric
+captions to follow external spatial guidance. At inference,
+4
+
+
+motion descriptions are generated from the current manipu-
+lation stage and target-relative geometry.
+4.2. Development-Calibrated Capability Routing
+As shown in Tab. 6, uniform MFM assistance can improve
+performance on challenging tasks but may interfere with
+tasks that the adapted VLA already handles well. We there-
+fore introduce a development-calibrated router to select be-
+tween direct and assisted execution.
+For each routing unit τ, we evaluate the adapted VLA
+under both DIRECT and ASSISTED execution on a develop-
+ment set Ddev, using K initialization seeds. We obtain the
+corresponding success rates ˆSdirect(τ) and ˆSassist(τ). The
+routing decision is defined as
+R(τ) =
+(
+ASSISTED, ˆSassist(τ) −ˆSdirect(τ) > δ ∧C(τ) = 1,
+DIRECT, otherwise,
+(2)
+where τ denotes a routing unit, instantiated at either the
+suite or individual-task level, and C(τ) indicates whether
+the task supports the spatial handoff interface. The result-
+ing routing decisions are frozen before evaluation.
+In DIRECT mode, πθ executes independently using the
+task instruction ℓ. In ASSISTED mode, the MFM-based spa-
+tial guidance procedure in Sec. 4.3 is activated.
+4.3. Task-Aware Grounding and Spatial Guidance
+In ASSISTED mode, the MFM identifies task-relevant ob-
+jects and manipulation-specific target points, providing spa-
+tial guidance while the adapted VLA retains control over
+local manipulation.
+Two-view 3D Target Grounding. To estimate 3D target
+positions without depth images, we use two calibrated RGB
+views: a fixed camera and either a second fixed camera or a
+wrist-mounted camera. Given instruction ℓ, the MFM iden-
+tifies task-relevant objects and selects manipulation-specific
+target points based on object structure and task require-
+ments.
+For example, opening a bottle requires locating
+its cap, whereas placing an object into a basket requires
+grounding an appropriate point inside the basket rather than
+its object center.
+It then refines these points in zoomed
+crops and establishes semantic correspondences across the
+two camera views. Camera calibration converts the matched
+points into viewing rays, whose closest-approach midpoint
+provides the 3D estimates: ˆpgrasp and ˆpplace. Geometric
+consistency checks and fallback rules are detailed in the Ap-
+pendix.
+Stage-wise Spatial Guidance and VLA Execution. For
+single-arm and mobile manipulation, execution follows four
+stages: Reach, Grasp & Lift, Carry, and Place & Release.
+Using the grounded targets, a Cartesian controller moves
+the open gripper to a pre-grasp handoff pose above the tar-
+get. The adapted VLA πθ then performs local alignment,
+descent, grasping, and lifting. After grasp verification, the
+controller transports the object to a pre-place handoff pose
+above the destination, where the VLA resumes control for
+lowering and release. The grounded targets also provide
+the relative geometric conditions for dense captions. MFM
+guidance is queried sparsely, while the controller and VLA
+execute the corresponding motions in closed loop.
+Grasp Verification and Local Recovery. A separate mon-
+itor checks grasp acquisition and object retention.
+If a
+failed grasp, wrong-object lift, or drop is detected, the con-
+troller opens the gripper, retreats, and returns to a pre-grasp
+handoff state for another VLA grasp attempt. Recovery is
+bounded by the maximum retry count and episode step bud-
+get. Platform-specific details are provided in the Appendix.
+5. Experiments
+5.1. Experimental Setup
+Benchmarks and Evaluation.
+We evaluate MFM-VLA
+on three simulation benchmarks. LIBERO-PRO [39] com-
+prises 160 tasks across 16 suites with four perturbation
+types: Semantic, Object, Position, and Task. We use 14,075
+trajectories for VLA fine-tuning, including official LIBERO
+demonstrations, perturbed-state recovery data.
+Initializa-
+tion seeds 0–4 are used for router calibration, and the re-
+sulting routing decisions are frozen before evaluation. We
+report results on the remaining seeds 5–49 (N = 7,200) and
+the full benchmark (N = 8,000). Component and router
+ablations use seeds 5–9 (N = 800), a subset of the test set.
+RoboCasa365 [18] evaluates mobile manipulation across
+50 tasks: 18 Atomic-Seen, 16 Composite-Seen, and 16
+Composite-Unseen. We fine-tune on 1,437 trajectories from
+seen tasks, excluding all Composite-Unseen tasks. For each
+task, we compare Direct and Assist execution on five cali-
+bration episodes and select Assisted only when it achieves
+higher success. The resulting task-level router is frozen and
+applied to all 50 episodes per task, yielding 2,500 evaluation
+episodes, including the calibration episodes. ALOHA-Sim-
+PRO extends the bimanual Transfer Cube task [36] with Se-
+mantic, Object, Position, and Task perturbations, alongside
+an original setting. We evaluate 50 episodes per condition
+using a consistent 400-step horizon and additionally test tar-
+get displacements of 0–16 cm beyond the training region.
+End-to-end task success is the primary metric; object lifting
+and subgoal completion are reported as other metrics.
+Real-world Evaluation. We evaluate MFM-VLA on the
+Franka–XHand platform with a 7-DoF Franka arm and a
+12-DoF XHand dexterous hand across 11 glassware manip-
+ulation tasks, including grasping, placement, funnel inser-
+tion, and multi-stage compositions. Scene generalization
+introduces unseen distractors, while position generalization
+moves targets to locations absent from the demonstrations.
+We use calibrated fixed and wrist-mounted RGB cameras
+5
+
+
+Table 1. Main results on LIBERO-PRO. Success rates (%) on
+the test set and full benchmark.
+The test set excludes router-
+calibration episodes, whereas the full benchmark includes all
+8,000 episodes. MFM-VLA + Code Policy denotes an extended
+system that adds task-specific code-based controllers for opera-
+tions beyond the VLA’s capabilities. The MFM selects between
+the adapted VLA policy and these controllers.
+Evaluation
+Method
+Sem. Obj. Pos. Task Overall
+Test set
+Base π0.5
+91.7
+80.2 22.1 25.1
+54.8
+(N = 7,200)
++MFM-VLA
+95.4
+83.8 46.8 51.2
+69.3
++Code Policy
+96.7
+87.9 79.2 70.9
+83.7
+Full benchmark Base π0.5
+92.0
+80.2 22.2 25.2
+54.9
+(N = 8,000)
++MFM-VLA
+95.4
+83.8 47.5 52.6
+69.8
++Code Policy
+96.8
+88.1 80.5 72.1
+84.4
+without depth input and evaluate each task over 20 trials.
+Task and camera details are provided in the Appendix.
+Baselines and Implementation. MFM-VLA uses GPT-6
+Astra with π0.5 on LIBERO-PRO, RoboCasa365, and real-
+world tasks, and the official π0 checkpoint on ALOHA-
+Sim-PRO. We compare against the corresponding stan-
+dalone policies and conduct component ablations to isolate
+the effects of policy adaptation, routing, and spatial guid-
+ance. For LIBERO-PRO, the router is calibrated through
+paired Direct and Assisted evaluations on seeds 0–4, with
+VLA parameters fixed throughout. The resulting routing
+decisions are frozen before evaluation on seeds 5–49. Addi-
+tional training configurations, control settings, and baseline
+details are provided in the Appendix.
+5.2. Main Results
+LIBERO-PRO. As shown in Tab. 1, MFM-VLA improves
+overall success from 54.9% to 69.8% on the full benchmark.
+The largest improvements occur under Position (22.2% to
+47.5%) and Task perturbations (25.2% to 52.6%), while per-
+formance under Semantic and Object perturbations is also
+improved. These results demonstrate that MFM assistance
+particularly benefits tasks requiring changes in target selec-
+tion and spatial movement. Some operations, such as sus-
+tained plate pushing, remain beyond the capabilities of π0.5.
+We therefore further explore an extended system, MFM-
+VLA + Code Policy, in which the MFM selects between
+the adapted VLA and task-specific code-based controllers.
+This extension improves overall success to 84.4%, demon-
+strating the potential of the MFM-VLA framework.
+Zero-Shot MFM Control. Tab. 2 compares direct GPT-
+6 Astra control with VLA-based execution on matched
+episodes. GPT-6 Astra achieves only 3.5% success at the
+native horizon and 8.9% with a 3× horizon, despite target-
+lifting rates of 32.7% and 54.7%, respectively. In contrast,
+MFM-VLA maintains over 73% success, highlighting the
+importance of retaining VLA-based contact control.
+Table 2. Zero-shot MFM control on LIBERO-PRO. Success
+rates (%) on matched (suite, task, init) keys within each hori-
+zon. MFM evaluations use init 0–2, which belong to the router-
+calibration split. Held-out comparisons are reported in Tab. 1.
+Method
+Horizon
+N
+Semantic Position Task Overall
+GPT-6 Astra
+1×
+171
+6.9
+1.8
+1.8
+3.5
+Base π0.5
+1×
+171
+96.6
+14.3
+24.6
+45.6
+MFM-VLA
+1×
+171
+93.1
+55.4
+73.7
+74.3
+GPT-6 Astra
+3×
+179
+10.2
+10.0
+6.7
+8.9
+Base π0.5
+3×
+179
+96.6
+15.0
+25.0
+45.3
+MFM-VLA
+3×
+179
+93.2
+55.0
+73.3
+73.7
+Table 3. ALOHA-Sim-PRO bimanual transfer success rates
+(%) under the standard 400-step horizon (50 episodes per condi-
+tion; Pert. Avg. averages Sem., Obj., Pos., and Task).
+Method
+Orig.
+Sem. Obj. Pos.
+Task
+Pert. Avg.
+π0
+70.0
+40.0
+54.0
+0.0
+0.0
+23.5
+DOT Policy [14]
+88.0
+88.0
+16.0
+2.0
+0.0
+26.5
+Diffusion Policy [5]
+92.0
+92.0
+42.0
+4.0
+0.0
+34.5
+ACT [36]
+86.0
+86.0
+80.0
+2.0
+0.0
+42.0
+π0+MFM-VLA
+100.0 100.0 98.0 92.0 100.0
+97.5
+Table 4. RoboCasa365 success rates (%). Comp.-S/U denote
+seen/unseen composite tasks. Code Policy extends MFM-VLA
+with task-specific controllers for operations beyond the VLA’s ca-
+pabilities. Each method is evaluated over 2,500 episodes.
+Method
+Atomic
+Comp.-S
+Comp.-U
+Overall
+Diffusion Policy
+15.7
+0.2
+1.3
+6.1
+π0
+34.6
+6.1
+1.1
+14.8
+π0.5
+39.6
+7.1
+1.2
+16.9
+π0.5 + MFM-VLA
+39.3
+17.1
+2.4
+20.5
++Code Policy
+51.8
+18.1
+18.3
+30.3
+ALOHA-Sim-PRO. As shown in Tab. 3, MFM-VLA im-
+proves the average success rate across four perturbation
+settings from 23.5% to 97.5% under the standard 400-
+step horizon. The largest gains occur under Position and
+Task perturbations, where MFM-VLA achieves 92.0% and
+100.0% success, respectively.
+These results demonstrate
+that MFM-assisted spatial guidance also benefits bimanual
+manipulation under substantial spatial and task changes.
+RoboCasa365. As shown in Tab. 4, MFM-VLA improves
+overall success from 16.9% to 20.5%, with a larger gain on
+Composite-Seen tasks (7.1% to 17.1%). Performance on
+Atomic tasks remains nearly unchanged (39.6% to 39.3%),
+while Composite-Unseen success increases only from 1.2%
+to 2.4%. These results suggest that spatial guidance helps
+combine learned manipulation skills in familiar tasks, but
+6
+
+
+LIBERO-PRO
+RoboCasa365
+ALOHA-Sim-PRO
+Real-World Lab
+Task Shift: "Pick the milk and place it in the basket" 
+Position Swap: "Open the middle drawer of the cabinet"
+Counter-to-Cabinet: "Place counter item into overhead cabinet"
+Articulated Appliance: "Close the refrigerator door"
+Position Shift (+8 cm OOD): "Transfer displaced red cube"
+Task & Color Shift: "Pick unseen blue cube & transfer"
+Scene Gen. (Long-Horizon): "Pick funnel from stand -> insert into flask"
+Position Gen.: "Remove glass funnel from displaced flask"
+Figure 4. Qualitative results across simulation and real-world tasks. We show eight successful executions on LIBERO-PRO, Robo-
+Casa365, ALOHA-Sim-PRO, and the real-world laboratory platform. Each row presents successive execution frames from left to right,
+covering task and position changes, articulated-object manipulation, bimanual transfer, and transparent glassware manipulation.
+Table 5. Real-world success rates (%). Scene introduces unseen distractors; Position changes target locations. Each task is evaluated
+over 20 trials. Avg. is the unweighted mean across all tasks and both settings within each task group.
+Atomic tasks
+Multi-stage tasks
+Method
+Pick Beaker
+Pick Cylinder
+Balance
+Place
+Pick Funnel
+Remove Funnel
+Place Funnel
+Return Funnel
+Avg.
+Mid Balance
+Place Funnel
+Return Funnel
+Avg.
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+Scene
+Position
+π0.5
+0.0
+0.0
+0.0
+0.0
+85.0
+25.0
+0.0
+45.0
+15.0
+0.0
+30.0
+0.0
+15.0
+0.0
+30.0
+0.0
+15.3
+0.0
+0.0
+5.0
+0.0
+0.0
+0.0
+0.8
++MFM-VLA
+80.0
+90.0
+0.0
+30.0
+95.0
+40.0
+10.0
+50.0
+80.0
+75.0
+95.0
+85.0
+40.0
+30.0
+25.0
+45.0
+54.4
+80.0
+55.0
+10.0
+15.0
+15.0
+15.0
+31.7
+cannot fully compensate for missing low-level skills in un-
+seen task compositions. Adding task-specific code-based
+controllers further improves Composite-Unseen success to
+18.3% and overall success to 30.3%.
+Real-world Manipulation. As shown in Tab. 5, MFM-
+VLA improves the average success rate from 15.3% to
+54.4% on atomic tasks and from 0.8% to 31.7% on multi-
+stage tasks, averaged across Scene and Position settings.
+Notable gains include funnel grasping and removal un-
+der scene perturbations, as well as beaker grasping and
+multi-stage manipulation under position changes. These re-
+sults demonstrate the effectiveness of MFM-assisted spatial
+guidance in real-world manipulation involving transparent
+objects and multi-stage operations.
+Qualitative Results. Fig. 4 presents representative execu-
+tions across LIBERO-PRO, RoboCasa365, ALOHA-Sim-
+PRO, and real-world laboratory tasks. The examples cover
+target and position changes, articulated-object manipula-
+tion, bimanual transfer, and transparent glassware opera-
+tions, illustrating MFM-VLA’s applicability across different
+embodiments and manipulation settings.
+Table 6. MFM-VLA component ablations. Success rates (%)
+on 800 LIBERO-PRO episodes. w/o DGC uses perturbed-state
+recovery data but no dense geometric captions.
+Model
+Router
+Sem. Obj. Pos. Task Overall
+π0.5
+No
+92.5
+81.0 20.5 28.0
+55.5
+π0.5
+Always
+66.0
+50.0 37.5 58.0
+52.9
+Adapted π0.5
+No
+95.5
+85.0 39.5 30.5
+62.6
+π0.5
+Yes
+92.5
+81.0 41.5 57.0
+68.0
+Adapted π0.5 (w/o DGC)
+Yes
+95.5
+81.0 54.5 56.5
+71.9
+Adapted π0.5
+Yes
+95.5
+85.0 56.5 63.5
+75.1
+5.3. Ablation Studies
+Unless
+otherwise
+specified,
+ablations
+use
+the
+800-
+episode LIBERO-PRO subset (init 5–9), excluding router-
+calibration episodes. Under the default suite-level router,
+550 episodes use Direct mode, and 250 use Assisted mode.
+Component Ablation. Tab. 6 evaluates the contributions
+of policy adaptation and selective routing. Uniform MFM
+assistance improves Position and Task performance but de-
+grades Semantic and Object performance, reducing success
+from 55.5% to 52.9%. This motivates selective rather than
+7
+
+
+Table 7. Comparison of routing strategies on LIBERO-PRO.
+Success rates and assistance rates on 800 episodes (init 5–9).
+Routing Strategy
+Success rate (%)
+Assistance rate (%)
+All Direct
+62.6
+0.0
+All Guided
+62.3
+100.0
+Perturbation-level
+74.1
+50.0
+Suite-level
+75.1
+31.2
+Task-level
+78.5
+27.5
+Table 8. Spatial guidance ablations. Success rates (%) on the
+250 Assisted episodes and all 800 evaluation episodes.
+Variant
+Assisted
+Overall
+Adapted Direct
+33.6
+62.6
+Single-view grounding
+45.6
+66.4
+Without carry guidance
+62.0
+71.5
+Without grasp retries
+69.2
+73.8
+MFM-VLA
+73.6
+75.1
+uniform intervention.
+Dense geometric adaptation alone
+improves overall success to 62.6%, while adding the router
+to the base policy raises it to 68.0%. Combining routing
+with perturbed-state recovery further improves success to
+71.9%, and adding dense geometric captions increases it to
+75.1%. These results demonstrate the complementary ben-
+efits of policy adaptation and selective assistance.
+Router Strategy Ablation. Tab. 7 compares routing strate-
+gies at different granularities. All-Direct and All-Guided
+achieve 62.6% and 62.3%, respectively, while perturbation-
+level routing reaches 74.1%. Our suite-level router achieves
+75.1% success with only 31.2% MFM calls. Although task-
+level routing further improves success to 78.5% and reduces
+MFM calls to 27.5%, it requires more calibration data to
+make reliable task-specific decisions. With limited per-task
+calibration data, its routing decisions exhibit higher vari-
+ance and are more sensitive to individual calibration out-
+comes. In contrast, suite-level routing aggregates feedback
+across tasks, enabling more stable decisions with fewer
+samples. We thus adopt suite-level routing to balance per-
+formance and stability.
+Spatial Guidance Ablation.
+Tab. 8 evaluates guidance
+components, reporting success on the 250 Assisted episodes
+and overall success across all 800 episodes.
+Replacing
+two-view triangulation with single-view grounding reduces
+Assisted success from 73.6% to 45.6%, highlighting the
+importance of accurate 3D localization. Removing Carry
+guidance further reduces success to 62.0%, while disabling
+grasp retries reduces it to 69.2%. These results confirm the
+contributions of accurate grounding, free-space guidance,
+and local recovery to successful manipulation.
+MFM Backbones. Tab. 9 compares six MFM backbones
+Table 9. MFM backbone ablation on LIBERO-PRO. We report
+median horizontal (x, y) grounding error and the percentage of es-
+timates within 6 cm of the ground-truth target position, computed
+over samples with available estimates. Success rates (%) are re-
+ported on the 250 Assisted episodes and all 800 episodes.
+MFM backbone
+exy (cm)↓
+≤6 cm (%)↑
+Assisted
+Overall
+Kimi K3
+22.94
+8.7
+29.6
+61.4
+Qwen3-VL-30B
+2.25
+63.0
+38.0
+64.0
+Gemini 4 Argon
+2.75
+76.1
+58.4
+70.4
+Grok 4.7
+0.92
+91.3
+59.2
+70.6
+GPT-5.6
+0.57
+93.5
+60.4
+71.0
+GPT-6 Astra
+0.16
+97.3
+73.6
+75.1
+Table 10.
+Target-selection diagnostic after adaptation and
+guidance. Results (%) on an independent 200-episode diagnos-
+tic set across four Task-perturbation suites. onew denotes the in-
+structed target and otrain the original training target.
+Method
+Success ↑
+Lift onew ↑
+Lift otrain ↓
+Base π0.5
+22.5
+33.0
+40.0
+Adapted Direct
+27.5
+35.0
+35.5
+Base + Guidance
+61.0
+75.5
+8.5
+MFM-VLA
+73.5
+81.5
+2.5
+with the adapted VLA and execution pipeline fixed. GPT-6
+Astra achieves the lowest median horizontal grounding er-
+ror (0.16 cm), the highest ≤6 cm hit rate (97.3%), and the
+highest Assisted success rate (73.6%). These results show
+that MFM-VLA accommodates different MFM backbones
+and suggest that more accurate task-relevant grounding con-
+tributes to better manipulation performance.
+Shortcut Mitigation.
+To examine whether MFM-VLA
+mitigates the visual scene shortcuts identified in Sec. 3.2,
+we repeat the counterfactual instruction test on four Task-
+perturbation suites. As shown in Tab. 10, dense adaptation
+alone provides limited improvement in instructed-target lift-
+ing (33.0% to 35.0%).
+Spatial guidance increases it to
+75.5% and reduces incorrect lifting of the original training
+target from 40.0% to 8.5%. Combining guidance with pol-
+icy adaptation further improves instructed-target lifting to
+81.5% and reduces original-target lifting to 2.5%. These
+results show that spatial guidance helps redirect target se-
+lection, while policy adaptation improves its execution.
+6. Conclusion
+We investigate how MFMs can improve the spatial gen-
+eralization of pretrained VLAs and make two key obser-
+vations. First, systematic analysis reveals that pretrained
+VLAs often rely on visual scene shortcuts, leading to incor-
+rect target selection and spatial routing, while local manip-
+ulation skills remain largely usable. Second, indiscriminate
+8
+
+
+MFM assistance can interfere with tasks that VLAs already
+handle well. Based on these findings, we propose MFM-
+VLA, a selective collaboration framework that combines
+dense geometric policy adaptation, development-calibrated
+routing, and MFM-based spatial guidance.
+Experiments
+across three simulation benchmarks and real-world chem-
+istry tasks demonstrate improved spatial generalization and
+reduced shortcut-driven failures while preserving the ma-
+nipulation capabilities of pretrained VLAs. We hope this
+work provides a practical direction for combining MFM
+spatial reasoning with learned VLA manipulation skills.
+LLM Usage Statement
+We used Cursor to assist with code editing and debug-
+ging, and ChatGPT for language polishing, grammar check-
+ing, and improving manuscript clarity.
+All AI-assisted
+code and text were reviewed and revised by the au-
+thors.
+References
+[1] Michael Ahn, Anthony Brohan, Noah Brown, Yevgen Cheb-
+otar, Omar Cortes, Byron David, Chelsea Finn, Chuyuan Fu,
+Keerthana Gopalakrishnan, Karol Hausman, et al. Do as i
+can, not as i say: Grounding language in robotic affordances.
+arXiv preprint arXiv:2204.01691, 2022. 1, 2
+[2] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom,
+Karol Hausman, Brian Ichter, et al. π0: A vision-language-
+action flow model for general robot control. arXiv preprint
+arXiv:2410.24164, 2024. 1, 2
+[3] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen
+Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding,
+Danny Driess, Avinava Dubey, Chelsea Finn, et al. Rt-2:
+Vision-language-action models transfer web knowledge to
+robotic control. arXiv preprint arXiv:2307.15818, 2023. 1,
+2
+[4] Kaiyuan Chen, Shuangyu Xie, Letian Fu, Justin Yu, William
+Pacini, Sandeep Bajamahal, Hudson Kim, Jaimyn Drake,
+Daehwa Kim, Haoru Xue, et al.
+Gap: A graph-as-policy
+multi-agent self-learning harness for variational automation
+tasks. arXiv preprint arXiv:2607.05369, 2026. 2
+[5] Cheng Chi, Zhenjia Xu, Siyuan Feng, Eric Cousineau, Yilun
+Du, Benjamin Burchfiel, Russ Tedrake, and Shuran Song.
+Diffusion policy: Visuomotor policy learning via action dif-
+fusion. The International Journal of Robotics Research, 44
+(10-11):1684–1704, 2025. 6
+[6] OX-Embodiment Collaboration,
+Abby O’Neill,
+Abdul
+Rehman, Abhinav Gupta, Abhiram Maddukuri, Abhishek
+Gupta, Abhishek Padalkar, Abraham Lee, Acorn Pooley,
+Agrim Gupta, et al. Open x-embodiment: Robotic learning
+datasets and rt-x models. arXiv preprint arXiv:2310.08864,
+1(2), 2023. 1
+[7] Danny Driess, Fei Xia, Mehdi SM Sajjadi, Corey Lynch,
+Aakanksha
+Chowdhery,
+Brian
+Ichter,
+Ayzaan
+Wahid,
+Jonathan Tompson, Quan Vuong, Tianhe Yu, et al. Palm-
+e: An embodied multimodal language model. arXiv preprint
+arXiv:2303.03378, 2023. 1
+[8] Letian Fu, Justin Yu, Karim El-Refai, Ethan Kou, Haoru
+Xue, Huang Huang, Wenli Xiao, Guanzhi Wang, Dantong
+Niu, Fei-Fei Li, et al. Cap-x: A framework for benchmarking
+and improving coding agents for robot manipulation. arXiv
+preprint arXiv:2603.22435, 2026. 2
+[9] Wenlong Huang, Chen Wang, Ruohan Zhang, Yunzhu Li,
+Jiajun Wu, and Li Fei-Fei. Voxposer: Composable 3d value
+maps for robotic manipulation with language models. arXiv
+preprint arXiv:2307.05973, 2023. 1, 2
+[10] Physical Intelligence, Kevin Black, Noah Brown, James
+Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail,
+Michael Equi, Chelsea Finn, Niccolo Fusai, et al. π0.5: a
+vision-language-action model with open-world generaliza-
+tion. arXiv preprint arXiv:2504.16054, 2025. 1, 2
+[11] Alexander Khazatsky,
+Karl Pertsch,
+Suraj Nair,
+Ash-
+win Balakrishna, Sudeep Dasari, Siddharth Karamcheti,
+Soroush Nasiriany, Mohan Kumar Srirama, Lawrence Yun-
+liang Chen, Kirsty Ellis, et al.
+Droid:
+A large-scale
+in-the-wild robot manipulation dataset.
+arXiv preprint
+arXiv:2403.12945, 2024. 1
+[12] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao,
+Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan
+Foster, Grace Lam, Pannag Sanketi, et al.
+Openvla: An
+open-source vision-language-action model. arXiv preprint
+arXiv:2406.09246, 2024. 1, 2
+[13] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning
+vision-language-action models: Optimizing speed and suc-
+cess. arXiv preprint arXiv:2502.19645, 2025. 2
+[14] Ilia Larchenko. Decoder only transformer policy - simple but
+powerful model for behavioral cloning, 2025. GitHub repos-
+itory:
+https://github.com/IliaLarchenko/
+dot_policy. 6
+[15] Jacky Liang, Wenlong Huang, Fei Xia, Peng Xu, Karol
+Hausman, Brian Ichter, Pete Florence, and Andy Zeng. Code
+as policies: Language model programs for embodied control.
+In 2023 IEEE International conference on robotics and au-
+tomation (ICRA), pages 9493–9500. IEEE, 2023. 2
+[16] Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao
+Zhang, Jie Yang, Qing Jiang, Chunyuan Li, Jianwei Yang,
+Hang Su, et al.
+Grounding dino:
+Marrying dino with
+grounded pre-training for open-set object detection. In Euro-
+pean conference on computer vision, pages 38–55. Springer,
+2024. 3
+[17] Runyu Lu, Yubo Wu, Ethan Kou, Letian Fu, Wenli Xiao,
+Ajay Mandlekar, Yinzhen Xu, Guanya Shi, Ken Goldberg,
+Ang Chen, et al.
+Aspire:
+Agentic/skills discovery for
+robotics. arXiv preprint arXiv:2607.00272, 2026. 2
+[18] Soroush Nasiriany, Sep Nasiriany, Abhiram Maddukuri, and
+Yuke Zhu. Robocasa365: A large-scale simulation frame-
+work for training and benchmarking generalist robots. In In-
+ternational Conference on Learning Representations, pages
+98643–98667, 2026. 1, 5, 2
+[19] OpenAI.
+Gpt-6 astra: A new generation of intelligence,
+2026. 2
+9
+
+
+[20] Alfredo Reichlin, Giovanni Luca Marchetti, Hang Yin, Ali
+Ghadirzadeh, and Danica Kragic. Back to the manifold: Re-
+covering from out-of-distribution states. In 2022 IEEE/RSJ
+International Conference on Intelligent Robots and Systems
+(IROS), pages 8660–8666. IEEE, 2022. 4
+[21] Lucy Xiaoyang Shi, Brian Ichter, Michael Equi, Liyim-
+ing Ke, Karl Pertsch, Quan Vuong, James Tanner, Anna
+Walling, Haohuan Wang, Niccolo Fusai, et al.
+Hi robot:
+Open-ended instruction following with hierarchical vision-
+language-action models. arXiv preprint arXiv:2502.19417,
+2025. 1
+[22] Yunzhou Song, Long Le, Yong-Hyun Park, Jie Wang, Jun-
+yao Shi, Lingjie Liu, Jiatao Gu, Eric Eaton, Dinesh Jayara-
+man, and Kostas Daniilidis. Omniguide: Universal guidance
+fields for enhancing generalist robot policies. arXiv preprint
+arXiv:2603.10052, 2026. 2
+[23] Jiayi Su, Yixin Zheng, Mi Yan, Li Yi, Zhizheng Zhang, and
+He Wang. GPT 6 Astra as an embodied policy. Technical
+report and code, 2026. 1
+[24] Jianli Sun, Chengxiang Li, and Yonglin Tian. Make {\pi}
+0.5 learn to call astra for reliable robot manipulation. arXiv
+preprint arXiv:2610.14117, 2026. 2
+[25] Zhipeng Tang, Sihang Chen, Sha Zhang, Peihao Yang, Yan
+Liu, Wentao Zhao, Xinrui Liu, Rui Huang, Wensheng Du,
+Yuting Huang, et al.
+Labdex: A hierarchical benchmark
+for dexterous manipulation in laboratories. arXiv preprint
+arXiv:2608.18618, 2026. 1
+[26] Galbot Team, Xuchuan Chen, Xiaoqian Cheng, Yu Deng,
+Lihe Ding, Shaocong Dong, Xiangjun Gao, Haozhe Jia,
+Zekai Li, Zhoujian Li, et al. Systematically exploring the ca-
+pabilities of gpt-6 astra as embodied policies. arXiv preprint
+arXiv:2609.38537, 2026. 2
+[27] Octo Model Team, Dibya Ghosh, Homer Walke, Karl
+Pertsch, Kevin Black, Oier Mees, Sudeep Dasari, Joey
+Hejna,
+Tobias Kreiman,
+Charles Xu,
+et al.
+Octo:
+An open-source generalist robot policy.
+arXiv preprint
+arXiv:2405.12213, 2024. 1
+[28] Yuran Wang, Siqiao Huang, Mingleyang Li, Chenhao Zhang,
+Jiaqi Liang, Weiyang Jin, Yue Chen, Xuemin Chi, Dong-
+hao Zhou, Qize Yu, et al.
+Openwam: An open, modular
+exploration towards systematic world-action model pretrain-
+ing. arXiv preprint arXiv:2609.07398, 2026. 2
+[29] Wenli Xiao, Haotian Lin, Andy Peng, Haoru Xue, Tairan He,
+Zhengyi Luo, Yuqi Xie, Fengyuan Hu, Jim Fan, Guanya Shi,
+et al.
+Self-improving vision-language-action models with
+data generation via residual rl. In International Conference
+on Learning Representations, pages 13209–13236, 2026. 2
+[30] Wenli Xiao, Jia Xie, Tonghe Zhang, Haotian Lin, Letian Fu,
+Haoru Xue, Jalen Lu, Yi Yang, Cunxi Dai, Zi Wang, et al.
+Enpire: Agentic robot policy self-improvement in the real
+world. arXiv preprint arXiv:2606.19980, 2026. 2
+[31] Lin Yang, Yunjie Shen, Zheyu Li, Zhenjie Tian, Yongli
+Wang, Dongze Huang, Weiqi Wang, Yucheng Zhu, Zhao-
+quan Jiang, Guofeng Xie, et al. Leap-vla: High-rate robot
+control from a low-rate vlm backbone.
+arXiv preprint
+arXiv:2611.01011, 2026. 2
+[32] Yifan Yang, Zhixiang Duan, Tianshi Xie, Fuyu Cao, Pinxi
+Shen, Peili Song, Chenyang Zhao, Piaopiao Jin, Guokang
+Sun, Shaoqing Xu, et al. Fpc-vla: A vision-language-action
+framework with a supervisor for failure prediction and cor-
+rection.
+Expert Systems with Applications, page 131742,
+2026. 2
+[33] Yifei Yao, Yude Zou, Guanbo Jiao, Xing Gao, Ning Gao,
+Yukai Wang, Jiantong Chen, Zihou Zhu, Xinyu Li, Ningyu
+Yan, et al.
+Profiling a frontier agent with ebench: From
+direct control to harness with policy.
+arXiv preprint
+arXiv:2610.35832, 2026. 2
+[34] Jingkun Yi, Shujie Zhang, Zirui Zhou, Haoxiao Wang,
+Haiyang Sun, Yuhang Dong, Xudong Xu, Xing Shen, Tao
+Zhang, Yong Liu, et al. Vlms are native action models: Un-
+leashing the manipulation capabilities of vlms with explicit
+action-space grounding. arXiv preprint arXiv:2610.12832,
+2026. 2
+[35] Junyi Zhang, Jiaxin Ge, Hanjun Yoo, Letian Fu, Zihan Yang,
+Yaowei Liu, Raj Saravanan, Shaofeng Yin, Justin Yu, Dan-
+tong Niu, et al. Playful agentic robot learning. arXiv preprint
+arXiv:2606.19419, 2026. 2
+[36] Tony Z Zhao, Vikash Kumar, Sergey Levine, and Chelsea
+Finn.
+Learning fine-grained bimanual manipulation with
+low-cost hardware. arXiv preprint arXiv:2304.13705, 2023.
+1, 5, 6
+[37] Ninghan Zhong, Jing-Chen Peng, and Sriram Vishwanath.
+Gt-vla: Target-conditioned trace guidance for generalizable
+robotic manipulation.
+arXiv preprint arXiv:2609.31904,
+2026. 2
+[38] Enshen Zhou, Jingkun An, Cheng Chi, Yi Han, Shanyu
+Rong, Chi Zhang, Pengwei Wang, Zhongyuan Wang, Tiejun
+Huang, Lu Sheng, et al. Roborefer: Towards spatial refer-
+ring with reasoning in vision-language models for robotics.
+Advances in Neural Information Processing Systems, 38:
+28404–28481, 2026. 2
+[39] Xueyang Zhou, Yangming Xu, Guiyao Tie, Yongchao Chen,
+Guowen Zhang, Duanfeng Chu, Pan Zhou, and Lichao
+Sun.
+Libero-pro: Towards robust and fair evaluation of
+vision-language-action models beyond memorization. arXiv
+preprint arXiv:2510.03827, 2025. 1, 2, 5
+10
+
+
+Ground, Guide, Act: Improving VLA Spatial Generalization with
+Multimodal Foundation Models
+Supplementary Material
+7. Implementation Details
+7.1. Inference Procedure
+Algorithm S1: MFM-VLA Inference
+Input: Task instruction ℓ, routing unit τ, frozen router R, adapted VLA
+πθ, calibrated RGB cameras.
+1 if R(τ) = DIRECT then execute πθ with ℓ; return.
+2 Acquire fixed-view image Ia.
+3 Ground the grasp target and destination in Ia with coarse-to-fine
+MFM queries.
+4 Plan and execute a free-space wrist survey move; acquire second
+view Ib.
+5 for each target x ∈{grasp, place} do
+6
+Match the task-relevant contact point across Ia and Ib.
+7
+Triangulate, check visibility and ray gap, and reobserve if nec-
+essary.
+8
+Set ˆpx to the accepted 3D point, or ∅if invalid.
+9 end for
+10 if ˆpgrasp̸ = ∅then estimate support height and execute Carte-
+sian pre-grasp handoff.
+11 if the grasp target is valid then enable grounded dense captions.
+12 Execute VLA-based local alignment, grasp, and lift.
+13 if a grasp is detected and the grasp reference is available then
+visually verify the held object; retry a wrong grasp at most twice.
+14 if grasp verified and place target valid then execute the platform-
+specific carry policy: LIBERO-PRO: allow a brief VLA carry at-
+tempt, then switch to Cartesian transport when triggered; Robo-
+Casa365: use Cartesian transport immediately.
+15 if a carry drop occurs then re-ground and retry at most once.
+16 Continue VLA execution for local placement and release, subject
+to the episode step budget.
+Algorithm S1 summarizes the inference procedure of
+MFM-VLA. A frozen capability router first determines
+whether an episode requires external assistance.
+Direct
+episodes are executed entirely by the adapted VLA. For
+Assisted episodes, the MFM localizes task-relevant targets
+from two sequential RGB observations, after which geo-
+metric checks determine whether Cartesian handoffs are re-
+liable. The controller handles free-space movement where
+valid targets are available, while the VLA retains con-
+trol over contact-rich manipulation. Visual verification and
+bounded recovery are used to handle incorrect grasps and
+dropped objects.
+Capability routing.
+The router compares Direct and As-
+sisted success rates measured on a development set and se-
+lects Assisted execution only when the estimated gain ex-
+ceeds δ = 0.05 (5 percentage points) and the task supports
+the handoff interface (C(τ) = 1). We use suite-level rout-
+ing with K = 5 calibration episodes per task by default and
+freeze the resulting routing decisions before evaluation. A
+Direct decision executes πθ with the original instruction ℓ
+without invoking the MFM.
+Target grounding and view acquisition.
+For Assisted
+execution, the MFM first identifies the object to grasp
+and its destination in the fixed RGB view. A full-frame
+query proposes candidates, and a subsequent zoomed-crop
+query resolves the intended object and its base-contact
+pixel. These first-view observations define calibrated rays
+for planning a free-space survey move that places the wrist
+camera where the candidate targets are likely to be visible.
+Only after this move do we acquire the wrist RGB image.
+Conditioned on the selected objects in the first view, the
+MFM then identifies the corresponding manipulation points
+in the two views, rather than independently selecting a new
+object in the wrist view.
+Two-view reconstruction.
+A pixel uc in camera c defines
+the viewing ray
+rc(s) = oc + sdc,
+dc =
+RcK−1
+c [uc; 1]
+∥RcK−1
+c [uc; 1]∥2
+,
+(3)
+where Kc denotes camera intrinsics and (oc, Rc) its
+camera-to-world pose. For matched pixels, we find the clos-
+est points on the two viewing rays by solving
+(s⋆, t⋆) = arg min
+s,t≥0 ∥ra(s) −rb(t)∥2
+2.
+We take their midpoint as the 3D estimate and their distance
+as the geometric consistency gap:
+ˆp = ra(s⋆) + rb(t⋆)
+2
+,
+g = ∥ra(s⋆) −rb(t⋆)∥2.
+(4)
+If the target is clipped, the wrist camera is recentered; if it is
+not visible, the hand is raised by 15 cm once. A gap above
+1 cm triggers up to two additional recentering attempts, re-
+taining the valid view with the smallest gap. Estimates are
+accepted for g ≤2.5 cm, or 3.0 cm for articulated handles.
+Support height and fallback.
+The support height is esti-
+mated without depth using the fixed-view ray through the
+object’s base-contact pixel.
+Given the triangulated hori-
+zontal contact-point location ˆpxy and the base-contact ray
+(oa, dbase), we find the horizontally closest point on the ray
+by constraining the projection parameter to be nonnegative:
+s⊥= max
+(
+0,
+d⊤
+base,xy(ˆpxy −oa,xy)
+∥dbase,xy∥2
+2
+)
+,
+zsup = oa,z + s⊥dbase,z.
+(5)
+1
+
+
+If a target has no accepted two-view estimate, its precision-
+dependent Cartesian handoff is skipped and the adapted
+VLA continues execution.
+Geometric captions and stage-wise control.
+When
+grounding is available, the adapted VLA receives dense
+captions describing the scene, current subgoal, gripper-to-
+target geometry, and short-horizon motion. The Cartesian
+controller moves the open gripper to a pre-grasp handoff
+pose, after which the VLA performs local alignment, de-
+scent, grasping, and lifting.
+Following a verified grasp,
+carry is primarily handled by the Cartesian controller, which
+transports the grasped object to a pre-place handoff pose
+above the destination. On LIBERO-PRO Assisted episodes
+(eval g5.py, mode g5j), after a confirmed grasp the
+VLA carries first while a monitor tracks the horizontal end-
+effector–to–place distance dt = ∥pxy
+t
+−ˆpxy
+place∥2. Con-
+troller takeover is triggered by any of the following con-
+ditions from the frozen g5j place config:
+• Insufficient progress (brief window).
+After exactly
+W0=20 action steps, if d0 −dW0 < 3 cm.
+• Stall. After the brief window, if over any subsequent win-
+dow of W=10 steps the reduction dt−W −dt is less than
+1 cm while dt > 10 cm (near-target horizontal stall is ig-
+nored so that lowering/placing is not interrupted).
+• Timeout. After Tcarry=40 action steps without arriving
+within 4 cm of ˆpplace.
+• Premature gripper opening. If the VLA issues an open-
+gripper command while dt > 8 cm.
+Otherwise, if the VLA opens near the target or reaches
+dt ≤4 cm, control remains with the VLA for Place &
+Release (with a free-space release fallback if it has not
+opened within 30 steps after hand-back). On RoboCasa365,
+controller transport begins immediately once the lift and
+destination-validity conditions are met. The VLA then per-
+forms local placement and release.
+Handoff offsets are
+taken from training demonstrations (e.g., the LIBERO pre-
+grasp offset is [+2.6, +0.4, +9.0] cm from the object top).
+Verification and recovery.
+After a detected grasp-and-
+lift event, the MFM compares the held object against the
+reference crop cached during initial grounding, using cur-
+rent fixed and wrist RGB observations. If the wrong ob-
+ject is held, the controller opens the gripper, rises by 5 cm,
+and returns to a closer pre-grasp handoff pose for another
+VLA grasp attempt. The cached reference crop is reused
+for subsequent grasp verification, with at most Mretry = 2
+re-grasps.
+A drop during transport instead triggers re-
+grounding and at most one carry recovery. All actions re-
+main subject to the episode step budget.
+7.2. Benchmark Setup and Inference
+LIBERO-PRO.
+LIBERO-PRO [39] contains 160 tasks
+across 16 suites, covering four perturbation types: Semantic
+(instruction paraphrases), Object (appearance changes), Po-
+sition (object displacement and swaps), and Task (changes
+in instructed targets).
+We fine-tune π0.5 on 14,075 tra-
+jectories, including 6,350 official demonstrations, 5,597
+perturbed-state recovery rollouts, and 2,128 spatial aug-
+mentations, for 10,000 steps. We evaluate 50 initializations
+per task (N = 8,000), using init 0--4 for router cali-
+bration and init 5--49 for held-out evaluation.
+We use GPT-6 Astra [19] as the external MFM and a
+frozen suite-level router with δ = 0.05, calibrated on five
+initializations per task. The router selects Direct execution
+for 11 suites and Assisted execution for the remaining five.
+The adapted VLA receives 224 × 224 RGB observations
+and replans every five action steps. Episode horizons fol-
+low the benchmark settings: 220 steps for Spatial, 280 for
+Object, 300 for Goal, and 520 for LIBERO-10 tasks. In As-
+sisted mode, the MFM grounds task-relevant targets from
+RGB observations, while the Cartesian controller and VLA
+execute the corresponding spatial handoffs and local manip-
+ulation.
+RoboCasa365.
+We evaluate a 50-task subset of Robo-
+Casa365 [18], comprising 18 Atomic-Seen, 16 Composite-
+Seen, and 16 Composite-Unseen tasks, with 50 episodes
+per task (N = 2,500).
+The first five episodes per task
+(N = 250) are used for task-level router calibration, while
+the remaining 45 episodes (N = 2,250) form the held-out
+evaluation set. The reported full-benchmark results include
+all 2,500 episodes, including the 250 router-calibration
+episodes. We additionally distinguish the 2,250 episodes
+held out from router selection for evaluation. We fine-tune
+π0.5 from the official 75k-step checkpoint for 7,500 cumu-
+lative steps using 1,437 trajectories from seen tasks (563
+human demonstrations and 874 recovery rollouts), exclud-
+ing all Composite-Unseen tasks.
+GPT-6 Astra decomposes the task into up to three or-
+dered manipulation stages. The task-level routing decisions
+are determined from five calibration episodes per task and
+frozen before evaluation. For Assisted execution, the MFM
+identifies stage-specific targets and selects either top-down
+or front-horizontal approaches. Grounding uses calibrated
+left and right fixed RGB cameras, supplemented by an ac-
+tively positioned wrist camera when needed. The adapted
+VLA receives three RGB views and proprioceptive states,
+with 224 × 224 image inputs and replanning every five
+action steps. Dynamic dense geometric captions provide
+stage-specific target-relative guidance during execution.
+2
+
+
+Table 11. Grounding, verification, and retry ablations on LIBERO-PRO (init 5--9; Assisted N=250, Overall N=800). The target-
+ID oracle is a simulation-only diagnostic for grasp verification. Success rates are percentages. For GPT-6 Astra, the two retry settings share
+the same visual verifier and differ in the maximum number of re-grasp attempts.
+3D Grounding
+Verification / Retry Setting
+Assist.
+Overall
+GroundingDINO (top-edge)
+No MFM verify (proprio. only)
+10.0
+55.3
+GroundingDINO (box center)
+No MFM verify (proprio. only)
+16.4
+57.3
+GroundingDINO (box center)
+Live MFM visual (Qwen3-VL-30B)
+17.2
+57.5
+GroundingDINO (box center)
+Sim target-ID oracle
+17.2
+57.5
+GPT-6 Astra
+Visual verify, no retry (Mretry = 0)
+69.2
+73.8
+GPT-6 Astra
+Visual verify + bounded retry (Mretry = 2)
+73.6
+75.1
+Figure 5. Real-world experimental setup. A Franka robotic arm
+equipped with a dexterous hand operates in a tabletop workspace
+containing laboratory glassware and an electronic scale. Two ex-
+ternal cameras capture the workspace from different viewpoints.
+ALOHA-Sim-PRO.
+ALOHA-Sim-PRO
+evaluates
+bi-
+manual cube transfer using a 14-DoF robot. We use the
+official π0 checkpoint without additional fine-tuning and
+a fixed 400-step episode horizon. The benchmark covers
+five conditions: Original, Semantic, Object, Position, and
+Task, with 50 seeds per condition. Semantic perturbations
+paraphrase the instruction; Object perturbations change the
+cube to an unseen color; Position perturbations move it
+outside the training region; and Task perturbations combine
+target appearance and position changes with an updated
+instruction.
+Real-World Task.
+Fig. 5 shows our real-world experi-
+mental setup, comprising a Franka robotic arm equipped
+with a dexterous hand, two external cameras, and a table-
+top workspace with laboratory glassware and an electronic
+scale. We evaluate 11 transparent-glassware manipulation
+tasks using a 7-DoF Franka arm equipped with a 12-DoF
+XHand dexterous hand. The perception system consists of
+one wrist-mounted RGB camera and two tripod-mounted
+Intel RealSense RGB cameras. Each task is evaluated with
+20 trials per setting. Scene generalization introduces unseen
+Table 12. GroundingDINO vs. MFM backbones on LIBERO-
+PRO (init 5--9). err: median horizontal (x,y) grounding error
+(cm); ≤6 cm: hit rate (%). Assisted and Overall success (%)
+use 250 and 800 episodes, respectively, with the same 417/550
+successful Direct episodes.
+Backbone
+err↓
+≤6 cm↑Assist. Overall
+GroundingDINO (top-edge, no verify)
+11.97
+20.9
+10.0
+55.3
+GroundingDINO (box center, no verify) 9.04
+49.1
+16.4
+57.3
+GroundingDINO + MFM verify
+9.04
+49.1
+17.2
+57.5
+Kimi K3
+22.94
+8.7
+29.6
+61.4
+Qwen3-VL-30B
+2.25
+63.0
+38.0
+64.0
+Gemini 4 Argon
+2.75
+76.1
+58.4
+70.4
+Grok 4.7
+0.92
+91.3
+59.2
+70.6
+GPT-5.6
+0.57
+93.5
+60.4
+71.0
+GPT-6 Astra
+0.16
+97.3
+73.6
+75.1
+laboratory distractors, while Position generalization moves
+targets outside the demonstration region.
+We use GPT-6 Astra for task-conditioned grounding and
+visual grasp verification, together with the adapted VLA
+for fine-grained manipulation. Calibrated fixed and wrist
+RGB views provide two-view geometric measurements of
+grasp and placement targets. The resulting 3D targets guide
+Cartesian free-space motion, while the VLA retains control
+over local contact-rich operations. Visual verification and
+bounded re-grasp recovery are applied when necessary.
+8. Additional Experiments
+8.1. Replacing the MFM with GroundingDINO
+We replace MFM-based grounding with GroundingDINO-
+Base [16], keeping the adapted VLA and suite router fixed.
+As shown in Tab. 12, selecting the bounding-box center im-
+proves Assisted success over the top-edge midpoint (16.4%
+vs. 10.0%), but remains substantially below GPT-6 Astra
+(73.6%). Adding live MFM grasp verification or a simula-
+tion target-ID oracle yields only 17.2% success (Tab. 11),
+suggesting that verification alone cannot compensate for in-
+accurate grounding.
+3
+
+
+Table 13.
+Router calibration budget on LIBERO-PRO
+(N=800). Results cover all
+  5
+K
+
+calibration subsets. Suite/Task
+denote routing granularity; Assist. is the Assisted episode rate. All
+rates are percentages.
+K
+Suite Succ.(%)Assist.(%)Task Succ.(%)Assist.(%)
+All Direct
+62.6
+0.0
+62.6
+0.0
+All Assisted
+62.3
+100.0
+62.3
+100.0
+1
+75.1±0.2
+28.8
+74.6±0.9
+18.2
+2
+75.2±0.2
+28.1
+76.1±0.9
+22.6
+3
+75.2±0.1
+28.8
+77.1±0.7
+25.0
+4
+75.2±0.1
+30.0
+78.0±0.4
+26.9
+5
+75.1
+31.2
+78.5
+27.5
+Episode oracle
+80.9
+Table 14. Routing margin sensitivity at K=5 (N=800). Assist.
+is the Assisted episode rate. All rates are percentages.
+δ
+Suite Succ. (%)
+Assist.(%)
+Task Succ. (%)
+Assist. (%)
+0.00
+75.1
+31.2
+78.5
+27.5
+0.05
+75.1
+31.2
+78.5
+27.5
+0.10
+75.1
+31.2
+78.5
+27.5
+0.20
+73.0
+18.8
+77.3
+21.2
+0.40
+71.9
+12.5
+74.8
+15.6
+Table 15. Three action-sampling seeds on LIBERO-PRO (init
+5--9, N=800 per seed). Results are reported as mean ± standard
+deviation (%).
+Method
+Sem.
+Obj.
+Pos.
+Task
+Overall
+Base π0.5
+93.7±1.3 82.3±0.9 25.5±3.5
+25.5±1.8
+56.8±0.9
+MFM-VLA 93.5±2.2 82.8±1.7 53.3±2.5 59.5±3.1 72.3±2.0
+8.2. Router Calibration Budget and Margin
+We vary the calibration budget K over all
+  5
+K
+
+subsets of
+init 0--4 and evaluate on init 5--9.
+As shown
+in Tab. 13, suite-level routing remains stable even with
+K=1 (75.1±0.2%), whereas task-level routing benefits
+more from additional calibration data, reaching 78.5% at
+K=5. Performance is unchanged across the tested margins
+from 0 to 0.10, while larger margins reduce both assistance
+frequency and success (Tab. 14). We use suite-level rout-
+ing with K=5 and δ=0.05 by default. The paired episode
+oracle, which selects between execution modes using eval-
+uation outcomes, achieves 80.9%.
+8.3. Multi-Seed Sampling Variance
+We evaluate three independent action-sampling seeds on
+init 5--9, with 800 episodes per seed and fixed model
+checkpoints. As shown in Tab. 15, MFM-VLA improves
+mean overall success from 56.8% to 72.3%.
+The gains
+concentrate on Position and Task perturbations (+27.8 and
++34.0 percentage points), while Semantic and Object per-
+formance remains similar, supporting the main findings
+across sampling seeds.
+8.4. Additional Qualitative Results
+We provide additional qualitative results on LIBERO-PRO,
+ALOHA-Sim-PRO, RoboCasa365, and real-world labora-
+tory tasks in Figs. 6 to 9, respectively. These examples il-
+lustrate manipulation behaviors across different target in-
+structions, spatial configurations, and tasks.
+4
+
+
+Task description: pick the milk and place it in the basket
+π0.5
+MFM-VLA
+Task description: open the middle layer of the drawer
+π0.5
+MFM-VLA
+Task description: pick the akita black bowl next to the ramekin and place it on the plate
+π0.5
+MFM-VLA
+Task description: put both the cream cheese box and the butter in the basket
+π0.5
+MFM-VLA
+Figure 6. Qualitative comparisons on LIBERO-PRO. Examples cover object selection, drawer manipulation, and multi-object rear-
+rangement. For each task, the upper and lower rows show π0.5 and MFM-VLA, respectively. Time progresses from left to right.
+5
+
+
+Task description: transfer cube (+8 cm OOD position shift)
+π0
+MFM-VLA
+Task description: transfer cube (+12 cm OOD position shift)
+π0
+MFM-VLA
+Task description: transfer the blue cube
+π0
+MFM-VLA
+Task description: ignore the default center position; pick up the green cube and transfer it to the left arm
+π0
+MFM-VLA
+Figure 7. Qualitative comparisons on ALOHA-Sim-PRO. Examples show bimanual cube transfer under position shifts and different
+target instructions. For each task, the upper and lower rows show π0 and MFM-VLA, respectively. Time progresses from left to right.
+6
+
+
+Task description: place the toasted item on a plate
+π0.5
+MFM-VLA
+Task description: close the fridge doors
+π0.5
+MFM-VLA
+Task description: pick the mug from the counter and place it under the coffee machine dispenser
+π0.5
+MFM-VLA
+Task description: close the toaster oven door
+π0.5
+MFM-VLA
+Figure 8. Qualitative comparisons on RoboCasa365. Examples cover object placement and toaster oven door manipulation. For each
+task, the upper and lower rows show π0.5 and MFM-VLA, respectively. Time progresses from left to right.
+7
+
+
+Task description: extract the glass funnel from the displaced flask (π0.5: 0.0% vs. MFM-VLA: 85.0%)
+Front-Left
+Overhead
+Task description: grasp the glass funnel from the stand amidst distractors (π0.5: 15.0% vs. MFM-VLA: 80.0%)
+Front-Left
+Overhead
+Task description: pick the glass funnel from the stand and insert into the flask (π0.5: 5.0% vs. MFM-VLA: 10.0%)
+Front-Left
+Overhead
+Task description: pick the glass funnel and insert into the displaced flask (π0.5: 0.0% vs. MFM-VLA: 15.0%)
+Front-Left
+Overhead
+Figure 9. Qualitative results on real-world laboratory tasks. Examples show glass funnel extraction, grasping, and insertion with object
+displacement or distractors. For each task, the upper and lower rows show front-left and overhead views, respectively. Time progresses
+from left to right.
+8

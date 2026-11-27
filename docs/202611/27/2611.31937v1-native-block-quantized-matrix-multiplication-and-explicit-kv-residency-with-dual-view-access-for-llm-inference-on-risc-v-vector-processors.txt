@@ -1,0 +1,249 @@
+Title: Native Block-Quantized Matrix Multiplication and Explicit K/V Residency with Dual-View Access for LLM Inference on RISC-V Vector Processors
+
+URL Source: https://arxiv.org/pdf/2611.31937v1
+
+Published Time: Wed, 25 Nov 2026 02:06:02 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Native Block-Quantized Matrix Multiplication and Explicit K/V Residency with Dual-View Access for LLM Inference on RISC-V Vector Processors 
+
+Weiying Wang, Yuanyang Xiang and Zhiwei Zhang 
+
+Institute of Automation, Chinese Academy of Sciences School of Artificial Intelligence, University of Chinese Academy of Sciences Beijing 100049, China Email: {wangweiying2021,xiangyuanyang2020,zhiwei.zhang }@ia.ac.cn 
+
+Abstract —Some key execution states in large language model inference persist across multiple instructions and are difficult to express and exploit within RVV semantics centered on individual operations. We define specialization boundaries according to data-state lifetimes and propose Quantized Block Streams (QBS) and Attention/KV Context (AKV) while preserving RVV programma-bility. QBS organizes native-block format processing, block traver-sal, integer computation, and ordered FP32 accumulation into a unified execution process, whereas AKV maintains local K/V residency and supplies operand views aligned with the computa-tion direction while leaving Attention arithmetic on RVV. Cycle-accurate RTL evaluation shows that QBS achieves geometric-mean speedups of 35.68 × and 51.34 × for projection Compute and 
+
+Matmul , respectively, while AKV achieves a 1.45 × geometric-mean speedup over Tiled RVV for Decode Attention. Compared with the baseline, the complete design increases total area by 12.65%; on the evaluated projection workloads, throughput per area and energy efficiency improve by 46.63 × and 19.78 ×, respectively. Fur-ther evaluation demonstrates applicability across multiple block-quantization formats and across models with different Attention organizations. 
+
+Index Terms —RISC-V Vector Extension, LLM inference, block quantization, quantized matrix multiplication, K/V reuse 
+
+I. I NTRODUCTION 
+
+Large language models (LLMs) are widely used in language understanding, content generation, and code processing [1]– [3], placing increasing demands on inference efficiency. Trans-former inference repeatedly executes linear projections and attention operations [4]; as model sizes and context lengths con-tinue to grow, the costs of weight access, attention computation, and intermediate-data movement become increasingly signifi-cant, making inference efficiency dependent on both computa-tional throughput and data-supply efficiency. The RISC-V Vec-tor Extension (RVV) provides vector-length-agnostic computa-tion and memory operations, offering a unified programmable execution substrate across different hardware implementations and tensor shapes [5]. However, runtime-known data layouts, reuse relationships, and state lifetimes are still largely managed by software through low-level vector operations, making it difficult for hardware to directly exploit data-organization and reuse patterns that persist across instructions. Based on this observation, we preserve RVV programmability while defining specialization boundaries according to LLM workload structure and optimizing the corresponding critical execution stages. Inference runtimes such as llama.cpp employ block quan-tization to reduce model-weight storage and bandwidth require-ments [6], but compact representation does not directly translate into efficient vector execution. In addition to low-bit values, block-quantized weights contain scales, subgroup metadata, and format-specific correction rules, requiring RVV kernels to explicitly perform parsing, integer computation, correction, floating-point updates, and block traversal. Prior work opti-mizes quantized projection at different execution boundaries, including matrix-level execution, block-scaled dot products, and native quantized-block processing [7]–[11]; however, native block-quantized projection still requires format parsing, block traversal, and output accumulation to be coordinated with matrix-level reuse. Attention presents a different data-supply problem: K/V data are generated at runtime and repeatedly reused by subsequent queries, while grouped-query attention (GQA) and Prefill further enlarge their reuse scope [12]. Although methods such as FlashAttention reduce external data movement through tiling and online Softmax [13], local K/V residency organization and operand supply matched to the com-putation direction still require explicit software orchestration on vector processors. Although these two bottlenecks arise from different execu-tion paths, they share a common property: the lifetimes of key data states extend beyond what a single RVV instruction can express. As shown in Fig. 1, quantized projection must preserve and update output accumulation state across successive K blocks, whereas attention must reuse K/V across queries and form different operand views according to the computation direction. Building on this observation, we propose Quantized Block Streams (QBS) and an Attention/KV Context (AKV). QBS defines a unified execution boundary spanning native quantized blocks to completed result tiles, bringing format handling, block traversal, and ordered accumulation across K blocks into the same execution process; AKV instead confines specialization to local K/V residency and operand supply, providing operand views matched to the computation direction. Attention arithmetic and other operations outside the supported arXiv:2611.31937v1 [cs.AR] 24 Nov 2026 scope continue to execute on standard RVV. The main contributions of this work are as follows:  
+
+> •
+
+Specialization boundaries and architectural interfaces for cross-instruction state lifetimes. For ordered accumulation across native blocks in quantized projection and K/V reuse across attention queries, two architectural interfaces are defined from native quantized blocks to completed result tiles and from resident K/V to operand views, respectively.  
+
+> •
+
+Integration and runtime mapping in RISC-V vector pro-cessors. QBS and AKV reuse the existing dependency-management, address-translation and memory-protection, and VRF result-delivery paths. The runtime selects spe-cialized execution according to format, layout, shape, and data type, while operations outside the supported interface constraints continue to execute on standard RVV.  
+
+> •
+
+RTL performance evaluation and functional validation with real-model workloads. QBS achieves geometric-mean speedups of 35.68 × and 51.34 × for projection Compute and Matmul, respectively, while AKV achieves a 1.45 ×
+
+geometric-mean speedup over GQA-aware Tiled RVV for Decode Attention. Validation covers multiple quantization formats and models with different Attention configura-tions. II. W ORKLOAD STRUCTURE AND RELATED WORK 
+
+A. Quantized Projection and K/V Reuse 
+
+A linear projection computes Y = AW T, where A ∈ RM ×K
+
+is the activation matrix and W ∈ RN ×K is the weight matrix. Single-token Decode typically corresponds to M = 1 , whereas Prefill contains multiple activation rows. Block quantization partitions weights along the K dimension into native blocks, so each output element Y [m, n ] is successively updated by multiple native blocks along K. As a concrete example, a Q4 K native block occupies 144 bytes, represents 256 weights, and is divided into eight 32-element subgroups. When paired with Q8 K activations, the integer computation within one block can be summarized by the dot-product and correction terms [6] 
+
+T = X
+
+> g
+
+sg
+
+X
+
+> i∈I g
+
+qai qwi , U = X
+
+> g
+
+μg
+
+X
+
+> i∈I g
+
+qai . (1) where qai and qwi are the activation and weight integer values, respectively, while sg and μg encode subgroup scale and minimum information. Let y denote the output accumulated from preceding native blocks. The current block then performs the format-defined FP32 update: 
+
+z = fma 32 (R32 (dwda), R 32 (T ), y ) ,y′ = fma 32 (−R32 (dmin da), R 32 (U ), z ) . (2) Here, da, dw, and dmin denote the activation scale, weight scale, and minimum-value scale, respectively, and R32 denotes the prescribed conversion or rounding to FP32. A native-block format therefore specifies not only the data encoding, but also the subgroup organization, scaling and correction rules, and block-level update order; beyond the low-precision dot product, its processing involves format parsing, format-specific correction, and FP32 updates. Matrix structure further exposes reuse in two directions: one activation block can serve multiple output channels along N , while one weight block can serve multiple activation rows along M . In the remainder of this paper, profile denotes the encoding and numerical rules of a native block, layout denotes its physical placement and traversal order, and shape denotes the M , N , and K range covered by one execution. For Attention, let Q ∈ RMq ×D and K, V ∈ RT ×D. The computation is 
+
+P = softmax 
+
+ QK T
+
+√D + M
+
+
+
+, O = P V, (3) where D is the head dimension, T is the number of currently visible K/V tokens, and M is the attention mask. In GQA, multiple Query heads share the same K/V head [12], while Prefill allows the same K/V data to be reused by multiple Query positions. Fig. 1(b) illustrates this reuse and the corresponding operand-access directions. Under the vectorized schedule used in this work, attention-score computation fixes a feature dimen-sion d and reads K[: , d ] along the token dimension, whereas weighted accumulation over V fixes a token t and reads V [t, :] 
+
+along the feature dimension. Consequently, K columns and V rows are operand views formed by the vectorized schedule rather than inherent storage forms of K/V. 
+
+B. Specialization Boundaries in Prior Work 
+
+Prior work on quantized projection and Attention explores specialization across computation granularity, data representa-tion, execution mapping, and storage management [14]–[16]. For quantized projection, MX, VMXDOTP, and SpacemiT IME extend low-precision computation at the matrix, microscaling-dot-product, and tile levels, while F-BFQ and DECA combine native-format processing or near-core weight expansion with specialized matrix execution [7]–[11]. For Attention, FlashAt-tention and its successors primarily optimize tiling, online Softmax, and vector mapping [13], [17]–[20], whereas KIVI, PagedAttention, and PLENA reduce overhead through K/V rep-resentation, cache management, and on-chip data organization with dedicated execution support [21]–[23]. This work instead defines specialization boundaries from the common property of cross-instruction state lifetimes. QBS brings the path from native-block access to completed result-tile commit into a single specialized execution, jointly performing format parsing and correction, block traversal, and ordered accumulation across K blocks; AKV confines specialization to local K/V residency and operand-view supply, while Attention arithmetic remains on standard RVV. The two mechanisms exploit output-accumulation state across K blocks and K/V state across queries, respectively, leveraging cross-instruction state lifetimes and reuse relationships while preserving RVV programmability. III. A RCHITECTURAL INTERFACES AND RUNTIME 
+
+MAPPING 
+
+QBS and AKV define their respective software-visible inter-faces. Table I summarizes the major operations, while Table II (a) Projection: output lifetime (b) Attention: operand lifetime                                                                        
+
+> Q4 K: 256 weights Scales 4 B Meta 12 B INT4 128 B
+> RVV Unpack Widen / dot Reduce Scale / update
+> Software K-block loop
+> QBS Block stream →ordered accumulation FP32 tile
+> KV
+> Token axis tFeature axis d
+> K column K[: , d ]→QK V row V[t, :] →PV
+> RVV: QK →Softmax →PV
+> FILL Head / query reuse REFILL RELEASE
+> Fig. 1. Specialization for cross-instruction lifetimes. QBS retains output state across Kblocks; AKV retains K/V across queries and supplies operand views. TABLE I CUSTOM VECTOR INSTRUCTIONS OF THE PROPOSED ARCHITECTURE .
+> Instruction Function
+> vqbinfo Report supported profile, layout, and shape
+> vqbexec Execute native blocks to an M×NFP32 tile; support activation-snapshot reuse
+> vakvinfo Report supported context and view parameters
+> vakvfill Establish or update a K/V context (Fill/REFILL)
+> vakvload.v Load a selected Q/K/V row view to the VRF
+> vakvkcol.v Load a K-column or Panel4 view to the VRF
+> vakvrelease Release the current K/V context TABLE II ARCHITECTURAL EXECUTION LIMITS .QBS Mode MNK blocks Standard 1–4 ≤32 ≤256
+> Wide 5–8 ≤16 ≤256
+> Snapshot 1≤32 ≤16 (Q8 K) AKV Type DQ Rows Tokens F16 K/V 64/96/128 1–8 ≤64
+
+gives the range of a single execution. 
+
+A. QBS: Native Quantized-Block Execution Interface 
+
+For Y = AW T, one QBS command processes M activation rows and N outputs, traverses a specified number of native quantized blocks along the K dimension, and retains the output accumulation state until the reduction completes. The QBS de-scriptor specifies the weight address, profile, layout, N , and the number of K blocks, while the command additionally specifies the activation address, M , and the destination register. When 
+
+M or N exceeds the command range, the runtime generates multiple output tiles along the corresponding dimension; when the number of K blocks exceeds the limit, split-K is used, with each K segment independently accumulated and rounded by a QBS command before software combines the partial results, so the combined result is not required to be bitwise identical to an unsplit execution. When multiple output tiles share the same quantized acti-vations, software can explicitly manage an activation snapshot through FILL, REUSE, and RELEASE. For Q8 K activations satisfying the snapshot constraints, FILL saves the activation data read by the current command, REUSE makes the snapshot available to subsequent commands, and RELEASE frees it after the final successful use. The snapshot stores only already-quantized data, while F32-to-Q8 K quantization remains a software responsibility; reuse is explicitly specified by software rather than inferred from the source address and changes only the cross-command data-supply path without altering the block-level computation or rounding rules of QBS. 
+
+B. AKV: K/V Context and View Interface 
+
+Unlike QBS, which maintains output accumulation state within a command, AKV maintains K/V residency that can be reused across instructions through an explicit Attention context whose lifetime is managed using Fill, REFILL, and RELEASE. Fill establishes a new context and loads the first K/V tile, REFILL retains the existing Query data and context configuration while replacing only the currently resident K/V, and RELEASE frees the context after reuse completes. Once a context is established, software obtains the operands required by subsequent RVV computation through view operations: a row view returns the contiguous feature vector of a selected Query, K, or V row, a column view fixes one feature dimension and forms data arranged along the token direction, and Panel4 forms the column views corresponding to four adjacent feature dimensions in a single request. After these operands are written to the VRF, QK, Softmax, and PV continue to execute using standard RVV instructions; AKV therefore changes only K/V residency and operand supply rather than taking over Attention arithmetic. When the head dimension, K/V sequence length, or the number of Queries sharing the same K/V exceeds the range of a single execution, the runtime applies segmented scheduling along the feature dimension, partitions the K/V sequence into consecutive tiles along the token dimension, or groups Queries, respectively; Softmax state across K/V tiles and scheduling across segments and Query groups remain under software control. 
+
+C. Runtime Composition and Fallback 
+
+QBS and AKV target quantized projection and K/V operand supply for Attention, respectively, and operate together with standard RVV to form the Transformer execution path. Q/K/V projections, output projections, and feed-forward matrix multi-plications that satisfy the interface constraints can be mapped to QBS; after K/V cache writes complete and the AKV interface constraints are satisfied, AKV provides locally resident data and the required views for subsequent Attention computation, while the remaining operations continue to execute on RVV. Before dispatch, the runtime selects the specialized or RVV path according to constraints including quantization format, data layout, tensor shape, and data type, and directly uses the existing RVV implementation when the interface constraints are not satisfied. CVA6             
+
+> Fetch / I$ Decode Issue / scoreboard
+> IXU FPU LSU Writeback Commit MMU D$
+> Vector engine
+> Dispatcher Sequencer
+> Issue control VFU coordination Response handling Completion / VID
+> Lane ×4 Lane seq. VRF 1 KiB OR / OQ ALU MFPU WB arb. MASKU / SLDU
+> VLSU Owner / active VID MMU / PMA AGU VLDU VSTU
+> QBS
+> Read Blocks Dot / FP32 acc.
+> AKV
+> Read K/V Row / col. / panel Result mux / grant demux AXI interconnect System SRAM Peripherals
+
+Fig. 2. Integration of QBS and AKV into the RISC-V vector execution path.          
+
+> (a) QBS: dedicated arithmetic
+> Tagged reader 2 outstanding Weights 16 banks Activation 8 banks Q8 snapshot M=1 replay Decode INT8 dot Reduce Group slots
+> 2×16
+> Operands Products Subtotal FP entries 16 slots FP32 unit I2F / MUL / FMA FP32 sums
+> 8×16
+> Publish gate / read / drain Tile commit
+> (b) AKV: resident operands
+> Tagged reader 2 outstanding Context control Fill / REFILL / RELEASE Q seed store Fill only
+> 8 K/V banks 0KV1KV2KV3KV4KV5KV6KV7KV
+> Row replay 16 F16/word Column gather / Panel4 4 F16 fields/word Replay format tail mask Lane mapping VRF Existing RVV: QK / Softmax / PV
+
+Fig. 3. QBS native-block execution and AKV resident-operand datapaths. QBS performs ordered native-block accumulation, while AKV supplies resident K/V views to the existing RVV path. 
+
+IV. M ICROARCHITECTURE 
+
+A. Shared Execution, Dependencies, and State Visibility 
+
+Fig. 2 presents the overall microarchitecture of QBS and AKV and their shared integration with the existing vector execution path. QBS, AKV, and ordinary vector memory oper-ations share the VLSU address-translation path, PMA checks, AXI interface, and Lane result path, while the Sequencer con-tinues to use existing instruction identifiers to track destination-register dependencies and completion state. QBS commands and AKV context operations wait for older vector operations to complete and for relevant ordinary memory transactions to drain before entering execution, and use the shared VLSU resources under mutually exclusive arbitration, ensuring that read responses, fault information, and returned results remain associated with the active execution request. QBS result-accumulation state belongs only to the current command and is independent of the activation snapshot reused across commands; AKV K/V state may persist across multi-ple view instructions, while each view instruction retains its own destination register, dependencies, and completion state. Both mechanisms update architecturally visible state only after successful execution: QBS commits its final results after the associated memory accesses and computation complete, while AKV marks a context valid only after it has been completely filled without a fault. During reuse, QBS activation snapshots and AKV contexts do not reaccess the corresponding source addresses or automatically track changes to source memory, so software must rebuild or release the corresponding state when the source data change or reuse ends. 
+
+B. QBS Native-Block Execution and Ordered Accumulation 
+
+As shown in Fig. 3(a), the QBS datapath performs native-block fetch, format decoding, integer computation, FP32 ac-cumulation, and result commit. A tagged read path accom-modates different native-block sizes and weight layouts; re-turned data are byte-aligned and reassembled into complete native quantized blocks before entering the decode path se-lected by the corresponding profile. The weight layout may be transformed during model loading; for example, the four-row block-interleaved layout (R4) interleaves native blocks at the same K position from four output rows without changing their internal block encoding, thereby aligning the weight-read order with multi-output computation. Decoded data enter four parallel integer compute clusters, each containing eight signed INT8 ×INT8 multipliers, for 32 integer multiplications in parallel. For M = 1 , 2, 4, each cluster serves one, two, or four activation rows, respectively; the Wide mode for M = 5 –
+
+8 reuses the same weight tile and processes the activation rows in two waves. Integer dot-product results are reduced within the corresponding subgroups and then corrected and scaled according to the active profile to form FP32 block-level updates. Different profiles primarily differ in format decoding and block-level update rules, while sharing the integer dot-product, reduction, and FP32 accumulation resources. Block-level updates enter the FP32 accumulation path, where tags track in-flight updates and prevent conflicts on the same accumulation state. Updates for different outputs may proceed in an interleaved manner, while updates to the same output always preserve native K-block order. The current implemen-tation provides 128 command-local FP32 accumulation states, allowing an entire M × N result tile to remain inside QBS throughout reduction along K and avoiding repeated VRF writeback after each native block; after the reduction completes, the final FP32 results are written to the destination vector-register group. 
+
+C. AKV Banked Storage and Multi-View Operand Supply 
+
+As shown in Fig. 3(b), AKV distributes the resident K/V tile across eight single-port banks according to the token index, with token t mapped to bank t mod 8 and K and V occupying separate logical regions while preserving the external row-major layout. This organization directly supports reading K/V rows by token and forming K column views by feature dimen-sion. For a K-column access, the hardware fixes one feature dimension; in each round, the eight banks read the storage words corresponding to the current 8-token group and extract the F16 element at the same position, so a column containing 
+
+Tvalid valid tokens requires only ⌈Tvalid /8⌉ bank-read rounds. Panel4 further extracts the F16 fields corresponding to four adjacent feature dimensions within the same read round and forms four column views without requiring additional SRAM read ports. K/V fill, row reads, and column-view generation share the same single-port banks under mutually exclusive arbitration; validity bits mask invalid tokens in tail tiles. V. E VALUATION 
+
+A. Evaluation Methodology and Baselines 
+
+We use a functionally validated Ara implementation [24] with known implementation issues corrected as the baseline. All experiments use a four-lane configuration with VLEN=1024, ELEN=64, and a 128-bit AXI interface. Operator-level tests use cycle-accurate RTL simulation with tensors captured from real-model execution. Paired experiments use identical inputs and numerical acceptance criteria, with data layouts organized according to the corresponding kernels. We report execution cycles, AXI response bytes on the shared vector port, and retired vector instruction counts, and use internal hardware counters to analyze the major execution constraints. For projection, the baseline uses format-specific multi-output RVV kernels optimized on Ara. Compute includes dynamic ac-tivation quantization and matrix computation, whereas Matmul 
+
+denotes the matrix-computation phase; static weight prepacking is performed during model loading. For Attention, we compare Direct RVV, GQA-aware Tiled RVV, and AKV. Tiled RVV already applies software tiling and K/V reuse across queries, so its comparison with AKV measures the incremental benefit of local K/V residency and operand-view supply. Model-level functional runs validate runtime dispatch and fallback across different models and Attention configurations. PPA evaluation uses the same architectural parameters and implementation constraints to quantify the implementation cost and efficiency of the proposed design. 
+
+B. Quantized Projection Performance and Reuse 
+
+Fig. 4(a) compares projection performance across represen-tative block-quantized formats. QBS achieves geometric-mean speedups of 35.68 × and 51.34 × for Compute and Matmul, respectively, showing that organizing format processing, inte-ger computation, and result updates as native-block execution substantially reduces quantized-projection overhead. Fig. 4(c) further supports this result from both data movement and instruction execution: all evaluated formats return fewer AXI bytes than the RVV baseline, while the number of retired vector instructions falls to only 0.42%–0.56% of the baseline. The performance gain therefore reflects not only a more efficient compute path, but also reduced data movement and explicit RVV instruction overhead. Fig. 5(a) further exposes format-dependent execution be-havior. Q3 K–Q6 K are primarily dominated by dot-product execution, with more pronounced weight-supply stalls in Q5 K and Q6 K. In contrast, the more frequent result updates of Q8 0 make FP32 update overhead more prominent. Fig. 5(b) and Fig. 6(a) examine activation and weight reuse, respectively. Reusing quantized activations reduces the total cycles of three identical projections by 47.6%, while Wide-M shares weights across activation rows and reduces the input payload by 33.2% for equal work. The former avoids repeated activation quantiza-tion, whereas the latter reduces redundant weight reads, further reducing projection overhead from activation preparation and weight supply. 
+
+C. Attention Performance and K/V Supply 
+
+Fig. 4(b) compares Attention latency during Decode. Relative to Tiled RVV, which already exploits GQA-aware tiling and K/V reuse across queries, AKV achieves a 1.45 × geometric-mean speedup. As the KV length increases from 16 to 256, the speedup rises from 1.22 × to 1.60 ×. Since the software baseline already explicitly exploits K/V sharing, the remaining gain shows that K/V organization and delivery still constitute significant data-supply overhead, whose impact becomes more pronounced as the context grows. Fig. 5(c) further decomposes this gain. With the effective K/V payload unchanged, two-query sharing combined with Panel4 reduces column-view commands and local replay by 81.7% and 30.4%, respectively, while reducing execution cycles by 14.5%. The improvement therefore primarily comes from more efficient organization and supply of resident K/V rather than from reducing the effective data volume or the Attention computation itself. Fig. 6(b) explains this behavior at the storage-access level: Panel4 exploits adjacent F16 fields already available in a single 256-bit bank word, reducing the bank-access rounds required for four adjacent column views from 32 to 8 while preserving the single-port bank organization. AKV thus confines specialization to K/V residency and operand-view supply, while QK, Softmax, and PV continue to execute on the existing RVV datapath. (a) Projection speedup               
+
+> Speedup vs RVV ( ×)Compute Matmul 020 40 60 80 100 Q3 K 44.2 72.7 Q5 K 60.6 92.5 Q6 K 35.0 50.7 Q8 0 17.320.4 Geo. mean: 35.68 ×/ 51.34 ×
+> (b) Decode latency
+> Cycles (k; log scale) KV16 KV128 KV256 40 200 1000 Direct Tiled AKV 121.3 41.3 33.8 725.8 157.4 100.5 1,414 309.5 193.4 Gain vs tiled: 1.22 ×/1.57 ×/1.60 ×
+> (c) Traffic and instructions
+> Read bytes: QBS/RVV (%) 040 80 120 26.8 Q3 K 0.45% 25.0 Q5 K 0.43% 36.4 Q6 K 0.42% 41.0 Q8 0 0.56% Vec. inst.: QBS / RVV
+
+Fig. 4. Projection, Decode, and data-movement results. (a) Projection speedup over RVV for M = 1 , N = 256 , with K = 1536 for Q3 K–Q6 K and 
+
+K = 896 for Q8 0. (b) Decode latency for D = 128 , GQA6, and two K/V heads. (c) QBS/RVV read-byte and vector-instruction ratios.                
+
+> (a) QBS activity
+> % of busy cycles Dot 70.7 57.2 49.4 26.9 W-wt 0.0 15.2 25.4 17.1 FP-wt 0.0 0.0 0.0 23.3 R-idle 3.9 3.0 2.7 17.3 Q3 K Q5 K Q6 K Q8 0
+> 050 100
+> (b) Activation reuse
+> Cycles (k) Matmul Quant. 020 40 14.2 34.5 48.6 No reuse 13.9 11.6 25.5
+> −47 .6%
+> Activation reuse
+> (c) AKV scheduling and views
+> Single-Q 2Q + Panel4 Saved (%) 0.0 0.5 1.0 Col. cmds. 0.183 81.7 Local replay 0.696 30.4 Cycles 0.855 14.5 K/V bytes 1.000 0.0
+
+Fig. 5. Bottlenecks and reuse effects. (a) QBS busy-cycle activity (W-wt/FP-wt/R-idle: weight wait/FP-entry wait/read-response idle). (b) Activation reuse across three Q4 K projections. (c) AKV scheduling and view supply for M = 15 Prefill, normalized to single-query AKV at equal K/V payload.                          
+
+> (a) QBS payload bytes (b) AKV bank-access rounds
+> Two M4 One M8
+> Q4 M0–3 Q4 M4–7 Q4 M0–3 M4–7 2 reads 1 read Payload Two M4 One M8 Red. Q8 K 2,336 2,336 Q4 K 4,608 2,304
+> Total 6,944 4,640 −33 .2%
+> 8 single-port banks; 256-bit words
+> · · · · · · dd+1 d+2 d+3
+> 4 singles
+> 1 field/word
+> Panel4
+> 4 fields/word 88888
+> 32 rounds 8 rounds
+> −75% bank rounds
+
+Fig. 6. Mechanism-level reuse in QBS and AKV: (a) Wide-M weight-payload reuse and (b) Panel4 bank-access reduction. Values represent data-supply work rather than execution latency. 
+
+D. Model Applicability and Runtime Validation 
+
+This section evaluates design applicability through cross-configuration RTL tests and model-level functional runs. Be-yond the D128/GQA configurations used in the main evalua-tion, Refact D64/MQA32 [25] and Gemma 3 D256/GQA4 [26] reuse the existing K/V residency and view-supply structures and achieve 2.04 × and 2.55 × speedups over Direct RVV, respectively. Model-level functional runs cover Qwen2.5 [27], Qwen3 [28], Refact, and Gemma 3; all cases execute native QBS commands and validate AKV runtime dispatch and fall-back, and all pass functional checks. These results show that different model configurations can be accommodated through software scheduling without changing the core hardware struc-tures, thereby supporting multiple model configurations while preserving compatibility with the existing execution path. 
+
+E. Implementation Cost and Efficiency 
+
+Table III compares the PPA and efficiency results of baseline Ara and the proposed design under the same technology, processor configuration, and implementation constraints. At an operating frequency of 1 GHz, the total area increases 
+
+TABLE III PPA AND EFFICIENCY COMPARISON .
+
+Metric Baseline Ara This Work Relative Change 
+
+Technology TSMC 28 nm HPC+ –Frequency (GHz) 1.0 –Lanes / VLEN / DLEN 4 / 1024 / 256 –Performance (GOPS) 0.615 32.29 51.34 ×
+
+Area (mm 2) 3.195 3.599 +12.65% Area Eff. (GOPS/mm 2) 0.192 8.97 46.63 ×
+
+Power (mW) 177.0 471.7 +166.49% Execution Energy (pJ/op) 312.8 16.91 −94.59% Energy Eff. (GOPS/W) 3.55 70.18 19.78 ×
+
+EDP (norm.) 1.00 0.0010 −99.90% 
+
+Note: Both designs use TSMC 28 nm HPC+ (TT/0.9 V/25 ◦C) at 1 GHz with four lanes, VLEN=1024, and DLEN=256. 
+
+from 3.195 mm 2 to 3.599 mm 2, corresponding to a 12.65% area overhead, while the overall performance reaches 51.34 ×
+
+that of the baseline and throughput per area improves by 46.63 ×. Relative to the performance gain, the area overhead introduced by the additional compute, state-storage, and data-supply logic remains limited, indicating that the additional hardware resources can be effectively translated into processing throughput. The average power of the proposed design is 2.67 × that of the baseline, while energy efficiency improves from 3.55 to 70.18 GOPS/W, corresponding to a 19.78 × gain. The performance improvement is substantially larger than the power increase, indicating that reducing the overhead of format processing, explicit vector execution, and operand supply can effectively amortize the additional hardware power cost and thereby deliver significant energy-efficiency gains. VI. C ONCLUSION 
+
+This paper proposes QBS and AKV to exploit state and reuse relationships that persist across instructions in LLM inference. QBS unifies native-block format processing, block traversal, and ordered FP32 accumulation, while AKV reduces operand-organization overhead through local K/V residency and multi-view supply while preserving the existing RVV arithmetic path. RTL evaluation shows that the two mechanisms reduce quantized-projection and K/V-supply overhead while improving throughput per area and energy efficiency. Validation across multiple quantization formats and model-specific Attention organizations further shows that the design accommodates diverse LLM inference configurations while retaining a unified hardware structure and RVV programmability. REFERENCES [1] T. B. Brown, B. Mann, N. Ryder, M. Subbiah, J. D. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell et al. , “Language models are few-shot learners,” in Advances in Neural Information Processing Systems , vol. 33, 2020, pp. 1877–1901. [2] H. Touvron, L. Martin, K. Stone, P. Albert, A. Almahairi, Y. Babaei, N. Bashlykov, S. Batra, P. Bhargava, S. Bhosale et al. , “Llama 2: Open foundation and fine-tuned chat models,” 2023. [Online]. Available: https://arxiv.org/abs/2307.09288 [3] B. Rozi` ere, J. Gehring, F. Gloeckle, S. Sootla, I. Gat, X. E. Tan, Y. Adi, J. Liu, R. Sauvestre, T. Remez et al. , “Code Llama: Open foundation models for code,” 2023. [Online]. Available: https://arxiv.org/abs/2308.12950 [4] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, L. Kaiser, and I. Polosukhin, “Attention is all you need,” in Advances in Neural Information Processing Systems , vol. 30, 2017. [5] RISC-V International, RISC-V “V” Vector Extension, Version 1.0 ,RISC-V International, 2021. [Online]. Available: https://docs.riscv.org/ reference/isa/extensions/vector/ attachments/riscv-v-spec.pdf [6] G. Gerganov and contributors, “llama.cpp: LLM Inference in C/C++,” https://github.com/ggml-org/llama.cpp, 2026, accessed: 2026-09-19. [7] M. Perotti, Y. Zhang, M. A. Cavalcante, E. Mustafa, and L. Benini, “MX: Enhancing RISC-V’s vector ISA for ultra-low overhead, energy-efficient matrix multiplication,” in 2024 Design, Automation & Test in Europe Conference & Exhibition (DATE) , 2024, pp. 1–6. [8] M. Wipfli, G. Islamoglu, N. K. Purayil, A. Garofalo, and L. Benini, “VMXDOTP: A RISC-V vector ISA extension for efficient microscaling (MX) format acceleration,” in 2026 Design, Automation & Test in Europe Conference (DATE) , 2026, pp. 1–7. [9] SpacemiT, “RISC-V IME Set Specification,” https://github.com/ spacemit-com/riscv-ime-extension-spec, 2026, version 1.0 specification; accessed: 2026-09-19. [10] J. Haris and J. Cano, “F-BFQ: Flexible block floating-point quantization accelerator for LLMs,” in New Approaches for Addressing the Computing Requirements of LLMs and GNNs (LG-ARC), co-located with ISCA , Tokyo, Japan, Jun. 2025. [Online]. Available: https: //arxiv.org/abs/2510.13401 [11] G. Gerogiannis, S. Eyerman, E. Georganas, W. Heirman, and J. Torrellas, “DECA: A near-core LLM decompression accelerator grounded on a 3d roofline model,” in 58th IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2025, pp. 184–200. [12] J. Ainslie, J. Lee-Thorp, M. de Jong, Y. Zemlyanskiy, F. Lebron, and S. Sanghai, “GQA: Training generalized multi-query transformer models from multi-head checkpoints,” in Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) . Asso-ciation for Computational Linguistics, 2023, pp. 4895–4901. [13] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. R´ e, “FlashAttention: Fast and memory-efficient exact attention with IO-awareness,” in Advances in Neural Information Processing Systems , vol. 35, 2022, pp. 16 344–16 359. [14] G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han, “SmoothQuant: Accurate and efficient post-training quantization for large language models,” in Proceedings of the 40th International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 202. PMLR, 2023, pp. 38 087–38 099. [Online]. Available: https://proceedings.mlr.press/v202/xiao23c.html [15] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen, W.-C. Wang, G. Xiao, X. Dang, C. Gan, and S. Han, “AWQ: Activation-aware weight quantization for on-device LLM compression and acceleration,” in Proceedings of Machine Learning and Systems , vol. 6, 2024. [Online]. Available: https://proceedings.mlsys.org/paper files/paper/2024/ hash/42a452cbafa9dd64e9ba4aa95cc1ef21-Abstract-Conference.html [16] C. Hooper, S. Kim, H. Mohammadzadeh, M. W. Mahoney, Y. S. Shao, K. Keutzer, and A. Gholami, “KVQuant: Towards 10 million context length LLM inference with KV cache quantization,” in Advances in Neural Information Processing Systems , vol. 37, 2024. [17] T. Dao, “FlashAttention-2: Faster attention with better parallelism and work partitioning,” in The Twelfth International Conference on Learning Representations (ICLR) , 2024. [Online]. Available: https://openreview.net/forum?id=mZn2Xyh9Ec [18] J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao, “FlashAttention-3: Fast and accurate attention with asynchrony and low-precision,” in Advances in Neural Information Processing Systems ,vol. 37, 2024. [19] V. Titopoulos, K. Alexandridis, and G. Dimitrakopoulos, “Vectorized FlashAttention with low-cost exponential computation in RISC-V vector processors,” The Journal of Supercomputing , vol. 82, no. 4, p. 189, 2026. [20] S. R. Gupta, N. Papadopoulou, and M. Peric` as, “FlashAttention for scalable vector architectures,” 2026. [Online]. Available: https: //arxiv.org/abs/2608.18656 [21] Z. Liu, J. Yuan, H. Jin, S. Zhong, Z. Xu, V. Braverman, B. Chen, and X. Hu, “KIVI: A tuning-free asymmetric 2bit quantization for KV cache,” in Proceedings of the 41st International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 235. PMLR, 2024, pp. 32 332–32 344. [Online]. Available: https://proceedings.mlr.press/v235/liu24bz.html [22] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . ACM, 2023, pp. 611–626. [23] H. Wu, C. Xiao, J. Nie, X. Guo, B. Lou, J. T. H. Wong, Z. Mo, C. Zhang, P. Forys, C. Ai, T. Adeniran, W. Luk, H. Fan, J. Cheng, T. M. Jones, R. Antonova, R. Mullins, and A. Zhao, “Combating the memory walls: Optimization pathways for long-context agentic LLM inference,” in Proceedings of the 53rd IEEE Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2026, pp. 100–115. [24] M. Perotti, M. Cavalcante, R. Andri, L. Cavigelli, and L. Benini, “Ara2: Exploring single- and multi-core vector processing with an efficient RVV 1.0 compliant open-source processor,” IEEE Transactions on Computers ,vol. 73, no. 7, pp. 1822–1836, 2024. [25] Refact.ai, “Refact-1.6B-fim,” Hugging Face model repository, 2023, accessed: 2026-09-21. [Online]. Available: https://huggingface.co/ refactai/Refact-1 6B-fim [26] Gemma Team, “Gemma 3 technical report,” 2025. [Online]. Available: https://arxiv.org/abs/2503.19786 [27] A. Yang et al. , “Qwen2.5 technical report,” 2024. [Online]. Available: https://arxiv.org/abs/2412.15115 [28] ——, “Qwen3 technical report,” 2025. [Online]. Available: https: //arxiv.org/abs/2505.09388

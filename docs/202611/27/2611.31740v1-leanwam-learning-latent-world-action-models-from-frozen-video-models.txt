@@ -1,0 +1,546 @@
+Title: LeanWAM: Learning Latent World Action Models from Frozen Video Models
+
+URL Source: https://arxiv.org/pdf/2611.31740v1
+
+Published Time: Wed, 25 Nov 2026 01:46:02 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# LeanWAM: Learning Latent World Action Models from Frozen Video Models 
+
+# Shaolong Li ∗ Hongze Fu ∗ Joyce Chai † Yinpei Dai †
+
+# University of Michigan 
+
+# Abstract 
+
+World action models (WAMs) typically adapt large pre-trained video generators to jointly predict future observa-tions and robot actions, incurring substantial training and deployment costs. However, it remains unclear which future representations a policy actually needs and how compactly they can be represented. Our probing study shows that com-plementary future representations can be compressed into a few tokens while retaining most of their action-decoding performance. Motivated by this finding, we introduce Lean-WAM, a latent WAM that transfers video priors from a frozen video generator to a lightweight policy via two-stage training. In the first stage, a Future Extractor compresses observed transitions into 32 predictive tokens. These to-kens condition the frozen generator and are jointly shaped by action, RGB, semantic, and geometric supervision, while a compact readout of the generator’s hidden states supplies complementary world tokens. The second stage distills both representations into the policy, which learns to predict them from current observations while generating actions. With 1.4B parameters and no large-scale embodied pretrain-ing, LeanWAM outperforms strong vision-language-action (VLA) and WAM baselines on LIBERO, LIBERO-Plus, and RoboTwin 2.0. It predicts an action chunk in 25.1 ms on an A100 GPU, 12.3–41.5 × faster than representative WAMs. These results demonstrate that compact predictive supervi-sion can transfer video priors to robust and efficient control. 
+
+# 1. Introduction 
+
+World action models (WAMs) couple robot action learning with future prediction [2, 22, 65, 69]. Built on pretrained video generators, they bring two benefits to control: joint video-action learning provides dense supervision for antic-ipating scene dynamics [65, 74], and video pretraining sup-plies spatiotemporal priors that robot demonstrations alone may not capture [19]. This framework also supports learn-          
+
+> ∗Equal contribution. †Equal advising. Project website: https://shaolonl-16.github.io/leanwam/ 20 50 100 200 500 1000 2000 50 60 70 80 90
+> Success Rate (%)
+> OpenVLA-OFT Fast-WAM OpenWAM-α
+> ImageWAM VLAct
+> π0.5
+> GR00T N1.7 Cosmos Policy
+> LeanWAM (Ours)
+> Inference Latency (ms)
+> Model size
+> 2B 4B 6B
+
+Figure 1. Success rate versus inference latency on LIBERO-Plus. Latency per action chunk is shown on a log scale, and bubble size denotes model size. 
+
+ing from videos without action labels [11, 56]. However, these benefits come at a substantial cost. Many WAMs rely on billion-parameter video backbones over dense vi-sual latents [2, 22, 69]. Their representations preserve back-ground, texture, and appearance alongside the robot and object motion needed for control. Modeling all these de-tails increases computation without necessarily improving actions. Compact latent actions [6, 64] and compressed perceptual features [16] offer alternatives, but do not use a pretrained video generator to shape their representations. They therefore do not directly benefit from the motion and interaction priors encoded in these generators, which could complement the supervision available in robot demonstra-tions. In this paper, we ask: what information about the fu-ture does a policy need, and how compactly can it be repre-sented? Recent studies suggest that useful signals lie both in future observations and in the intermediate features of video models [12, 15, 23, 55]. Our probing study (Sec. 3) shows that joint video–action training makes robot actions substantially easier to decode from video features. Com-bining these adapted features with VAE latents and seman-tic features improves decoding further. In contrast, adding features from the original pretrained video model provides no gain. These combined features can also be compressed 1arXiv:2611.31740v1 [cs.CV] 24 Nov 2026 Stage 1 Stage 2                    
+
+> current future frames
+> Future Extractor
+> predictive code z
+> grad
+> VAE
+> ℒsem
+> ℒgeo
+> ℒvideo
+> world features
+> Pooler
+> zw
+> Action DiT
+> ℒact
+> frozen trainable dropped after training gradient
+> distill
+> targets
+> ℒcode +ℒworld
+> training only ẑŵ
+> multi-view ot
+> instruction ℓ
+> proprio st
+> DINOv3
+> + resampler
+> VL Backbone
+> Qwen3.5-0.8B
+> L
+> 12 ×MoT layers
+> World Expert
+> CFA
+> Action Expert action chunk
+> L C F A CFA
+> condition block kw
+> block kg
+> block ks
+> Video Model G
+> xcnoisy xf
+> Projector Projector
+
+Figure 2. Overview of LeanWAM. Stage 1: A Future Extractor produces a predictive code z that conditions a frozen video model G.Semantic, geometric, RGB, and action losses jointly shape the code. An attentive pooler extracts world tokens w from the hidden states of 
+
+G, and an action DiT reads [Pa(z); w]. Stage 2: The World Expert processes current tokens C and learnable future queries F to predict z
+
+and w, while the Action Expert generates actions. Only the Stage-2 policy is deployed. 
+
+into a few tokens: a single aggregated token retains most of the action-decoding performance achieved with 32 to-kens. Intermediate frames further improve decoding within the same action horizon and token budget. Together, these findings motivate a compact, action-supervised representa-tion that combines complementary cues across a short clip. We present LeanWAM, a latent world action model that transfers the priors of a frozen pretrained video generator into a lightweight policy. Figure 2 illustrates how Lean-WAM learns compact predictive representations and distills them into the deployed policy. In Stage 1, a Future Ex-tractor compresses a short clip into a predictive code that conditions the frozen video model. The current frame sup-plies scene context, while the code describes the transition. Semantic, geometric, and RGB supervision at increasing depths guides this description without additional genera-tion branches. An action DiT reads both the predictive code and a compact readout of the model’s hidden states, called world tokens. Action gradients shape this predictive inter-face through the frozen model. In Stage 2, a lightweight Mixture-of-Transformers policy learns to predict both rep-resentations from current observations while generating ac-tions. Only this policy is deployed, and the video generator is used exclusively during training. Our contributions are threefold: • We introduce a two-stage framework that transfers a frozen video generator’s priors through compact predic-tive codes and world tokens into a lean deployed policy, without updating or deploying the video generator. • Our probes show that a few tokens retain most of the ac-tion information in complementary future representations (Sec. 3), and that the learned code supports better ac-tion decoding than dense future representations. Behav-ior analysis further reveals greater cross-task consistency with action supervision (Sec. 5.3). • Without large-scale embodied pretraining, our 1.4B-parameter policy surpasses strong vision-language-action (VLA) and WAM baselines on LIBERO [27], LIBERO-Plus [13], and RoboTwin 2.0 [9]. It predicts an action chunk in 25.1 ms on an A100 GPU, with 12.3–41.5 ×
+
+lower latency than representative WAMs (Figure 1). 
+
+# 2. Related Work 
+
+Vision-language-action models. Vision-language-action (VLA) models transfer the knowledge of pretrained vision-language models to robot control. RT-2 [5] and Open-VLA [17] represent actions as discrete tokens, while π0 [3] and GR00T N1 [38] pair a vision-language backbone with a continuous action generator. Other work scales train-ing across tasks and data sources [42], robot embodi-ments [57], memory augmentation [10], or aligned het-erogeneous manipulation data [67]. LeanWAM retains a language-conditioned continuous-action policy and uses fu-ture observations as additional training supervision. 
+
+World action models. WAMs couple action learning with the prediction of how the visual world evolves. DreamZero [65] adapts a 14B video generation model to jointly predict videos and actions. Motus [2] combines understanding, video, and action experts in a Mixture-of-Transformers [24], and the LingBot-VA series [22, 71] stud-ies causal modeling and native video–action pretraining. 2W D F T T¤                    
+
+> L12 T¤
+> L24 T¤
+> ¿=.25 T¤
+> ¿=1.0 W+D W+D +F W+D +T 0.0 0.2 0.4 0.6 0.8 Action  R2 ↑
+> 0.34 0.48 0.30
+> 0.66
+> 0.57 0.64 0.63 0.60 0.55 0.50
+> 0.72
+> (a) Feature sources
+> N=32; 2 frames
+> 124816 32 Queries N (log 2scale) 0.60 0.65 0.70 0.75 0.80
+> (b) Number of queries
+> W+D+T; 2 frames
+> 0.68 0.70 0.71 0.73 0.70 0.72
+> 1+1 1+2 1+4 Current + future frames 0.60 0.65 0.70 0.75 0.80
+> (c) Observed frames
+> W+D+T; N=32
+> 0.72 0.74 0.75
+> W: Wan VAE D: DINOv3 F: Frozen video model T: Trained video model
+
+Figure 3. Probing what a policy needs from the future. We report the action R2 of the probe on held-out LIBERO episodes, averaged over three seeds with different data splits. Error bars show ±1 standard deviation. (a) Feature sources. T ∗ changes the default block 18 or noise level τ = 0 .75 . (b) Number of probe queries N . (c) Number of observed frames: the current frame plus 1, 2, or 4 future frames uniformly sampled over the same action horizon. 
+
+Flex-π [59] and DreamWAM [68] extend future prediction to geometry, motion, or semantics. Fast-WAM [69] retains video co-training while skipping future generation at infer-ence. These approaches retain a video backbone at deploy-ment. InternVLA-A1.5 [32] and PDRVLA [51] instead use frozen video models only during training. Recent analy-ses further show that, beyond the predicted future, interme-diate video features also provide useful action representa-tions [12, 15, 23, 55]. LeanWAM learns a compact code and an action-supervised readout of these features, then distills both into a separate policy. 
+
+Latent world action models. WoG [48] and Being-H0.7 [31] use future observations to supervise compact la-tents for action generation. LaWAM [7] predicts visual sub-goals in a frozen feature space. VLA-JEPA [49] and JEPA-WAM [25] learn policies with future-state prediction in pre-trained video representation spaces. ReWAM [16] com-presses DINOv3 features through a bottleneck trained only by action gradients, and GE-Act 2.0 [28] aligns its visual latents with multiple perception teachers. LeanWAM com-plements these approaches by shaping its predictive code through a pretrained video generator, jointly using action, RGB, semantic, and geometric supervision. 
+
+# 3. What Does a Policy Need from the Future? 
+
+LeanWAM rests on the premise that a policy needs only a small, action-relevant part of the future. To test this premise, we train a probe to recover actions from repre-sentations of observed transitions. We evaluate action R2,which measures the relative reduction in squared prediction error compared with predicting the mean action. Higher scores indicate that actions are easier to decode from a rep-resentation under this probe. We ask three questions: (1) Which future representations make actions easy to decode? (2) How many tokens are needed for effective action decod-ing? (3) Do intermediate frames provide useful temporal context? 
+
+Setup. We train an attentive probe [1] to aggregate frozen features into N tokens with learnable queries and decode an 
+
+H-step action chunk with a small transformer. We compare Wan VAE [50] latents (W), DINOv3 [46] patch features (D), and Cosmos-Predict2.5-2B [36] hidden states, before (F) and after (T) video–action training on the probe’s train-ing episodes. Each probe is trained separately with mean squared error on LIBERO [27] demonstrations, using the same episode split and training schedule within each seed. By default, we use N = 32 and the current and final frames of the chunk. For simplicity, we extract video features from a single transformer block. We use block 18 at noise level 
+
+τ = 0 .75 , where τ = 1 denotes pure noise. Full implemen-tation details are provided in Appendix B. 
+
+Feature sources. Figure 3(a) shows that DINOv3 features yield higher action R2 than VAE latents, consistent with broader evidence that semantic latents support action recov-ery [35]. The pretrained video features F have the lowest mean among the tested single sources ( R2 = 0 .30 ), whereas features of the same model after training on robot data (T) reach 0.66 . This gap shows that joint video–action training on robot demonstrations makes the model’s features more accessible for action decoding. The sources also provide complementary cues: W+D reaches 0.55, above either W or D alone, and adding T raises R2 to 0.72, above both W+D and T. Adding F instead gives a lower mean of 0.50, indi-cating that more feature sources do not necessarily improve decoding. Where the video features are read also matters. Block 18 3at τ = 0 .75 has the highest mean R2 among the tested set-tings. Moving to block 12 reduces the score to 0.57, while block 24 remains close at 0.64. At block 18, both a lower noise level ( τ = 0 .25 ) and pure noise ( τ = 1 ) reduce de-coding performance. These results indicate that action de-codability depends on both depth and noise level, consistent with prior analyses of diffusion representations [20, 58]. 
+
+Number of queries. Figure 3(b) varies the number of queries N for W+D+T. Each query is a learnable vector with the probe’s hidden width of 512, and the queries jointly aggregate clip features through cross-attention. Although the probe receives more than a thousand feature tokens, a single summary token already yields R2 = 0 .68 , close to the 0.72 with 32 tokens. As N grows, R2 stays within a narrow range and peaks at N = 8 , with no consistent gain beyond a few queries. These results support learning a com-pact representation of observed transitions that retains most of the action-decoding performance. 
+
+Temporal sampling. Figure 3(c) compares two, three, and five frames for W+D+T over the same action horizon, with N = 32 throughout. All settings include the current frame and the final frame. The three-frame setting adds the midpoint, and the five-frame setting samples at quarter in-tervals. The corresponding mean R2 scores are 0.72, 0.74, and 0.75. Denser observations therefore improve decoding without extending the horizon or increasing the number of queries. The endpoints capture the overall visual change but leave the intervening motion ambiguous, and the gains are consistent with intermediate frames supplying such motion cues. 
+
+Implications. These results suggest that a small set of to-kens can retain complementary action cues from dense fu-ture representations, while intermediate frames provide ad-ditional temporal context. They also expose a challenge: joint video–action training improves video features for ac-tion decoding, but updating a large video model is costly. LeanWAM instead learns a compact predictive code shaped by visual and action supervision through a frozen video gen-erator. We evaluate the resulting representations and closed-loop policies in Sec. 5. 
+
+# 4. Method 
+
+At time t, a policy receives camera observations ot, a pro-prioceptive state st, and a language instruction ℓ, and pre-dicts an action chunk at = ( at, . . . , a t+H−1). Motivated by Sec. 3, training also uses a clip Vt containing the cur-rent frame and several future frames uniformly sampled through t + H. LeanWAM is trained in two stages (Fig-ure 2). Stage 1 encodes the observed transition into a pre-dictive code and world tokens (Sec. 4.1). Stage 2 trains a lean policy to predict the code and world tokens from the current observation (Sec. 4.2), and only this policy is de-ployed. Video and action objectives use flow matching [26, 29]. Given a clean sample x, Gaussian noise ϵ ∼ N (0, I), and a flow time τ ∈ [0 , 1] , let xτ = (1 − τ ) x + τ ϵ. A network f
+
+with condition c regresses the velocity ϵ − x:
+
+LFM (f ; x, c) = Eτ, ϵ
+
+h
+
+f (xτ , τ, c) − (ϵ − x) 22
+
+i
+
+, (1) and generates samples by integrating from τ = 1 to τ = 0 .
+
+4.1. Learning Predictive Codes from a Frozen Video Model 
+
+We use Cosmos-Predict2.5-2B [36] as the frozen video model G. Its frozen Wan VAE encoder compresses time by 4×, producing current and future latents xc and xf .
+
+Encoding the transition. The Future Extractor Eθ maps the clip to a predictive code z = Eθ (Vt) ∈ RNz ×dz
+
+through two frozen encoders. The VAE latents lie in the latent space of G and preserve fine-grained appearance and motion, while DINOv3 [46] provides semantic patch fea-tures that are more robust to visual distribution shifts. The two are complementary for action decoding (Sec. 3). To-kens of both encoders are mapped to a common width and spatial grid, and fixed spatiotemporal sinusoidal position embeddings are added. An 18-layer Q-Former [21] aggre-gates these tokens through self-attention and cross-attention with Nz learnable queries. A linear layer projects each query to dz dimensions. We set Nz = dz = 32 , encoding the transition over the action horizon in 1,024 scalar values. 
+
+Explaining the future to a frozen video model. We re-place the text context of G with Pg (z) in every cross-attention block, where Pg is a trainable linear projection into the text-context space of G. Conditioned on the clean current latent, G predicts the future through 
+
+Lvideo = LFM 
+
+ G; xf , (xc, P g (z)) . (2) The weights of G remain fixed, but gradients pass through 
+
+G to train the Future Extractor. Since a frozen G interprets its condition in a fixed way, the code can lower the loss only by providing additional transition information that helps the frozen model predict the future. The current frame supplies scene appearance, and the pretrained generator supplies vi-sual priors. This encourages the limited code capacity to de-scribe changes needed to explain the observed future. The code thus learns to guide an existing generative model rather than co-adapt with it, grounding representation learning in pretrained spatiotemporal priors that distillation later trans-fers to the policy. 4Semantic and geometric alignment. To complement RGB prediction, we align intermediate features of G with frozen perception teachers [66]. Block ks = 9 is aligned with DINOv3 patch features, and block kg = 14 is aligned with patch features from the global-attention blocks of VGGT-Ω [52]. Both teachers encode the clean clip. We keep the current-frame features separate and linearly inter-polate future features in time to match G’s token layout. A trainable projector Psem , comprising a 3D convolution and an MLP, maps hidden states h(ks) to the semantic target space, and we maximize their patch-wise cosine similarity: 
+
+Lsem = 1
+
+|Ω|
+
+X
+
+> i∈Ω
+
+h
+
+1 − cos  Psem (h(ks))i, eYsem 
+
+> i
+
+i
+
+, (3) where Ω indexes spatiotemporal tokens and eYsem denotes the resampled targets. The geometric loss Lgeo uses an anal-ogous projector Pgeo and VGGT-Ω targets eYgeo .The supervision follows the depth of G: semantics at an early block, geometry at a middle block that builds on the semantic layout, and RGB at the output. Since video gener-ation models already encode much of the semantics, geom-etry, and motion of a scene [20], the code does not need to store high-dimensional feature maps with their back-grounds. It only needs to steer G toward internal states con-sistent with the true future, which also avoids the conflicts that may arise when a small latent is regressed onto several teachers directly. All three losses share one forward pass of G, without separately generating semantic or geometric outputs. 
+
+Action supervision through the frozen video model. An action DiT πψ reads the code. Its inputs are proprioception and noisy action tokens, with flow time supplied through adaptive layer normalization (adaLN) [40]. Self-attention alternates with cross-attention to the conditioning tokens. Besides the code, the action DiT receives a compact readout of G. During denoising, video-model hidden states encode physical plausibility [12], but predictive features do not nec-essarily make actions easy to decode. Our probe shows that joint video–action training improves action decodabil-ity (Sec. 3), motivating action-guided feature learning. We achieve this without updating G: action supervision trains the code and its readout, shaping the code-conditioned fea-tures of G while keeping its weights frozen. From the same forward pass of G, we take the future-position hidden states 
+
+h(kw )f of block kw = 18 , which we call world features. An attentive pooler Rη with Nw = 32 learnable queries and 3 cross-attention layers compresses them into world tokens 
+
+w = Rη (h(kw )f ) ∈ RNw ×dw , which are extracted down-stream of both alignment blocks. The action objective is: 
+
+L(1) act = LFM 
+
+ πψ ; at, (st, [Pa(z); w]) , (4) where Pa is a trainable linear projection from dz to dw di-mensions, [·; ·] concatenates tokens, and w uses the noise level sampled for the video loss. The action gradients reach the code both directly and through G. This encourages con-trollable changes to remain accessible, since visual predic-tion alone can favor nuisance variation [70]. The action DiT is discarded after Stage 1. 
+
+Objective. Stage 1 minimizes 
+
+LS1 = L(1) act + Lvideo + λsem Lsem + λgeo Lgeo , (5) with λsem = λgeo = 0 .1. As in conventional WAMs, action and video supervision are combined with a pretrained video prior, but here they shape a compact predictive code while the video model remains frozen. 
+
+4.2. Distilling the Future into a Lean Policy 
+
+Stage 1 encodes future observations available only during training. Stage 2 learns to predict these representations from current observations. 
+
+Architecture. The policy consists of a vision-language backbone, a World Expert, and an Action Expert. The back-bone, Qwen3.5-0.8B [44] truncated to the first 12 of its 24 layers, encodes the multi-view observation and the instruc-tion into context L. The two experts are 12-layer trans-formers coupled as a Mixture-of-Transformers [24], with separate weights and masked joint self-attention at every layer. Only the World Expert can attend to the backbone context L, which is supplied through layer-specific normal-ization and key/value projections. The World Expert holds two groups of tokens. The current tokens C describe the present scene: each camera view is encoded by a frozen DI-NOv3 and tagged with a learnable view embedding, and a visual resampler compresses all views into 64 tokens. The future queries F are Nz + Nw learnable tokens that predict the code and the world tokens. The Action Expert processes the proprioception and noisy action tokens A, conditioned on flow time through adaLN. Detailed module architectures for both training stages are provided in Appendix A. 
+
+Attention mask. The backbone keeps its causal mask and does not attend to the experts. Both C and F attend to 
+
+{L, C, F}, allowing the future queries to predict from the observation and instruction while refining the current to-kens with predictive information. The Action Expert at-tends only to {C, A}, with no direct access to L or F. Lan-guage and predicted-future information therefore influence actions through C, whose computation is independent of action denoising. 5Distillation. At the last layer, separate layer-normalization and linear heads map the future queries to code predictions ˆz and world-token predictions ˆw.The targets come from the frozen Stage-1 modules: 
+
+¯z = LN( Eθ (Vt)) and ¯w = LN( Rη (h(kw )f )) , where LN is a token-wise layer normalization without affine parameters. To obtain ¯w, G receives Pg (z), the clean current latent, and the future latent corrupted at τ ⋆ = 0 .75 , selected from our probe. We use the same noise level for target extraction across samples. We minimize Lcode = SmoothL1(ˆ z, ¯z)
+
+and Lworld = SmoothL1( ˆ w, ¯w). The two distillation targets are complementary: the code is jointly shaped by all Stage-1 objectives, while the world tokens retain spatial structure from the video prior. 
+
+Objective. Let L(2) act denote the flow-matching action ob-jective of the Stage-2 policy. We randomly initialize the Action Expert and freeze all Stage-1 modules. Stage 2 min-imizes 
+
+LS2 = L(2) act + λcode Lcode + λworld Lworld , (6) where λcode = λworld = 0 .1.
+
+Inference. The backbone and World Expert each run once per observation. We cache the layer-wise keys and val-ues of C and run only the Action Expert for ten denoising steps. All Stage-1 modules and the distillation heads are discarded. The deployed policy has 1.4B parameters and renders no future video. 
+
+# 5. Experiments 
+
+We evaluate LeanWAM on LIBERO [27], LIBERO-Plus [13], and RoboTwin 2.0 [9], comparing success rates and latency with VLA and WAM baselines (Sec. 5.2), an-alyzing predictive representations (Sec. 5.3), and ablating model components (Sec. 5.4). 
+
+5.1. Experimental Setup 
+
+Benchmarks. We use four 10-task LIBERO suites [27]: Spatial, Object, Goal, and Long. A single model is trained jointly on these suites and evaluated on 500 episodes per suite. LIBERO-Plus [13] adds seven perturbation types: camera viewpoint, robot initial state, language, lighting, background, sensor noise, and object layout. We evalu-ate the LIBERO-trained checkpoint on all 10,030 episodes without further training. RoboTwin 2.0 [9] contains 50 bimanual tasks with clean and randomized settings, and randomization varies clutter, background, lighting, table height, and instructions. We jointly train on clean and ran-domized demonstrations of 10 selected tasks and evaluate 100 episodes per task per setting. 
+
+Table 1. Results on LIBERO. Success rates (%) over 500 episodes per suite. Size: number of parameters. PT: large-scale embodied pretraining. Bold : best. Underline: second best.                                                                                        
+
+> Method Size PT Spatial Object Goal Long Avg.
+> Vision-language-action models
+> OpenVLA-OFT [18] 7.5B ✓97.6 98.4 97.9 94.5 97.1
+> π0.5[42] 3.3B ✓98.8 98.2 98.0 92.4 96.9 GR00T N1.7 [38] 3B ✓97.7 98.5 97.5 94.4 97.0 LAPA [64] 7B ✓73.8 74.6 58.8 55.4 65.7 UniVLA [6] 7B ✓96.5 96.8 95.6 92.0 95.2 VLA-JEPA [49] 2.3B ✓96.2 99.6 97.2 95.8 97.2 StarVLA-π[47] 7.8B ✗98.8 99.6 95.8 88.4 95.7
+> World action models
+> Fast-WAM [69] 6B ✗98.2 100.0 97.0 95.2 97.6 JEPA-WAM [25] 1.3B ✗95.6 99.4 97.2 94.6 96.7 Motus [2] 8B ✓96.8 99.8 96.6 97.6 97.7
+> LeanWAM (ours) 1.4B ✗98.4 99.4 97.8 98.0 98.4
+
+Implementation details. We train both stages for 30 epochs on LIBERO, and Stage 1 and Stage 2 for 10 and 15 epochs on RoboTwin 2.0. We report success rates (%). Baseline success rates are taken from the corresponding pa-pers or public benchmark reports. We separately measure inference latency for representative VLA and WAM base-lines. Further details are in Appendices C and D. 
+
+5.2. Main Results 
+
+LIBERO. LeanWAM reaches 98.4% average success, the highest in Table 1, without large-scale embodied pretrain-ing. It also leads on Long at 98.0%, 5.6 points above 
+
+π0.5, and exceeds Fast-WAM and Motus with roughly one-quarter to one-sixth as many parameters. The fol-lowing benchmarks test robustness beyond these high in-distribution scores. 
+
+LIBERO-Plus. LIBERO-Plus tests generalization to per-turbations unseen in training (Table 2). Without large-scale embodied pretraining, LeanWAM achieves the high-est total success rate, outperforming all other WAMs in the table and π0.5. It is particularly robust to camera and noise perturbations, leading the next best methods by 8.9 and 3.3 points. Several WAMs built on large video mod-els are fragile under such perturbations, with Fast-WAM reaching only 16.4% under camera changes. We hypoth-esize that LeanWAM is robust because its predictive code emphasizes manipulation-relevant regions and behaviors (Sec. 5.3) rather than scene appearance. Perturbed ini-tial robot states remain challenging for LeanWAM, and the five strongest methods on this dimension all use large-scale embodied pretraining, suggesting that broader pretraining could complement our approach. 6Table 2. Zero-shot generalization and latency on LIBERO-Plus. Success rates (%) by perturbation and overall (Total). LeanWAM is trained only on LIBERO. Latency per action chunk is measured for LeanWAM and representative VLA and WAM baselines on the same A100 GPU at batch size 1; – indicates that latency was not measured. Other notation follows Table 1.                                                                                                                                                                                                                      
+
+> Method Size PT Latency (ms) Camera Robot Language Light Background Noise Layout Total
+> Vision-language-action models
+> OpenVLA-OFT [18] 7.5B ✓104.2 56.4 31.9 79.5 88.7 93.3 75.8 74.2 69.6
+> π0[3] 3.3B ✓–13.8 6.0 58.8 85.0 81.4 79.0 68.9 53.6
+> π0-FAST [41] 3B ✓–65.1 21.6 61.0 73.2 73.2 74.4 68.8 61.6
+> π0.5[42] 3.3B ✓65.8 78.4 73.6 80.8 96.2 94.1 89.0 84.5 84.4 VLA-JEPA [49] 2.3B ✓–63.3 67.1 85.4 95.6 93.6 66.3 85.1 79.5 StarVLA [47] 4B ✗–52.5 49.8 88.5 95.7 95.7 73.0 76.9 74.1 VLAct [62] 4B ✓531.4 73.9 68.4 81.5 96.7 96.7 86.0 83.3 82.6
+> World action models
+> Fast-WAM [69] 6B ✗627.1 16.4 44.5 68.9 78.2 53.7 37.7 60.7 51.5 OpenWAM-α[54] 6B ✓1040.3 33.8 76.1 88.0 97.0 87.1 39.8 77.5 69.2 4D-WAM [60] 6B ✗–45.2 64.3 90.6 94.3 57.7 69.1 79.2 71.0 ST-WAM [53] 7B ✗–55.4 60.1 79.3 93.0 74.2 79.5 74.3 72.8 Faster-WAM [33] 5B ✗–67.9 49.0 92.1 94.3 57.0 82.3 82.7 75.0 Cosmos Policy [19] 2B ✗788.2 75.8 63.3 81.7 96.5 88.9 92.7 82.2 82.2 JEPA-WAM [25] 1.3B ✗–79.2 59.2 68.2 93.3 94.6 83.6 76.1 79.2 ImageWAM [72] 4.5B ✗307.6 80.8 50.3 91.4 98.1 85.5 93.8 80.5 83.1 ABot-M0.5 [8] 5B ✓–70.5 87.4 88.6 94.0 89.7 75.5 85.2 83.4 Being-H0.7 [31] 3B ✓–82.0 59.0 82.8 97.8 90.0 93.5 88.5 82.1
+> LeanWAM (ours) 1.4B ✗25.1 90.9 61.8 81.3 96.4 88.4 97.1 79.8 84.6
+
+Table 3. Results on RoboTwin 2.0. Success rates (%) averaged over 10 bimanual tasks, with 100 episodes per task and setting.                           
+
+> Method Clean Randomized Avg. X-VLA [73] 76.4 73.6 75.0
+> π0.5[42] 83.5 80.3 81.9 Motus [2] 89.5 89.4 89.5 Fast-WAM [69] 89.3 89.6 89.5 GigaWorld-Policy [63] 89.2 87.8 88.5 LingBot-VA [22] 89.9 87.4 88.7
+> LeanWAM (ours) 93.9 92.3 93.1
+
+Efficiency. Table 2 also reports inference latency. We measure latency for representative VLA and WAM base-lines. LeanWAM achieves the lowest latency in this com-parison at 25.1 ms per action chunk. It is 4.2 × faster than OpenVLA-OFT, which decodes a chunk in a single pass, 2.6 × faster than π0.5, and 12.3 × to 41.5 × faster than the four representative WAMs. Unlike these WAMs, Lean-WAM does not run a generative visual backbone at infer-ence: its backbone and World Expert run once per observa-tion, and only the Action Expert iterates over ten denoising steps. Measurement details and our inference implementa-tion are in Appendix D. 
+
+RoboTwin 2.0. On RoboTwin 2.0 (Table 3), LeanWAM leads both clean and randomized evaluations on our 10-task subset. It improves the average by 3.6 points over the strongest baselines, Motus and Fast-WAM, which run 
+
+Table 4. Probing LeanWAM’s representations. Action R2 for predictive code (P), world tokens (V), and their combination, com-pared with the best dense combination in Sec. 3. Probes follow Sec. 3, with results averaged over three seeds. ∆: change relative to W+D+T. Representation Tokens Action R2 ∆
+
+W+D+T (dense, Sec. 3) >3k 0.755 –P (predictive code) 32 0.805 +0.050 V (world tokens) 32 0.622 −0.133 P+V 64 0.843 +0.088 
+
+billion-parameter video models. Per-task results are in Ap-pendix C.4. 
+
+5.3. What Does the Predictive Code Capture? 
+
+Probing the learned representations. We rerun Stage 1 using only the probe’s 400 training episodes, extract predic-tive codes (P) and world tokens (V) from five-frame clips, and train separate probes on P, V, and P+V. Evaluation uses the held-out episodes and protocol of Sec. 3. Table 4 shows that the 32-token code reaches R2 =0.805 , above the dense W+D+T combination at 0.755. Stage 1 therefore makes action information more accessi-ble through a compact representation. World tokens score lower alone (0.622), yet their R2 is more than twice that of F ( 0.30 ), read from the same video model under text con-ditioning, and close to that of T ( 0.66 ), read after training the model. Although V uses five frames whereas F and T 7(a) With action supervision (b) Without action supervision            
+
+> Reach Grasp Lift Transport Place Figure 4. Predictive codes with and without action supervision.
+> The same 1,500 LIBERO clips, colored by behavior and projected with PCA followed by UMAP [34]. (a) Full Stage-1 objective.
+> (b) Without action loss. Reach, Lift, and Transport form more coherent neighborhoods in (a). RGB Attention
+> Instruction: put the wine bottle on top of the cabinet
+> Figure 5. Query attention of the Future Extractor. Top: demon-stration frames. Bottom: query cross-attention to the DINOv3 to-kens. The queries concentrate on the gripper and the target bottle.
+
+use two, the observed gain over F is substantial. As with the dense sources in Sec. 3, the two are complementary: with the same probe capacity, P+V performs best ( 0.843 ), sug-gesting that the world tokens carry action cues not readily decodable from the code. This supports distilling both tar-gets into the policy. The corresponding closed-loop ablation appears in Sec. 5.4. 
+
+Behavior structure of the code. We study how action su-pervision in Stage 1 shapes the code. We sample 1,500 non-overlapping clips balanced across LIBERO tasks and label each with one of five behaviors, Reach, Grasp, Lift, Trans-port, or Place, using Gemini 3.6 Flash [14]. The same clips are encoded by Future Extractors trained with and with-out the Stage-1 action loss. Figure 4 visualizes the two sets of codes with UMAP [34]. With action supervision, codes of the same behavior form distinct clusters or more coherent neighborhoods. Without it, Grasp and Place still lie apart, but Reach, Lift, and Transport intermix. Super-vision through the video model alone thus captures salient events such as grasping and releasing, while the action loss improves separation among these behaviors. Since UMAP can distort distances, we quantify this structure in the original 1,024-dimensional space. For each code, we find 15 cosine-nearest neighbors from other tasks,                                        
+
+> Table 5. Ablations on LIBERO-Plus. Total success rates (%).
+> ∆is relative to LeanWAM. −/→: removal/replacement. †Also removes world tokens, leaving only code distillation in Stage 2. Variant Total ∆
+> LeanWAM 84.6 –
+> Stage 1
+> −action supervision †80.1 −4.5
+> −video model †81.0 −3.6
+> −semantic and geometric alignment 82.2 −2.4 frozen →trainable video model 79.6 −5.0 alignment →prediction heads 78.0 −6.6
+> Stage 2
+> −code distillation 79.3 −5.3
+> −world distillation 80.4 −4.2
+> −code and world distillation 75.8 −8.8 DINOv3 tokens →learnable tokens 79.4 −5.2
+
+measure their behavior-label agreement, and macro-average over behaviors. Restricting neighbors to other tasks re-duces task-specific similarity. Agreement rises from 70.7% to 78.5% with action supervision, versus an approximately 20% random-neighbor reference. This supports more con-sistent behavior representations across tasks beyond the two-dimensional visualization. 
+
+Where the Future Extractor attends. We visualize the cross-attention from the queries of the Future Extractor to the DINOv3 tokens of a LIBERO demonstration (Figure 5). The attention concentrates on the gripper and the wine bot-tle that the robot is asked to move. The table, the back-ground, and the other objects receive little attention. This example illustrates how the queries select manipulation-relevant regions when aggregating clip features. Additional attention visualizations are provided in Appendix E. 
+
+5.4. Ablation Studies 
+
+Table 5 ablates the components of LeanWAM on all 10,030 LIBERO-Plus episodes. Each variant modifies a component or training pathway and otherwise follows Sec. 5.1, with details in Appendix C.5. 
+
+Stage 1. Removing action supervision or the video model reduces success by 4.5 and 3.6 points. These are coupled ablations: both also remove world tokens and retain only code distillation. They therefore test the corresponding training pathways, rather than isolating either component alone. Removing the semantic and geometric alignment costs 2.4 points. Replacing alignment with output heads that predict future DINOv3 features and depth, following WAMs that add semantic or geometric targets to the pre-dicted future [51, 59], is even worse (78.0%). This supports 8our design: alignment only steers the internal states of the frozen model, whereas the heads must produce dense fea-ture and depth maps from its last layer, which is specialized for RGB. Fine-tuning the video model, as most WAMs do, lowers the success rate to 79.6%, although training makes video features more decodable in distribution (Sec. 3). A trainable model can rely less on the code and may lose its general prior when fitted to limited robot data. Keeping it frozen is thus both cheaper and more robust. 
+
+Stage 2. With the same policy architecture and inference cost, action-only training reaches 75.8%, 8.8 points below LeanWAM. Distilling world tokens alone or the code alone recovers part of this gap (79.3% and 80.4%), and jointly distilling them performs best, consistent with their com-plementarity in Sec. 5.3. Replacing current DINOv3 to-kens with learnable tokens costs 5.2 points, supporting di-rect visual input to the World Expert alongside the vision-language backbone. 
+
+# 6. Conclusion 
+
+LeanWAM transfers video priors to control by learning compact predictive representations through a frozen video model. A lean policy predicts these representations from current observations, achieving strong task performance, robustness, and low inference latency without deploying the video model. 
+
+Future work. Our evaluation is limited to simulation. Fu-ture work includes testing LeanWAM in complex, dynamic real-world environments, scaling the Future Extractor with larger robot datasets and human videos, and integrating its fast control with a high-level agent for long-horizon plan-ning and task decomposition. 
+
+# References 
+
+[1] Adrien Bardes, Quentin Garrido, Jean Ponce, Xinlei Chen, Michael Rabbat, Yann LeCun, Mahmoud Assran, and Nico-las Ballas. Revisiting feature prediction for learning visual representations from video. Transactions on Machine Learn-ing Research (TMLR) , 2024. [2] Hongzhe Bi, Hengkai Tan, Shenghao Xie, Zeyuan Wang, Shuhe Huang, Haitian Liu, Ruowen Zhao, Yao Feng, Chen-dong Xiang, Yinze Rong, Hongyan Zhao, Hanyu Liu, Zhizhong Su, Lei Ma, Hang Su, and Jun Zhu. Motus: A Unified Latent Action World Model. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 35101–35113, 2026. [3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mo-hith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xiaoyang Shi, James Tanner, Quan Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. π0: A Vision-Language-Action Flow Model for General Robot Control. In Robotics: Sci-ence and Systems , 2025. [4] James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Yash Katariya, Chris Leary, Dougal Maclaurin, George Necula, Adam Paszke, Jake Van-derPlas, Skye Wanderman-Milne, and Qiao Zhang. JAX: composable transformations of Python+NumPy programs. 
+
+https://github.com/jax-ml/jax , 2018. Software repository. [5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding, Danny Driess, Avinava Dubey, Chelsea Finn, Pete Flo-rence, Chuyuan Fu, Montse Gonzalez Arenas, Keerthana Gopalakrishnan, Kehang Han, Karol Hausman, Alexander Herzog, Jasmine Hsu, Brian Ichter, Alex Irpan, Nikhil Joshi, Ryan Julian, Dmitry Kalashnikov, Yuheng Kuang, Isabel Leal, Lisa Lee, Tsang-Wei Edward Lee, Sergey Levine, Yao Lu, Henryk Michalewski, Igor Mordatch, Karl Pertsch, Kanishka Rao, Krista Reymann, Michael Ryoo, Grecia Salazar, Pannag Sanketi, Pierre Sermanet, Jaspiar Singh, Anikait Singh, Radu Soricut, Huong Tran, Vincent Van-houcke, Quan Vuong, Ayzaan Wahid, Stefan Welker, Paul Wohlhart, Jialin Wu, Fei Xia, Ted Xiao, Peng Xu, Sichun Xu, Tianhe Yu, and Brianna Zitkovich. RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control. arXiv:2307.15818, 2023. [6] Qingwen Bu, Yanting Yang, Jisong Cai, Shenyuan Gao, Guanghui Ren, Maoqing Yao, Ping Luo, and Hongyang Li. Learning to Act Anywhere with Task-centric Latent Actions. In Robotics: Science and Systems , 2025. [7] Jialei Chen, Kai Wang, Kang Chen, Shuaihang Chen, Feng Gao, Wenhao Tang, Zhiyuan Li, Weilin Liu, Zhuyu Yao, Boxun Li, Yuanbo Xu, and Chao Yu. LaWAM: Latent World Action Models for Efficient Dynamics-Aware Robot Poli-cies. arXiv:2606.15768, 2026. [8] Ronghan Chen, Yandan Yang, Zuojin Tang, Dongjie Huo, Tong Lin, Haoning Wu, Haoyun Liu, Yuzhi Chen, Lulu Zheng, Botai Yuan, Tianlun Li, Mingxin Wang, Dekang Qi, Bin Hu, Wei Mei, Yuze Xuan, Haolong Yang, Yanqing Zhu, Mu Xu, Zhiheng Ma, and Xinyuan Chang. ABot-M0.5: Uni-fied Mobility-and-Manipulation World Action Model. arXiv preprint arXiv:2607.00678 , 2026. [9] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge, Zhenyu Gu, Weiliang Deng, Yubin Guo, Tian Nian, Xuan-bing Xie, Qiangyu Chen, Kailun Su, Tianling Xu, Guodong Liu, Mengkang Hu, Huan-ang Gao, Kaixuan Wang, Zhix-uan Liang, Yusen Qin, Xiaokang Yang, Ping Luo, and Yao Mu. RoboTwin 2.0: A scalable data generator and bench-mark with strong domain randomization for robust bimanual robotic manipulation. In International Conference on Ma-chine Learning (ICML) , 2026. [10] Yinpei Dai, Hongze Fu, Jayjun Lee, Yuejiang Liu, Haoran Zhang, Jianing Yang, Chelsea Finn, Nima Fazeli, and Joyce Chai. Robomme: Benchmarking and understanding memory for robotic generalist policies, 2026. 
+
+9[11] Yilun Du, Sherry Yang, Bo Dai, Hanjun Dai, Ofir Nachum, Josh Tenenbaum, Dale Schuurmans, and Pieter Abbeel. Learning universal policies via text-guided video genera-tion. Advances in neural information processing systems ,36:9156–9172, 2023. [12] Parsa Esmati, Somjit Nath, Katja Hofmann, Derek Nowrouzezahrai, Samira Ebrahimi Kahou, and Majid Mirmehdi. The invisible hand of physics: When video dif-fusion models know more than they show. arXiv preprint arXiv:2606.05328 , 2026. [13] Senyu Fei, Siyin Wang, Junhao Shi, Zihao Dai, Jikun Cai, Pengfang Qian, Li Ji, Xinzhe He, Shiduo Zhang, Zhaoye Fei, Jinlan Fu, Jingjing Gong, and Xipeng Qiu. LIBERO-Plus: In-depth robustness analysis of vision-language-action models. arXiv preprint arXiv:2510.13626 , 2025. [14] Google. Gemini 3.6 flash. https://docs.cloud. google . com / gemini - enterprise - agent -platform/models/gemini/3-6-flash , 2026. [15] Yucheng Hu, Yanjiang Guo, Pengchao Wang, Xiaoyu Chen, Yen-Jen Wang, Jianke Zhang, Koushil Sreenath, Chaochao Lu, and Jianyu Chen. Video Prediction Policy: A General-ist Robot Policy with Predictive Visual Representations. In 
+
+International Conference on Machine Learning , 2025. [16] Haoyi Jiang, Liu Liu, Xinjiang Wang, Zhihao Sun, Ze-qun Chen, Sen Wang, Xinjie Wang, Xia Chen, Jingfeng Yao, Weiheng Zhao, Shanglin Yuan, Zhizhong Su, Wei Sui, Wenyu Liu, and Xinggang Wang. Rethinking Representa-tions for World-Action Modeling. arXiv:2609.38163, 2026. [17] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Fos-ter, Grace Lam, Pannag Sanketi, Quan Vuong, Thomas Kollar, Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. Open-VLA: An Open-Source Vision-Language-Action Model. arXiv:2406.09246, 2024. [18] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-Tuning Vision-Language-Action Models: Optimizing Speed and Success. In Robotics: Science and Systems , 2025. [19] Moo Jin Kim, Yihuai Gao, Tsung-Yi Lin, Yen-Chen Lin, Yunhao Ge, Grace Lam, Percy Liang, Shuran Song, Ming-Yu Liu, Chelsea Finn, and Jinwei Gu. Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning. In International Conference on Learning Representations ,2026. [20] Michael King, Aravindh Mahendran, Matthew Koichi Grimes, Fedor Kitashov, et al. Gen4U: Unifying video generation and understanding via diffusion. arXiv preprint arXiv:2607.06856 , 2026. [21] Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. BLIP-2: Bootstrapping Language-Image Pre-training with Frozen Image Encoders and Large Language Models. In In-ternational Conference on Machine Learning , 2023. [22] Lin Li, Qihang Zhang, Yiming Luo, Shuai Yang, Ruilin Wang, Fei Han, Mingrui Yu, Zelin Gao, Nan Xue, Xing Zhu, Yujun Shen, and Yinghao Xu. Causal World Modeling for Robot Control. arXiv:2601.21998, 2026. [23] Junbang Liang, Pavel Tokmakov, Ruoshi Liu, Sruthi Sud-hakar, Paarth Shah, Rares Ambrus, and Carl Vondrick. Video generators are robot policies. arXiv preprint arXiv:2508.00795 , 2025. [24] Weixin Liang, Lili Yu, Liang Luo, Srinivasan Iyer, Ning Dong, Chunting Zhou, Gargi Ghosh, Mike Lewis, Wen tau Yih, Luke Zettlemoyer, and Xi Victoria Lin. Mixture-of-Transformers: A Sparse and Scalable Architecture for Multi-Modal Foundation Models. Transactions on Machine Learn-ing Research , 2025. [25] Yihan Lin, Jiawei He, Shifeng Bao, Chen Zhao, Yang Li, Xiaobo Wang, Yan Wang, Cheng Chi, and Jing Zhang. JEPA-WAM: Learning Vision-Language-Action Policies with Joint-Embedding World Modeling. arXiv preprint arXiv:2608.09381 , 2026. [26] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maxi-milian Nickel, and Matt Le. Flow Matching for Generative Modeling. In International Conference on Learning Repre-sentations , 2023. [27] Bo Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter Stone. LIBERO: Benchmarking Knowl-edge Transfer for Lifelong Robot Learning. In Advances in Neural Information Processing Systems , 2023. [28] Renhang Liu, Wenzhi Zhao, Zhuo Yang, Liliang Chen, Pengfei Zhou, Shengcong Chen, Guanghui Ren, Youlun Peng, Rongjun Jin, Nan Wang, Sukai Wang, Xindong He, Jinyuan Feng, Ziyu Xiong, Linqing Zhong, Yifei Wei, Feng Han, Long Zhang, Da Huang, Nanshu Zhao, Chenghao Yin, Mo Wu, Zhaodong Yan, Kongtao Hu, Yuxiang Yan, Aogeli-jiang Niyazi, Yu Fang, Jia Zeng, Lizhu Meng, Daizhen Lv, Haoyu Cao, Zhiwen Hou, Lianjin Ye, Yuehan Niu, Zhikai Cai, Xuan Hu, Hui Min, Xiongfeng Cai, Yue Liao, Jing Wu, Soujanya Poria, Ye Li, Sanping Zhou, Maoqing Yao, and AgiBot Research Team. GE-Act 2.0: Pretraining and Scaling a World-Action Model for Robotic Manipulation. arXiv:2609.05588, 2026. [29] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow. In International Conference on Learn-ing Representations , 2023. [30] Ilya Loshchilov and Frank Hutter. Decoupled Weight Decay Regularization. arXiv preprint arXiv:1711.05101 , 2019. [31] Hao Luo, Wanpeng Zhang, Yicheng Feng, Sipeng Zheng, Haiweng Xu, Chaoyi Xu, Ziheng Xi, Yuhui Fu, and Zongqing Lu. Being-H0.7: A Latent World-Action Model from Egocentric Videos. In Advances in Neural Information Processing Systems , 2026. [32] Haoxiang Ma, Junhao Cai, Xiaoxu Xu, Hao Li, Yuyin Yang, Yang Tian, Jiafei Cao, Hongrui Zhu, Zherui Qiu, Zhax-izhuoma, Yuqiang Yang, Jiaqi Peng, Xueyuan Wei, Yangkun Zhu, Jiahao Jiang, Xing Gao, Hanqing Wang, Feng Yuan, Kailin Li, Xueyue Zhu, Tai Wang, Yan Ding, Jiangmiao Pang, Jia Zeng, Jingjing Zhang, Bowen Zhou, Yao Mu, Chunhua Shen, and Weinan Zhang. InternVLA-A1.5: Uni-fying Understanding, Latent Foresight, and Action for Com-positional Generalization. arXiv:2607.04988, 2026. [33] Liheng Ma, Rui Heng Yang, Amin Abyaneh, George Z. Xue, Behnam Rahmati, Mateo Clemente, Ziwen Hu, An-lin Chen, Tongtong Cao, Zhanguang Zhang, and Yingxue 
+
+10 Zhang. Faster-WAM: Do World Action Models Need Deep Action Modules? arXiv preprint arXiv:2608.02365 , 2026. [34] Leland McInnes, John Healy, and James Melville. UMAP: Uniform manifold approximation and projection for dimen-sion reduction. arXiv preprint arXiv:1802.03426 , 2018. [35] Nilaksh, Saurav Jha, Artem Zholus, and Sarath Chandar. Re-construction or semantics? What makes a latent space useful for robotic world models. arXiv preprint arXiv:2605.06388 ,2026. [36] NVIDIA, Arslan Ali, Junjie Bai, Maciej Bala, Yogesh Bal-aji, Aaron Blakeman, Tiffany Cai, Jiaxin Cao, Tianshi Cao, Elizabeth Cha, Yu-Wei Chao, Prithvijit Chattopadhyay, Mike Chen, Yongxin Chen, Yu Chen, Shuai Cheng, Yin Cui, Jenna Diamond, Yifan Ding, Jiaojiao Fan, Linxi Fan, Liang Feng, Francesco Ferroni, Sanja Fidler, Xiao Fu, Ruiyuan Gao, Yunhao Ge, Jinwei Gu, Aryaman Gupta, Siddharth Gururani, Imad El Hanafi, Ali Hassani, Zekun Hao, Ja-cob Huffman, Joel Jang, Pooya Jannaty, Jan Kautz, Grace Lam, Xuan Li, Zhaoshuo Li, Maosheng Liao, Chen-Hsuan Lin, Tsung-Yi Lin, Yen-Chen Lin, Huan Ling, Ming-Yu Liu, Xian Liu, Yifan Lu, Alice Luo, Qianli Ma, Hanzi Mao, Kaichun Mo, Seungjun Nah, Yashraj Narang, Abhijeet Panaskar, Lindsey Pavao, Trung Pham, Morteza Ramezanali, Fitsum Reda, Scott Reed, Xuanchi Ren, Haonan Shao, Yue Shen, Stella Shi, Shuran Song, Bartosz Stefaniak, Shangkun Sun, Shitao Tang, Sameena Tasmeen, Lyne Tchapmi, Wei-Cheng Tseng, Jibin Varghese, Andrew Z. Wang, Hao Wang, Haoxiang Wang, Heng Wang, Ting-Chun Wang, Fangyin Wei, Jiashu Xu, Dinghao Yang, Xiaodong Yang, Haotian Ye, Seonghyeon Ye, Xiaohui Zeng, Jing Zhang, Qinsheng Zhang, Kaiwen Zheng, Andrew Zhu, and Yuke Zhu. World Simulation with Video Foundation Models for Physical AI. arXiv:2511.00062, 2025. [37] NVIDIA, Alisson Azzolini, Junjie Bai, Hannah Brandon, Ji-axin Cao, Prithvijit Chattopadhyay, Huayu Chen, Jinju Chu, Yin Cui, Jenna Diamond, Yifan Ding, Liang Feng, Francesco Ferroni, Rama Govindaraju, Jinwei Gu, Siddharth Guru-rani, Imad El Hanafi, Zekun Hao, Jacob Huffman, Jingyi Jin, Brendan Johnson, Rizwan Khan, George Kurian, Elena Lantz, Nayeon Lee, Zhaoshuo Li, Xuan Li, Maosheng Liao, Tsung-Yi Lin, Yen-Chen Lin, Ming-Yu Liu, Xiangyu Lu, Al-ice Luo, Andrew Mathau, Yun Ni, Lindsey Pavao, Wei Ping, David W. Romero, Misha Smelyanskiy, Shuran Song, Lyne Tchapmi, Andrew Z. Wang, Boxin Wang, Haoxiang Wang, Fangyin Wei, Jiashu Xu, Yao Xu, Dinghao Yang, Xiaodong Yang, Zhuolin Yang, Jingxu Zhang, Xiaohui Zeng, and Zhe Zhang. Cosmos-Reason1: From Physical Common Sense To Embodied Reasoning. arXiv preprint arXiv:2503.15558 ,2025. [38] NVIDIA, Johan Bjorck, Fernando Castañeda, Nikita Cherni-adev, Xingye Da, Runyu Ding, Linxi "Jim" Fan, Yu Fang, Di-eter Fox, Fengyuan Hu, Spencer Huang, Joel Jang, Zhenyu Jiang, Jan Kautz, Kaushil Kundalia, Lawrence Lao, Zhiqi Li, Zongyu Lin, Kevin Lin, Guilin Liu, Edith Llontop, Loic Magne, Ajay Mandlekar, Avnish Narayan, Soroush Nasiri-any, Scott Reed, You Liang Tan, Guanzhi Wang, Zu Wang, Jing Wang, Qi Wang, Jiannan Xiang, Yuqi Xie, Yinzhen Xu, Zhenjia Xu, Seonghyeon Ye, Zhiding Yu, Ao Zhang, Hao Zhang, Yizhou Zhao, Ruijie Zheng, and Yuke Zhu. GR00T N1: An Open Foundation Model for Generalist Humanoid Robots. arXiv:2503.14734, 2025. [39] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Yang, Zach DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. PyTorch: An Imper-ative Style, High-Performance Deep Learning Library. arXiv preprint arXiv:1912.01703 , 2019. [40] William Peebles and Saining Xie. Scalable Diffusion Models with Transformers. In Proceedings of the IEEE/CVF Inter-national Conference on Computer Vision , 2023. [41] Karl Pertsch, Kyle Stachowicz, Brian Ichter, Danny Driess, Suraj Nair, Quan Vuong, Oier Mees, Chelsea Finn, and Sergey Levine. FAST: Efficient Action Tokenization for Vision-Language-Action Models. In Robotics: Science and Systems , 2025. [42] Physical Intelligence, Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Gal-liker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky. π0.5: a Vision-Language-Action Model with Open-World Generalization. arXiv:2504.16054, 2025. [43] Han Qi, Chun nien Chan, Will Cromar, Manfei Bai, and Kevin Gleason. torchax: PyTorch on TPU and JAX interop-erability. https://github.com/google/torchax ,2025. Software repository. [44] Qwen Team. Qwen3.5-0.8B. Model card, 2026. [45] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. ZeRO: Memory Optimizations Toward Training Trillion Parameter Models. arXiv preprint arXiv:1910.02054 , 2020. [46] Oriane Siméoni, Huy V. Vo, Maximilian Seitzer, Federico Baldassarre, Maxime Oquab, Cijo Jose, Vasil Khalidov, Marc Szafraniec, Seungeun Yi, Michaël Ramamonjisoa, Francisco Massa, Daniel Haziza, Luca Wehrstedt, Jianyuan Wang, Timothée Darcet, Théo Moutakanni, Leonel Sentana, Claire Roberts, Andrea Vedaldi, Jamie Tolan, John Brandt, Camille Couprie, Julien Mairal, Hervé Jégou, Patrick La-batut, and Piotr Bojanowski. DINOv3. arXiv:2508.10104, 2025. [47] StarVLA Community. StarVLA: A Lego-like Codebase for Vision-Language-Action Model Developing. arXiv preprint arXiv:2604.05014 , 2026. [48] Yue Su, Sijin Chen, Haixin Shi, Mingyu Liu, Zhengshen Zhang, Ningyuan Huang, Weiheng Zhong, Zhengbang Zhu, Yuxiao Liu, and Xihui Liu. World guidance: World model-ing in condition space for action generation. In Proceedings of the 43rd International Conference on Machine Learning ,pages 115917–115933, 2026. 
+
+11 [49] Jingwen Sun, Wenyao Zhang, Zekun Qi, Shaojie Ren, Zezhi Liu, Hanxin Zhu, Guangzhong Sun, Xin Jin, and Zhibo Chen. VLA-JEPA: Enhancing Vision-Language-Action Model with Latent World Model. arXiv preprint arXiv:2602.10098 , 2026. [50] Team Wan, Ang Wang, Baole Ai, Bin Wen, Chaojie Mao, Chen-Wei Xie, Di Chen, Feiwu Yu, Haiming Zhao, Jianx-iao Yang, Jianyuan Zeng, Jiayu Wang, Jingfeng Zhang, Jin-gren Zhou, Jinkai Wang, Jixuan Chen, Kai Zhu, Kang Zhao, Keyu Yan, Lianghua Huang, Mengyang Feng, Ningyi Zhang, Pandeng Li, Pingyu Wu, Ruihang Chu, Ruili Feng, Shiwei Zhang, Siyang Sun, Tao Fang, Tianxing Wang, Tianyi Gui, Tingyu Weng, Tong Shen, Wei Lin, Wei Wang, Wei Wang, Wenmeng Zhou, Wente Wang, Wenting Shen, Wenyuan Yu, Xianzhong Shi, Xiaoming Huang, Xin Xu, Yan Kou, Yangyu Lv, Yifei Li, Yijing Liu, Yiming Wang, Yingya Zhang, Yitong Huang, Yong Li, You Wu, Yu Liu, Yulin Pan, Yun Zheng, Yuntao Hong, Yupeng Shi, Yutong Feng, Zey-inzi Jiang, Zhen Han, Zhi-Fan Wu, and Ziyu Liu. Wan: Open and Advanced Large-Scale Video Generative Models. arXiv:2503.20314, 2025. [51] Hanqing Wang, Zhaotian Cai, Ruichuan An, Bohan Zeng, Tao Zhang, Yilin Chen, Xu Jiang, Kaiquan Chen, Chongyang Wu, Haoran Li, Fan Yang, Mingan Lin, Wen-tao Zhang, Zenan Zhou, and Youzheng Wu. PDRVLA: A Vision-Language-Action Model with Physical Dynamics Representations. arXiv:2610.37381, 2026. [52] Jianyuan Wang, Minghao Chen, Shangzhan Zhang, Nikita Karaev, Johannes Schönberger, Patrick Labatut, Piotr Bo-janowski, David Novotny, Andrea Vedaldi, and Christian Rupprecht. VGGT-Ω. In Proceedings of the IEEE/CVF Con-ference on Computer Vision and Pattern Recognition , pages 21486–21499, 2026. [53] Mingxin Wang, Bin Hu, Bin Qian, Kaitao Jiang, Haon-ing Wu, Feng Yan, Bowen Jing, Ruiyang Hao, Enyi Wang, Kangning Niu, Yandan Yang, Mu Xu, Yan Wang, Houde Liu, and Tianlun Li. ST-WAM: Semantic-Temporal World Action Model for Robust Manipulation under Visual Distri-bution Shifts. arXiv preprint arXiv:2607.28993 , 2026. [54] Yuran Wang, Siqiao Huang, Mingleyang Li, Chenhao Zhang, Jiaqi Liang, Weiyang Jin, Yue Chen, Xuemin Chi, Dong-hao Zhou, Qize Yu, Yu-Kai Wang, Yuhan Rui, Shenzhe Yao, Zhen Yuan, Zhenhao Shen, Kefei Zhu, Zijie Zhu, Ning Gao, Xiaowei Chi, Guanqi He, Shanghang Zhang, Hao Dong, Lin Shao, and Hang Zhao. OpenWAM: An Open, Modular Ex-ploration Towards Systematic World-Action Model Pretrain-ing. arXiv preprint arXiv:2609.07398 , 2026. [55] Youpeng Wen, Junfan Lin, Yi Zhu, Jianhua Han, Hang Xu, Shen Zhao, and Xiaodan Liang. Vidman: Exploiting implicit dynamics from video diffusion model for effective robot ma-nipulation. Advances in Neural Information Processing Sys-tems , 37:41051–41075, 2024. [56] Hongtao Wu, Ya Jing, Chilam Cheang, Guangzeng Chen, Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and Tao Kong. Unleashing large-scale video generative pre-training for visual robot manipulation. In International Conference on Learning Representations , pages 10641–10662, 2024. [57] Wei Wu, Fan Lu, Yunnan Wang, Shuai Yang, Shi Liu, Fangjing Wang, Qian Zhu, He Sun, Yong Wang, Shuailei Ma, Yiyu Ren, Kejia Zhang, Hui Yu, Jingmei Zhao, Shuai Zhou, Zhenqi Qiu, Houlong Xiong, Ziyu Wang, Zechen Wang, Ran Cheng, Yong-Lu Li, Yongtao Huang, Xing Zhu, Yujun Shen, and Kecheng Zheng. A Pragmatic VLA Foun-dation Model. arXiv:2601.18692, 2026. [58] Weilai Xiang, Hongyu Yang, Di Huang, and Yunhong Wang. Denoising diffusion autoencoders are unified self-supervised learners. In IEEE/CVF International Conference on Com-puter Vision (ICCV) , 2023. [59] Ge Yan, Jinghao Liu, Yuzhi Fan, Lei Cai, Minwen Liao, Jesse Zhang, and Dieter Fox. Flex-π: A Multi-Stream World-Action Model with Compute Flexibility. arXiv:2608.10860, 2026. [60] Lishan Yang, Wenxuan Song, Xi Wang, Pingyue Sheng, Zheng Fang, Ziyang Zhou, Junjie He, Haodong Yan, Jiayi Chen, Nan Sun, Qiao Sun, Lingqiao Liu, Yan Wang, Yux-iang Gao, Feras Dayoub, and Haoang Li. 4D-WAM: In-fusing Spatiotemporal Awareness into World Action Models through Trajectory Fields. arXiv preprint arXiv:2608.08023 ,2026. [61] Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated Delta Networks: Improving Mamba2 with Delta Rule. arXiv preprint arXiv:2412.06464 , 2025. [62] Senqiao Yang, Chengyao Wang, Yuxin Chen, Zixuan Wang, Longxiang Tang, Haokun Gui, Jinhui Ye, Changsheng Lu, Xiaoyang Wu, Mingkang Zhu, Pengguang Chen, Shu Liu, Zhuotao Tian, Hengshuang Zhao, Bei Yu, and Jiaya Jia. Be-yond Data Scaling: Representation-Centric Continued Pre-training for Vision-Language-Action Models. In Advances in Neural Information Processing Systems , 2026. [63] Angen Ye, Boyuan Wang, Chaojun Ni, Guan Huang, Gu-osheng Zhao, Hao Li, Hengtao Li, Jie Li, Jindi Lv, Jingyu Liu, Min Cao, Peng Li, Qiuping Deng, Wenjun Mei, Xi-aofeng Wang, Xinze Chen, Xinyu Zhou, Yang Wang, Yifan Chang, Yifan Li, Yukun Zhou, Yun Ye, Zhichao Liu, and Zheng Zhu. GigaWorld-Policy: An efficient action-centered world–action model. arXiv preprint arXiv:2603.17240 ,2026. [64] Seonghyeon Ye, Joel Jang, Byeongguk Jeon, Sejune Joo, Jianwei Yang, Baolin Peng, Ajay Mandlekar, Reuben Tan, Yu-Wei Chao, Bill Yuchen Lin, Lars Liden, Kimin Lee, Jian-feng Gao, Luke Zettlemoyer, Dieter Fox, and Minjoon Seo. Latent Action Pretraining from Videos. In International Conference on Learning Representations , 2025. [65] Seonghyeon Ye, Yunhao Ge, Kaiyuan Zheng, Shenyuan Gao, Sihyun Yu, George Kurian, Suneel Indupuru, You Liang Tan, Chuning Zhu, Jiannan Xiang, Ayaan Ma-lik, Kyungmin Lee, William Liang, Nadun Ranawaka, Ji-asheng Gu, Yinzhen Xu, Guanzhi Wang, Fengyuan Hu, Avnish Narayan, Johan Bjorck, Jing Wang, Gwanghyun Kim, Dantong Niu, Ruijie Zheng, Yuqi Xie, Jimmy Wu, Qi Wang, Ryan Julian, Danfei Xu, Yilun Du, Yevgen Cheb-otar, Scott Reed, Jan Kautz, Yuke Zhu, Linxi "Jim" Fan, and Joel Jang. World Action Models are Zero-shot Policies. arXiv:2602.15922, 2026. 
+
+12 [66] Sihyun Yu, Sangkyung Kwak, Huiwon Jang, Jongheon Jeong, Jonathan Huang, Jinwoo Shin, and Saining Xie. Rep-resentation Alignment for Generation: Training Diffusion Transformers Is Easier Than You Think. In International Conference on Learning Representations , 2025. [67] Haoqi Yuan, Zhixuan Liang, Anzhe Chen, Ye Wang, Haoyang Li, Pei Lin, Yiyang Huang, Zixing Lei, Tong Zhang, Jiazhao Zhang, Jie Zhang, Jingyang Fan, Gengze Zhou, Qihang Peng, Chenxu Lv, Xiaoyue Chen, An Yang, Fei Huang, Junyang Lin, Dayiheng Liu, Jingren Zhou, Chen-fei Wu, and Xiong-Hui Chen. Qwen-RobotManip Technical Report: Alignment Unlocks Scale for Robotic Manipulation Foundation Models. arXiv:2606.17846, 2026. [68] Shanglin Yuan, Weiheng Zhao, Xin Shi, Haoyi Jiang, Xianda Guo, Liu Liu, Wenyu Liu, Wei Sui, and Xinggang Wang. Dreamwam: Beyond rgb future prediction for world action models. arXiv preprint arXiv:2608.04996 , 2026. [69] Tianyuan Yuan, Zibin Dong, Yicheng Liu, and Hang Zhao. Fast-WAM: Do World Action Models Need Test-time Future Imagination? arXiv:2603.16666, 2026. [70] Chuheng Zhang, Tim Pearce, Pushi Zhang, Kaixin Wang, Xiaoyu Chen, Wei Shen, Li Zhao, and Jiang Bian. What do latent action models actually learn? In Advances in Neural Information Processing Systems , 2025. [71] Qihang Zhang, Lin Li, Luyao Zhang, Shuai Yang, Yim-ing Luo, Shuaiting Li, Ruilin Wang, Junke Wang, Jiahao Shao, Gangwei Xu, Jiaming Zhou, Yishu Shen, Yudong Jin, Fangyi Xu, Shuailei Ma, Jiaqi Liao, Guanxing Lu, Zifan Shi, Yongkun Wen, Yujie Zhao, Weixuan Tang, Xinyang Wang, Chaojian Li, Jiapeng Zhu, Ka Leong Cheng, Nan Xue, Xing Zhu, Yujun Shen, and Yinghao Xu. Native Video-Action Pre-training for Generalizable Robot Control. arXiv:2607.08639, 2026. [72] Yuyang Zhang, Wenyao Zhang, Zekun Qi, He Zhang, Haitao Lin, Jingbo Zhang, Yao Mu, Xiaokang Yang, Wenjun Zeng, and Xin Jin. ImageWAM: Do World Action Models Really Need Video Generation, or Just Image Editing? In Confer-ence on Robot Learning , 2026. [73] Jinliang Zheng, Jianxiong Li, Zhihao Wang, Dongxiu Liu, Xirui Kang, Yuchun Feng, Yinan Zheng, Jiayin Zou, Yilun Chen, Jia Zeng, Tai Wang, Ya-Qin Zhang, Jingjing Liu, and Xianyuan Zhan. X-VLA: Soft-prompted transformer as scal-able cross-embodiment vision-language-action model. In In-ternational Conference on Learning Representations (ICLR) ,2026. [74] Chuning Zhu, Raymond Yu, Siyuan Feng, Benjamin Burch-fiel, Paarth Shah, and Abhishek Gupta. Unified world mod-els: Coupling video and action diffusion for pretraining on large robotic datasets. In Robotics: Science and Systems (RSS) , 2025. 
+
+13 Appendix 
+
+# A. Model Architecture 
+
+This section details the modules of both training stages (Sec. 4). Table 6 summarizes the transformer modules that we introduce, and Table 7 gives the attention mask of the policy. Sec. C.2 lists which modules are trained in each stage. Blocks are indexed from 1 in all networks. 
+
+A.1. Stage 1 
+
+Future Extractor. The Future Extractor encodes the current frame and four future frames of the main camera (Table 9) with two frozen encoders. From the Wan2.1 VAE encoder [50], we take the 384-channel spatiotemporal features after its middle block, before the output head that maps them to latents. From DINOv3 ViT-L/16 [46], we take the patch tokens of the penultimate block for each frame and normalize them with a LayerNorm without affine parameters. Both feature maps are pooled to a common spatial grid, and a linear layer maps the VAE features to the 1,024 channels of DINOv3. The tokens of the two encoders are then concatenated into one memory. An 18-layer Q-Former [21] with 32 learnable queries reads this memory. Each layer applies pre-LN self-attention among the queries, cross-attention to the memory, and an FFN, each with a residual connection. Fixed 3D sinusoidal position embeddings over time, height, and width are added to the keys of the cross-attention but not to its values, which therefore carry only visual content. A final LayerNorm and a linear layer from 1,024 to 32 channels produce the code z ∈ R32 ×32 .
+
+Conditioning and world tokens. A linear projection Pg maps the code from 32 to 1,024 channels, and the result replaces the text embeddings in every cross-attention block of the frozen Cosmos-Predict2.5-2B [36]. The video model receives the clean latent of the current frame and the noised latent of the four future frames, which the VAE compresses into one latent frame. From block 18, we take the 2,048-channel hidden states at the future positions and project them linearly to 1,024 channels. The attentive pooler Rη then aggregates them into the world tokens w ∈ R32 ×1024 . It is a 3-layer Q-Former with 32 learnable queries, whose layers apply pre-LN self-attention, cross-attention with separate LayerNorms for the queries and the memory, and an FFN, followed by a final LayerNorm. 
+
+Action DiT. The action DiT is conditioned on the 64 tokens [Pa(z); w], where Pa is a linear projection from 32 to 1,024 channels. Its input sequence contains a state token and the noisy action tokens. Its 16 blocks alternate between cross-attention to the conditioning tokens and self-attention over the input sequence, and all cross-attention blocks read the same conditioning tokens. The flow time modulates attention and FFN through AdaLN-Zero [40]. 
+
+Alignment projectors. Two projectors map hidden states of the video model to 1,024-channel teacher features. The seman-tic projector reads block 9 and targets the penultimate-block patch tokens of DINOv3, normalized as in the Future Extractor but not pooled. The geometric projector reads block 14 and targets the patch tokens of the 14th global-attention block of VGGT-Ω [52], without additional normalization. Each projector consists of a spatial convolution and a two-layer MLP and keeps the spatial grid of the video model. The teacher features of the current frame are kept, and those of the four future frames are linearly interpolated in time to the future latent, so both the current and the future positions are aligned. 
+
+A.2. Stage 2 
+
+Vision-language backbone. The backbone keeps the full vision encoder of Qwen3.5-0.8B [44] and its first 12 language layers, which form three groups of three Gated DeltaNet layers [61] followed by one gated attention layer. It reads the images of all cameras and the instruction, and the last-layer hidden states of all non-padding tokens form the context L with 1,024 channels. The backbone runs its original forward pass, so L is not updated by the experts. 
+
+Visual resampler. The visual resampler produces the current tokens C from a frozen DINOv3 ViT-L/16, which encodes each camera view separately. From blocks 13, 17, and 21, we take the class token, the register tokens, and the patch tokens. The features of each block pass through a separate learnable LayerNorm, and a linear layer maps their concatenation from 3,072 to 1,024 channels. The main camera keeps its full patch grid. For the other cameras, every 2 × 2 group of neighboring patches is folded into the channels and mapped from 4,096 to 1,024 channels by a second linear layer, which reduces the patch tokens by 4× while keeping the class and register tokens. Both linear layers are shared across views. After adding a learnable embedding for each view, we concatenate the tokens of all views into one memory. A LayerNorm and a linear 14 Module Layers Heads Queries                                                
+
+> Stage 1
+> Future Extractor Q-Former 18 16 32 Attentive pooler Rη316 32 Action DiT 16 16 –
+> Stage 2
+> Visual resampler 6864 World Expert 12 16 64 Action Expert 12 16 –Table 6. Transformer modules introduced by LeanWAM. All have a hidden width of 1,024 and an FFN width of 4,096. Queries are learnable tokens, which form the future queries Fin the World Expert. Keys and values Queries LCFAC(World Expert) ✓✓✓✗
+> F(World Expert) ✓✓✓✗
+> A(Action Expert) ✗✓✗✓
+> Table 7. Attention mask of each expert layer. L: context from the backbone, used only as keys and values. C: current tokens. F: future queries. A: state, learnable register tokens, and noisy action tokens.
+
+projection feed this memory to a 6-layer Q-Former with 64 learnable queries, built from pre-LN decoder blocks without a final LayerNorm, which outputs C ∈ R64 ×1024 .
+
+World and Action Experts. The World Expert processes [C; F], where F consists of 64 learnable future queries, 32 for the code and 32 for the world tokens. The Action Expert processes A, which contains a state token, learnable register tokens, and the noisy action tokens. Input and output projections, sized to the state and action spaces of each benchmark (Table 9), map the states and actions to and from these tokens. The two experts have 12 layers each, with separate weights. At every layer, each expert computes the queries, keys, and values of its own tokens, and L is appended to the keys and values through a layer-specific LayerNorm and key and value projections. A single attention with the mask in Table 7 then runs over all tokens, and its outputs return to the residual and FFN branches of each expert. The World Expert uses pre-LN blocks. The Action Expert uses AdaLN-Zero [40], in which the flow time produces a shift, a scale, and a residual gate for both attention and FFN. Under this mask, future information reaches the actions only through C, which reads F at every layer. Since neither C
+
+nor F attends to A, the World Expert does not depend on the action noise or the integration step. Computing its keys and values once per query and reusing them across all Euler steps is therefore equivalent to recomputing them at every step. 
+
+Prediction heads. At the last layer of the World Expert, the first 32 future queries predict the code through a LayerNorm and a linear layer from 1,024 to 32 channels, and the other 32 predict the world tokens through a separate LayerNorm and a linear layer from 1,024 to 1,024 channels. The token-wise LayerNorm without affine parameters is applied only to the distillation targets, and the video model is always conditioned on the unnormalized code. The heads are used only for training, so the deployed policy consists of the other modules in this subsection (Sec. D). 
+
+Initialization. Both experts are randomly initialized, and the Action Expert does not inherit the weights of the Stage-1 action DiT. In the World Expert, the output projections of attention and FFN are scaled down with layer depth. The AdaLN-Zero modulation of the Action Expert is initialized to zero, so each of its blocks starts as the identity function [40]. 
+
+# B. Details of the Probing Study 
+
+This section gives the full protocol of the probing study in Sec. 3. 15 Component Configuration Input adapter Linear to 512, one per source Source embedding learnable, one per source †                            
+
+> Aggregator queries N×512 , default N= 32
+> Aggregator 2×[cross-attn., FFN] Action queries H×512 , one per time step Action decoder 2×[self-attn., cross-attn., FFN] Attention width 512, 8 heads FFN 512 →2048 →512 , GELU Normalization pre-LN, residual per sublayer Output head LayerNorm, Linear to action dim. Dropout 0Optimizer AdamW, weight decay 0 Learning rate 2×10 −4, constant, no warmup Batch size 256 Training 2 epochs over 400 episodes Table 8. Configuration of the attentive probe. Only the probe is trained, and all feature extractors stay frozen. †Used only when several sources are combined.
+
+Data. We use the LIBERO demonstrations [27]. For each of three random seeds, we sample 400 episodes for training and 100 different episodes for evaluation, covering all tasks uniformly. Because the split is made at the level of episodes, no trajectory, and hence no overlapping action chunk, appears in both sets. The three seeds use different splits, and all variants are trained and evaluated on the same splits. At each time step, the two camera views are concatenated side by side into a 
+
+224 × 448 image before being encoded. A sample consists of the current frame It, the action chunk at = ( at, . . . , a t+H−1)
+
+with H = 32 , and the future frames within the same horizon. The two-frame setting observes It+H , the three-frame setting observes {It+H/ 2, I t+H }, and the five-frame setting observes {It+H/ 4, I t+H/ 2, I t+3 H/ 4, I t+H }.
+
+Features. All feature extractors are frozen. D: DINOv3 ViT-L/16 with 300M parameters [46] encodes each frame inde-pendently, and we take the patch tokens of its last layer. W: the Wan2.1 VAE encoder of Cosmos-Predict2.5 [36, 50] encodes the frame sequence, and we take its output latents. The encoder maps the first frame to one latent and each subsequent group of four frames to another, so we repeat the future frames to fill this four-frame window: a single future frame is repeated four times, and each of two future frames is repeated twice. F and T: the same latents are fed to Cosmos-Predict2.5-2B [36], with the current latent kept clean and the future latent noised to level τ , where τ = 1 corresponds to pure noise. We take the hid-den states of block k at all positions, current and future. Both keep the original text conditioning of Cosmos-Predict2.5-2B, whose text embeddings come from Cosmos-Reason1-7B [37]. The default setting is k = 18 and τ = 0 .75 . The variants T ∗
+
+use k ∈ { 12 , 24 } with τ = 0 .75 , or τ ∈ { 0.25 , 1.0} with k = 18 . F uses the pretrained weights. T uses the weights obtained by training the video model together with an action DiT on the 400 training episodes, under a flow-matching video loss and action loss, as in a standard WAM. T is never trained on the 100 evaluation episodes, so these episodes are held out for both T and the probe. 
+
+Probe. Table 8 lists the architecture. Each source is mapped to width 512 by its own linear layer. When several sources are combined, each receives a learnable source embedding, and the tokens of all frames and sources are concatenated into one sequence. The aggregator has N learnable queries (default N = 32 ) and two blocks, each consisting of cross-attention from the queries to the feature tokens followed by an FFN. The action decoder has H learnable action queries, one per time step, and two blocks, each consisting of self-attention among the action queries, cross-attention to the N aggregated tokens, and an FFN. A final layer normalization and a linear layer map each action query to an action. We use an attentive probe [1] rather than a linear one because the sources differ in the number, width, and layout of their tokens. The aggregator and action decoder use the same width and depth across variants. 
+
+Training and evaluation. Only the probe is trained. Actions are normalized, and the probe minimizes the mean squared error between the predicted and ground-truth action chunks. We train for two epochs over the 400 training episodes with 16 LIBERO / LIBERO-Plus RoboTwin 2.0 Robot Franka Panda Aloha-AgileX Training tasks 40 10 Demonstrations 1,693 5,338 Training frames 273,465 1,161,718 Cameras third-person, wrist head, two wrists Image size (W ×H) 224 ×224 320 ×256 State 8-D, EE pose 14-D, joints Action 7-D, EE delta 14-D, joint targets Chunk / executed 16 / 10 32 / 16 Stage-1 horizon 32 steps 32 steps Test episodes 2,000 / 10,030 1,000 / 1,000  
+
+> Table 9. Setup on each benchmark.
+
+AdamW, a constant learning rate of 2 × 10 −4 without warmup, no weight decay, and a batch size of 256. All variants use the same settings. We evaluate on all action chunks of the 100 held-out episodes. For each of the da = 7 action dimensions, we compute the coefficient of determination over all chunks and time steps, and we report the unweighted mean over dimensions: 
+
+R2 = 1
+
+dadaX
+
+> d=1
+
+1 −
+
+P
+
+> n
+
+PHh=1 
+
+ ˆan,h,d − an,h,d 
+
+2
+
+P
+
+> n
+
+PHh=1 
+
+ an,h,d − ¯ad
+
+2
+
+!
+
+, (7) where n indexes evaluation chunks, an,h,d and ˆan,h,d are the ground-truth and predicted values of dimension d at step h, and 
+
+¯ad is the mean of dimension d over all chunks and steps. We report the mean and standard deviation over the three seeds. The error bars in Figure 3 show ±1 standard deviation, not the standard error or a confidence interval. 
+
+# C. Experimental Details 
+
+This section details the protocols and training settings summarized in Sec. 5.1, and reports per-task results on RoboTwin 2.0. Table 9 summarizes the setup on each benchmark. 
+
+C.1. Benchmarks and Protocols 
+
+LIBERO. LIBERO [27] has four suites of 10 language-conditioned tasks, performed by a simulated Franka Panda arm. LIBERO-Spatial places the same objects in different layouts, LIBERO-Object varies the objects to be manipulated, LIBERO-Goal varies the goal in a fixed scene, and LIBERO-Long, also known as LIBERO-10, contains long-horizon tasks that chain several subtasks. Each task has 50 human demonstrations. We use the version released by OpenVLA [17], which replays the demonstrations to render 256 × 256 images, removes no-op actions, and discards demonstrations that fail on replay. This leaves 1,693 demonstrations with 273,465 frames, on which we train a single model for all four suites. The policy receives the instruction, the third-person and wrist images resized to 224 × 224 , and an 8-dimensional propri-oceptive state: the end-effector position, its orientation in axis-angle form, and the positions of the two gripper fingers. It predicts chunks of 16 actions, each a 7-dimensional command of end-effector translation and rotation deltas and a gripper action, and executes the first 10 before predicting again. Stage 1 uses only the third-person camera, with clips of the current frame and four future frames over the next 32 steps. This horizon is set independently of the Stage-2 chunk length, so the distilled targets describe a longer future than each predicted chunk. Following the standard protocol, we evaluate each task over 50 episodes from the initial states provided by the benchmark, giving 500 episodes per suite and 2,000 in total. Each episode begins with 10 idle steps that let the objects settle, after which the policy acts for at most 220, 280, 300, and 520 steps on Spatial, Object, Goal, and Long, respectively. An episode is successful if the task is completed within this limit. 
+
+LIBERO-Plus. LIBERO-Plus [13] evaluates policies trained on LIBERO under controlled perturbations along seven di-mensions: • Camera : the pose and field of view of the third-person camera. • Robot : the initial pose of the arm. • Language : instructions rewritten with richer and more complex language. 17 Stage 1 Stage 2 LIBERO RoboTwin 2.0 LIBERO RoboTwin 2.0 Epochs 30 10 30 15 Global batch size 256 256 1,024 256 Warmup (fraction of steps) 2% 2% 5% 2% Weight decay 0 0 10 −8 10 −8                                       
+
+> Learning rate, Stage-1 modules 3×10 −4→2×10 −52×10 −4→2×10 −5––Learning rate, Qwen3.5 backbone ––10 −4→5×10 −710 −4→5×10 −7
+> Learning rate, other modules ––2×10 −4→10 −52×10 −4→3×10 −5
+> Noise level τof the video model 5u/ (1 + 4 u), random τ⋆= 0 .75 , fixed Auxiliary loss weights λsem =λgeo = 0 .10.1 (code), 0.1 (world) Table 10. Training hyperparameters. Learning rates are given as peak →minimum.
+
+• Light : the intensity, direction, and color of the illumination, and the resulting shadows. • Background : the textures and materials of the table and the scene. • Noise : photometric distortions of the input images, such as jitter and Gaussian blur. • Layout : added distractor objects and shifted target positions. The benchmark contains 10,030 perturbed task instances, each evaluated once. We evaluate the LIBERO checkpoint of LeanWAM with the same inputs, chunking, integration steps, and step limits as on LIBERO, so the two benchmarks differ only in the perturbations and in the number of episodes per task. For all methods in Table 2, task-specific training uses only LIBERO demonstrations, and no method is trained on LIBERO-Plus data. Following the benchmark leaderboard, we report the success rate for each dimension and over all 10,030 episodes (Total). 
+
+RoboTwin 2.0. RoboTwin 2.0 [9] contains 50 bimanual tasks, which we run with the Aloha-AgileX dual-arm robot as in its benchmark evaluation. Each task is evaluated in two settings, called Easy and Hard in the original paper and clean and randomized in ours. The clean setting uses scenes without domain randomization, while the randomized setting adds cluttered distractors and randomizes background textures, lighting, and table height. We use the 10 tasks in Table 11. The official dataset provides 50 clean and 500 randomized demonstrations per task. We discard demonstrations whose arm-joint actions leave the valid range and trim static frames, which leaves 5,338 demonstrations with 1,161,718 frames, and train a single model on all 10 tasks. The policy receives the instruction, the images of the head camera and the two wrist cameras resized to 320 ×256 (width ×
+
+height), and a 14-dimensional state with the six joint positions of each arm and the two gripper states. It predicts chunks of 32 actions, each a 14-dimensional vector of absolute joint and gripper targets, and executes the first 16. Unlike the end-effector deltas on LIBERO, these actions are absolute targets in joint space. Stage 1 uses only the head camera, with clips of the current frame and four future frames over the next 32 steps. We evaluate each task over 100 episodes in each setting. 
+
+C.2. Training and Inference Details 
+
+Both stages of LeanWAM are trained on a single node with 8 NVIDIA A100 GPUs (80 GB), using DeepSpeed ZeRO-2 [45] and BF16 mixed precision, with the action, video, alignment, and distillation losses computed in FP32. We use AdamW [30] with β1 = 0 .9, β2 = 0 .99 , and ϵ = 10 −8, a linear warmup followed by cosine decay to a minimum learning rate, and gradient clipping at a global norm of 1.0. Table 10 lists the settings that differ across stages and benchmarks. 
+
+Stage 1. Stage 1 trains the Future Extractor, the attentive pooler, the action DiT, and the projections for conditioning and alignment. The video model, its VAE encoder, and DINOv3 are frozen, but the gradients of the video and action losses still flow through the video model to the code. The current latent is kept clean, and the future latents are noised to the level 
+
+τ = 5 u/ (1 + 4 u), where u is drawn uniformly from 1,000 discrete levels. This shift places more samples at high noise levels. The world features that condition the action DiT come from the same forward pass and thus share this noise level. 
+
+Stage 2. Stage 2 fine-tunes all parameters of the first 12 layers of Qwen3.5-0.8B, together with the World Expert, the Action Expert, the visual resampler, and the prediction heads, while DINOv3 and all Stage-1 modules stay frozen. The backbone uses a lower learning rate than the other modules. We precompute the distillation targets once. For the world tokens, the 18 Task Clean Randomized Adjust Bottle 100 99 Handover Block 96 93 Open Laptop 98 99 Pick Diverse Bottles 85 85 Place Object Basket 92 94 Press Stapler 96 93 Stack Blocks Two 98 100 Stack Bowls Three 93 88 Stack Bowls Two 98 98 Turn Switch 83 74 Average 93.9 92.3 Table 11. Per-task results of LeanWAM on RoboTwin 2.0. Success rates (%) over 100 episodes per task in each setting. 
+
+video model runs at the fixed noise level τ ⋆ = 0 .75 with a fixed noise sample per clip, so the targets are the same in every epoch. 
+
+Inference. The Action Expert generates each action chunk by integrating its velocity field over 10 Euler steps. The back-bone and DINOv3 run in BF16. The experts use BF16 autocast for matrix operations, while normalization and the action noise and integration state remain in FP32 (Sec. D). 
+
+C.3. Baselines 
+
+In the tables of the main paper, Size counts the parameters of the deployed model. PT marks methods whose policy is pre-trained to predict actions or latent actions on large-scale robot or human manipulation data before training on the benchmark. LeanWAM builds on pretrained vision, language, and video models, none of which is pretrained on embodied action data. On LIBERO and LIBERO-Plus, task-specific training uses only LIBERO demonstrations. Methods marked PT may additionally use large-scale embodied pretraining. On RoboTwin 2.0, the baselines are trained on all 50 tasks in their papers, and we average their reported per-task success rates over our 10 tasks. LeanWAM is trained on these 10 tasks only. The two protocols thus differ: the baselines learn from more tasks and demonstrations, while LeanWAM is trained on fewer tasks. 
+
+C.4. Per-Task Results on RoboTwin 2.0 
+
+Table 11 reports the success rate of LeanWAM on each task. LeanWAM succeeds in at least 92% of the clean episodes on eight of the ten tasks, and its success rate changes by at most 3 points under randomization on eight tasks. Turn Switch and Pick Diverse Bottles are the most challenging tasks, and Turn Switch also drops the most under randomization, from 83% to 74%. 
+
+C.5. Ablation Details 
+
+The ablations in Sec. 5.4 follow the LIBERO-Plus protocol in Sec. C.1. Each variant is trained on LIBERO with the same data, schedule, and hyperparameters as LeanWAM and is evaluated on all 10,030 episodes of LIBERO-Plus. A Stage-1 variant changes the Stage-1 model, and Stage 2 is retrained with it as the teacher. A Stage-2 variant reuses the Stage-1 model of LeanWAM. Each variant is trained once. Under an independent Bernoulli approximation, the evaluation standard error is about 0.4 percentage points. 
+
+Stage-1 variants. 
+
+• − action supervision removes the action DiT and its loss, so the Future Extractor learns only from the video and alignment losses through the frozen video model. Without the action DiT, there is no attentive pooler and hence no world tokens, and Stage 2 is trained with the action loss and the code distillation loss. • − video model removes the video model, together with the alignment losses and the world tokens. The Future Extractor learns only from the action loss, through an action DiT conditioned on the projected code alone. Stage 2 again distills only the code. 19 • − semantic and geometric alignment removes Lsem and Lgeo and keeps the action and video losses. Stage 2 distills both targets, as in LeanWAM. • Frozen → trainable video model unfreezes Cosmos-Predict2.5-2B and updates it with the action, video, and alignment losses at a constant learning rate of 10 −5. All other modules and settings are unchanged. • Alignment → prediction heads replaces the alignment losses with two output heads that predict future DINOv3 features and depth, as described next. 
+
+Prediction heads. This variant follows WAMs that add semantic or geometric targets to the predicted future [59, 68]. The video model predicts the velocity of the future RGB latent from the hidden states of its last block, through adaptive layer normalization, a linear layer, and unpatchifying. We add two heads of the same form next to it, each with its own adaptive layer normalization, a linear layer from width 2048 to the target dimension, and unpatchifying. Both heads are randomly initialized and read the same hidden states as the RGB head. The input of the video model is unchanged: the clean current latent and the noisy future latent. The semantic head predicts DINOv3 features [46]. Since the Wan VAE [50] compresses the four future frames into one latent, we take the target from the last of them: the patch features of the frozen DINOv3 ViT-L/16 after its second-to-last block, followed by a layer normalization without affine parameters. These features have 1,024 channels and the same spatial grid as the tokens of the video model, so the head maps 2048 channels to 1,024 without any resampling. The head regresses the features directly, without noise, under a mean squared error. The geometric head predicts depth. We compute pseudo-depth maps of the future frames with VGGT-Ω [52], clip them to a fixed range estimated on the training set, and apply a logarithmic normalization, using the same range for all videos of a camera. The normalized maps are replicated to three channels and encoded by the frozen Wan VAE encoder, which compresses the four future depth maps into one latent zd. Like the RGB head, the depth head is trained with flow matching and predicts the velocity ϵ − zd. Both head losses have a weight of 1.0. The rest of Stage 1 is unchanged. The attentive pooler reads the world tokens from the same block, the action DiT is conditioned on the code and the world tokens, and both serve as targets in Stage 2. 
+
+Stage-2 variants. 
+
+• − code distillation , − world distillation , and − code and world distillation remove the corresponding distillation losses from the Stage-2 objective. The architecture, including the future queries, is unchanged, so these variants have the same inference cost as LeanWAM. • DINOv3 tokens → learnable tokens replaces the 64 current tokens, produced by DINOv3 and the visual resampler, with 64 learnable tokens. DINOv3 and the resampler are removed from both training and inference, so the policy observes the images only through the vision-language backbone. 
+
+# D. Inference Efficiency and Training Cost 
+
+Latency measurement. We time the complete prediction of one action chunk on a single NVIDIA A100-SXM4-80GB GPU with batch size 1 and BF16 mixed precision, using the same GPU for all methods. Each method answers 1,000 queries on the ten LIBERO-Long tasks, 100 per task. We synchronize the GPU immediately before and after the neural computation of each query and measure the wall-clock time in between, which includes every network component that the query requires. We exclude input preprocessing, host-to-device transfer, simulation and rendering, communication, output post-processing, and robot execution. Warmup, compilation, and graph capture are excluded as well: each method runs 30 warmup queries before timing and three untimed queries whenever the task changes. We report the mean and standard deviation over all timed queries without discarding slow samples. Each baseline is timed with its official implementation, keeping its native input resolution and prediction horizon. For π0.5, this is the JAX implementation in openpi 1.
+
+LeanWAM at inference. LeanWAM receives two 224 × 224 images, the instruction, and the 8-dimensional state, and predicts a chunk of 16 actions, of which 10 are executed before the next query. For each query, the backbone and the World Expert run once and the Action Expert runs ten Euler steps. The deployed policy contains no video model and no other Stage-1 module. The backbone and DINOv3 run in BF16, the experts run their matrix operations under BF16 autocast, and the normalization layers and the noise and integration state of the actions stay in FP32. We implement this policy in PyTorch [39], 
+
+> 1https://github.com/Physical-Intelligence/openpi
+
+20 Method Latency (ms) Relative OpenVLA-OFT [18] 104 .2 ± 1.2 4.2 ×                                              
+
+> π0.5[42] 65 .8±0.22.6 ×
+> GR00T N1.7 [38] 267 .5±15 .510.7 ×
+> VLAct [62] 531 .4±6.821.2 ×
+> Fast-WAM [69] 627 .1±42 .925.0 ×
+> OpenWAM-α[54] 1040 .3±129 .341.5 ×
+> Cosmos Policy [19] 788 .2±74 .731.4 ×
+> ImageWAM [72] 307 .6±23 .312.3 ×
+> LingBot-VA [22] 1203 .4±19 .747.9 ×
+> LeanWAM (PyTorch) 63 .1±3.42.5 ×
+> LeanWAM (JAX) 25 .1±0.71.0 ×
+> Table 12. Inference latency. Mean and standard deviation of the time to predict one action chunk on an A100 GPU with batch size 1, over 1,000 queries. Relative: latency divided by that of LeanWAM (JAX). VLAs are listed above WAMs.
+
+which we also use for training, and in JAX, which gives the latency reported in the main paper. Both implementations load the same Stage-2 checkpoint. 
+
+PyTorch implementation. The PyTorch implementation uses four optimizations that do not change what the model com-putes: 1. Parallel visual encoding. The backbone runs on one CUDA stream while DINOv3 and the visual resampler run on another, and the two branches join before the experts. 2. Compact action attention. Since the action tokens attend only to the current tokens C and to themselves (Sec. 4.2), we pass only the keys and values of [C, A] to their attention instead of masking all other tokens. The World Expert is computed in full. 3. Compiled denoising. A static-shape denoising step of the Action Expert is compiled with TorchInductor. Masks, position embeddings, and the state conditioning are built once per query, and the keys and values of C are computed once and reused across the ten steps. 4. CUDA graphs. DINOv3 with the visual resampler, and the World and Action Experts, are captured as two CUDA graphs and replayed for every query, while the backbone runs eagerly. Each query uses its own observation, state, and action noise, and nothing is cached across queries. 
+
+JAX implementation. We obtain a JAX [4] implementation with torchax [43], a PyTorch frontend for JAX, which runs our PyTorch modules as JAX programs that XLA compiles. This implementation therefore reuses the network definitions of the PyTorch one. Each query calls four functions compiled with jax.jit : the vision encoder of Qwen3.5, DINOv3 with the visual resampler, the language model of Qwen3.5, and the World and Action Experts. The last function runs all ten Euler steps, with the same compact action attention and the same reuse of the keys and values of C as the PyTorch implementation. We use neither separate CUDA streams nor explicit CUDA graphs, and we precompute only the image-grid indices and the rotary-embedding constants, which are identical for all queries. Nine of the 12 language layers that we keep from Qwen3.5 use Gated DeltaNet [61], a linear attention mechanism based on the gated delta rule. We implement its chunkwise form natively in JAX, with chunks of 64 tokens, a triangular solve within each chunk, and a lax.scan over chunks that keeps the recurrent state in FP32. We align the autocast rules of torchax with those of PyTorch, so the two implementations use the same mixed precision. Softmax attention uses the fused cuDNN kernel when its inputs are in BF16 and its head dimension is at most 128, and the XLA implementation otherwise. We time the JAX implementation on 1,000 queries, 100 per task, synchronizing the GPU with jax.block_until_ready .
+
+Latency results. Table 12 lists all methods we timed, including GR00T N1.7 and LingBot-VA, which appear in the LIBERO and RoboTwin 2.0 comparisons. With the JAX implementation, LeanWAM takes 25 .1 ± 0.7 ms per action chunk, which corresponds to 39.8 queries per second. It is 2.6 × faster than π0.5, the fastest baseline, 4.2 × faster than OpenVLA-OFT, and 12.3 × to 47.9 × faster than the five WAMs. Both LeanWAM and π0.5 are timed in JAX, so this comparison uses 21 GPUs Epochs Updates Hours GPU-hours Stage 1 8 30 32,040 18.1 144.5 Stage 2 8 30 8,010 12.4 99.0 Total 30.4 243.5 Table 13. Training cost on LIBERO. Wall-clock hours and A100 GPU-hours of the two stages. 
+
+the same framework. Over 1,000 queries, the PyTorch implementation takes 63 .1 ± 3.4 ms, with a median of 61.3 ms and a 95th percentile of 69.3 ms. JAX is 2.5 × faster under this protocol. The PyTorch implementation is also faster than every baseline measured here. 
+
+Memory and parameters. We measure memory with the PyTorch implementation, in a separate process with batch size 1, over 200 queries on the same ten tasks after warmup. The PyTorch allocator holds at most 3.76 GiB, including the model weights and the CUDA-graph buffers. NVML reports at most 4.58 GiB for the process, which also includes the CUDA context and libraries. Neither number includes the simulator. The deployed policy has 1.431B parameters: 604M in the truncated Qwen3.5 backbone, 303M in the frozen DINOv3 encoder, and 524M in the World and Action Experts and the visual resampler. The count excludes the Stage-1 modules and the teachers, which the deployed policy does not contain. 
+
+Training cost. Table 13 reports the training cost on LIBERO. Both stages run on a single node with eight A100 GPUs and take 30.4 hours in total. Stage 1 runs the frozen video model online and reads its alignment targets from a cache. Stage 2 reads cached distillation targets and does not load the Stage-1 model. The costs exclude the one-time computation of these caches, the pretraining of the backbones, and evaluation. Stage-2 training peaks at about 18.9 GiB of GPU memory with 128 samples per GPU. 
+
+# E. Additional Query Attention Visualizations 
+
+Sec. 5.3 visualizes where the queries of the Future Extractor attend in one LIBERO demonstration. Figure 6 shows two more tasks, from LIBERO-Spatial and LIBERO-Object, and compares our Future Extractor with one trained without the Stage-1 action loss. 
+
+Visualization. The Future Extractor reads the current frame and four future frames through an 18-layer Q-Former with 32 learnable queries (Sec. A.1). In every block, the queries cross-attend to a memory of VAE and DINOv3 tokens, which gives one attention matrix per head. We keep the weights on the DINOv3 tokens, which retain a separate spatial map for each frame, and average them over all heads, all 32 queries, and the last 8 of the 18 blocks. The averaged weights of each frame are reshaped into a spatial map, resized to the image, and overlaid on the frame. The variant without action supervision is trained with the same Stage-1 objective except the action loss and is visualized in the same way. The visualization in Figure 5 follows the same procedure. 
+
+Results. With action supervision, the attention concentrates on the gripper and the target object throughout the clip. In the first task, it covers the gripper and the black bowl that the robot carries toward the plate. In the second, it follows the gripper as the robot grasps and lifts the ketchup bottle. The rest of the scene receives little attention. Without action supervision, the attention spreads over the robot arm and over objects that the task does not involve: an object on the stove in the first task, and the bottles and boxes next to the ketchup in the second. In these examples, action supervision is associated with more concentrated attention on the end effector and manipulated object, consistent with the behavior analysis in Sec. 5.3. 22 Instruction: pick up the black bowl from table center and place it on the plate 
+
+RGB Attention 
+
+> w/o Action Supervision
+
+Instruction: pick up the ketchup and place it in the basket 
+
+RGB Attention 
+
+> w/o Action Supervision
+
+Figure 6. Query attention of the Future Extractor with and without action supervision. For each task, the rows show the five frames of one input clip (RGB), the attention of our Future Extractor (Attention), and the attention of a Future Extractor trained without the Stage-1 action loss (w/o Action Supervision). 
+
+23
